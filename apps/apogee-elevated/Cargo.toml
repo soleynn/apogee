@@ -5,5 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+# Reuses zipatch's DiskSink over the elevated stdio protocol (wired later).
+apogee-zipatch = { path = "../../crates/apogee-zipatch" }
+
 [lints]
 workspace = true
