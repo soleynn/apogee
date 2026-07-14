@@ -18,9 +18,9 @@ deny = [
 
 [licenses]
 version = 2
-# Permissive licenses only. GPL-3.0 is deliberately absent, so GPL code (such as the
-# reference launcher used only as an out-of-process oracle) cannot enter the graph.
+# Our own license (GPL-3.0-or-later) plus GPL-compatible permissive licenses for dependencies.
 allow = [
+    "GPL-3.0-or-later",
     "MIT",
     "Apache-2.0",
     "BSD-2-Clause",
@@ -29,7 +29,6 @@ allow = [
     "Zlib",
     "Unicode-3.0",
 ]
-# Workspace crates carry a TBD license for now; skip them until it is chosen.
 private = { ignore = true }
 
 [sources]
