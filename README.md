@@ -16,6 +16,11 @@ cargo build --workspace
 
 Requires a recent stable Rust toolchain, pinned in `rust-toolchain.toml`.
 
+## Contributing
+
+Apogee is open source but contribution is invitation-only. Bug reports are welcome as issues; for code
+changes, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 GNU General Public License v3.0 or later (GPL-3.0-or-later). See the `LICENSE` file. Any distributed
