@@ -5,5 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true }
+apogee-fetch = { path = "../apogee-fetch" }
+apogee-zipatch = { path = "../apogee-zipatch" }
+# Composition edge for the version cross-check; unused for now.
+sqex-proto = { path = "../sqex-proto" }
+
 [lints]
 workspace = true
