@@ -13,7 +13,7 @@ jobs:
     name: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Generate release notes
@@ -23,7 +23,7 @@ jobs:
           config: cliff.toml
           args: --latest --strip all
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body: ${{ steps.git-cliff.outputs.content }}
           # Binaries get attached here once the app produces them (post-M0).
