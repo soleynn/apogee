@@ -33,7 +33,7 @@ jobs:
               body: [
                 "Thanks for the interest! Apogee is open source, but contribution is invitation-only, so unsolicited pull requests are closed automatically. This is not about your change.",
                 "",
-                "I keep a clear direction for the project and a small, deliberate group of collaborators. If you would like to get involved, reach out on Discord (soleynn.x) and tell me what you would like to work on. CONTRIBUTING.md has the details.",
+                "I keep a clear direction for the project and a small, deliberate group of collaborators. If you would like to get involved, reach out on Discord ([@soleynn.x](https://discord.com/users/1444305499456671829)) and tell me what you would like to work on. CONTRIBUTING.md has the details.",
                 "",
                 "Bug reports and ideas are always welcome as issues, no invitation needed.",
               ].join("\n"),

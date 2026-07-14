@@ -21,7 +21,7 @@ A few honest reasons, none of them about the quality of your work:
 
 ## Want to help?
 
-Reach out on Discord (soleynn.x) and tell me what you would like to work on. If it is a fit,
+Reach out on Discord, [@soleynn.x](https://discord.com/users/1444305499456671829), and tell me what you would like to work on. If it is a fit,
 I will add you as a collaborator. I would rather bring people in on purpose than run an open queue, and
 I appreciate you asking first.
 

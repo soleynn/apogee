@@ -8,19 +8,20 @@ taken seriously.
 
 Please report security issues privately, not in a public issue or pull request.
 
-- Preferred: GitHub's private vulnerability reporting on this repository (the **Security** tab, then
-  **Report a vulnerability**). This opens a private advisory only the maintainer can see.
-- Alternative: a direct message on Discord (soleynn.x).
+- Preferred: [open a private security advisory](https://github.com/soleynn/apogee/security/advisories/new).
+  This is GitHub's private vulnerability reporting (also reachable from the **Security** tab, then
+  **Report a vulnerability**), and it is visible only to the maintainer.
+- Alternative: a direct message on Discord, [@soleynn.x](https://discord.com/users/1444305499456671829).
 
 Include enough to reproduce: the affected version or commit, the steps, and the impact. A suggested fix
 is welcome but not required.
 
 ## What to expect
 
-This is a small, spare-time project, so response is best-effort rather than same-day. You can expect an
-acknowledgement, a discussion of severity and a fix, and credit in the advisory once it is resolved
-(unless you would rather stay anonymous). Please allow a reasonable window to ship a fix before any
-public disclosure.
+This is a small, spare-time project, so response is best-effort. Expect an acknowledgement within about
+5 business days, then a discussion of severity and a fix, and credit in the advisory once it is resolved
+(unless you would rather stay anonymous). Please allow up to 90 days for a fix to ship before any public
+disclosure; for an actively exploited issue we can coordinate a shorter timeline.
 
 ## Supported versions
 
