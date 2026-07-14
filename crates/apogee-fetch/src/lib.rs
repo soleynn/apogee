@@ -1,0 +1,1 @@
+//! Resumable, verified HTTP downloads.
