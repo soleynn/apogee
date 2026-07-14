@@ -5,5 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+async-trait.workspace = true
+apogee-runtime = { path = "../apogee-runtime" }
+apogee-fetch = { path = "../apogee-fetch" }
+
 [lints]
 workspace = true
