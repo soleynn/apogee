@@ -1,0 +1,2 @@
+# Keep a blank-issue option so no one is forced through a template.
+blank_issues_enabled: true
