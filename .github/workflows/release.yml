@@ -26,7 +26,8 @@ jobs:
           config: cliff.toml
           args: --latest --strip all
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          body: ${{ steps.git-cliff.outputs.content }}
-          # Binaries get attached here once the app produces them (post-M0).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ steps.git-cliff.outputs.content }}
+        # Attach binaries here once the app produces them (post-M0): add file paths after the tag.
+        run: gh release create "$GITHUB_REF_NAME" --notes "$NOTES"
