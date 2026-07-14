@@ -3,7 +3,7 @@ name: Close external PRs
 # Runs from the base branch (pull_request_target), so an external PR cannot alter it.
 # It only reads PR metadata and never checks out untrusted code.
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no PR checkout, minimal perms, static body
     types: [opened, reopened]
 
 permissions:
