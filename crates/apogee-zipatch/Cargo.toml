@@ -5,5 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+# Shared compressed-block format lives in sqpack::codec (wired later).
+apogee-sqpack = { path = "../apogee-sqpack" }
+
 [lints]
 workspace = true
