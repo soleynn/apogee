@@ -2,10 +2,18 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# Cancel superseded runs on the same ref instead of letting them pile up.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
 
 jobs:
   fmt:
@@ -29,6 +37,8 @@ jobs:
           toolchain: "1.97.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test-linux:
@@ -40,6 +50,8 @@ jobs:
         with:
           toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --no-tests=pass
       - run: cargo test --workspace --doc
@@ -47,6 +59,8 @@ jobs:
   build-windows-cross:
     name: build-windows-cross
     runs-on: ubuntu-latest
+    env:
+      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
@@ -54,6 +68,15 @@ jobs:
           toolchain: "1.97.0"
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-cross
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The Windows SDK/CRT that cargo-xwin downloads is the slowest part; cache it.
+      - name: Cache xwin SDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.xwin-cache
+          key: xwin-sdk-${{ runner.os }}-v1
       - uses: taiki-e/install-action@cargo-xwin
       - run: cargo xwin build --target x86_64-pc-windows-msvc --workspace
 
