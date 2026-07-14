@@ -1,1 +1,15 @@
+# Build artifacts (the whole workspace shares one root target dir)
 /target
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# Local environment and secrets: never commit real account credentials
+.env
+.env.*
+
+# OS cruft
+.DS_Store
