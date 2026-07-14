@@ -42,6 +42,7 @@ commit_parsers = [
   { message = "^style", group = "Styling" },
   { message = "^revert", group = "Reverted" },
   { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore\\(deps\\)", skip = true },
   { message = "^chore", group = "Miscellaneous" },
   { body = ".*[Ss]ecurity", group = "Security" },
 ]
