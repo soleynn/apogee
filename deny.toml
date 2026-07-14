@@ -1,0 +1,38 @@
+# cargo-deny policy. Authored at scaffold; validate when cargo-deny is installed or CI runs.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[bans]
+# Home-built domain code only: no third-party FFXIV crates in the graph.
+deny = [
+    { name = "physis" },
+    { name = "ironworks" },
+    # rustls is the only TLS stack; keep OpenSSL out.
+    { name = "openssl-sys" },
+]
+
+[licenses]
+version = 2
+# Permissive licenses only. GPL-3.0 is deliberately absent, so GPL code (such as the
+# reference launcher used only as an out-of-process oracle) cannot enter the graph.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+# Workspace crates carry a TBD license for now; skip them until it is chosen.
+private = { ignore = true }
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
