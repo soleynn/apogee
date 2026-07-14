@@ -5,7 +5,7 @@ members  = ["crates/*", "apps/apogee-cli", "apps/apogee-elevated"]
 [workspace.package]
 edition      = "2024"
 rust-version = "1.85"
-license      = "TBD"
+license      = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 # foundation runtime
