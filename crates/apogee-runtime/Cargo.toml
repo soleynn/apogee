@@ -5,5 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+apogee-fetch = { path = "../apogee-fetch" }
+
 [lints]
 workspace = true
