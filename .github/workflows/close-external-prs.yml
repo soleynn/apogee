@@ -1,0 +1,44 @@
+name: Close external PRs
+
+# Runs from the base branch (pull_request_target), so an external PR cannot alter it.
+# It only reads PR metadata and never checks out untrusted code.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    # Skip the owner, collaborators, org members, and Dependabot; act only on outside PRs.
+    if: >-
+      github.event.pull_request.author_association != 'OWNER' &&
+      github.event.pull_request.author_association != 'COLLABORATOR' &&
+      github.event.pull_request.author_association != 'MEMBER' &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: [
+                "Thanks for the interest! Apogee is open source, but contribution is invitation-only, so unsolicited pull requests are closed automatically. This is not about your change.",
+                "",
+                "I keep a clear direction for the project and a small, deliberate group of collaborators. If you would like to get involved, reach out on Discord (soleynn.x) and tell me what you would like to work on. CONTRIBUTING.md has the details.",
+                "",
+                "Bug reports and ideas are always welcome as issues, no invitation needed.",
+              ].join("\n"),
+            });
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              state: "closed",
+            });
