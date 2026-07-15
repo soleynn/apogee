@@ -1,1 +1,13 @@
-//! Test-only harness: fixtures, byte-diff helpers, and the out-of-process oracle runner.
+//! Test-only harness: byte-diff goldens, corpus fetch, redaction, sandboxes, and the
+//! out-of-process oracle runner.
+//!
+//! Dev-dependency only: consumers pull this in under `[dev-dependencies]`, so it never enters a
+//! shipping build's graph.
+
+pub mod corpus;
+pub mod golden;
+pub mod redact;
+pub mod sandbox;
+
+#[cfg(feature = "oracle")]
+pub mod oracle;
