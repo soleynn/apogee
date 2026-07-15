@@ -1,0 +1,27 @@
+---
+source: crates/sqex-proto/src/patchlist/tests.rs
+expression: entries
+---
+[
+    PatchListEntry {
+        length: 52430000,
+        version_id: "D2024.01.02.0000.0000",
+        url: "http://patch-dl.example.invalid/game/ex1/abcd1234/D2024.01.02.0000.0000.patch",
+        hashes: Some(
+            BlockHashes {
+                hash_type: "sha1",
+                block_size: 52428800,
+                hashes: [
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ],
+            },
+        ),
+    },
+    PatchListEntry {
+        length: 900,
+        version_id: "D2024.01.01.0000.0000",
+        url: "http://patch-dl.example.invalid/boot/2b5cbc63/D2024.01.01.0000.0000.patch",
+        hashes: None,
+    },
+]
