@@ -7,6 +7,8 @@
 //! hold no transport and no credentials, and their errors carry a count or a length-capped page
 //! excerpt, never the submitted secrets or the session id.
 
+use zeroize::Zeroizing;
+
 use crate::error::{ProtoError, excerpt};
 
 /// The attribute that anchors the `_STORED_` input on the top page (XL: `PatchListParser`-style
@@ -30,9 +32,10 @@ const MAX_MESSAGE: usize = 512;
 
 /// The launch parameters SE returns on a successful login. `session_id` authorizes the next stage, so
 /// this type deliberately implements no `Debug`/`Display`/`Serialize`: it is a transient parse result,
-/// consumed immediately into the redacted session-id type, and never logged.
+/// consumed immediately into the redacted session-id type, and never logged. The id is held zeroizing
+/// so it scrubs on drop.
 pub struct LaunchParams {
-    pub session_id: String,
+    pub session_id: Zeroizing<String>,
     pub terms_accepted: bool,
     pub region: u16,
     pub playable: bool,
@@ -147,7 +150,7 @@ pub fn parse_launch_params(params: &str) -> Result<LaunchParams, usize> {
         .ok_or(got)?;
 
     Ok(LaunchParams {
-        session_id: session_id.to_owned(),
+        session_id: Zeroizing::new(session_id.to_owned()),
         // "0" is the only value that reads as not-accepted / not-playable.
         terms_accepted: terms != "0",
         region,
