@@ -59,11 +59,17 @@ impl ArgKey {
     }
 
     /// The key rendered as 8 lowercase-hex ASCII bytes (all < 0x80, so the signed-key fold is dormant).
+    ///
+    /// Rendered nibble by nibble rather than through `format!` so the secret key digits never occupy
+    /// an un-zeroized heap `String`; the output is byte-identical to `{:08x}`.
     #[must_use]
     pub(super) fn key_bytes(&self) -> [u8; 8] {
-        let hex = format!("{:08x}", self.key());
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let k = self.key();
         let mut out = [0u8; 8];
-        out.copy_from_slice(hex.as_bytes());
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = HEX[((k >> (28 - 4 * i)) & 0xF) as usize];
+        }
         out
     }
 }
