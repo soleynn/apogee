@@ -198,15 +198,20 @@ impl LoginFlow<'_> {
                 terms_accepted: params.terms_accepted,
             }),
             Err(CallbackReject::NotAuthOk { message }) => {
-                // Prefer SE's own failure message; fall back to a page excerpt when none was found.
-                let raw =
-                    message.unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
-                Err(ProtoError::OauthFailed {
-                    excerpt: scrubbed_excerpt(
-                        raw.as_bytes(),
-                        &[creds.sqexid, creds.password, otp, self.stored.as_str()],
-                    ),
-                })
+                // Surface only SE's own structured failure message (still scrubbed, as defense in
+                // depth), never the raw response page. The raw page is attacker-influenced and could
+                // reflect a submitted credential in a re-encoded form a verbatim scrub misses, and it
+                // carries no triage the structured message lacks. No login callback at all yields an
+                // empty excerpt.
+                let excerpt = message
+                    .map(|m| {
+                        scrubbed_excerpt(
+                            m.as_bytes(),
+                            &[creds.sqexid, creds.password, otp, self.stored.as_str()],
+                        )
+                    })
+                    .unwrap_or_default();
+                Err(ProtoError::OauthFailed { excerpt })
             }
             Err(CallbackReject::Unparseable { got_fields }) => {
                 Err(ProtoError::LaunchParamsUnparseable { got_fields })

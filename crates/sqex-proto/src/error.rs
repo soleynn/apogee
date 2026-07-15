@@ -95,10 +95,17 @@ pub(crate) fn excerpt(body: &[u8]) -> String {
 }
 
 /// Like [`excerpt`], but first removes any of `secrets` from the body so a page that echoes the
-/// submitted credentials cannot leak them into an error. Scrubbing happens before the length cap, so a
-/// secret near the start cannot survive by being split at the boundary.
+/// submitted credentials cannot leak them into an error. Matching is verbatim and best-effort: a
+/// secret the page re-encodes (HTML-escaped, percent-encoded) is not caught, so callers surface
+/// attacker-influenced text sparingly rather than relying on this alone. Scrubbing happens before the
+/// length cap, so a secret near the boundary cannot survive by being split.
 pub(crate) fn scrubbed_excerpt(body: &[u8], secrets: &[&str]) -> String {
-    let mut text = String::from_utf8_lossy(body).into_owned();
+    // Scrub a bounded window, not the whole body: keep EXCERPT_MAX_CHARS plus the longest secret
+    // (minus one) so any secret with a char in the final excerpt is fully present here and is redacted
+    // before the final cut, without copying a large body once per secret.
+    let max_secret = secrets.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+    let window = EXCERPT_MAX_CHARS + max_secret.saturating_sub(1);
+    let mut text: String = String::from_utf8_lossy(body).chars().take(window).collect();
     for secret in secrets {
         if !secret.is_empty() {
             text = text.replace(secret, "[redacted]");
