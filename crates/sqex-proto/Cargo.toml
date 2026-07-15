@@ -5,5 +5,23 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+http.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+zeroize.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+apogee-test-support = { path = "../apogee-test-support" }
+insta.workspace = true
+rstest.workspace = true
+proptest.workspace = true
+
 [lints]
 workspace = true
