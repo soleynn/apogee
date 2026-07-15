@@ -64,20 +64,22 @@ impl ArgumentBuilder {
     /// at index 0 rather than duplicating it), so the key and the `T` value cannot desync.
     #[must_use]
     pub fn build_encrypted(&self, key: &ArgKey) -> String {
-        let mut pairs = self.args.clone();
-        let t = ("T".to_string(), key.ticks().to_string());
-        if pairs.first().is_some_and(|(k, _)| k.as_str() == "T") {
-            pairs[0] = t;
-        } else {
-            pairs.insert(0, t);
-        }
-
-        let mut plaintext = String::new();
-        for (k, v) in &pairs {
-            plaintext.push_str(" /");
-            plaintext.push_str(&escape(k));
-            plaintext.push_str(" =");
-            plaintext.push_str(&escape(v));
+        // The serialized plaintext carries the session id and other credential-bearing args in the
+        // clear, so build it straight into a zeroizing buffer that is wiped on drop. Pre-size to an
+        // upper bound (every space can at most double) so growth never reallocates and strands a
+        // cleartext copy in freed heap. `T={ticks}` leads, derived from the key itself; a
+        // caller-supplied leading `T` is dropped rather than duplicated, so key and `T` can't desync.
+        let cap = self
+            .args
+            .iter()
+            .map(|(k, v)| 4 + 2 * (k.len() + v.len()))
+            .sum::<usize>()
+            + 20;
+        let mut plaintext = Zeroizing::new(String::with_capacity(cap));
+        push_pair(&mut plaintext, "T", &key.ticks().to_string());
+        let skip_first = self.args.first().is_some_and(|(k, _)| k == "T");
+        for (k, v) in self.args.iter().skip(usize::from(skip_first)) {
+            push_pair(&mut plaintext, k, v);
         }
 
         let key_bytes = Zeroizing::new(key.key_bytes());
@@ -88,9 +90,23 @@ impl ArgumentBuilder {
     }
 }
 
-/// Escape by doubling every space, applied to both keys and values.
-fn escape(s: &str) -> String {
-    s.replace(' ', "  ")
+/// Append one serialized `" /{key} ={value}"` pair, escaping both halves in place.
+fn push_pair(out: &mut String, key: &str, value: &str) {
+    out.push_str(" /");
+    push_escaped(out, key);
+    out.push_str(" =");
+    push_escaped(out, value);
+}
+
+/// Append `s` with every space doubled (SE escapes keys and values this way). Byte-identical to
+/// `s.replace(' ', "  ")`, but appends in place instead of allocating a fresh `String` per call.
+fn push_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        out.push(ch);
+        if ch == ' ' {
+            out.push(' ');
+        }
+    }
 }
 
 /// The checksum char for `key`: one nibble (bits 16-19) indexes the table. The mask makes the index
