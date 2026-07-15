@@ -2,9 +2,10 @@
 //! the fixture transport (the drift alarm), the flow's dispositions are checked, and the failure paths
 //! are proven to keep the submitted credentials out of the error excerpt.
 //!
-//! Response bodies here are synthetic and shaped from the documented wire format; a captured, sanitized
-//! real login replaces them once available. The request bytes are ours either way, so these goldens are
-//! stable across that swap.
+//! The request-byte goldens use synthetic bodies (the request is ours regardless). The parser is also
+//! run against committed fixtures under `fixtures/oauth_*.html`: sanitized captures of a real login
+//! (credentials removed, the session id and `_STORED_` blob replaced with same-shape fakes), which pin
+//! the scanners against genuine Square Enix page markup.
 
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
@@ -254,4 +255,89 @@ fn a_non_200_top_page_is_an_invalid_response() {
             ..
         }
     ));
+}
+
+// The sanitized session id committed in fixtures/oauth_login_ok.html.
+const FIXTURE_SID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn a_real_captured_login_parses_to_authenticated() {
+    let id = computer_id();
+    let transport = FixtureTransport::new([
+        ProtoResponse::new(200, include_bytes!("fixtures/oauth_top.html").to_vec())
+            .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE)),
+        ProtoResponse::new(200, include_bytes!("fixtures/oauth_login_ok.html").to_vec()),
+    ]);
+
+    let auth = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        assert_eq!(flow.server_date(), Some(SERVER_DATE));
+        flow.submit(Credentials {
+            sqexid: "user",
+            password: "pw",
+            otp: None,
+        })
+        .await
+        .unwrap()
+    });
+
+    assert_eq!(auth.session_id().expose(), FIXTURE_SID);
+    assert_eq!(auth.region, 2);
+    assert_eq!(auth.max_expansion, 5);
+    assert!(auth.playable);
+    assert!(auth.terms_accepted);
+
+    // The `_STORED_` blob scraped from the real top page is echoed into the submit body.
+    let recorded = transport.recorded();
+    let body = String::from_utf8(recorded[1].body.clone().unwrap()).unwrap();
+    assert!(
+        body.contains("_STORED_=00112233"),
+        "submit body did not carry the scraped _STORED_: {body}"
+    );
+}
+
+#[test]
+fn a_real_captured_failure_page_is_oauth_failed() {
+    let id = computer_id();
+    let transport = FixtureTransport::new([
+        ProtoResponse::new(200, include_bytes!("fixtures/oauth_top.html").to_vec())
+            .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE)),
+        ProtoResponse::new(
+            200,
+            include_bytes!("fixtures/oauth_wrong_password.html").to_vec(),
+        ),
+    ]);
+
+    let err = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        flow.submit(Credentials {
+            sqexid: "user",
+            password: "wrong",
+            otp: None,
+        })
+        .await
+        .unwrap_err()
+    });
+
+    let ProtoError::OauthFailed { excerpt } = err else {
+        panic!("expected OauthFailed, got {err:?}");
+    };
+    assert!(
+        excerpt.contains("ID or password is incorrect"),
+        "excerpt: {excerpt}"
+    );
 }
