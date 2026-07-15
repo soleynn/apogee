@@ -20,8 +20,9 @@ pub(crate) enum Endian {
     Big,
 }
 
-/// The keyed cipher state: 18 subkeys plus four 256-entry S-boxes.
-#[derive(Clone)]
+/// The keyed cipher state: 18 subkeys plus four 256-entry S-boxes. Zeroized on drop because the
+/// expanded schedule is key-equivalent secret material.
+#[derive(zeroize::ZeroizeOnDrop)]
 pub(crate) struct BlowfishCore {
     p: [u32; 18],
     s: [[u32; 256]; 4],
