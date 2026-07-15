@@ -2,15 +2,13 @@
 //! network, and zero-padded ECB. The two public variants differ only in how the key schedule folds
 //! in key bytes and in block-word endianness.
 
-mod legacy;
-mod standard;
 mod tables;
+mod variants;
 
 #[cfg(test)]
 mod tests;
 
-pub use legacy::LegacyBlowfish;
-pub use standard::Blowfish;
+pub use variants::{Blowfish, LegacyBlowfish};
 
 /// Block-word byte order. The launcher variant reads/writes little-endian; the standard variant
 /// big-endian.
@@ -20,20 +18,28 @@ pub(crate) enum Endian {
     Big,
 }
 
-/// The keyed cipher state: 18 subkeys plus four 256-entry S-boxes. Zeroized on drop because the
-/// expanded schedule is key-equivalent secret material.
+/// The keyed cipher state: 18 subkeys plus four 256-entry S-boxes, and the block-word byte order
+/// this variant reads and writes. Zeroized on drop because the expanded schedule is key-equivalent
+/// secret material.
 #[derive(zeroize::ZeroizeOnDrop)]
 pub(crate) struct BlowfishCore {
     p: [u32; 18],
     s: [[u32; 256]; 4],
+    // Endianness is an immutable property of the variant, not of an operation, so it is fixed at
+    // construction and read by the ECB driver instead of being passed on every call (which left an
+    // encrypt/decrypt mismatch representable). Nothing to wipe: a public format detail, not a secret.
+    #[zeroize(skip)]
+    endian: Endian,
 }
 
 impl BlowfishCore {
-    /// Run the key schedule. `sign_extend` selects the launcher variant's signed-byte folding.
-    pub(crate) fn new(key: &[u8], sign_extend: bool) -> Self {
+    /// Run the key schedule. `sign_extend` selects the launcher variant's signed-byte folding;
+    /// `endian` fixes the block-word byte order for every subsequent encrypt/decrypt.
+    pub(crate) fn new(key: &[u8], sign_extend: bool, endian: Endian) -> Self {
         let mut core = Self {
             p: tables::P_INIT,
             s: tables::S_INIT,
+            endian,
         };
         core.mix_key(key, sign_extend);
         core.expand();
@@ -124,27 +130,31 @@ impl BlowfishCore {
         (l, r)
     }
 
-    /// Zero-pad to an 8-byte multiple and ECB-encrypt each block in `endian` word order.
-    fn encrypt_ecb(&self, data: &[u8], endian: Endian) -> Vec<u8> {
+    /// Zero-pad to an 8-byte multiple and run each block through `round` (encrypt or decrypt) in this
+    /// cipher's word order. ECB, because SE chains nothing.
+    fn process_ecb(&self, data: &[u8], round: fn(&Self, u32, u32) -> (u32, u32)) -> Vec<u8> {
         let mut buf = pad8(data);
         for block in buf.chunks_exact_mut(8) {
-            let (l, r) = self.encrypt_words(word_in(block, 0, endian), word_in(block, 4, endian));
-            word_out(block, 0, l, endian);
-            word_out(block, 4, r, endian);
+            let (l, r) = round(
+                self,
+                word_in(block, 0, self.endian),
+                word_in(block, 4, self.endian),
+            );
+            word_out(block, 0, l, self.endian);
+            word_out(block, 4, r, self.endian);
         }
         buf
     }
 
-    /// ECB-decrypt each 8-byte block in `endian` word order. Trailing partial input is zero-padded
-    /// first so the call never panics; well-formed ciphertext is always a multiple of 8.
-    fn decrypt_ecb(&self, data: &[u8], endian: Endian) -> Vec<u8> {
-        let mut buf = pad8(data);
-        for block in buf.chunks_exact_mut(8) {
-            let (l, r) = self.decrypt_words(word_in(block, 0, endian), word_in(block, 4, endian));
-            word_out(block, 0, l, endian);
-            word_out(block, 4, r, endian);
-        }
-        buf
+    /// Zero-pad to an 8-byte multiple and ECB-encrypt each block.
+    fn encrypt_ecb(&self, data: &[u8]) -> Vec<u8> {
+        self.process_ecb(data, Self::encrypt_words)
+    }
+
+    /// ECB-decrypt each 8-byte block. Trailing partial input is zero-padded first so the call never
+    /// panics; well-formed ciphertext is always a multiple of 8.
+    fn decrypt_ecb(&self, data: &[u8]) -> Vec<u8> {
+        self.process_ecb(data, Self::decrypt_words)
     }
 
     #[cfg(test)]
@@ -168,11 +178,10 @@ impl BlowfishCore {
 }
 
 fn pad8(data: &[u8]) -> Vec<u8> {
-    let mut buf = data.to_vec();
-    let rem = buf.len() % 8;
-    if rem != 0 {
-        buf.resize(buf.len() + (8 - rem), 0);
-    }
+    let padded = data.len() + (8 - data.len() % 8) % 8;
+    let mut buf = Vec::with_capacity(padded);
+    buf.extend_from_slice(data);
+    buf.resize(padded, 0);
     buf
 }
 
