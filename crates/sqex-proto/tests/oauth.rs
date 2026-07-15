@@ -152,7 +152,7 @@ fn an_otp_is_sent_in_the_submit_body() {
     });
 
     let recorded = transport.recorded();
-    let body = String::from_utf8(recorded[1].body.clone().unwrap()).unwrap();
+    let body = String::from_utf8(recorded[1].body.as_ref().unwrap().to_vec()).unwrap();
     assert_eq!(body, "_STORED_=S&sqexid=user&password=pw&otppw=123456");
 }
 
@@ -296,7 +296,7 @@ fn a_real_captured_login_parses_to_authenticated() {
 
     // The `_STORED_` blob scraped from the real top page is echoed into the submit body.
     let recorded = transport.recorded();
-    let body = String::from_utf8(recorded[1].body.clone().unwrap()).unwrap();
+    let body = String::from_utf8(recorded[1].body.as_ref().unwrap().to_vec()).unwrap();
     assert!(
         body.contains("_STORED_=00112233"),
         "submit body did not carry the scraped _STORED_: {body}"
