@@ -42,6 +42,14 @@ done
 bad=$(deps_of sqex-proto | grep -xiE 'regex|regex-.*|scraper|html5ever|select|kuchiki|tl|lol_html' || true)
 [ -z "$bad" ] || report "sqex-proto pulled in a regex/HTML-parser dependency" "$bad"
 
+# 5. No presentation below the shell: the composition root carries no user-facing string constants
+#    (it emits typed codes, and the shell localizes them), and no library writes to the terminal.
+hits=$(grep -rnE '^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[^=]*\bstr\b' \
+  crates/apogee-core/src --include='*.rs' || true)
+[ -z "$hits" ] || report "string constant in apogee-core (presentation belongs to the shell)" "$hits"
+hits=$(libs '\b(print|println|eprint|eprintln)!')
+[ -z "$hits" ] || report "terminal output in a library crate" "$hits"
+
 # Informational: remaining stub markers (never fails).
 printf 'stub markers (todo!/unimplemented!): %s\n' \
   "$(grep -roE 'todo!|unimplemented!' crates/*/src --include='*.rs' | wc -l | tr -d ' ')"
