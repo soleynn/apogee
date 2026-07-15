@@ -5,5 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+
+[features]
+# Gates the out-of-process oracle runner; off by default and never on the CI path.
+oracle = []
+
 [lints]
 workspace = true
