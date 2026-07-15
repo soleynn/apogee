@@ -28,5 +28,6 @@ pub use oauth::{
 pub use patchlist::{BlockHashes, PatchListEntry, parse_patch_list};
 pub use time::LauncherTime;
 pub use transport::{
-    ProtoRequest, ProtoResponse, Transport, TransportError, debug_assert_header_fidelity,
+    ProtoRequest, ProtoResponse, RequestBody, Transport, TransportError,
+    debug_assert_header_fidelity,
 };

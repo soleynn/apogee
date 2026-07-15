@@ -22,7 +22,7 @@ use crate::error::{ProtoError, Step, scrubbed_excerpt};
 use crate::identity::ClientContext;
 use crate::time::LauncherTime;
 use crate::transport::{
-    ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header, parse_base,
+    ProtoRequest, ProtoResponse, RequestBody, Transport, TransportError, dynamic_header, parse_base,
 };
 
 mod scan;
@@ -168,7 +168,7 @@ impl LoginFlow<'_> {
         body.push_str("&otppw=");
         body.extend(utf8_percent_encode(otp, UNRESERVED));
 
-        let request = self.build_login_request(Zeroizing::new(body.as_bytes().to_vec()))?;
+        let request = self.build_login_request(RequestBody::new(body.as_bytes().to_vec()))?;
         let response = self.transport.execute(request).await?;
 
         if !response.is_ok() {
@@ -214,10 +214,7 @@ impl LoginFlow<'_> {
     }
 
     /// The launcher's submit header set, in order. The referer is the step-one URL verbatim.
-    fn build_login_request(
-        &self,
-        body: Zeroizing<Vec<u8>>,
-    ) -> Result<ProtoRequest, TransportError> {
+    fn build_login_request(&self, body: RequestBody) -> Result<ProtoRequest, TransportError> {
         let url = parse_base(LOGIN_SEND_URL, "invalid login URL")?;
         Ok(ProtoRequest::new(Method::POST, url)
             .header(
