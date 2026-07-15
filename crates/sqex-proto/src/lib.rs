@@ -8,6 +8,7 @@
 
 mod bootver;
 mod error;
+mod frontier;
 mod identity;
 mod patchlist;
 mod time;
@@ -15,6 +16,7 @@ mod transport;
 
 pub use bootver::check_boot_version;
 pub use error::{ProtoError, Step};
+pub use frontier::{FrontierContext, GateStatus, check_gate_status, check_login_status};
 pub use identity::{ComputerId, PATCHER_USER_AGENT, frontier_referer, launcher_user_agent};
 pub use patchlist::{BlockHashes, PatchListEntry, parse_patch_list};
 pub use time::LauncherTime;
