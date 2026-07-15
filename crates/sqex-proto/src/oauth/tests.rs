@@ -57,7 +57,7 @@ fn scrape_stored_caps_a_runaway_value() {
 #[test]
 fn launch_params_reads_by_key() {
     let params = parse_launch_params(FULL_PARAMS).unwrap();
-    assert_eq!(params.session_id, "SESSIONABC");
+    assert_eq!(params.session_id.as_str(), "SESSIONABC");
     assert!(params.terms_accepted);
     assert_eq!(params.region, 3);
     assert!(params.playable);
@@ -68,7 +68,7 @@ fn launch_params_reads_by_key() {
 fn launch_params_falls_back_to_position_when_keys_are_unknown() {
     // Keys renamed so only the positional fallback can resolve the fields.
     let params = parse_launch_params("k0,SID,k2,1,k4,3,k6,0,k8,1,k10,0,k12,4").unwrap();
-    assert_eq!(params.session_id, "SID");
+    assert_eq!(params.session_id.as_str(), "SID");
     assert_eq!(params.region, 3);
     assert_eq!(params.max_expansion, 4);
 }
@@ -97,7 +97,7 @@ fn launch_params_rejects_a_non_numeric_region() {
 fn login_callback_reads_a_success_body() {
     let body = format!(r#"<script>window.external.user("login=auth,ok,{FULL_PARAMS}");</script>"#);
     let params = parse_login_callback(&body).unwrap();
-    assert_eq!(params.session_id, "SESSIONABC");
+    assert_eq!(params.session_id.as_str(), "SESSIONABC");
     assert_eq!(params.region, 3);
 }
 
@@ -145,7 +145,7 @@ fn full_parse_is_pinned() {
     let params = parse_launch_params(FULL_PARAMS).unwrap();
     let rendered = format!(
         "session_id={} terms={} region={} playable={} maxex={}",
-        params.session_id,
+        params.session_id.as_str(),
         params.terms_accepted,
         params.region,
         params.playable,

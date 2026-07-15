@@ -81,16 +81,16 @@ pub struct Credentials<'a> {
     pub otp: Option<&'a str>,
 }
 
-/// The OAuth session id. Redacted in `Debug` and never serialized; the next stage reads it into a URL
-/// path segment via [`SessionId::expose`].
-pub struct SessionId(String);
+/// The OAuth session id. Zeroized on drop, redacted in `Debug`, and never serialized; the next stage
+/// reads it into a URL path segment via [`SessionId::expose`].
+pub struct SessionId(Zeroizing<String>);
 
 impl SessionId {
     /// The raw session id. Secret-adjacent (it authorizes the next stage), so callers must not persist
     /// or log it.
     #[must_use]
     pub fn expose(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
