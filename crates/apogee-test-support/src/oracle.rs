@@ -72,6 +72,9 @@ impl OracleRunner {
 
     /// Spawn the process, wait, and return its raw stdout. A non-zero exit is an error carrying the
     /// captured stderr.
+    ///
+    /// There is no wall-clock timeout: a child that never exits blocks until the caller aborts it.
+    /// That is acceptable for this interactive authoring path; a wired-in job would add its own bound.
     pub fn run(&self) -> Result<Vec<u8>, OracleError> {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
