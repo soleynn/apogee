@@ -5,5 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+apogee-core = { path = "../../crates/apogee-core" }
+tokio.workspace = true
+tokio-stream.workspace = true
+
 [lints]
 workspace = true

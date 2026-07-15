@@ -93,6 +93,17 @@ jobs:
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-xwin
+      # rustls pulls in `ring`, whose C sources cc-rs archives with the MSVC-style `llvm-lib`;
+      # expose it (and the other LLVM cross tools) under their unversioned names on PATH.
+      - name: Provide the LLVM MSVC cross tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm clang lld
+          bindir="$(dirname "$(ls /usr/lib/llvm-*/bin/llvm-lib | sort -V | tail -n1)")"
+          for tool in llvm-lib lld-link llvm-dlltool clang-cl; do
+            command -v "$tool" >/dev/null 2>&1 || sudo ln -sf "$bindir/$tool" "/usr/local/bin/$tool"
+          done
+          llvm-lib --version
       - run: cargo xwin build --target x86_64-pc-windows-msvc --workspace
 
   deny:

@@ -5,5 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+sqex-proto = { path = "../sqex-proto" }
+apogee-fetch = { path = "../apogee-fetch" }
+apogee-patcher = { path = "../apogee-patcher" }
+apogee-runtime = { path = "../apogee-runtime" }
+apogee-addons = { path = "../apogee-addons" }
+apogee-secrets = { path = "../apogee-secrets" }
+apogee-otp = { path = "../apogee-otp" }
+
+[dev-dependencies]
+apogee-test-support = { path = "../apogee-test-support" }
+insta.workspace = true
+rstest.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true
