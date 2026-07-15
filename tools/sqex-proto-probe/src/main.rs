@@ -18,8 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{HeaderName, HeaderValue};
 use sqex_proto::{
-    ComputerId, Credentials, LauncherTime, LoginKind, OauthContext, ProtoError, ProtoRequest,
-    ProtoResponse, Transport, TransportError, begin_login,
+    begin_login, ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext,
+    ProtoError, ProtoRequest, ProtoResponse, Transport, TransportError,
 };
 
 const CAPTURE_ROOT: &str = "target/capture";
@@ -51,10 +51,13 @@ async fn run_login(client: &reqwest::Client, scenario: &str, sqexid: &str, passw
     let computer_id = ComputerId::from_facts("APOGEE-PROBE", "apogee", "Linux", 8);
     let now = utc_now();
     let context = OauthContext {
-        computer_id: &computer_id,
-        language: "en-us",
-        accept_language: "en-US,en;q=0.9",
-        referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        client: ClientContext {
+            computer_id: &computer_id,
+            language: "en-us",
+            accept_language: "en-US,en;q=0.9",
+            referer_template:
+                "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        },
         lng: "en",
         region: 3,
     };
@@ -132,8 +135,11 @@ impl Transport for RecordingTransport {
 
         // The request body can contain the password, so this whole directory is gitignored and never
         // committed; only the sanitized response bodies become fixtures.
-        std::fs::write(self.dir.join(format!("{stem}-request.txt")), render_request(&req))
-            .expect("write request capture");
+        std::fs::write(
+            self.dir.join(format!("{stem}-request.txt")),
+            render_request(&req),
+        )
+        .expect("write request capture");
 
         let method = reqwest::Method::from_bytes(req.method.as_str().as_bytes())
             .map_err(|_| TransportError::new("unsupported method"))?;
@@ -147,7 +153,7 @@ impl Transport for RecordingTransport {
             builder = builder.header(name.as_str(), value.as_bytes());
         }
         if let Some(body) = &req.body {
-            builder = builder.body(body.clone());
+            builder = builder.body(body.as_bytes().to_vec());
         }
 
         let response = builder
@@ -170,8 +176,11 @@ impl Transport for RecordingTransport {
                 String::from_utf8_lossy(value.as_bytes())
             ));
         }
-        std::fs::write(self.dir.join(format!("{stem}-response-headers.txt")), header_dump)
-            .expect("write response headers");
+        std::fs::write(
+            self.dir.join(format!("{stem}-response-headers.txt")),
+            header_dump,
+        )
+        .expect("write response headers");
         std::fs::write(self.dir.join(format!("{stem}-response-body.html")), &body)
             .expect("write response body");
 
@@ -196,7 +205,7 @@ fn render_request(req: &ProtoRequest) -> String {
     }
     if let Some(body) = &req.body {
         out.push('\n');
-        out.push_str(&String::from_utf8_lossy(body));
+        out.push_str(&String::from_utf8_lossy(body.as_bytes()));
     }
     out
 }
