@@ -823,6 +823,7 @@ dependencies = [
  "proptest",
  "rstest",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

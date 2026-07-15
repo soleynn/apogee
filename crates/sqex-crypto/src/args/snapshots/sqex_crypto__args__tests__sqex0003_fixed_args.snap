@@ -1,0 +1,5 @@
+---
+source: crates/sqex-crypto/src/args/tests.rs
+expression: fixed_builder().build_encrypted(&key)
+---
+//**sqex0003V4CSvwpH7dvAtpOVqv1QTN7nfW333ccgd1sXDx1QHKCf9aT8GPzepCWocXd_Cw0_yuB_b-KhMtcQSLR7xnDy7S5FgDrWaizpwbpdGhcOoWQs8NUyJTJVPUix-czY3h7yTA2cTaWO6XLsa3tZn0DqFS4s5KF7G0pm-VgMbCwLAyPGC5nm-09RP65fewaia10890HTWt1csky7ZjE1SQVSC0x6WxdV3LNoh79BjEqUQ-UR7HmDbus-Oh9FheO8T2hMG**//
