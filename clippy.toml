@@ -1,0 +1,5 @@
+# The workspace denies unwrap/expect/panic in shipping paths; tests are exempt so fixtures and
+# assertions stay readable.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
