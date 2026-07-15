@@ -131,7 +131,6 @@ dependencies = [
  "http",
  "sqex-proto",
  "tempfile",
- "thiserror",
  "url",
 ]
 
