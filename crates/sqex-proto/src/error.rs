@@ -16,6 +16,10 @@ pub enum Step {
     GateStatus,
     /// The frontier login-status fetch.
     LoginStatus,
+    /// The OAuth login top page.
+    OauthTop,
+    /// The OAuth credential submission.
+    OauthLogin,
 }
 
 /// A protocol failure.
@@ -38,14 +42,55 @@ pub enum ProtoError {
     /// A patchlist line could not be parsed. `line` is 1-based; `reason` is a stable, static tag.
     #[error("patchlist parse error at line {line}: {reason}")]
     PatchListParse { line: u32, reason: &'static str },
+
+    /// The OAuth submission did not return the success callback. The excerpt is scrubbed of the
+    /// submitted credentials and length-capped at the construction site.
+    #[error("oauth login rejected")]
+    OauthFailed { excerpt: String },
+
+    /// The top page asked the client to relink a Steam account (`window.external.user("restartup")`).
+    /// Wired for the Steam variant; a standard login never reaches it.
+    #[error("steam account not linked")]
+    SteamLinkNeeded,
+
+    /// The Steam ticket is linked to a different SE account than the one submitted. `expected_hint` is
+    /// a masked form of the linked id, never the full value.
+    #[error("steam ticket is linked to a different account")]
+    SteamWrongAccount { expected_hint: String },
+
+    /// The top page carried no `_STORED_` blob. The excerpt is length-capped; the top page carries no
+    /// submitted credentials.
+    #[error("_STORED_ not found on the login top page")]
+    StoredNotFound { excerpt: String },
+
+    /// The `launchParams` list was too short or malformed to read the fields a login needs. `got_fields`
+    /// is a count only, never the field contents (which include the session id).
+    #[error("launchParams unparseable ({got_fields} fields)")]
+    LaunchParamsUnparseable { got_fields: usize },
 }
+
+/// The most characters an excerpt keeps: enough to triage, small enough that a large or binary body
+/// cannot bloat the error.
+const EXCERPT_MAX_CHARS: usize = 200;
 
 /// A short, safe excerpt of a response body for an error message: lossy UTF-8, capped in length so a
 /// large or binary body cannot bloat the error.
 pub(crate) fn excerpt(body: &[u8]) -> String {
-    const MAX_CHARS: usize = 200;
     String::from_utf8_lossy(body)
         .chars()
-        .take(MAX_CHARS)
+        .take(EXCERPT_MAX_CHARS)
         .collect()
+}
+
+/// Like [`excerpt`], but first removes any of `secrets` from the body so a page that echoes the
+/// submitted credentials cannot leak them into an error. Scrubbing happens before the length cap, so a
+/// secret near the start cannot survive by being split at the boundary.
+pub(crate) fn scrubbed_excerpt(body: &[u8], secrets: &[&str]) -> String {
+    let mut text = String::from_utf8_lossy(body).into_owned();
+    for secret in secrets {
+        if !secret.is_empty() {
+            text = text.replace(secret, "[redacted]");
+        }
+    }
+    text.chars().take(EXCERPT_MAX_CHARS).collect()
 }
