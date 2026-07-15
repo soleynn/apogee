@@ -5,8 +5,11 @@
 //! Tests supply a fixture transport. The crate names neither `reqwest` nor `tokio`; the only async
 //! surface is the `async fn` on this trait.
 
+use std::fmt;
+
 use http::{HeaderName, HeaderValue, Method};
 use url::Url;
+use zeroize::Zeroizing;
 
 /// A single HTTP request, fully specified.
 ///
@@ -14,12 +17,28 @@ use url::Url;
 /// and injects nothing of its own (no default `Accept`, no tracing header). SE plausibly fingerprints
 /// the header set, so fidelity is a contract; [`debug_assert_header_fidelity`] lets an adapter check
 /// it at the boundary.
-#[derive(Debug, Clone)]
+///
+/// The body is zeroizing: a login submit carries percent-encoded credentials, so the only in-memory
+/// copy scrubs on drop rather than lingering in freed heap.
+#[derive(Clone)]
 pub struct ProtoRequest {
     pub method: Method,
     pub url: Url,
     pub headers: Vec<(HeaderName, HeaderValue)>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl fmt::Debug for ProtoRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The body can carry submitted credentials, so its bytes are never rendered: only presence
+        // and length.
+        f.debug_struct("ProtoRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &self.headers)
+            .field("body", &self.body.as_ref().map(|b| format!("[{} bytes]", b.len())))
+            .finish()
+    }
 }
 
 impl ProtoRequest {
@@ -41,9 +60,9 @@ impl ProtoRequest {
         self
     }
 
-    /// Attach a request body.
+    /// Attach a request body. Zeroizing, since a login submit body carries credentials.
     #[must_use]
-    pub fn body(mut self, body: Vec<u8>) -> Self {
+    pub fn body(mut self, body: Zeroizing<Vec<u8>>) -> Self {
         self.body = Some(body);
         self
     }
