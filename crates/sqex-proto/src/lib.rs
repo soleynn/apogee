@@ -7,9 +7,11 @@
 //! later phases.
 
 mod error;
+mod patchlist;
 mod transport;
 
 pub use error::{ProtoError, Step};
+pub use patchlist::{BlockHashes, PatchListEntry, parse_patch_list};
 pub use transport::{
     ProtoRequest, ProtoResponse, Transport, TransportError, debug_assert_header_fidelity,
 };
