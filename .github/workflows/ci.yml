@@ -115,6 +115,18 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: "1.97.0"
+      - run: bash scripts/audit.sh
+
   fuzz-smoke:
     name: fuzz-smoke
     runs-on: ubuntu-latest
@@ -142,3 +154,5 @@ jobs:
       - run: cargo +nightly fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
       - run: cargo +nightly fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048

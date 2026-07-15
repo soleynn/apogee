@@ -14,6 +14,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 sqex-proto = { path = "../crates/sqex-proto" }
+sqex-crypto = { path = "../crates/sqex-crypto" }
 
 [[bin]]
 name = "patchlist"
@@ -32,6 +33,13 @@ bench = false
 [[bin]]
 name = "oauth_launch_params"
 path = "fuzz_targets/oauth_launch_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqex_base64"
+path = "fuzz_targets/sqex_base64.rs"
 test = false
 doc = false
 bench = false
