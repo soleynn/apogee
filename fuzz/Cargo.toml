@@ -22,5 +22,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "oauth_stored"
+path = "fuzz_targets/oauth_stored.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oauth_launch_params"
+path = "fuzz_targets/oauth_launch_params.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
