@@ -156,3 +156,26 @@ jobs:
       - run: cargo +nightly fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
       - run: cargo +nightly fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+
+  # The one live call: an unauthenticated GET to SE's boot endpoint, confirming the patchlist parser
+  # handles genuinely-current output. An amber canary (continue-on-error) with one retry, so an SE CDN
+  # hiccup is a visible warning, not a red build; the parser is also covered hermetically by fixtures.
+  boot-check-live:
+    name: boot-check-live
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: tools/boot-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Live boot-version check (retried once)
+        run: >
+          cargo run --manifest-path tools/boot-check/Cargo.toml ||
+          { sleep 5; cargo run --manifest-path tools/boot-check/Cargo.toml; }
