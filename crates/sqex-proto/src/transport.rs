@@ -16,32 +16,14 @@ use zeroize::Zeroizing;
 /// The header list is ordered and complete: a transport emits exactly these headers, in this order,
 /// and injects nothing of its own (no default `Accept`, no tracing header). SE plausibly fingerprints
 /// the header set, so fidelity is a contract; [`debug_assert_header_fidelity`] lets an adapter check
-/// it at the boundary.
-///
-/// The body is zeroizing: a login submit carries percent-encoded credentials, so the only in-memory
-/// copy scrubs on drop rather than lingering in freed heap.
-#[derive(Clone)]
+/// it at the boundary. The [`RequestBody`] keeps a credential-bearing body zeroizing and out of
+/// `Debug`, so `ProtoRequest` can derive `Debug` without leaking it.
+#[derive(Debug, Clone)]
 pub struct ProtoRequest {
     pub method: Method,
     pub url: Url,
     pub headers: Vec<(HeaderName, HeaderValue)>,
-    pub body: Option<Zeroizing<Vec<u8>>>,
-}
-
-impl fmt::Debug for ProtoRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The body can carry submitted credentials, so its bytes are never rendered: only presence
-        // and length.
-        f.debug_struct("ProtoRequest")
-            .field("method", &self.method)
-            .field("url", &self.url)
-            .field("headers", &self.headers)
-            .field(
-                "body",
-                &self.body.as_ref().map(|b| format!("[{} bytes]", b.len())),
-            )
-            .finish()
-    }
+    pub body: Option<RequestBody>,
 }
 
 impl ProtoRequest {
@@ -63,11 +45,40 @@ impl ProtoRequest {
         self
     }
 
-    /// Attach a request body. Zeroizing, since a login submit body carries credentials.
+    /// Attach a request body.
     #[must_use]
-    pub fn body(mut self, body: Zeroizing<Vec<u8>>) -> Self {
+    pub fn body(mut self, body: RequestBody) -> Self {
         self.body = Some(body);
         self
+    }
+}
+
+/// The bytes of a request body.
+///
+/// Held zeroizing because a login submit carries percent-encoded credentials, so the crate's copy
+/// scrubs on drop instead of lingering in freed heap; and rendered in `Debug` as only its length, so a
+/// logged request cannot leak it. This is defense in depth for the crate's own copy: a transport
+/// (reqwest, TLS, and kernel buffers) makes further copies this type cannot reach.
+#[derive(Clone)]
+pub struct RequestBody(Zeroizing<Vec<u8>>);
+
+impl RequestBody {
+    /// Wrap `bytes` as a request body; they are held zeroizing from here on.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// The body bytes, for a transport to write.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RequestBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{} bytes]", self.0.len())
     }
 }
 

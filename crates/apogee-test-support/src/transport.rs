@@ -88,7 +88,7 @@ pub fn canonical_request(req: &ProtoRequest) -> String {
     }
     if let Some(body) = &req.body {
         s.push('\n');
-        s.push_str(&String::from_utf8_lossy(body));
+        s.push_str(&String::from_utf8_lossy(body.as_bytes()));
     }
     s
 }
