@@ -55,7 +55,7 @@ fn parse_error(line: u32, reason: &'static str) -> ProtoError {
 /// The body's line endings may be any of CRLF, CR, or LF (SE mixes them); they are normalized before
 /// splitting so line numbering matches the source.
 pub fn parse_patch_list(body: &str) -> Result<Vec<PatchListEntry>, ProtoError> {
-    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalize_newlines(body);
     let lines: Vec<&str> = normalized.split('\n').collect();
 
     if lines.len() < HEADER_LINES + TRAILER_LINES {
@@ -85,6 +85,25 @@ pub fn parse_patch_list(body: &str) -> Result<Vec<PatchListEntry>, ProtoError> {
 /// 1-based line number for a 0-based line index, saturating so a pathological length can never wrap.
 fn line_number(index: usize) -> u32 {
     u32::try_from(index + 1).unwrap_or(u32::MAX)
+}
+
+/// Normalize CRLF, CR, and LF line endings to LF in a single pass (SE mixes them). A CRLF collapses to
+/// one LF and a lone CR (including mid-line) becomes an LF, so line numbering matches the source.
+/// Identical output to `replace("\r\n", "\n").replace('\r', "\n")`, without the second full-body pass.
+fn normalize_newlines(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            out.push('\n');
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn parse_entry(line: &str, line_no: u32) -> Result<PatchListEntry, ProtoError> {
