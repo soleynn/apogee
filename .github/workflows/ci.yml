@@ -114,6 +114,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: nightly
+          targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: fuzz
@@ -122,6 +123,7 @@ jobs:
         with:
           tool: cargo-fuzz
       # Build, then a short timed run: the patchlist parser must stay panic- and allocation-safe on
-      # any input.
-      - run: cargo +nightly fuzz build patchlist
-      - run: cargo +nightly fuzz run patchlist -- -max_total_time=30 -rss_limit_mb=2048
+      # any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose static libc is
+      # incompatible with the address sanitizer.
+      - run: cargo +nightly fuzz build patchlist --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz run patchlist --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
