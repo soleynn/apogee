@@ -39,3 +39,13 @@ pub enum ProtoError {
     #[error("patchlist parse error at line {line}: {reason}")]
     PatchListParse { line: u32, reason: &'static str },
 }
+
+/// A short, safe excerpt of a response body for an error message: lossy UTF-8, capped in length so a
+/// large or binary body cannot bloat the error.
+pub(crate) fn excerpt(body: &[u8]) -> String {
+    const MAX_CHARS: usize = 200;
+    String::from_utf8_lossy(body)
+        .chars()
+        .take(MAX_CHARS)
+        .collect()
+}
