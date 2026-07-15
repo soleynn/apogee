@@ -70,8 +70,6 @@ jobs:
   build-windows-cross:
     name: build-windows-cross
     runs-on: ubuntu-latest
-    env:
-      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -79,32 +77,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: "1.97.0"
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-cross
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The Windows SDK/CRT that cargo-xwin downloads is the slowest part; cache it.
-      - name: Cache xwin SDK
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ github.workspace }}/.xwin-cache
-          key: xwin-sdk-${{ runner.os }}-v1
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
-        with:
-          tool: cargo-xwin
-      # rustls pulls in `ring`, whose C sources cc-rs archives with the MSVC-style `llvm-lib`;
-      # expose it (and the other LLVM cross tools) under their unversioned names on PATH.
-      - name: Provide the LLVM MSVC cross tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends llvm clang lld
-          bindir="$(dirname "$(ls /usr/lib/llvm-*/bin/llvm-lib | sort -V | tail -n1)")"
-          for tool in llvm-lib lld-link llvm-dlltool clang-cl; do
-            command -v "$tool" >/dev/null 2>&1 || sudo ln -sf "$bindir/$tool" "/usr/local/bin/$tool"
-          done
-          llvm-lib --version
-      - run: cargo xwin build --target x86_64-pc-windows-msvc --workspace
+      # The GNU/MinGW ABI cross-compiles from a plain apt package: no MSVC SDK download, no llvm-lib,
+      # no EULA. The Windows components run under Wine, where GNU-ABI binaries are fine.
+      - name: Install the MinGW-w64 cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+      - run: cargo build --target x86_64-pc-windows-gnu --workspace
 
   deny:
     name: deny
