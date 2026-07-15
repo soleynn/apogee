@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use crate::error::{ProtoError, Step, excerpt, scrubbed_excerpt};
 use crate::identity::{ComputerId, frontier_referer, launcher_user_agent};
 use crate::time::LauncherTime;
-use crate::transport::{ProtoRequest, ProtoResponse, Transport, TransportError};
+use crate::transport::{ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header};
 
 mod scan;
 #[cfg(test)]
@@ -359,10 +359,4 @@ fn read_date(response: &ProtoResponse) -> Option<String> {
         .header(&http::header::DATE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
-}
-
-/// Build a header value from a caller-supplied string, failing rather than panicking on stray control
-/// bytes (the launcher's own values are always valid, so this is a guard, not a live path).
-fn dynamic_header(value: &str) -> Result<HeaderValue, TransportError> {
-    HeaderValue::from_str(value).map_err(|_| TransportError::new("invalid header value"))
 }

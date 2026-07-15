@@ -17,7 +17,7 @@ use url::Url;
 use crate::error::{ProtoError, Step, excerpt};
 use crate::identity::{ComputerId, frontier_referer, launcher_user_agent};
 use crate::time::LauncherTime;
-use crate::transport::{ProtoRequest, ProtoResponse, Transport, TransportError};
+use crate::transport::{ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header};
 
 const FRONTIER_ORIGIN: &str = "https://launcher.finalfantasyxiv.com";
 const GATE_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/gate_status.json";
@@ -131,12 +131,6 @@ fn parse_status(response: &ProtoResponse, step: Step) -> Result<GateStatus, Prot
         status: response.status,
         excerpt: excerpt(&response.body),
     })
-}
-
-/// Build a header value from a caller-supplied string, failing rather than panicking on stray control
-/// bytes (the launcher's own values are always valid, so this is a guard, not a live path).
-fn dynamic_header(value: &str) -> Result<HeaderValue, TransportError> {
-    HeaderValue::from_str(value).map_err(|_| TransportError::new("invalid header value"))
 }
 
 #[cfg(test)]
