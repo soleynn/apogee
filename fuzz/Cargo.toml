@@ -1,0 +1,26 @@
+# Its own workspace so the nightly-only, libfuzzer-linked fuzz crate stays out of the main
+# workspace's stable build, clippy, and cross-compile jobs.
+[workspace]
+
+[package]
+name = "sqex-proto-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sqex-proto = { path = "../crates/sqex-proto" }
+
+[[bin]]
+name = "patchlist"
+path = "fuzz_targets/patchlist.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
