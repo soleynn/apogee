@@ -17,6 +17,11 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// A deterministic `ArgKey` for goldens, composed through the `TickCount` seam.
+fn arg_key(raw: u32) -> ArgKey {
+    ArgKey::from_tick(TickCount::from_raw(raw))
+}
+
 /// A fixed, obviously-synthetic argument set in the launcher's order. No SE bytes.
 fn fixed_builder() -> ArgumentBuilder {
     ArgumentBuilder::new()
@@ -30,7 +35,7 @@ fn fixed_builder() -> ArgumentBuilder {
         .add("ver", "2000.00.00.0000.0000")
 }
 
-/// The serialized plaintext `fixed_builder` + `ArgKey::from_raw(0x1234_5678)` encrypts. `0x1234_5678`
+/// The serialized plaintext `fixed_builder` + `arg_key(0x1234_5678)` encrypts. `0x1234_5678`
 /// is 305419896 decimal; every quirk (leading space, `/`, space before `=`) is visible here.
 const FIXED_PLAINTEXT: &str = " /T =305419896 /DEV.DataPathType =1 /DEV.MaxEntitledExpansionID =4 /DEV.TestSID =0123456789abcdef /DEV.UseSqPack =1 /SYS.Region =0 /language =1 /resetConfig =0 /ver =2000.00.00.0000.0000";
 
@@ -68,14 +73,14 @@ fn checksum_indexes_one_nibble() {
 
 #[test]
 fn key_is_high_half_as_ascii_hex() {
-    let key = ArgKey::from_raw(0x1234_5678);
+    let key = arg_key(0x1234_5678);
     assert_eq!(key.key(), 0x1234_0000);
     assert_eq!(&key.key_bytes(), b"12340000");
     assert_eq!(key.ticks(), 0x1234_5678);
 }
 
 #[test]
-fn from_tick_matches_from_raw() {
+fn from_tick_derives_key_and_ticks() {
     let key = ArgKey::from_tick(TickCount::from_raw(0x1234_5678));
     assert_eq!(key.ticks(), 0x1234_5678);
     assert_eq!(key.key(), 0x1234_0000);
@@ -83,14 +88,14 @@ fn from_tick_matches_from_raw() {
 
 #[test]
 fn t_is_prepended_from_the_key() {
-    let key = ArgKey::from_raw(0x1234_5678);
+    let key = arg_key(0x1234_5678);
     let s = ArgumentBuilder::new().add("a", "b").build_encrypted(&key);
     assert_eq!(decrypt_to_string(&s, &key), " /T =305419896 /a =b");
 }
 
 #[test]
 fn explicit_t_is_overwritten_not_duplicated() {
-    let key = ArgKey::from_raw(0x1234_5678);
+    let key = arg_key(0x1234_5678);
     let s = ArgumentBuilder::new()
         .add("T", "999")
         .add("a", "b")
@@ -110,7 +115,7 @@ fn build_plain_has_no_slash_no_escape_no_t() {
 
 #[test]
 fn decrypt_round_trip_matches_serialized_plaintext() {
-    let key = ArgKey::from_raw(0x1234_5678);
+    let key = arg_key(0x1234_5678);
     let s = fixed_builder().build_encrypted(&key);
 
     let inner = s
@@ -131,7 +136,7 @@ fn decrypt_round_trip_matches_serialized_plaintext() {
 /// Human-reviewable pin of the serialized plaintext, including doubled spaces in a value.
 #[test]
 fn plaintext_serialization_pinned() {
-    let key = ArgKey::from_raw(0x00AB_CDEF);
+    let key = arg_key(0x00AB_CDEF);
     let s = ArgumentBuilder::new()
         .add("DEV.UseSqPack", "1")
         .add("extra", "a b c")
@@ -143,7 +148,7 @@ fn plaintext_serialization_pinned() {
 /// set, pinned so any drift in the codec is caught.
 #[test]
 fn sqex0003_fixed_args_pinned() {
-    let key = ArgKey::from_raw(0x1234_5678);
+    let key = arg_key(0x1234_5678);
     insta::assert_snapshot!("sqex0003_fixed_args", fixed_builder().build_encrypted(&key));
 }
 
