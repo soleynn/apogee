@@ -1,0 +1,5 @@
+---
+source: crates/sqex-crypto/src/args/tests.rs
+expression: "decrypt_to_string(&s, &key)"
+---
+ /T =11259375 /DEV.UseSqPack =1 /extra =a  b  c
