@@ -105,6 +105,13 @@ impl TransportError {
     }
 }
 
+/// Build a header value from a caller-supplied string, failing rather than panicking on stray control
+/// bytes (the launcher's own values are always valid, so this is a guard, not a live path). Shared by
+/// every surface that sets a header from a dynamic string.
+pub(crate) fn dynamic_header(value: &str) -> Result<HeaderValue, TransportError> {
+    HeaderValue::from_str(value).map_err(|_| TransportError::new("invalid header value"))
+}
+
 /// The only way this crate touches the network.
 ///
 /// Implementations own pooling, dual-stack dialing, timeouts, and TLS. The crate never retries: the
