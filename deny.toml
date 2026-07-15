@@ -28,8 +28,11 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    # webpki-roots ships the Mozilla CA bundle (pulled in by rustls) under this license.
-    "CDLA-Permissive-2.0",
+]
+# webpki-roots ships the Mozilla CA bundle (via rustls) under a data license; scope the
+# allowance to that crate so any other CDLA-licensed crate still trips the gate.
+exceptions = [
+    { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 private = { ignore = true }
 
