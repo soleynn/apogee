@@ -131,8 +131,8 @@ fn plaintext_serialization_pinned() {
     insta::assert_snapshot!("plaintext_serialization", decrypt_to_string(&s, &key));
 }
 
-/// The headline byte-identity golden. This snapshot is the reference to re-validate against the
-/// XIVLauncher oracle at authoring time.
+/// The headline byte-identity golden: the `sqex0003` argument string for a fixed key and argument
+/// set, pinned so any drift in the codec is caught.
 #[test]
 fn sqex0003_fixed_args_pinned() {
     let key = ArgKey::from_raw(0x1234_5678);

@@ -7,18 +7,12 @@ license.workspace = true
 
 [dependencies]
 tempfile.workspace = true
-thiserror = { workspace = true, optional = true }
 sqex-proto = { path = "../sqex-proto" }
 async-trait.workspace = true
 
 [dev-dependencies]
 http.workspace = true
 url.workspace = true
-
-[features]
-# Gates the out-of-process oracle runner; off by default and never on the CI path. The runner is the
-# only piece needing a typed error, so thiserror rides in with it.
-oracle = ["dep:thiserror"]
 
 [lints]
 workspace = true
