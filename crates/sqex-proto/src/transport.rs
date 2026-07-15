@@ -49,19 +49,39 @@ impl ProtoRequest {
     }
 }
 
-/// A response, reduced to what the protocol parsers consume: the status and the raw body. No current
-/// surface reads response headers, so they are not carried.
+/// A response: the status, the raw body, and any headers a surface needs to read. Most surfaces read
+/// only the status and body; the OAuth top page reads the `Date` header (for TOTP skew correction) and
+/// session registration will read `X-Patch-Unique-Id`, so a header a transport chooses to surface rides
+/// along here. A transport carries only the headers a surface asks for, not the whole response set.
 #[derive(Debug, Clone)]
 pub struct ProtoResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl ProtoResponse {
-    /// Build a response from its status and body.
+    /// Build a response from its status and body, carrying no headers.
     #[must_use]
     pub fn new(status: u16, body: Vec<u8>) -> Self {
-        Self { status, body }
+        Self {
+            status,
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Attach a response header, preserving insertion order.
+    #[must_use]
+    pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.headers.push((name, value));
+        self
+    }
+
+    /// The first value carried for `name`, if any.
+    #[must_use]
+    pub fn header(&self, name: &HeaderName) -> Option<&HeaderValue> {
+        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 }
 
