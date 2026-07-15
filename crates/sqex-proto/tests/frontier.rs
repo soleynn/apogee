@@ -5,8 +5,8 @@
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use sqex_proto::{
-    ComputerId, FrontierContext, LauncherTime, ProtoError, ProtoResponse, Step, check_gate_status,
-    check_login_status,
+    ClientContext, ComputerId, FrontierContext, LauncherTime, ProtoError, ProtoResponse, Step,
+    check_gate_status, check_login_status,
 };
 
 fn fixed_time() -> LauncherTime {
@@ -19,10 +19,12 @@ fn computer_id() -> ComputerId {
 
 fn context<'a>(id: &'a ComputerId) -> FrontierContext<'a> {
     FrontierContext {
-        computer_id: id,
-        language: "en-us",
-        accept_language: "en-US,en;q=0.9",
-        referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        client: ClientContext {
+            computer_id: id,
+            language: "en-us",
+            accept_language: "en-US,en;q=0.9",
+            referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        },
     }
 }
 

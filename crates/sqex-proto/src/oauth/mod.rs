@@ -19,7 +19,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::error::{ProtoError, Step, scrubbed_excerpt};
-use crate::identity::{ComputerId, frontier_referer, launcher_user_agent};
+use crate::identity::ClientContext;
 use crate::time::LauncherTime;
 use crate::transport::{
     ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header, parse_base,
@@ -51,14 +51,8 @@ const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
 
 /// The per-install, per-locale values a login carries.
 pub struct OauthContext<'a> {
-    /// The launcher computer-id, embedded in the user agent.
-    pub computer_id: &'a ComputerId,
-    /// The client language code (e.g. `en-us`), used for the referer.
-    pub language: &'a str,
-    /// The `Accept-Language` header value.
-    pub accept_language: &'a str,
-    /// The referer URL template, with `{lang}` and `{time}` placeholders.
-    pub referer_template: &'a str,
+    /// The shared client identity and locale plumbing.
+    pub client: ClientContext<'a>,
     /// The top-page `lng` query value (XL sends `en`).
     pub lng: &'a str,
     /// The top-page `rgn` query value (XL sends `3`).
@@ -220,7 +214,10 @@ impl LoginFlow<'_> {
     }
 
     /// The launcher's submit header set, in order. The referer is the step-one URL verbatim.
-    fn build_login_request(&self, body: Zeroizing<Vec<u8>>) -> Result<ProtoRequest, TransportError> {
+    fn build_login_request(
+        &self,
+        body: Zeroizing<Vec<u8>>,
+    ) -> Result<ProtoRequest, TransportError> {
         let url = parse_base(LOGIN_SEND_URL, "invalid login URL")?;
         Ok(ProtoRequest::new(Method::POST, url)
             .header(
@@ -265,18 +262,13 @@ pub async fn begin_login<'t>(
 ) -> Result<LoginFlow<'t>, ProtoError> {
     let LoginKind::Standard { free_trial } = kind;
 
-    let user_agent = launcher_user_agent(context.computer_id);
-    let referer = frontier_referer(
-        context.referer_template,
-        context.language,
-        &now.referer_timestamp(),
-    );
+    let (user_agent, referer) = context.client.user_agent_and_referer(now);
 
     let top_url = build_top_url(context, free_trial)?;
     let request = build_top_request(
         top_url.clone(),
         &user_agent,
-        context.accept_language,
+        context.client.accept_language,
         &referer,
     )?;
     let response = transport.execute(request).await?;
@@ -303,7 +295,7 @@ pub async fn begin_login<'t>(
         server_date,
         steam_linked_id: None,
         user_agent,
-        accept_language: context.accept_language.to_owned(),
+        accept_language: context.client.accept_language.to_owned(),
     })
 }
 
