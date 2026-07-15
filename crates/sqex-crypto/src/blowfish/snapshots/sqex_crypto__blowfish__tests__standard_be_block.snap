@@ -1,0 +1,5 @@
+---
+source: crates/sqex-crypto/src/blowfish/tests.rs
+expression: to_hex(&be)
+---
+a3ab9303725eb216

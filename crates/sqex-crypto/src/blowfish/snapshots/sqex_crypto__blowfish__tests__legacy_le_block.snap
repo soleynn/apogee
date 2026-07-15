@@ -1,0 +1,5 @@
+---
+source: crates/sqex-crypto/src/blowfish/tests.rs
+expression: to_hex(&le)
+---
+f3df43546e843ab8

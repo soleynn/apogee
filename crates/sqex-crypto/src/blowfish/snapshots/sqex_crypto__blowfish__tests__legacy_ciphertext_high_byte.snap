@@ -1,0 +1,5 @@
+---
+source: crates/sqex-crypto/src/blowfish/tests.rs
+expression: to_hex(&ct)
+---
+c9d6a0eb223fb85d
