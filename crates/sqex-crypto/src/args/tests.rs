@@ -6,8 +6,16 @@
 
 use proptest::prelude::*;
 
-use super::{ArgKey, ArgumentBuilder, TickCount, derive_checksum, escape};
+use super::{ArgKey, ArgumentBuilder, TickCount, derive_checksum, push_escaped};
 use crate::{LegacyBlowfish, sqex_base64};
+
+/// The old allocating escaper, expressed over the in-place `push_escaped`, kept so the escaping
+/// rules stay directly unit-tested.
+fn escape(s: &str) -> String {
+    let mut out = String::new();
+    push_escaped(&mut out, s);
+    out
+}
 
 /// A fixed, obviously-synthetic argument set in the launcher's order. No SE bytes.
 fn fixed_builder() -> ArgumentBuilder {
