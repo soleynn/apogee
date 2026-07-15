@@ -28,6 +28,8 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    # webpki-roots ships the Mozilla CA bundle (pulled in by rustls) under this license.
+    "CDLA-Permissive-2.0",
 ]
 private = { ignore = true }
 
