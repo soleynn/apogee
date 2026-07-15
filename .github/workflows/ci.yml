@@ -122,8 +122,12 @@ jobs:
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-fuzz
-      # Build, then a short timed run: the patchlist parser must stay panic- and allocation-safe on
-      # any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose static libc is
-      # incompatible with the address sanitizer.
+      # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
+      # allocation-safe on any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose
+      # static libc is incompatible with the address sanitizer.
       - run: cargo +nightly fuzz build patchlist --target x86_64-unknown-linux-gnu
       - run: cargo +nightly fuzz run patchlist --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly fuzz build oauth_stored --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
