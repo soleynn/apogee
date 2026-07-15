@@ -38,8 +38,10 @@ async fn main() {
 
     // One real login, captured as the success fixtures.
     run_login(&client, "success", &sqexid, &password).await;
-    // One deliberate wrong password, captured as the failure fixture. A single attempt, no retries.
-    run_login(&client, "wrong_password", &sqexid, "definitely-not-the-password").await;
+    // One deliberate wrong password, captured as the failure fixture. Derived from the real one (so it
+    // is not a hard-coded secret) and guaranteed to differ. A single attempt, no retries.
+    let wrong_password = format!("{password}-invalid");
+    run_login(&client, "wrong_password", &sqexid, &wrong_password).await;
 }
 
 async fn run_login(client: &reqwest::Client, scenario: &str, sqexid: &str, password: &str) {
