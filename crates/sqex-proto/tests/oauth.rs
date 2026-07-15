@@ -159,11 +159,13 @@ fn an_otp_is_sent_in_the_submit_body() {
 #[test]
 fn a_wrong_password_is_oauth_failed_with_a_scrubbed_excerpt() {
     let id = computer_id();
+    // SE's structured `ng` message is the only page text ever surfaced; prove a credential reflected
+    // inside it is scrubbed.
     let transport = FixtureTransport::new([
         top_response("STOREDBLOB"),
         ProtoResponse::new(
             200,
-            b"<html>Login failed: sqexid=testuser password=wrongpass</html>".to_vec(),
+            br#"<script>window.external.user("login=auth,ng,err,Login failed for testuser using wrongpass");</script>"#.to_vec(),
         ),
     ]);
 
