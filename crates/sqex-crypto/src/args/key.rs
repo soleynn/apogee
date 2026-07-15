@@ -34,13 +34,8 @@ pub struct ArgKey {
 }
 
 impl ArgKey {
-    /// Construct from a fixed raw tick. Deterministic; the entry point for tests and goldens.
-    #[must_use]
-    pub fn from_raw(raw: u32) -> Self {
-        Self { raw }
-    }
-
-    /// Construct from a live tick.
+    /// Construct from a tick, the sole source of an `ArgKey`. `TickCount::from_raw` is the
+    /// deterministic entry point tests and goldens use; `TickCount::now_for_game` is the live source.
     #[must_use]
     pub fn from_tick(tick: TickCount) -> Self {
         Self { raw: tick.0 }
