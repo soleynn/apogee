@@ -1,0 +1,200 @@
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang=en-GB id=gb>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge;chrome=1">
+
+<title>FFXIV Login Form</title>
+
+
+
+
+<link rel="stylesheet" href="https://cache.secure.square-enix.com/oauth/content/css/ffxivlaunch/v3/login.css?ver=17202649074209" type="text/css" />
+ 
+<link rel="shortcut icon" href="https://cache.secure.square-enix.com/oauth/content/image/common/favicon.ico?ver=17202649074209" />
+
+
+
+
+
+
+<script>
+<!--
+// -------------------------------------------------------------------
+// Event
+// -------------------------------------------------------------------
+var g_clickCheck = false;
+var g_eventElementName = '_event';
+function ctrEvent ( formName ) 
+{
+	if (g_clickCheck) 
+	{
+		//window.external.user('login=auth,ng,err,The data has already been sent.rnIf the screen still has not displayed after waiting a few moments, please refresh the page on your browser.');
+		return;
+	}
+
+	if (formName == null || formName =='')
+		formName = 'mainForm';
+	document.forms [ formName ].submit();	
+	g_clickCheck = true;
+	ctrStartClickCheckResetTimer();
+}
+
+function ctrEventAction ( formName , actionName) 
+{
+	if (g_clickCheck) 
+	{
+		//window.external.user('login=auth,ng,err,The data has already been sent.rnIf the screen still has not displayed after waiting a few moments, please refresh the page on your browser.');
+		return;
+	}
+
+	if (formName == null || formName =='')
+		formName = 'mainForm';
+	document.forms [ formName ].action = actionName;	
+	document.forms [ formName ].submit();	
+	g_clickCheck = true;
+	ctrStartClickCheckResetTimer();
+}
+
+// -------------------------------------------------------------------
+// Reset Timer
+// -------------------------------------------------------------------
+var g_ctrClickCheckTimer;
+function ctrResetClickCheck() {
+	g_clickCheck = false;
+	window.clearTimeout(g_ctrClickCheckTimer);
+}
+function ctrStartClickCheckResetTimer() {
+	g_ctrClickCheckTimer = window.setTimeout('ctrResetClickCheck()', 15*1000);
+}
+
+// -------------------------------------------------------------------
+// Get Key Code
+// -------------------------------------------------------------------
+function ctrGetKeyCode(event){
+	var key;
+	if(event.keyCode != 0) {
+		key = event.keyCode;
+	} else{
+	  	key = event.charCode;
+	}
+	return key;
+}
+-->
+</script>
+
+
+
+
+</head>
+
+
+<body >
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script>
+
+<!--
+//初期フォーカス設定
+window.onload = function(){
+	var sqexid = document.getElementById('sqexid');
+	// sqexid に値がない場合
+	if(sqexid.value == ""){
+		sqexid.focus();
+	}else{
+		// sqexid に値がある場合
+		document.getElementById('password').focus();
+	}
+}
+//
+function onEnterPressSubmit(event) {
+	if( ctrGetKeyCode(event) == 13 ){
+ 		var targets = new Array(2);
+		targets[0] = document.getElementById('sqexid');
+		targets[1] = document.getElementById('password');
+		//sqexidに入力がない場合はsqexidにフォーカス
+		if(targets[0] && targets[0].value == "") {
+			targets[0].focus();
+		}
+		//sqexidに入力があり、passwordに入力が無い場合はpasswordにフォーカス
+		if(targets[0] && targets[0].value != "" 
+			&& ((targets[1] && targets[1].value == ""))) {
+		   	document.getElementById('password').focus();
+		 }
+		if(targets[0] && targets[0].value != "" 
+			&& ((targets[1] && targets[1].value != ""))) {
+
+			
+			ctrEvent( "mainForm", 'Submit' );
+			
+		}
+  		return false;
+   }
+}
+
+function onSubmit( token ) {
+	document.getElementById('token').value = token;
+	ctrEvent( "mainForm" );
+}
+-->
+</script>
+
+<div class="l-login-form mode-light" onKeyPress="return onEnterPressSubmit(event);">
+	<form action="login.send" method="post" name="mainForm">
+		<input type="hidden" name="token" id="token">
+
+		
+		<input type="hidden" name="_STORED_" value="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff">
+
+		
+		<div class="form-item type-id">
+			<label class="item-label" for="sqexid"><span class="label-image-text" title="Square Enix ID"></span></label>
+			<input class="item-input" name="sqexid" id="sqexid" type="text" value="" tabindex="1" placeholder="ID (Required)"  maxLength="16"
+			
+				 />
+			
+		</div>
+
+		 <div class="form-item type-pw">
+			<label class="item-label" for="password"><span class="label-image-text" title="Square Enix Password"></span></label>
+			<input class="item-password" name="password" id="password" type="password" value="" tabindex="2" placeholder="Password (Required)" maxLength="32" autocomplete="off"/>
+		</div>
+	
+		<div class="form-item type-otpw">
+			<label class="item-label" for="otppw"><span class="label-image-text" title="One-Time Password"></span></label>
+			<input class="item-otpw" name="otppw" id="otppw" type="text" value="" tabindex="3" autocomplete="off" maxLength="6" placeholder="Password (Optional)" />
+		</div>
+
+		
+		<div class="form-item type-remember-id">
+			<input name="saveid" id="saveid" type="checkbox" value="1" class="item-checkbox" tabindex="4"  />
+			<label class="item-checkbox-label" for="saveid"><span class="label-checkbox-image-text" title="Remember Square Enix ID"></span></label>
+		</div>
+		
+
+		<div class="form-item type-submit">
+			
+				<button class="item-button" type="submit" tabindex="5" onClick="ctrEvent('mainForm')" id="btLogin"><span class="button-image-text" title="Login"></span></button>
+			
+		</div>
+
+	</form>
+</div>
+</body>
+</html>
+

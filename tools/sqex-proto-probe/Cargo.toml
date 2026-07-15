@@ -1,0 +1,17 @@
+# Its own workspace so this dev-only probe (reqwest + tokio + a real network call) stays out of the
+# main workspace's build, clippy, and cross-compile jobs. It is never run in CI: it needs a real
+# account and talks to live Square Enix servers.
+[workspace]
+
+[package]
+name = "sqex-proto-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sqex-proto = { path = "../../crates/sqex-proto" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "deflate"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+async-trait = "0.1"
+http = "1"

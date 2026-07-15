@@ -1,0 +1,5 @@
+---
+source: crates/sqex-proto/src/oauth/tests.rs
+expression: rendered
+---
+session_id=SESSIONABC terms=true region=3 playable=true maxex=4
