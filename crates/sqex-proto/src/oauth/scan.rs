@@ -20,10 +20,13 @@ const ATTR_WINDOW: usize = 64;
 /// The most bytes the `_STORED_` capture keeps before giving up: the blob is opaque but bounded, so a
 /// missing closing quote cannot make the capture run away.
 const MAX_STORED: usize = 4096;
-/// The success callback wrapper. The launch params run from here to the next `"`.
-const AUTH_OK_OPEN: &str = "window.external.user(\"login=auth,ok,";
+/// The login callback wrapper. The status field (`ok` / `ng`) and its payload run from here to the
+/// next `"`. Double-quoted, so the single-quoted commented-out samples on the page do not match.
+const CALLBACK_OPEN: &str = "window.external.user(\"login=auth,";
 /// The Steam relink callback (`restartup`). A standard login never triggers it.
 const RESTARTUP_MARKER: &str = "window.external.user(\"restartup\")";
+/// The most characters kept from a failure message, bounding the capture on hostile input.
+const MAX_MESSAGE: usize = 512;
 
 /// The launch parameters SE returns on a successful login. `session_id` authorizes the next stage, so
 /// this type deliberately implements no `Debug`/`Display`/`Serialize`: it is a transient parse result,
@@ -36,14 +39,15 @@ pub struct LaunchParams {
     pub max_expansion: u8,
 }
 
-/// Why a `login.send` body was not a usable success callback. Carries no page bytes, so it cannot leak
-/// the submitted credentials; the flow builds any excerpt itself, scrubbing the credentials first.
+/// Why a `login.send` body was not a usable success callback. Any `message` is SE's own failure text;
+/// the flow scrubs the submitted credentials out of it before surfacing, so this cannot leak them.
 #[derive(Debug)]
 pub(crate) enum CallbackReject {
-    /// The body was not the `login=auth,ok,...` success callback (a failure page or an error callback).
-    NotAuthOk,
-    /// The callback was present but its `launchParams` list was too short or malformed. `got_fields` is
-    /// a count only.
+    /// Not the `login=auth,ok,...` success callback. `message` is the `login=auth,ng,{type},{message}`
+    /// failure text when one was found, or `None` when no login callback was present at all.
+    NotAuthOk { message: Option<String> },
+    /// The success callback was present but its `launchParams` list was too short or malformed.
+    /// `got_fields` is a count only.
     Unparseable { got_fields: usize },
 }
 
@@ -81,14 +85,32 @@ pub(crate) fn is_restartup(html: &str) -> bool {
     html.contains(RESTARTUP_MARKER)
 }
 
-/// Peel the `login=auth,ok,{launchParams}` success callback out of a `login.send` body and parse the
-/// launch params. A body that is not the success callback is [`CallbackReject::NotAuthOk`].
+/// Peel the `login=auth,{status},...` callback out of a `login.send` body. A `login=auth,ok,` payload
+/// is parsed as launch params; a `login=auth,ng,{type},{message}` payload yields the failure message;
+/// no callback at all yields [`CallbackReject::NotAuthOk`] with no message.
 pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackReject> {
-    let start = body.find(AUTH_OK_OPEN).ok_or(CallbackReject::NotAuthOk)?;
-    let rest = &body[start + AUTH_OK_OPEN.len()..];
-    let end = rest.find('"').ok_or(CallbackReject::NotAuthOk)?;
-    parse_launch_params(&rest[..end])
-        .map_err(|got_fields| CallbackReject::Unparseable { got_fields })
+    let start = body
+        .find(CALLBACK_OPEN)
+        .ok_or(CallbackReject::NotAuthOk { message: None })?;
+    let rest = &body[start + CALLBACK_OPEN.len()..];
+    let end = rest
+        .find('"')
+        .ok_or(CallbackReject::NotAuthOk { message: None })?;
+    let content = &rest[..end];
+
+    if let Some(params) = content.strip_prefix("ok,") {
+        return parse_launch_params(params)
+            .map_err(|got_fields| CallbackReject::Unparseable { got_fields });
+    }
+
+    // A failure callback `ng,{type},{message}`: surface the human message, dropping the type token.
+    let after_status = content.strip_prefix("ng,").unwrap_or(content);
+    let detail = after_status
+        .split_once(',')
+        .map_or(after_status, |(_type, message)| message);
+    Err(CallbackReject::NotAuthOk {
+        message: Some(detail.chars().take(MAX_MESSAGE).collect()),
+    })
 }
 
 /// Parse the comma-separated `launchParams` list.

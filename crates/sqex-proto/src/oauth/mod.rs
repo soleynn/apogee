@@ -196,12 +196,17 @@ impl LoginFlow<'_> {
                 playable: params.playable,
                 terms_accepted: params.terms_accepted,
             }),
-            Err(CallbackReject::NotAuthOk) => Err(ProtoError::OauthFailed {
-                excerpt: scrubbed_excerpt(
-                    &response.body,
-                    &[creds.sqexid, creds.password, otp, self.stored.as_str()],
-                ),
-            }),
+            Err(CallbackReject::NotAuthOk { message }) => {
+                // Prefer SE's own failure message; fall back to a page excerpt when none was found.
+                let raw =
+                    message.unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
+                Err(ProtoError::OauthFailed {
+                    excerpt: scrubbed_excerpt(
+                        raw.as_bytes(),
+                        &[creds.sqexid, creds.password, otp, self.stored.as_str()],
+                    ),
+                })
+            }
             Err(CallbackReject::Unparseable { got_fields }) => {
                 Err(ProtoError::LaunchParamsUnparseable { got_fields })
             }

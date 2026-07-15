@@ -102,12 +102,23 @@ fn login_callback_reads_a_success_body() {
 }
 
 #[test]
-fn login_callback_rejects_a_failure_page() {
+fn login_callback_rejects_a_page_without_a_callback() {
     let body = r#"<html><body>The password you entered is incorrect.</body></html>"#;
     assert!(matches!(
         parse_login_callback(body),
-        Err(CallbackReject::NotAuthOk)
+        Err(CallbackReject::NotAuthOk { message: None })
     ));
+}
+
+#[test]
+fn login_callback_extracts_the_failure_message() {
+    let body = r#"<script>window.external.user("login=auth,ng,err,ID or password is incorrect.");</script>"#;
+    match parse_login_callback(body) {
+        Err(CallbackReject::NotAuthOk {
+            message: Some(message),
+        }) => assert_eq!(message, "ID or password is incorrect."),
+        _ => panic!("expected a failure message"),
+    }
 }
 
 #[test]
