@@ -93,8 +93,12 @@ dependencies = [
 name = "apogee-test-support"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "http",
+ "sqex-proto",
  "tempfile",
  "thiserror",
+ "url",
 ]
 
 [[package]]
