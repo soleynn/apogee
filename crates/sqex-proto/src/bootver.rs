@@ -6,20 +6,17 @@
 //! genuinely-current SE output.
 
 use http::{HeaderName, HeaderValue, Method};
-use url::Url;
 
-use crate::error::{ProtoError, Step, excerpt};
+use crate::error::{ProtoError, Step};
 use crate::identity::PATCHER_USER_AGENT;
 use crate::patchlist::{PatchListEntry, parse_patch_list};
 use crate::time::LauncherTime;
-use crate::transport::{ProtoRequest, Transport, TransportError};
+use crate::transport::{ProtoRequest, Transport, TransportError, parse_base};
 
 /// Base of the boot-version endpoint; the boot version and `time` query are appended.
 const BOOT_VERSION_BASE: &str = "http://patch-bootver.ffxiv.com/http/win32/ffxivneo_release_boot";
 /// The `Host` the boot check addresses.
 const BOOT_VERSION_HOST: &str = "patch-bootver.ffxiv.com";
-/// The status a healthy boot check answers with.
-const HTTP_OK: u16 = 200;
 
 /// Ask whether the boot component named by `boot_version` is current.
 ///
@@ -32,12 +29,8 @@ pub async fn check_boot_version(
     let request = build_request(boot_version, now)?;
     let response = transport.execute(request).await?;
 
-    if response.status != HTTP_OK {
-        return Err(ProtoError::InvalidResponse {
-            step: Step::BootVersion,
-            status: response.status,
-            excerpt: excerpt(&response.body),
-        });
+    if !response.is_ok() {
+        return Err(ProtoError::invalid_response(Step::BootVersion, &response));
     }
 
     let body = String::from_utf8_lossy(&response.body);
@@ -51,8 +44,7 @@ pub async fn check_boot_version(
 /// URL builder, so a malformed input yields a valid-but-wrong URL rather than an injection; the error
 /// arms exist only to keep the build panic-free and are unreachable for the constant base.
 fn build_request(boot_version: &str, now: &LauncherTime) -> Result<ProtoRequest, TransportError> {
-    let mut url = Url::parse(BOOT_VERSION_BASE)
-        .map_err(|_| TransportError::new("invalid boot-version base URL"))?;
+    let mut url = parse_base(BOOT_VERSION_BASE, "invalid boot-version base URL")?;
     url.path_segments_mut()
         .map_err(|()| TransportError::new("boot-version base URL cannot be a base"))?
         .push(boot_version)

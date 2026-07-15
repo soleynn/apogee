@@ -4,7 +4,7 @@
 //! are *values* in the result types, not errors; the variants here are genuine protocol failures.
 //! `#[non_exhaustive]`: the login and session-registration failures join as those surfaces land.
 
-use crate::transport::TransportError;
+use crate::transport::{ProtoResponse, TransportError};
 
 /// The protocol step a failure occurred in, for triage. `#[non_exhaustive]`: grows with the surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +67,18 @@ pub enum ProtoError {
     /// is a count only, never the field contents (which include the session id).
     #[error("launchParams unparseable ({got_fields} fields)")]
     LaunchParamsUnparseable { got_fields: usize },
+}
+
+impl ProtoError {
+    /// Build an [`InvalidResponse`](ProtoError::InvalidResponse) for `step` from a response, capturing
+    /// the status and a redacted, length-capped body excerpt at this single construction site.
+    pub(crate) fn invalid_response(step: Step, response: &ProtoResponse) -> Self {
+        Self::InvalidResponse {
+            step,
+            status: response.status,
+            excerpt: excerpt(&response.body),
+        }
+    }
 }
 
 /// The most characters an excerpt keeps: enough to triage, small enough that a large or binary body

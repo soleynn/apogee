@@ -18,10 +18,12 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::error::{ProtoError, Step, excerpt, scrubbed_excerpt};
+use crate::error::{ProtoError, Step, scrubbed_excerpt};
 use crate::identity::{ComputerId, frontier_referer, launcher_user_agent};
 use crate::time::LauncherTime;
-use crate::transport::{ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header};
+use crate::transport::{
+    ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header, parse_base,
+};
 
 mod scan;
 #[cfg(test)]
@@ -38,7 +40,6 @@ const OAUTH_ACCEPT: &str = "image/gif, image/jpeg, image/pjpeg, application/x-ms
     application/xaml+xml, application/x-ms-xbap, */*";
 const RSID_COOKIE: &str = "_rsid=\"\"";
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
-const HTTP_OK: u16 = 200;
 
 /// The RFC 3986 unreserved set: everything else is percent-encoded. The launcher escapes form fields
 /// this way (SE's `EscapeDataString`), not with `+`-for-space form encoding.
@@ -176,7 +177,7 @@ impl LoginFlow<'_> {
         let request = self.build_login_request(body.as_bytes().to_vec())?;
         let response = self.transport.execute(request).await?;
 
-        if response.status != HTTP_OK {
+        if !response.is_ok() {
             return Err(ProtoError::InvalidResponse {
                 step: Step::OauthLogin,
                 status: response.status,
@@ -215,8 +216,7 @@ impl LoginFlow<'_> {
 
     /// The launcher's submit header set, in order. The referer is the step-one URL verbatim.
     fn build_login_request(&self, body: Vec<u8>) -> Result<ProtoRequest, TransportError> {
-        let url =
-            Url::parse(LOGIN_SEND_URL).map_err(|_| TransportError::new("invalid login URL"))?;
+        let url = parse_base(LOGIN_SEND_URL, "invalid login URL")?;
         Ok(ProtoRequest::new(Method::POST, url)
             .header(
                 HeaderName::from_static("user-agent"),
@@ -276,12 +276,8 @@ pub async fn begin_login<'t>(
     )?;
     let response = transport.execute(request).await?;
 
-    if response.status != HTTP_OK {
-        return Err(ProtoError::InvalidResponse {
-            step: Step::OauthTop,
-            status: response.status,
-            excerpt: excerpt(&response.body),
-        });
+    if !response.is_ok() {
+        return Err(ProtoError::invalid_response(Step::OauthTop, &response));
     }
 
     let text = String::from_utf8_lossy(&response.body);
@@ -289,11 +285,7 @@ pub async fn begin_login<'t>(
     // A standard login sends no Steam ticket, so `restartup` here is an anomalous response, not the
     // Steam relink signal (which the Steam variant maps to `SteamLinkNeeded`).
     if is_restartup(&text) {
-        return Err(ProtoError::InvalidResponse {
-            step: Step::OauthTop,
-            status: response.status,
-            excerpt: excerpt(&response.body),
-        });
+        return Err(ProtoError::invalid_response(Step::OauthTop, &response));
     }
 
     let stored = scrape_stored(&text)?.to_owned();
@@ -311,7 +303,7 @@ pub async fn begin_login<'t>(
 }
 
 fn build_top_url(context: &OauthContext<'_>, free_trial: bool) -> Result<Url, TransportError> {
-    let mut url = Url::parse(TOP_URL).map_err(|_| TransportError::new("invalid top URL"))?;
+    let mut url = parse_base(TOP_URL, "invalid top URL")?;
     url.query_pairs_mut()
         .append_pair("lng", context.lng)
         .append_pair("rgn", &context.region.to_string())
