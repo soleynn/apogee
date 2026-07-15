@@ -13,7 +13,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqex_proto::{
-    LauncherTime, ProtoRequest, ProtoResponse, Transport, TransportError, check_boot_version,
+    check_boot_version, LauncherTime, ProtoRequest, ProtoResponse, Transport, TransportError,
 };
 
 /// Old enough that SE answers with the pending boot patch chain, so the parser is exercised.
@@ -28,7 +28,10 @@ async fn main() {
 
     match check_boot_version(&transport, BOOT_VERSION, &utc_now()).await {
         Ok(entries) if entries.is_empty() => println!("boot is current (empty patchlist parsed)"),
-        Ok(entries) => println!("parsed {} boot patch(es) from live SE output", entries.len()),
+        Ok(entries) => println!(
+            "parsed {} boot patch(es) from live SE output",
+            entries.len()
+        ),
         Err(err) => {
             eprintln!("live boot check did not parse: {err}");
             std::process::exit(1);
@@ -52,7 +55,7 @@ impl Transport for HttpTransport {
             builder = builder.header(name.as_str(), value.as_bytes());
         }
         if let Some(body) = &req.body {
-            builder = builder.body(body.clone());
+            builder = builder.body(body.as_bytes().to_vec());
         }
 
         let response = builder
