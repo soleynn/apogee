@@ -15,7 +15,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::error::{ProtoError, Step};
-use crate::identity::{ComputerId, frontier_referer, launcher_user_agent};
+use crate::identity::ClientContext;
 use crate::time::LauncherTime;
 use crate::transport::{
     ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header, parse_base,
@@ -37,14 +37,7 @@ pub struct GateStatus {
 
 /// The per-install, per-locale values a frontier request carries.
 pub struct FrontierContext<'a> {
-    /// The launcher computer-id, embedded in the user agent.
-    pub computer_id: &'a ComputerId,
-    /// The client language code (e.g. `en-us`), used for the referer and the gate-status query.
-    pub language: &'a str,
-    /// The `Accept-Language` header value.
-    pub accept_language: &'a str,
-    /// The referer URL template, with `{lang}` and `{time}` placeholders.
-    pub referer_template: &'a str,
+    pub client: ClientContext<'a>,
 }
 
 /// Fetch the world-gate status (world maintenance).
@@ -55,7 +48,7 @@ pub async fn check_gate_status(
 ) -> Result<GateStatus, ProtoError> {
     let mut url = parse_base(GATE_STATUS_URL, "invalid gate-status URL")?;
     url.query_pairs_mut()
-        .append_pair("lang", context.language)
+        .append_pair("lang", context.client.language)
         .append_pair("_", &now.cache_buster().to_string());
 
     let response = transport.execute(build_request(url, context, now)?).await?;
@@ -83,12 +76,7 @@ fn build_request(
     context: &FrontierContext<'_>,
     now: &LauncherTime,
 ) -> Result<ProtoRequest, TransportError> {
-    let user_agent = launcher_user_agent(context.computer_id);
-    let referer = frontier_referer(
-        context.referer_template,
-        context.language,
-        &now.referer_timestamp(),
-    );
+    let (user_agent, referer) = context.client.user_agent_and_referer(now);
 
     Ok(ProtoRequest::new(Method::GET, url)
         .header(
@@ -101,7 +89,7 @@ fn build_request(
         )
         .header(
             HeaderName::from_static("accept-language"),
-            dynamic_header(context.accept_language)?,
+            dynamic_header(context.client.accept_language)?,
         )
         .header(
             HeaderName::from_static("origin"),

@@ -18,7 +18,9 @@ mod transport;
 pub use bootver::check_boot_version;
 pub use error::{ProtoError, Step};
 pub use frontier::{FrontierContext, GateStatus, check_gate_status, check_login_status};
-pub use identity::{ComputerId, PATCHER_USER_AGENT, frontier_referer, launcher_user_agent};
+pub use identity::{
+    ClientContext, ComputerId, PATCHER_USER_AGENT, frontier_referer, launcher_user_agent,
+};
 pub use oauth::{
     Authenticated, Credentials, LaunchParams, LoginFlow, LoginKind, OauthContext, SessionId,
     begin_login, parse_launch_params, scrape_stored,

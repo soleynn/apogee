@@ -36,7 +36,10 @@ impl fmt::Debug for ProtoRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("headers", &self.headers)
-            .field("body", &self.body.as_ref().map(|b| format!("[{} bytes]", b.len())))
+            .field(
+                "body",
+                &self.body.as_ref().map(|b| format!("[{} bytes]", b.len())),
+            )
             .finish()
     }
 }

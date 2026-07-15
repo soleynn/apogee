@@ -8,6 +8,8 @@ use std::fmt;
 
 use sha1::{Digest, Sha1};
 
+use crate::time::LauncherTime;
+
 /// The patcher user agent, sent on the boot- and game-version checks. SE also defines a `-MAC` variant
 /// for the Mac service; a Linux-first launcher presents as the Windows client.
 pub const PATCHER_USER_AGENT: &str = "FFXIV PATCH CLIENT";
@@ -74,6 +76,35 @@ pub fn frontier_referer(template: &str, language: &str, timestamp: &str) -> Stri
     template
         .replace("{lang}", &language.replace('-', "_"))
         .replace("{time}", timestamp)
+}
+
+/// The per-install, per-locale client values every launcher request carries: the computer-id, the
+/// language code, the `Accept-Language` header, and the frontier referer template. Both the frontier
+/// and OAuth contexts embed this so the shared plumbing lives in one place.
+pub struct ClientContext<'a> {
+    /// The launcher computer-id, embedded in the user agent.
+    pub computer_id: &'a ComputerId,
+    /// The client language code (e.g. `en-us`), used for the referer and the gate-status query.
+    pub language: &'a str,
+    /// The `Accept-Language` header value.
+    pub accept_language: &'a str,
+    /// The referer URL template, with `{lang}` and `{time}` placeholders.
+    pub referer_template: &'a str,
+}
+
+impl ClientContext<'_> {
+    /// The launcher user agent and frontier referer this client sends, derived together since every
+    /// request builds both from these fields.
+    pub(crate) fn user_agent_and_referer(&self, now: &LauncherTime) -> (String, String) {
+        (
+            launcher_user_agent(self.computer_id),
+            frontier_referer(
+                self.referer_template,
+                self.language,
+                &now.referer_timestamp(),
+            ),
+        )
+    }
 }
 
 /// Encode a string as UTF-16LE bytes (the encoding SE hashes host facts under).

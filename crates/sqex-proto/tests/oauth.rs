@@ -11,8 +11,8 @@ use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use http::HeaderValue;
 use sqex_proto::{
-    ComputerId, Credentials, LauncherTime, LoginKind, OauthContext, ProtoError, ProtoResponse,
-    Step, begin_login,
+    ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext, ProtoError,
+    ProtoResponse, Step, begin_login,
 };
 
 const ACCEPT: &str = "image/gif, image/jpeg, image/pjpeg, application/x-ms-application, \
@@ -32,10 +32,12 @@ fn computer_id() -> ComputerId {
 
 fn context(id: &ComputerId) -> OauthContext<'_> {
     OauthContext {
-        computer_id: id,
-        language: "en-us",
-        accept_language: "en-US,en;q=0.9",
-        referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        client: ClientContext {
+            computer_id: id,
+            language: "en-us",
+            accept_language: "en-US,en;q=0.9",
+            referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        },
         lng: "en",
         region: 3,
     }
