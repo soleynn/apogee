@@ -14,15 +14,16 @@ use http::{HeaderName, HeaderValue, Method};
 use serde::Deserialize;
 use url::Url;
 
-use crate::error::{ProtoError, Step, excerpt};
+use crate::error::{ProtoError, Step};
 use crate::identity::{ComputerId, frontier_referer, launcher_user_agent};
 use crate::time::LauncherTime;
-use crate::transport::{ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header};
+use crate::transport::{
+    ProtoRequest, ProtoResponse, Transport, TransportError, dynamic_header, parse_base,
+};
 
 const FRONTIER_ORIGIN: &str = "https://launcher.finalfantasyxiv.com";
 const GATE_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/gate_status.json";
 const LOGIN_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/login_status.json";
-const HTTP_OK: u16 = 200;
 
 /// A world-gate or login-server status. `status` is open/closed; `message` and `news` are display
 /// strings. Fields SE may add are ignored.
@@ -52,8 +53,7 @@ pub async fn check_gate_status(
     context: &FrontierContext<'_>,
     now: &LauncherTime,
 ) -> Result<GateStatus, ProtoError> {
-    let mut url =
-        Url::parse(GATE_STATUS_URL).map_err(|_| TransportError::new("invalid gate-status URL"))?;
+    let mut url = parse_base(GATE_STATUS_URL, "invalid gate-status URL")?;
     url.query_pairs_mut()
         .append_pair("lang", context.language)
         .append_pair("_", &now.cache_buster().to_string());
@@ -68,8 +68,7 @@ pub async fn check_login_status(
     context: &FrontierContext<'_>,
     now: &LauncherTime,
 ) -> Result<GateStatus, ProtoError> {
-    let mut url = Url::parse(LOGIN_STATUS_URL)
-        .map_err(|_| TransportError::new("invalid login-status URL"))?;
+    let mut url = parse_base(LOGIN_STATUS_URL, "invalid login-status URL")?;
     url.query_pairs_mut()
         .append_pair("_", &now.cache_buster().to_string());
 
@@ -119,18 +118,10 @@ fn build_request(
 }
 
 fn parse_status(response: &ProtoResponse, step: Step) -> Result<GateStatus, ProtoError> {
-    if response.status != HTTP_OK {
-        return Err(ProtoError::InvalidResponse {
-            step,
-            status: response.status,
-            excerpt: excerpt(&response.body),
-        });
+    if !response.is_ok() {
+        return Err(ProtoError::invalid_response(step, response));
     }
-    serde_json::from_slice(&response.body).map_err(|_| ProtoError::InvalidResponse {
-        step,
-        status: response.status,
-        excerpt: excerpt(&response.body),
-    })
+    serde_json::from_slice(&response.body).map_err(|_| ProtoError::invalid_response(step, response))
 }
 
 #[cfg(test)]

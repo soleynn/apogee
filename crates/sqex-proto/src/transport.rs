@@ -83,6 +83,13 @@ impl ProtoResponse {
     pub fn header(&self, name: &HeaderName) -> Option<&HeaderValue> {
         self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
+
+    /// Whether SE answered with exactly `200 OK`. The protocol treats any other status as invalid, so
+    /// this is a strict equality, not a 2xx-range check.
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.status == 200
+    }
 }
 
 /// A transport-layer failure: DNS, connect, TLS, timeout, or a truncated read.
@@ -110,6 +117,12 @@ impl TransportError {
 /// every surface that sets a header from a dynamic string.
 pub(crate) fn dynamic_header(value: &str) -> Result<HeaderValue, TransportError> {
     HeaderValue::from_str(value).map_err(|_| TransportError::new("invalid header value"))
+}
+
+/// Parse a compile-time-constant base URL, mapping the (unreachable for our constants) parse failure
+/// to a typed transport error so request building stays panic-free.
+pub(crate) fn parse_base(url: &str, invalid_msg: &'static str) -> Result<Url, TransportError> {
+    Url::parse(url).map_err(|_| TransportError::new(invalid_msg))
 }
 
 /// The only way this crate touches the network.
