@@ -1,30 +1,32 @@
 name: Changelog
 
-# Regenerate CHANGELOG.md from the commit history after every merge to main and commit it back.
-# The bot commit is pushed with GITHUB_TOKEN, which by design does not retrigger workflows, so this
-# cannot loop; paths-ignore and [skip ci] are extra insurance.
+# Regenerate CHANGELOG.md from the commit history on each pull request and commit it back to the PR's
+# own branch, so the changelog lands together with the change. main is ruleset-protected (changes via
+# PR only), so the update rides the PR rather than being pushed to main directly.
+#
+# The push uses a fine-grained PAT stored as the CHANGELOG_TOKEN secret, not the default GITHUB_TOKEN:
+# a GITHUB_TOKEN push does not trigger CI on the new commit, which would leave the PR head without the
+# required status checks and block the merge. When the secret is absent the job skips with a warning.
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - CHANGELOG.md
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: changelog-${{ github.ref }}
+  group: changelog-${{ github.head_ref }}
   cancel-in-progress: true
 
 jobs:
   changelog:
     name: changelog
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    # Same-repo PRs only: fork PRs receive no secret (and are auto-closed anyway).
+    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: Regenerate the changelog
@@ -32,10 +34,15 @@ jobs:
         with:
           config: cliff.toml
           args: --output CHANGELOG.md
-      - name: Commit if it changed
+      - name: Commit to the PR branch if it changed
         env:
-          GH_TOKEN: ${{ github.token }}
+          PUSH_TOKEN: ${{ secrets.CHANGELOG_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
+          if [ -z "${PUSH_TOKEN}" ]; then
+            echo "::warning::CHANGELOG_TOKEN secret is not set; skipping changelog auto-commit"
+            exit 0
+          fi
           if git diff --quiet -- CHANGELOG.md; then
             echo "changelog already current"
             exit 0
@@ -43,5 +50,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add CHANGELOG.md
-          git commit -m "chore: regenerate changelog [skip ci]"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          git commit -m "chore: regenerate changelog"
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
