@@ -8,8 +8,22 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 url.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+crc32fast.workspace = true
+tracing.workspace = true
 # Implements zipatch's RangeSource (HttpRangeSource); wired later.
 apogee-zipatch = { path = "../apogee-zipatch" }
+
+[dev-dependencies]
+apogee-test-support = { path = "../apogee-test-support" }
+tempfile.workspace = true
+proptest.workspace = true
+trybuild.workspace = true
 
 [lints]
 workspace = true
