@@ -12,9 +12,9 @@ use apogee_test_support::sandbox::build_game_install;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use http::{HeaderName, HeaderValue};
 use sqex_proto::{
-    ClientContext, ComputerId, Credentials, InstallPaths, LauncherTime, LoginKind, OauthContext,
-    ProtoError, ProtoResponse, Registration, SanityKind, Step, VersionRepo, VersionReport,
-    begin_login, register_session,
+    Authenticated, ClientContext, ComputerId, Credentials, InstallPaths, LauncherTime, LoginKind,
+    OauthContext, ProtoError, ProtoResponse, Registration, SanityKind, Step, VersionRepo,
+    VersionReport, begin_login, register_session,
 };
 
 const BOOT_VER: &str = "2024.02.01.0000.0000";
@@ -114,9 +114,27 @@ fn game_entry() -> String {
     )
 }
 
+/// Drive the OAuth flow (top page + submit) to an [`Authenticated`], through a transport already
+/// scripted with the top and login responses. Uses `?` (no unwrap) so it satisfies the integration-test
+/// helper lint; a scripting mistake surfaces as the returned error, not a panic.
+async fn login(transport: &FixtureTransport, id: &ComputerId) -> Result<Authenticated, ProtoError> {
+    let flow = begin_login(
+        transport,
+        &context(id),
+        &fixed_time(),
+        LoginKind::Standard { free_trial: false },
+    )
+    .await?;
+    flow.submit(Credentials {
+        sqexid: "user",
+        password: "pw",
+        otp: None,
+    })
+    .await
+}
+
 /// Drive login then registration through one transport scripted with `[top, login, register]`,
-/// returning the transport (for request inspection) and the registration outcome. The login legs use
-/// `?` so a scripting mistake surfaces as the outcome rather than a panic in this helper.
+/// returning the transport (for request inspection) and the registration outcome.
 fn login_then_register(
     register: ProtoResponse,
 ) -> (FixtureTransport, Result<Registration, ProtoError>) {
@@ -128,20 +146,7 @@ fn login_then_register(
     ]);
 
     let outcome = block_on(async {
-        let flow = begin_login(
-            &transport,
-            &context(&id),
-            &fixed_time(),
-            LoginKind::Standard { free_trial: false },
-        )
-        .await?;
-        let auth = flow
-            .submit(Credentials {
-                sqexid: "user",
-                password: "pw",
-                otp: None,
-            })
-            .await?;
+        let auth = login(&transport, &id).await?;
         register_session(&transport, &auth, &request_report()).await
     });
 
@@ -199,9 +204,13 @@ fn uid_with_patchlist_is_registered_with_pending_patches() {
 
 #[test]
 fn conflict_status_is_needs_boot_patch() {
-    // 409 short-circuits before the UID check, even with a body present.
-    let (_transport, outcome) =
-        login_then_register(ProtoResponse::new(409, b"boot patch pending".to_vec()));
+    // 409 short-circuits before the UID check: even a response that also carries a UID header and a body
+    // is NeedsBootPatch, not Registered. This pins that the status match precedes the UID read.
+    let response = ProtoResponse::new(409, b"boot patch pending".to_vec()).with_header(
+        HeaderName::from_static("x-patch-unique-id"),
+        HeaderValue::from_static(UID),
+    );
+    let (_transport, outcome) = login_then_register(response);
     assert!(matches!(
         outcome.expect("disposition"),
         Registration::NeedsBootPatch
@@ -243,6 +252,26 @@ fn a_whitespace_body_with_uid_is_not_treated_as_current() {
 }
 
 #[test]
+fn non_ascii_uid_header_is_invalid_response() {
+    // A UID header present but not visible ASCII is treated as absent (its `to_str` fails), so the
+    // response is an invalid one, never a lossily-decoded credential.
+    let response = ProtoResponse::new(200, Vec::new()).with_header(
+        HeaderName::from_static("x-patch-unique-id"),
+        HeaderValue::from_bytes(&[0xff]).expect("opaque header value"),
+    );
+    let (_transport, outcome) = login_then_register(response);
+    let err = outcome.expect_err("garbage uid");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::Register,
+            status: 200,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_transport_failure_propagates() {
     // Script only the two login responses; the registration call finds the transport exhausted, which
     // surfaces as a transport error.
@@ -253,20 +282,7 @@ fn a_transport_failure_propagates() {
     ]);
 
     let err = block_on(async {
-        let flow = begin_login(
-            &transport,
-            &context(&id),
-            &fixed_time(),
-            LoginKind::Standard { free_trial: false },
-        )
-        .await?;
-        let auth = flow
-            .submit(Credentials {
-                sqexid: "user",
-                password: "pw",
-                otp: None,
-            })
-            .await?;
+        let auth = login(&transport, &id).await?;
         register_session(&transport, &auth, &request_report()).await
     })
     .expect_err("exhausted transport");
@@ -414,6 +430,41 @@ fn a_corrupt_bck_is_invalid_version_files() {
 }
 
 #[test]
+fn a_corrupt_expansion_bck_is_invalid_version_files() {
+    // The `.bck` gate covers expansions too, exercising the ex{n}.bck path construction.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::write(dir.path().join("game/sqpack/ex1/ex1.bck"), [0u8, 0]).expect("nul ex bck");
+    let err =
+        VersionReport::from_install(&InstallPaths::new(dir.path()), 1).expect_err("corrupt ex bck");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Ex(1),
+            kind: SanityKind::AllNul,
+        }
+    ));
+}
+
+#[test]
+fn an_unreadable_ver_is_invalid_version_files() {
+    // A directory where a `.ver` file belongs makes the read fail with a non-not-found error, which is
+    // the Unreadable kind. A directory (not a mode-000 file) keeps the test reliable when CI is root.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    let ver = dir.path().join("game/ffxivgame.ver");
+    std::fs::remove_file(&ver).expect("remove game ver");
+    std::fs::create_dir(&ver).expect("dir in place of game ver");
+    let err =
+        VersionReport::from_install(&InstallPaths::new(dir.path()), 1).expect_err("unreadable");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Game,
+            kind: SanityKind::Unreadable,
+        }
+    ));
+}
+
+#[test]
 fn a_sanity_violation_stops_before_registration() {
     // A corrupt install fails report construction, so the login's two requests are the only traffic;
     // register_session is never reached.
@@ -431,20 +482,7 @@ fn a_sanity_violation_stops_before_registration() {
     let paths = InstallPaths::new(dir.path());
 
     let err = block_on(async {
-        let flow = begin_login(
-            &transport,
-            &context(&id),
-            &fixed_time(),
-            LoginKind::Standard { free_trial: false },
-        )
-        .await?;
-        let auth = flow
-            .submit(Credentials {
-                sqexid: "user",
-                password: "pw",
-                otp: None,
-            })
-            .await?;
+        let auth = login(&transport, &id).await?;
         // Report construction fails here; the registration call below is never reached.
         let report = VersionReport::from_install(&paths, auth.max_expansion)?;
         register_session(&transport, &auth, &report).await
