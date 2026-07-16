@@ -1,80 +1,21 @@
 #![forbid(unsafe_code)]
 //! Wine and Proton runner management with process supervision.
 //!
-//! STUB: public shape only (error taxonomy, the [`Runtime`] handle the composition root
-//! constructs, and the launch-lifecycle types `apogee-addons` injectables hook); runner download,
-//! prefix setup, and process supervision are not yet built.
+//! The runner catalog is a signed manifest (see [`Catalog`]); everything else — download/extract,
+//! spawn, and `/proc` supervision — is layered on the injected [`apogee_fetch::Fetcher`] seam.
+
+mod catalog;
+mod error;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use thiserror::Error;
+use apogee_fetch::Fetcher;
 
-use apogee_fetch::{FetchError, Fetcher};
-
-/// Runner / prefix / launch failures.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum RuntimeError {
-    #[error("runner {name} {version} unavailable")]
-    RunnerUnavailable { name: String, version: String },
-    #[error("runner download failed")]
-    Download(#[from] FetchError),
-    #[error("extract of {archive:?} failed")]
-    Extract {
-        archive: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("prefix init failed at {step:?}")]
-    PrefixInit {
-        step: SetupStep,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("prefix is unhealthy ({} issue(s))", issues.len())]
-    PrefixUnhealthy { issues: Vec<HealthIssue> },
-    #[error("spawn of {runner} failed")]
-    Spawn {
-        runner: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("game process not found after {waited:?}")]
-    GameProcessNotFound { waited: Duration },
-    #[error("path mapping failed for {path:?}: {reason}")]
-    PathMapping { path: PathBuf, reason: &'static str },
-    #[error("missing host tool: {tool:?}")]
-    MissingHostTool { tool: HostTool },
-    #[error("unsupported: {what}")]
-    Unsupported { what: &'static str },
-}
-
-/// A step in prefix initialization (for [`RuntimeError::PrefixInit`]).
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub enum SetupStep {
-    CreatePrefix,
-    InstallDxvk,
-    ApplyTweaks,
-}
-
-/// A prefix health problem (for [`RuntimeError::PrefixUnhealthy`]).
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum HealthIssue {
-    MissingFile(PathBuf),
-    WrongArch,
-}
-
-/// A required host-side tool (for [`RuntimeError::MissingHostTool`]).
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub enum HostTool {
-    Wine,
-    Steam,
-    Tar,
-}
+pub use catalog::{
+    ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEY, Catalog, DxvkEntry,
+    Runner, RunnerKind, ToolEntry,
+};
+pub use error::{CatalogError, HealthIssue, HostTool, RuntimeError, SetupStep};
 
 /// Where the runtime stores runners and prefixes.
 #[derive(Debug, Clone, Default)]
