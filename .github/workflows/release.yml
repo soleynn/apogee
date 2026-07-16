@@ -19,15 +19,31 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Classify the tag
+        id: tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_NAME" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "cliff_args=--unreleased --strip all" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "cliff_args=--latest --strip all" >> "$GITHUB_OUTPUT"
+          fi
       - name: Generate release notes
         id: git-cliff
         uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
         with:
           config: cliff.toml
-          args: --latest --strip all
+          args: ${{ steps.tag.outputs.cliff_args }}
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           NOTES: ${{ steps.git-cliff.outputs.content }}
-        # Attach binaries here once the app produces them (post-M0): add file paths after the tag.
-        run: gh release create "$GITHUB_REF_NAME" --notes "$NOTES"
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        # Attach binaries here once the app produces them: add file paths after the tag.
+        run: |
+          flag=--latest
+          [ "$PRERELEASE" = "true" ] && flag=--prerelease
+          gh release create "$GITHUB_REF_NAME" --notes "$NOTES" "$flag"
