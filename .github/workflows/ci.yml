@@ -31,6 +31,9 @@ jobs:
           toolchain: "1.97.0"
           components: rustfmt
       - run: cargo fmt --all --check
+      # The dev tools are separate workspaces, so --all skips them; format-check them too.
+      - run: cargo fmt --manifest-path tools/sqex-proto-probe/Cargo.toml --all --check
+      - run: cargo fmt --manifest-path tools/boot-check/Cargo.toml --all --check
 
   clippy:
     name: clippy
@@ -47,6 +50,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Lint the dev tools too (separate workspaces the run above misses), so the probe cannot rot on
+      # a sqex-proto API change without CI noticing.
+      - run: cargo clippy --manifest-path tools/sqex-proto-probe/Cargo.toml --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path tools/boot-check/Cargo.toml --all-targets -- -D warnings
 
   test-linux:
     name: test-linux
@@ -64,7 +71,7 @@ jobs:
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: nextest
-      - run: cargo nextest run --workspace --no-tests=pass
+      - run: cargo nextest run --profile ci --workspace --no-tests=pass
       - run: cargo test --workspace --doc
 
   build-windows-cross:
