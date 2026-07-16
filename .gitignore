@@ -13,3 +13,9 @@
 
 # OS cruft
 .DS_Store
+
+# Editor and IDE files
+/.idea/
+/.vscode/
+*.swp
+*~
