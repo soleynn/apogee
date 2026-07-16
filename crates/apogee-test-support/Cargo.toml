@@ -20,6 +20,8 @@ bytes.workspace = true
 http.workspace = true
 url.workspace = true
 sha2.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
 
 [dev-dependencies]
 # Drives the chaos server in its own self-test.

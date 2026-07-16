@@ -22,6 +22,15 @@ impl Fetcher {
         FetcherBuilder::default()
     }
 
+    /// Construct a fetcher over a caller-supplied client. Test-only (gated behind the `testing`
+    /// feature, never compiled into a release build): it lets a test inject a client that trusts a
+    /// loopback test certificate, which the safe builder deliberately cannot be configured to do.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn from_client(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+
     /// Download `spec`'s source to its destination, returning proof it verified.
     ///
     /// Progress snapshots are sent on `progress` when provided; the sender is dropped when the

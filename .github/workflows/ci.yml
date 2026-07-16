@@ -73,6 +73,9 @@ jobs:
           tool: nextest
       - run: cargo nextest run --profile ci --workspace --no-tests=pass
       - run: cargo test --workspace --doc
+      # The unverified-download-over-TLS test needs a client that trusts a loopback test certificate,
+      # exposed only behind apogee-fetch's test-only `testing` feature, so it runs as its own step.
+      - run: cargo test -p apogee-fetch --features testing --test none_over_tls
 
   build-windows-cross:
     name: build-windows-cross
