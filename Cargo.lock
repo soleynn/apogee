@@ -33,7 +33,6 @@ version = "0.0.0"
 dependencies = [
  "apogee-core",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
