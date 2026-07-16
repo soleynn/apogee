@@ -9,8 +9,14 @@ license.workspace = true
 tempfile.workspace = true
 sqex-proto = { path = "../sqex-proto" }
 async-trait.workspace = true
-
-[dev-dependencies]
+# The streaming chaos HTTP server the download tests drive against.
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
 http.workspace = true
 url.workspace = true
 
