@@ -24,6 +24,10 @@ apogee-test-support = { path = "../apogee-test-support" }
 tempfile.workspace = true
 proptest.workspace = true
 trybuild.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+sha2.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true
