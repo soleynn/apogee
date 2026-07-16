@@ -43,6 +43,12 @@ jobs:
             echo "::warning::CHANGELOG_TOKEN secret is not set; skipping changelog auto-commit"
             exit 0
           fi
+          # Loop guard: if the PR head is already an auto-commit, there is nothing to add. Belt to the
+          # cliff.toml skip rule, which alone makes regeneration idempotent.
+          if [ "$(git log -1 --pretty=%s)" = "chore: regenerate changelog" ]; then
+            echo "PR head is already a changelog regeneration; nothing to do"
+            exit 0
+          fi
           if git diff --quiet -- CHANGELOG.md; then
             echo "changelog already current"
             exit 0
