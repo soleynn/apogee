@@ -5,23 +5,31 @@
 header = """
 # Changelog
 
-All notable changes to this project are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
+All notable changes to this project are documented here. Entries are grouped by crate, and each line
+is tagged with its change type. Versioning aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 """
+# Crate-first: one section per commit scope (the crate), change type as an italic tag per line.
+# Unscoped commits (workspace-wide CI, docs, chores) collect under a trailing "workspace" section.
 body = """
 {% if version %}\
 ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else %}\
 ## [Unreleased]
 {% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
-### {{ group | upper_first }}
-{% for commit in commits %}\
-- {{ commit.message | split(pat="\n") | first | trim | upper_first }}
+{% for scope, scoped in commits | filter(attribute="scope") | group_by(attribute="scope") %}
+### {{ scope }}
+{% for commit in scoped %}\
+- {{ commit.message | split(pat="\n") | first | trim | upper_first }} _({{ commit.group | lower }})_
 {% endfor %}\
-{% endfor %}
+{% endfor %}\
+{% if commits | filter(attribute="scope") | length < commits | length %}
+### workspace
+{% for commit in commits %}{% if not commit.scope %}\
+- {{ commit.message | split(pat="\n") | first | trim | upper_first }} _({{ commit.group | lower }})_
+{% endif %}{% endfor %}\
+{% endif %}
 """
 trim = true
 footer = ""
@@ -30,6 +38,18 @@ footer = ""
 conventional_commits = true
 filter_unconventional = false
 split_commits = false
+# Normalize short crate scopes to their full crate names so each crate is one section.
+commit_preprocessors = [
+  { pattern = '^(\w+)\(addons\)', replace = '${1}(apogee-addons)' },
+  { pattern = '^(\w+)\(fetch\)', replace = '${1}(apogee-fetch)' },
+  { pattern = '^(\w+)\(otp\)', replace = '${1}(apogee-otp)' },
+  { pattern = '^(\w+)\(patcher\)', replace = '${1}(apogee-patcher)' },
+  { pattern = '^(\w+)\(runtime\)', replace = '${1}(apogee-runtime)' },
+  { pattern = '^(\w+)\(secrets\)', replace = '${1}(apogee-secrets)' },
+  { pattern = '^(\w+)\(sqpack\)', replace = '${1}(apogee-sqpack)' },
+  { pattern = '^(\w+)\(zipatch\)', replace = '${1}(apogee-zipatch)' },
+  { pattern = '^(\w+)\(test-support\)', replace = '${1}(apogee-test-support)' },
+]
 commit_parsers = [
   { message = "^feat", group = "Added" },
   { message = "^fix", group = "Fixed" },
