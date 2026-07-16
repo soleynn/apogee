@@ -1,32 +1,37 @@
 name: Changelog
 
-# Regenerate CHANGELOG.md from the commit history on each pull request and commit it back to the PR's
-# own branch, so the changelog lands together with the change. main is ruleset-protected (changes via
-# PR only), so the update rides the PR rather than being pushed to main directly.
-#
-# The push uses a fine-grained PAT stored as the CHANGELOG_TOKEN secret, not the default GITHUB_TOKEN:
-# a GITHUB_TOKEN push does not trigger CI on the new commit, which would leave the PR head without the
-# required status checks and block the merge. When the secret is absent the job skips with a warning.
+# After each merge to main, regenerate CHANGELOG.md and push it back to main. main is ruleset-protected
+# (changes via PR only), so the push uses a GitHub App token whose app is on the ruleset bypass list,
+# not the default GITHUB_TOKEN. The bot commit changes only CHANGELOG.md and carries [skip ci]; that,
+# paths-ignore, and cliff.toml's skip of "chore: regenerate changelog" each independently keep it from
+# looping. Until the APP_ID / APP_PRIVATE_KEY secrets exist the job skips with a warning.
 on:
-  pull_request:
+  push:
+    branches: [main]
+    paths-ignore:
+      - CHANGELOG.md
 
 permissions:
   contents: read
 
 concurrency:
-  group: changelog-${{ github.head_ref }}
-  cancel-in-progress: true
+  group: changelog-main
+  cancel-in-progress: false
 
 jobs:
   changelog:
     name: changelog
     runs-on: ubuntu-latest
-    # Same-repo PRs only: fork PRs receive no secret (and are auto-closed anyway).
-    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.head_ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: Regenerate the changelog
@@ -34,19 +39,12 @@ jobs:
         with:
           config: cliff.toml
           args: --output CHANGELOG.md
-      - name: Commit to the PR branch if it changed
+      - name: Commit to main if it changed
         env:
-          PUSH_TOKEN: ${{ secrets.CHANGELOG_TOKEN }}
-          HEAD_REF: ${{ github.head_ref }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          if [ -z "${PUSH_TOKEN}" ]; then
-            echo "::warning::CHANGELOG_TOKEN secret is not set; skipping changelog auto-commit"
-            exit 0
-          fi
-          # Loop guard: if the PR head is already an auto-commit, there is nothing to add. Belt to the
-          # cliff.toml skip rule, which alone makes regeneration idempotent.
-          if [ "$(git log -1 --pretty=%s)" = "chore: regenerate changelog" ]; then
-            echo "PR head is already a changelog regeneration; nothing to do"
+          if [ -z "${APP_TOKEN}" ]; then
+            echo "::warning::App token unavailable (set APP_ID and APP_PRIVATE_KEY); skipping changelog auto-commit"
             exit 0
           fi
           if git diff --quiet -- CHANGELOG.md; then
@@ -56,5 +54,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add CHANGELOG.md
-          git commit -m "chore: regenerate changelog"
-          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          git commit -m "chore: regenerate changelog [skip ci]"
+          git push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
