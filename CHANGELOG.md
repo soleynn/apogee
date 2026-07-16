@@ -104,4 +104,7 @@ is tagged with its change type. Versioning aims to follow
 - Broaden the source-hygiene gates _(ci)_
 - Select the nextest ci profile and lint the dev tools _(ci)_
 - Note the forward-declared dev-dependencies _(miscellaneous)_
+- Group the changelog by crate and catch it up _(miscellaneous)_
+- Regenerate the changelog on every merge to main _(ci)_
+- Auto-commit the regenerated changelog to each PR branch _(ci)_
 
