@@ -7,7 +7,14 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+ed25519-dalek = { workspace = true }
 apogee-fetch = { path = "../apogee-fetch" }
+
+[dev-dependencies]
+apogee-test-support = { path = "../apogee-test-support" }
 
 [lints]
 workspace = true
