@@ -11,9 +11,12 @@ license      = "GPL-3.0-or-later"
 # foundation runtime
 thiserror        = "2"
 async-trait      = "0.1"
-tokio            = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "time"] }
+tokio            = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "time", "net"] }
 tokio-stream     = "0.1"
-reqwest          = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "deflate", "http2"] }
+tokio-util       = "0.7"
+futures-util     = "0.3"
+bytes            = "1"
+reqwest          = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "deflate", "http2", "stream"] }
 serde            = { version = "1", features = ["derive"] }
 serde_json       = "1"
 sha1             = "0.10"
@@ -29,6 +32,10 @@ zeroize          = { version = "1", features = ["derive"] }
 keyring          = "3"
 totp-rs          = "5"
 flate2           = "1"
+# in-repo streaming test HTTP server (the download harness), gated to apogee-test-support
+hyper            = { version = "1", features = ["server", "http1"] }
+hyper-util       = { version = "0.1", features = ["tokio"] }
+http-body-util   = "0.1"
 # dev / test
 insta            = "1"
 rstest           = "0.23"
