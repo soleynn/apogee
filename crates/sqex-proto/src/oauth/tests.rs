@@ -94,6 +94,14 @@ fn launch_params_rejects_a_non_numeric_region() {
 }
 
 #[test]
+fn launch_params_rejects_an_empty_session_id() {
+    // A blank sid value must be rejected by the non-empty guard, not accepted as an empty session.
+    // The list is otherwise full-length, so a rejection here is the sid guard, not a too-short list.
+    let params = "sid,,terms,1,region,3,etmadd,0,playable,1,ps3pkg,0,maxex,4";
+    assert!(parse_launch_params(params).is_err());
+}
+
+#[test]
 fn login_callback_reads_a_success_body() {
     let body = format!(r#"<script>window.external.user("login=auth,ok,{FULL_PARAMS}");</script>"#);
     let params = parse_login_callback(&body).unwrap();
