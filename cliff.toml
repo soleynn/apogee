@@ -1,5 +1,6 @@
 # git-cliff configuration: https://git-cliff.org
-# CHANGELOG.md is generated from the commit history, so it is not edited by hand.
+# CHANGELOG.md is generated from the commit history, so it is not edited by hand; the changelog
+# workflow (.github/workflows/changelog.yml) regenerates it on each merge to main.
 
 [changelog]
 header = """
