@@ -71,8 +71,9 @@ pub enum Registration {
 /// Posts `report` to `patch-gamever` under the login's session id and classifies the response by the
 /// reference launcher's branch order: `409` is a pending boot patch, `410` an unserviced version, an
 /// `X-Patch-Unique-Id` header a registration (with any pending game patches parsed from the body), and
-/// anything else a [`ProtoError::InvalidResponse`]. The status is not otherwise gated: SE's contract is
-/// that the UID header, not a `200`, marks success.
+/// anything else a [`ProtoError::InvalidResponse`]. The status is not otherwise gated: a current game
+/// answers `204 No Content` and a pending one a `200` with a patchlist (both observed against the live
+/// service), so the UID header, not a specific status, marks success.
 pub async fn register_session(
     transport: &dyn Transport,
     auth: &Authenticated,

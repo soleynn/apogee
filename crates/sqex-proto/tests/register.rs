@@ -73,12 +73,17 @@ fn request_report() -> VersionReport {
     )
 }
 
-/// A registration response carrying the UID header and `body`.
-fn uid_response(body: Vec<u8>) -> ProtoResponse {
-    ProtoResponse::new(200, body).with_header(
+/// A registration response with `status`, carrying the UID header and `body`.
+fn uid_response_status(status: u16, body: Vec<u8>) -> ProtoResponse {
+    ProtoResponse::new(status, body).with_header(
         HeaderName::from_static("x-patch-unique-id"),
         HeaderValue::from_static(UID),
     )
+}
+
+/// A `200` registration response carrying the UID header and `body`.
+fn uid_response(body: Vec<u8>) -> ProtoResponse {
+    uid_response_status(200, body)
 }
 
 /// Wrap synthetic nine-field game entries in the multipart envelope the parser expects.
@@ -183,6 +188,20 @@ fn uid_with_empty_body_is_registered_with_no_patches() {
             assert_eq!(unique_id.expose(), UID);
             assert!(pending_patches.is_empty());
         }
+        other => panic!("expected Registered, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_204_no_content_is_registered_with_no_patches() {
+    // The live service answers a current game with 204 No Content and the UID header (observed against
+    // the real endpoint), not 200. Since registration keys on the UID header rather than a status, 204
+    // registers with no pending patches; this pins that a status gate is never reintroduced.
+    let (_transport, outcome) = login_then_register(uid_response_status(204, Vec::new()));
+    match outcome.expect("registration") {
+        Registration::Registered {
+            pending_patches, ..
+        } => assert!(pending_patches.is_empty()),
         other => panic!("expected Registered, got {other:?}"),
     }
 }
