@@ -63,6 +63,9 @@ commit_parsers = [
   { message = "^revert", group = "Reverted" },
   { message = "^chore\\(release\\)", skip = true },
   { message = "^chore\\(deps\\)", skip = true },
+  # The changelog workflow's own auto-commit: exclude it so regeneration is idempotent (no perpetual
+  # one-behind diff) and the changelog carries no "regenerate changelog" noise.
+  { message = "^chore: regenerate changelog", skip = true },
   { message = "^chore", group = "Miscellaneous" },
   { body = ".*[Ss]ecurity", group = "Security" },
 ]
