@@ -4,7 +4,7 @@
 //! each raw request/response into `target/capture/<scenario>/` so a genuine login can be sanitized into
 //! test fixtures. It runs one successful login and one deliberate wrong-password login (to capture the
 //! failure page), printing each step's shape without ever printing or persisting the session id, the
-//! TOTP secret, or the generated code.
+//! TOTP secret, the generated code, or the issued patch unique id.
 //!
 //! Reads from the process environment or a `.env` file in the working directory:
 //!
@@ -14,6 +14,10 @@
 //!   clock-skew-corrected path) and submits it, capturing the success under `target/capture/otp/`.
 //! - `SQEX_OTP` (optional): a manually-typed 6-digit code, used only when `SQEX_TOTP_SECRET` is unset.
 //!   Codes expire in 30 s, so this is racy; the secret is preferred.
+//! - `SQEX_GAME_PATH` (optional): the root of an installed game (the directory holding `boot/` and
+//!   `game/`). When set, a successful login is followed by a session-registration step that reports the
+//!   install's version and prints the disposition (the unique id stays redacted). An outdated install
+//!   yields a pending patchlist; a corrupt one yields a repairable version-files error.
 //!
 //! With no OTP configured it behaves as before (plain `success` scenario), so it still works on a
 //! no-2FA account. Never run in CI: it needs a real account and a network. Run from the repo root:
@@ -32,8 +36,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{HeaderName, HeaderValue};
 use sqex_proto::{
-    begin_login, ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext,
-    ProtoError, ProtoRequest, ProtoResponse, Transport, TransportError,
+    begin_login, register_session, Authenticated, ClientContext, ComputerId, Credentials,
+    InstallPaths, LauncherTime, LoginKind, OauthContext, ProtoError, ProtoRequest, ProtoResponse,
+    Registration, Transport, TransportError, VersionReport,
 };
 use totp_rs::{Algorithm, Secret, TOTP};
 
@@ -165,20 +170,62 @@ async fn run_login(
         })
         .await
     {
-        Ok(auth) => println!(
-            "[{scenario}] authenticated: {:?} region={} max_expansion={} playable={} terms_accepted={}",
-            auth.session_id(),
-            auth.region,
-            auth.max_expansion,
-            auth.playable,
-            auth.terms_accepted,
-        ),
+        Ok(auth) => {
+            println!(
+                "[{scenario}] authenticated: {:?} region={} max_expansion={} playable={} terms_accepted={}",
+                auth.session_id(),
+                auth.region,
+                auth.max_expansion,
+                auth.playable,
+                auth.terms_accepted,
+            );
+            // A successful login can be followed by session registration when a game install is named.
+            if let Some(game_path) = env_opt("SQEX_GAME_PATH") {
+                run_register(&transport, scenario, &auth, &game_path).await;
+            }
+        }
         Err(ProtoError::OauthFailed { excerpt }) => {
             println!("[{scenario}] oauth rejected (expected for a wrong password): {excerpt}");
         }
         Err(err) => println!("[{scenario}] submit failed: {err}"),
     }
     println!("[{scenario}] capture written under {CAPTURE_ROOT}/{scenario}");
+}
+
+/// Register the session against an installed game, printing the disposition. Reads the install's
+/// version files (repairable errors are printed, not fatal); the unique id is never printed raw.
+async fn run_register(
+    transport: &dyn Transport,
+    scenario: &str,
+    auth: &Authenticated,
+    game_path: &str,
+) {
+    let paths = InstallPaths::new(game_path);
+    let report = match VersionReport::from_install(&paths, auth.max_expansion) {
+        Ok(report) => report,
+        Err(err) => {
+            println!("[{scenario}] version report unavailable (repair the install): {err}");
+            return;
+        }
+    };
+    println!(
+        "[{scenario}] registering session (game_version={})",
+        report.game_version()
+    );
+    match register_session(transport, auth, &report).await {
+        Ok(Registration::Registered {
+            unique_id,
+            pending_patches,
+        }) => println!(
+            "[{scenario}] registered: unique_id={unique_id:?} pending_patches={}",
+            pending_patches.len()
+        ),
+        Ok(Registration::NeedsBootPatch) => println!("[{scenario}] disposition: NeedsBootPatch"),
+        Ok(Registration::VersionNotServiced) => {
+            println!("[{scenario}] disposition: VersionNotServiced");
+        }
+        Err(err) => println!("[{scenario}] register failed: {err}"),
+    }
 }
 
 /// Resolve the OTP source from the environment, preferring a stored secret over a typed code.
@@ -238,6 +285,8 @@ impl Transport for RecordingTransport {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let label = if req.url.path().ends_with("/top") {
             "top"
+        } else if req.url.path().contains("ffxivneo_release_game") {
+            "register"
         } else {
             "login"
         };
@@ -298,6 +347,13 @@ impl Transport for RecordingTransport {
         if let Some(date) = headers.get(http::header::DATE) {
             if let Ok(value) = HeaderValue::from_bytes(date.as_bytes()) {
                 out = out.with_header(HeaderName::from_static("date"), value);
+            }
+        }
+        // Session registration reads the patch unique id off this header; surface it so `register_session`
+        // can see a `Registered` disposition. (`HeaderMap::get` is case-insensitive.)
+        if let Some(uid) = headers.get("x-patch-unique-id") {
+            if let Ok(value) = HeaderValue::from_bytes(uid.as_bytes()) {
+                out = out.with_header(HeaderName::from_static("x-patch-unique-id"), value);
             }
         }
         Ok(out)
