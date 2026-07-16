@@ -222,3 +222,37 @@ impl Core {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{Core, CoreConfig};
+    use crate::error::CoreError;
+    use crate::model::{Account, AccountKind, Profile};
+
+    fn core() -> (TempDir, Core) {
+        let dir = TempDir::new().unwrap();
+        let core = Core::new(CoreConfig::with_base(dir.path())).unwrap();
+        (dir, core)
+    }
+
+    #[test]
+    fn deleting_a_missing_profile_surfaces_as_no_profile() {
+        let (_dir, core) = core();
+        let account = Account::new("me@example.invalid", AccountKind::Standard);
+        let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+        let id = profile.id;
+
+        core.save_profile(&profile).unwrap();
+        assert_eq!(core.profiles().unwrap(), vec![profile]);
+
+        // The first delete removes it; the second finds nothing, and the store's typed miss is
+        // mapped to the core's NoProfile carrying the id that was asked for.
+        core.delete_profile(id).unwrap();
+        match core.delete_profile(id).unwrap_err() {
+            CoreError::NoProfile(missing) => assert_eq!(missing, id),
+            other => panic!("expected NoProfile, got {other:?}"),
+        }
+    }
+}
