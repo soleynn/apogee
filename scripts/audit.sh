@@ -15,7 +15,7 @@ hits=$(grep -rnE '(from|to)_(le|be)_bytes' crates/sqex-crypto/src --include='*.r
 # 2. No ambient global state in the library crates.
 libs() { grep -rnE "$1" crates/*/src --include='*.rs' | grep -v '/apogee-test-support/' || true; }
 hits=$(libs '\bstatic[[:space:]]+mut\b'); [ -z "$hits" ] || report "mutable static in a library" "$hits"
-hits=$(libs 'lazy_static!|once_cell');   [ -z "$hits" ] || report "lazy global singleton" "$hits"
+hits=$(libs 'lazy_static!|once_cell|LazyLock|OnceLock|LazyCell|OnceCell'); [ -z "$hits" ] || report "lazy global singleton" "$hits"
 hits=$(grep -rnE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?static[[:space:]]+[A-Za-z_]' \
   crates/apogee-core/src --include='*.rs' || true)
 [ -z "$hits" ] || report "ambient static in apogee-core" "$hits"
@@ -47,7 +47,7 @@ bad=$(deps_of sqex-proto | grep -xiE 'regex|regex-.*|scraper|html5ever|select|ku
 hits=$(grep -rnE '^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[^=]*\bstr\b' \
   crates/apogee-core/src --include='*.rs' || true)
 [ -z "$hits" ] || report "string constant in apogee-core (presentation belongs to the shell)" "$hits"
-hits=$(libs '\b(print|println|eprint|eprintln)!')
+hits=$(libs '\b(print|println|eprint|eprintln)!|\b(write|writeln)![[:space:]]*\([^)]*std(out|err)')
 [ -z "$hits" ] || report "terminal output in a library crate" "$hits"
 
 # Informational: remaining stub markers (never fails).
