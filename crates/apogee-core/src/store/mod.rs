@@ -132,10 +132,7 @@ impl Store {
         };
         let mut profiles = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|source| StoreError::Io {
-                path: dir.clone(),
-                source,
-            })?;
+            let entry = entry.map_err(io_at(&dir))?;
             let path = entry.path();
             // Only entity files; a `.corrupt` backup or `.tmp` write-in-progress is skipped.
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -165,10 +162,7 @@ impl Store {
         T: Serialize + Migrate,
     {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| StoreError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+            fs::create_dir_all(parent).map_err(io_at(parent))?;
         }
         let envelope = Stored {
             schema_version: T::CURRENT_VERSION,
@@ -180,24 +174,12 @@ impl Store {
         })?;
 
         let tmp = suffixed(path, "tmp");
-        let mut file = fs::File::create(&tmp).map_err(|source| StoreError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-        file.write_all(&bytes).map_err(|source| StoreError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-        file.sync_all().map_err(|source| StoreError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
+        let mut file = fs::File::create(&tmp).map_err(io_at(&tmp))?;
+        file.write_all(&bytes).map_err(io_at(&tmp))?;
+        file.sync_all().map_err(io_at(&tmp))?;
         drop(file);
 
-        fs::rename(&tmp, path).map_err(|source| StoreError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+        fs::rename(&tmp, path).map_err(io_at(path))
     }
 
     /// Read `path`, migrate it forward to the current schema version, and deserialize it. Any parse
@@ -265,6 +247,15 @@ fn preserve(path: &Path, original: &[u8], detail: String) -> StoreError {
         path: path.to_path_buf(),
         backup,
         detail,
+    }
+}
+
+/// A `.map_err` closure that tags an [`io::Error`] with the `path` it occurred on, so every store
+/// `Io` error still names the specific file that failed.
+fn io_at(path: &Path) -> impl Fn(io::Error) -> StoreError + '_ {
+    move |source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
     }
 }
 
