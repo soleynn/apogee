@@ -173,13 +173,30 @@ impl Store {
             source: io::Error::new(ErrorKind::InvalidData, e),
         })?;
 
-        let tmp = suffixed(path, "tmp");
-        let mut file = fs::File::create(&tmp).map_err(io_at(&tmp))?;
+        // Write to a per-write unique temp name opened with create_new: a concurrent save of the same
+        // entity cannot truncate our in-flight bytes (each has its own temp), and a pre-existing file
+        // or planted symlink at the temp name is rejected (EEXIST) rather than followed. list_profiles
+        // ignores non-".json" names, so the temp is never read as an entity.
+        let tmp = suffixed(path, &format!("{}.tmp", Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(io_at(&tmp))?;
         file.write_all(&bytes).map_err(io_at(&tmp))?;
         file.sync_all().map_err(io_at(&tmp))?;
         drop(file);
 
-        fs::rename(&tmp, path).map_err(io_at(path))
+        fs::rename(&tmp, path).map_err(io_at(path))?;
+
+        // Fsync the containing directory so the rename (a directory-metadata change) is durable, not
+        // just the file's contents; otherwise a crash right after this returns could lose the entry.
+        // Best-effort: directories are not uniformly fsync-able across platforms, and the atomic
+        // rename already guarantees no torn file.
+        if let Some(parent) = path.parent() {
+            let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+        }
+        Ok(())
     }
 
     /// Read `path`, migrate it forward to the current schema version, and deserialize it. Any parse
@@ -238,11 +255,17 @@ impl Store {
     }
 }
 
-/// Copy the original bytes aside to `<path>.corrupt` (best effort) and build the corrupt error. The
-/// original file is left untouched.
+/// Copy the original bytes aside to a unique `<path>.<uuid>.corrupt` sidecar (best effort) and build
+/// the corrupt error. The sidecar is opened with create_new so a pre-existing file or planted symlink
+/// at that name is not followed; the original file is always left untouched, so no-delete holds even
+/// if the backup cannot be written.
 fn preserve(path: &Path, original: &[u8], detail: String) -> StoreError {
-    let backup = suffixed(path, "corrupt");
-    let _ = fs::write(&backup, original);
+    let backup = suffixed(path, &format!("{}.corrupt", Uuid::new_v4()));
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .and_then(|mut file| file.write_all(original));
     StoreError::Corrupt {
         path: path.to_path_buf(),
         backup,
