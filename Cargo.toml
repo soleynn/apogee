@@ -32,6 +32,8 @@ zeroize          = { version = "1", features = ["derive"] }
 keyring          = "3"
 totp-rs          = "5"
 flate2           = "1"
+# safe syscall wrappers (monotonic clock now; /proc + signals later), keeping #![forbid(unsafe_code)]
+rustix           = "1"
 # in-repo streaming test HTTP server (the download harness), gated to apogee-test-support
 hyper            = { version = "1", features = ["server", "http1"] }
 hyper-util       = { version = "0.1", features = ["tokio"] }
