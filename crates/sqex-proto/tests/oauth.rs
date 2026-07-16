@@ -345,3 +345,51 @@ fn a_real_captured_failure_page_is_oauth_failed() {
         "excerpt: {excerpt}"
     );
 }
+
+#[test]
+fn a_real_captured_login_carries_an_otp_in_the_submit_body() {
+    // A genuine 2FA login returns the same top and success pages as a no-OTP login (confirmed by
+    // capture: byte-identical to oauth_top.html / oauth_login_ok.html), because the one-time password
+    // is a request-side field only. So this replays the real fixtures but submits an OTP, proving the
+    // code rides in the real request body alongside the scraped `_STORED_`, and that the top page's
+    // `Date` (the input to skew-corrected code generation) is surfaced.
+    let id = computer_id();
+    let transport = FixtureTransport::new([
+        ProtoResponse::new(200, include_bytes!("fixtures/oauth_top.html").to_vec())
+            .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE)),
+        ProtoResponse::new(200, include_bytes!("fixtures/oauth_login_ok.html").to_vec()),
+    ]);
+
+    let auth = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        assert_eq!(flow.server_date(), Some(SERVER_DATE));
+        flow.submit(Credentials {
+            sqexid: "user",
+            password: "pw",
+            otp: Some("135791"),
+        })
+        .await
+        .unwrap()
+    });
+
+    assert_eq!(auth.session_id().expose(), FIXTURE_SID);
+    assert!(auth.playable);
+
+    let recorded = transport.recorded();
+    let body = String::from_utf8(recorded[1].body.as_ref().unwrap().as_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains("_STORED_=00112233"),
+        "submit body did not carry the scraped _STORED_: {body}"
+    );
+    assert!(
+        body.ends_with("&otppw=135791"),
+        "submit body did not carry the otp: {body}"
+    );
+}
