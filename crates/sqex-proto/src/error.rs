@@ -2,9 +2,10 @@
 //!
 //! Expected dispositions the UI narrates (no service, terms not yet accepted, a boot patch pending)
 //! are *values* in the result types, not errors; the variants here are genuine protocol failures.
-//! `#[non_exhaustive]`: the login and session-registration failures join as those surfaces land.
+//! `#[non_exhaustive]`: further failures join as new surfaces land.
 
 use crate::transport::{ProtoResponse, TransportError};
+use crate::version::{SanityKind, VersionRepo};
 
 /// The protocol step a failure occurred in, for triage. `#[non_exhaustive]`: grows with the surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum Step {
     OauthTop,
     /// The OAuth credential submission.
     OauthLogin,
+    /// The session-registration version report.
+    Register,
 }
 
 /// A protocol failure.
@@ -67,6 +70,11 @@ pub enum ProtoError {
     /// is a count only, never the field contents (which include the session id).
     #[error("launchParams unparseable ({got_fields} fields)")]
     LaunchParamsUnparseable { got_fields: usize },
+
+    /// A version file failed the sanity gate before session registration, so no request was made. The
+    /// install is corrupt but repairable; `repo` and `kind` locate the fault without carrying a path.
+    #[error("version file for {repo:?} failed the sanity check: {kind:?}")]
+    InvalidVersionFiles { repo: VersionRepo, kind: SanityKind },
 }
 
 impl ProtoError {
