@@ -89,6 +89,13 @@ pub enum FetchError {
         source: std::io::Error,
     },
 
+    /// The HTTP client could not be constructed (the TLS backend failed to initialize).
+    #[error("http client setup failed")]
+    Client {
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A validator or source shape the streaming path does not implement (block-hash validation and
     /// the multi-range transport arrive with the repair work).
     #[error("unsupported: {what}")]
@@ -97,4 +104,15 @@ pub enum FetchError {
     /// The caller cancelled the transfer; the partial file and its journal survive for a resume.
     #[error("cancelled")]
     Cancelled,
+}
+
+impl FetchError {
+    /// Build an [`Io`](FetchError::Io) at `path`, the single tidy build site for the crate's
+    /// filesystem failures.
+    pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source,
+        }
+    }
 }

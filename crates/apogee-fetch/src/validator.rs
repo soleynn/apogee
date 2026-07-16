@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 /// How a downloaded file (or its blocks) is verified before it can become a [`VerifiedFile`].
 /// `None` over a plain-`http://` source is rejected when the download spec is built.
 #[derive(Debug, Clone)]
@@ -22,6 +24,33 @@ pub enum Validator {
     None,
 }
 
+impl Validator {
+    /// A stable 32-byte fingerprint of this validator's configuration, recorded in the resume
+    /// journal. Resuming against a different validator (a different expected digest, a different
+    /// block layout) no longer matches, so the download restarts from zero instead of trusting bytes
+    /// against the wrong policy. A leading tag byte keeps the variants from colliding.
+    pub(crate) fn config_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        match self {
+            Validator::BlockSha1 { block_size, hashes } => {
+                hasher.update([0x01]);
+                hasher.update(block_size.to_le_bytes());
+                for hash in hashes {
+                    hasher.update(hash);
+                }
+            }
+            Validator::Sha256(digest) => {
+                hasher.update([0x02]);
+                hasher.update(digest);
+            }
+            Validator::None => hasher.update([0x00]),
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&hasher.finalize());
+        out
+    }
+}
+
 /// Proof that a file passed its [`Validator`]. `apogee-patcher` accepts only a `VerifiedFile` into
 /// its apply queue, so "installed an unverified patch" is a type error, not a code-review hope.
 /// Minted only inside this crate after verification.
@@ -31,6 +60,12 @@ pub struct VerifiedFile {
 }
 
 impl VerifiedFile {
+    /// Mint the proof for a file that just passed its validator. Crate-private: the only callers are
+    /// the verification paths, so the type cannot be forged from outside.
+    pub(crate) fn mint(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
     /// The verified file on disk.
     #[must_use]
     pub fn path(&self) -> &Path {

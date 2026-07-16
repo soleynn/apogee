@@ -7,8 +7,10 @@
 //! journal; progress is a stream of [`Progress`] events over a caller-owned channel, and cancellation
 //! is a single token.
 
+mod download;
 mod error;
 mod fetcher;
+mod journal;
 mod progress;
 mod spec;
 mod validator;
