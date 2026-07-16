@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::StreamBody;
-use sha2::{Digest, Sha256};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
     ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
@@ -25,8 +24,10 @@ use hyper::header::{
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
@@ -80,6 +81,7 @@ struct Config {
 pub struct ChaosServer {
     base: Url,
     stats: Arc<Stats>,
+    cert_der: Option<Vec<u8>>,
     _guard: DropGuard,
 }
 
@@ -109,7 +111,13 @@ impl ChaosServer {
     async fn start(cfg: Config) -> std::io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let addr: SocketAddr = listener.local_addr()?;
-        let base = Url::parse(&format!("http://{addr}/"))
+        let (scheme, acceptor, cert_der) = if cfg.tls {
+            let (cert, key) = generate_cert()?;
+            ("https", Some(build_acceptor(&cert, &key)?), Some(cert))
+        } else {
+            ("http", None, None)
+        };
+        let base = Url::parse(&format!("{scheme}://{addr}/"))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let stats = Arc::new(Stats::default());
         let cfg = Arc::new(cfg);
@@ -123,19 +131,18 @@ impl ChaosServer {
                     () = loop_token.cancelled() => break,
                     accepted = listener.accept() => {
                         let Ok((stream, _)) = accepted else { continue };
-                        let io = TokioIo::new(stream);
                         let cfg = cfg.clone();
                         let stats = loop_stats.clone();
                         let conn_token = loop_token.clone();
+                        let acceptor = acceptor.clone();
                         tokio::spawn(async move {
-                            let service = service_fn(move |req| {
-                                handle(req, cfg.clone(), stats.clone())
-                            });
-                            let conn = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(io, service);
-                            tokio::select! {
-                                () = conn_token.cancelled() => {}
-                                _ = conn => {}
+                            match acceptor {
+                                Some(tls) => {
+                                    if let Ok(stream) = tls.accept(stream).await {
+                                        serve(TokioIo::new(stream), cfg, stats, conn_token).await;
+                                    }
+                                }
+                                None => serve(TokioIo::new(stream), cfg, stats, conn_token).await,
                             }
                         });
                     }
@@ -146,14 +153,22 @@ impl ChaosServer {
         Ok(Self {
             base,
             stats,
+            cert_der,
             _guard: token.drop_guard(),
         })
     }
 
-    /// The server's base URL (`http://127.0.0.1:PORT/`).
+    /// The server's base URL (`http://127.0.0.1:PORT/`, or `https://` under [`tls`](ChaosServerBuilder::tls)).
     #[must_use]
     pub fn base_url(&self) -> &Url {
         &self.base
+    }
+
+    /// The self-signed certificate (DER) the server presents over TLS, for a client to trust via
+    /// `reqwest::Certificate::from_der`. `None` when not running over TLS.
+    #[must_use]
+    pub fn cert_der(&self) -> Option<&[u8]> {
+        self.cert_der.as_deref()
     }
 
     /// The URL of `path` under this server.
@@ -378,6 +393,51 @@ async fn handle(
     Ok(builder
         .body(body)
         .unwrap_or_else(|_| status_only(StatusCode::INTERNAL_SERVER_ERROR)))
+}
+
+/// Serve one HTTP/1 connection over any transport (plain or TLS-wrapped), until it closes or the
+/// server shuts down.
+async fn serve<I>(io: I, cfg: Arc<Config>, stats: Arc<Stats>, token: CancellationToken)
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req| handle(req, cfg.clone(), stats.clone()));
+    let conn = hyper::server::conn::http1::Builder::new().serve_connection(io, service);
+    tokio::select! {
+        () = token.cancelled() => {}
+        _ = conn => {}
+    }
+}
+
+/// A fresh self-signed certificate (DER) and its PKCS#8 private key (DER), valid for `127.0.0.1`.
+fn generate_cert() -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut params = rcgen::CertificateParams::new(Vec::new()).map_err(std::io::Error::other)?;
+    params.subject_alt_names = vec![rcgen::SanType::IpAddress(std::net::IpAddr::V4(
+        Ipv4Addr::LOCALHOST,
+    ))];
+    let key_pair = rcgen::KeyPair::generate().map_err(std::io::Error::other)?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(std::io::Error::other)?;
+    Ok((cert.der().to_vec(), key_pair.serialize_der()))
+}
+
+/// A TLS acceptor presenting `cert_der`/`key_der`, using the ring provider explicitly so it does not
+/// depend on a process-wide default being installed.
+fn build_acceptor(cert_der: &[u8], key_der: &[u8]) -> std::io::Result<TlsAcceptor> {
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    let certs = vec![CertificateDer::from(cert_der.to_vec())];
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der.to_vec()));
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(std::io::Error::other)?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(std::io::Error::other)?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 /// A response carrying `status` and an empty body.

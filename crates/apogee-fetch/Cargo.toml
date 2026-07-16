@@ -19,6 +19,11 @@ tracing.workspace = true
 # Implements zipatch's RangeSource (HttpRangeSource); wired later.
 apogee-zipatch = { path = "../apogee-zipatch" }
 
+[features]
+# Test-only: exposes Fetcher::from_client so a TLS test can inject a client that trusts a loopback
+# test certificate. Never enabled in a release build.
+testing = []
+
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
 tempfile.workspace = true
@@ -28,6 +33,11 @@ tokio.workspace = true
 tokio-util.workspace = true
 sha2.workspace = true
 url.workspace = true
+reqwest.workspace = true
+
+[[test]]
+name = "none_over_tls"
+required-features = ["testing"]
 
 [lints]
 workspace = true
