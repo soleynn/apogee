@@ -58,23 +58,6 @@ impl CoreConfig {
         }
     }
 
-    fn runtime_paths(&self) -> RuntimePaths {
-        RuntimePaths {
-            runners: self.runners_dir.clone(),
-            prefixes: self.prefixes_dir.clone(),
-        }
-    }
-
-    fn patcher_config(&self) -> PatcherConfig {
-        // A patch operation's game root is known only once a profile is chosen; the root builds a
-        // baseline so the subsystem graph constructs, and a flow supplies the real paths later.
-        PatcherConfig {
-            patch_store: self.patch_store.clone(),
-            game_root: PathBuf::new(),
-            keep_patches: false,
-            ignore_space: false,
-        }
-    }
 }
 
 /// Resolve an XDG base directory from `var`, falling back to `$HOME/<fallback>`.
@@ -112,7 +95,14 @@ impl Core {
     /// Returns [`CoreError::Init`] if the network client cannot be built, or the wrapped subsystem
     /// error if a subsystem fails to construct.
     pub fn new(config: CoreConfig) -> Result<Self, CoreError> {
-        let store = Store::new(config.store_dir.clone());
+        // `config` is consumed here, so move its owned paths into each subsystem rather than clone.
+        let CoreConfig {
+            store_dir,
+            runners_dir,
+            prefixes_dir,
+            patch_store,
+        } = config;
+        let store = Store::new(store_dir);
 
         // Client tuning (HTTP/1.1 for the plain-HTTP patch CDN, HTTP/2 for HTTPS hosts) lands with
         // the transport's request path; the dual-stack default already applies.
@@ -124,8 +114,24 @@ impl Core {
         let transport = HttpTransport::new(client);
 
         let fetcher = Fetcher::builder().build()?;
-        let runtime = Runtime::new(fetcher.clone(), config.runtime_paths());
-        let patcher = Patcher::new(fetcher.clone(), config.patcher_config());
+        let runtime = Runtime::new(
+            fetcher.clone(),
+            RuntimePaths {
+                runners: runners_dir,
+                prefixes: prefixes_dir,
+            },
+        );
+        // A patch operation's game root is known only once a profile is chosen; a baseline empty root
+        // lets the subsystem graph construct, and a flow supplies the real paths later.
+        let patcher = Patcher::new(
+            fetcher.clone(),
+            PatcherConfig {
+                patch_store,
+                game_root: PathBuf::new(),
+                keep_patches: false,
+                ignore_space: false,
+            },
+        );
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),
