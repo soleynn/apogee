@@ -109,4 +109,5 @@ is tagged with its change type. Versioning aims to follow
 - Auto-commit the regenerated changelog to each PR branch _(ci)_
 - Regenerate changelog _(miscellaneous)_
 - Verify the changelog auto-commit fires _(testing)_
+- Regenerate changelog _(miscellaneous)_
 
