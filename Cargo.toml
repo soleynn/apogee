@@ -33,10 +33,12 @@ flate2           = "1"
 insta            = "1"
 rstest           = "0.23"
 proptest         = "1"
+tempfile         = "3"
+# Forward-declared for test types not yet wired up: wiremock backs an HTTP-mock transport,
+# assert_cmd + predicates a CLI end-to-end harness, trybuild the compile-fail invariant tests.
 wiremock         = "0.6"
 assert_cmd       = "2"
 predicates       = "3"
-tempfile         = "3"
 trybuild         = "1"
 
 [workspace.lints.rust]
