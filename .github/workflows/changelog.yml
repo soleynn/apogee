@@ -1,0 +1,47 @@
+name: Changelog
+
+# Regenerate CHANGELOG.md from the commit history after every merge to main and commit it back.
+# The bot commit is pushed with GITHUB_TOKEN, which by design does not retrigger workflows, so this
+# cannot loop; paths-ignore and [skip ci] are extra insurance.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - CHANGELOG.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: changelog
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Regenerate the changelog
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        with:
+          config: cliff.toml
+          args: --output CHANGELOG.md
+      - name: Commit if it changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "changelog already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore: regenerate changelog [skip ci]"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
