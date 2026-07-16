@@ -1,0 +1,7 @@
+error[E0451]: field `path` of struct `VerifiedFile` is private
+ --> tests/ui/verified_file_extern.rs:8:9
+  |
+7 |     let forged = VerifiedFile {
+  |                  ------------ in this type
+8 |         path: std::path::PathBuf::new(),
+  |         ^^^^ private field
