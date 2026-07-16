@@ -145,6 +145,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "reqwest",
+ "sha2",
  "sqex-proto",
  "tempfile",
  "tokio",

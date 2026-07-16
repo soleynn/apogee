@@ -9,38 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apogee_fetch::{DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, Validator};
-use apogee_test_support::chaos::{ChaosServer, generate_into, generated_vec};
-use sha2::{Digest, Sha256};
+use apogee_test_support::chaos::{ChaosServer, body_sha256, generated_vec, sha256_of};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
-
-/// The SHA256 of the deterministic body, streamed so a large expectation is never materialized.
-fn body_sha256(seed: u64, len: u64) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut off = 0u64;
-    while off < len {
-        let want = (len - off).min(buf.len() as u64) as usize;
-        generate_into(seed, off, &mut buf[..want]);
-        hasher.update(&buf[..want]);
-        off += want as u64;
-    }
-    finalize(hasher)
-}
-
-fn finalize(hasher: Sha256) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&hasher.finalize());
-    out
-}
-
-/// The SHA256 of a byte slice.
-fn sha256_of(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    finalize(hasher)
-}
 
 fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
@@ -327,4 +299,222 @@ async fn block_hash_validation_is_rejected_before_any_request() {
 
     assert!(matches!(err, FetchError::Unsupported { .. }));
     assert_eq!(server.stats().requests(), 0);
+}
+
+#[tokio::test]
+async fn resume_disabled_writes_no_journal_and_restarts_from_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 4 * MIB;
+    let server = ChaosServer::builder(7, len)
+        .etag("\"v1\"")
+        .drop_after(2 * MIB)
+        .chunk(64 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = spec_builder(&server, &dest, 7, len)
+        .resume(false)
+        .build()
+        .unwrap();
+    let downloader = Fetcher::builder().build().unwrap();
+
+    downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        !sidecar(&dest, ".apdl").exists(),
+        "a disabled resume never writes a journal"
+    );
+
+    let verified = downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(7, len));
+    assert!(!sidecar(&dest, ".apdl").exists());
+    assert!(
+        server.stats().bytes_served() > len,
+        "a disabled resume re-fetches the dropped prefix from zero"
+    );
+}
+
+#[tokio::test]
+async fn a_part_shorter_than_the_watermark_restarts_from_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 4 * MIB;
+    let server = ChaosServer::builder(8, len)
+        .etag("\"v1\"")
+        .drop_after(2 * MIB)
+        .chunk(64 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = spec_builder(&server, &dest, 8, len).build().unwrap();
+    let downloader = Fetcher::builder().build().unwrap();
+
+    downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let part = sidecar(&dest, ".part");
+    assert!(part.exists() && sidecar(&dest, ".apdl").exists());
+    // Truncate the part below the journaled watermark: the resume must distrust it and restart.
+    let handle = std::fs::OpenOptions::new().write(true).open(&part).unwrap();
+    handle.set_len(1024).unwrap();
+    drop(handle);
+
+    let verified = downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(8, len));
+}
+
+#[tokio::test]
+async fn a_range_not_satisfiable_response_restarts_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 4 * MIB;
+    // The first (rangeless) request drops; the resume's ranged request gets 416, so the engine must
+    // reset and re-request from zero within the same download call.
+    let server = ChaosServer::builder(3, len)
+        .etag("\"v1\"")
+        .drop_after(2 * MIB)
+        .range_not_satisfiable(true)
+        .chunk(64 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = spec_builder(&server, &dest, 3, len).build().unwrap();
+    let downloader = Fetcher::builder().build().unwrap();
+
+    downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let verified = downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(3, len));
+}
+
+#[tokio::test]
+async fn resume_uses_last_modified_when_no_etag_is_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 4 * MIB;
+    let server = ChaosServer::builder(5, len)
+        .last_modified("Wed, 21 Oct 2025 07:28:00 GMT")
+        .drop_after(2 * MIB)
+        .chunk(64 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = spec_builder(&server, &dest, 5, len).build().unwrap();
+    let downloader = Fetcher::builder().build().unwrap();
+
+    downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let verified = downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(5, len));
+    assert!(
+        server.stats().bytes_served() < 2 * len,
+        "a Last-Modified If-Range should resume, not restart"
+    );
+}
+
+#[tokio::test]
+async fn a_changed_last_modified_restarts_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 4 * MIB;
+    let server = ChaosServer::builder(6, len)
+        .last_modified("Wed, 21 Oct 2025 07:28:00 GMT")
+        .change_last_modified_after(1, "Thu, 22 Oct 2025 07:28:00 GMT")
+        .drop_after(2 * MIB)
+        .chunk(64 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = spec_builder(&server, &dest, 6, len).build().unwrap();
+    let downloader = Fetcher::builder().build().unwrap();
+
+    downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let verified = downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(6, len));
+}
+
+#[tokio::test]
+async fn a_wrong_size_destination_is_re_downloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 1000;
+    tokio::fs::write(&dest, vec![0u8; 500]).await.unwrap();
+    let server = ChaosServer::builder(2, len).start().await.unwrap();
+    let spec = spec_builder(&server, &dest, 2, len).build().unwrap();
+
+    let verified = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        server.stats().requests() > 0,
+        "a wrong-size destination is not trusted"
+    );
+    assert_eq!(
+        sha256_of(&tokio::fs::read(verified.path()).await.unwrap()),
+        body_sha256(2, len)
+    );
+}
+
+#[tokio::test]
+async fn a_same_size_wrong_content_destination_is_re_downloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 1000;
+    // Right size, wrong bytes: the skip must re-hash and reject it, never mint a proof on length alone.
+    tokio::fs::write(&dest, generated_vec(999, 0, len as usize))
+        .await
+        .unwrap();
+    let server = ChaosServer::builder(2, len).start().await.unwrap();
+    let spec = spec_builder(&server, &dest, 2, len).build().unwrap();
+
+    let verified = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        server.stats().requests() > 0,
+        "a same-size wrong-content destination is re-hashed and re-downloaded, not trusted"
+    );
+    assert_eq!(
+        sha256_of(&tokio::fs::read(verified.path()).await.unwrap()),
+        body_sha256(2, len)
+    );
 }

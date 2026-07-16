@@ -7,40 +7,14 @@
 //! restarted from zero on each resume would serve several times the file and blow the budget.
 
 use apogee_fetch::{DownloadSpec, Fetcher, Progress, Validator};
-use apogee_test_support::chaos::{ChaosServer, generate_into};
+use apogee_test_support::chaos::{ChaosServer, body_sha256, sha256_of};
 use proptest::prelude::*;
-use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 /// The whole-file size each case downloads (a few fsync batches' worth).
 const FILE_LEN: u64 = 3 * 1024 * 1024;
 /// Mirrors the engine's fsync/journal cadence: a resume re-fetches at most this much per interruption.
 const BATCH: u64 = 1024 * 1024;
-
-fn finalize(hasher: Sha256) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&hasher.finalize());
-    out
-}
-
-fn body_sha256(seed: u64, len: u64) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut off = 0u64;
-    while off < len {
-        let want = (len - off).min(buf.len() as u64) as usize;
-        generate_into(seed, off, &mut buf[..want]);
-        hasher.update(&buf[..want]);
-        off += want as u64;
-    }
-    finalize(hasher)
-}
-
-fn sha256_of(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    finalize(hasher)
-}
 
 /// Download `FILE_LEN` bytes from `seed`, cancelling once each time progress crosses a point in
 /// `interrupt_at`, then completing. Returns the final file's hash and the server's total bytes served.
