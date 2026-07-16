@@ -8,24 +8,8 @@
 #![cfg(target_os = "linux")]
 
 use apogee_fetch::{DownloadSpec, Fetcher, Validator};
-use apogee_test_support::chaos::{ChaosServer, generate_into};
-use sha2::{Digest, Sha256};
+use apogee_test_support::chaos::{ChaosServer, body_sha256};
 use tokio_util::sync::CancellationToken;
-
-fn body_sha256(seed: u64, len: u64) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut off = 0u64;
-    while off < len {
-        let want = (len - off).min(buf.len() as u64) as usize;
-        generate_into(seed, off, &mut buf[..want]);
-        hasher.update(&buf[..want]);
-        off += want as u64;
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&hasher.finalize());
-    out
-}
 
 /// The process's peak resident set in KiB (`VmHWM`), if readable.
 fn peak_rss_kib() -> Option<u64> {

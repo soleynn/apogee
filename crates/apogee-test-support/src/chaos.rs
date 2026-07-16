@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::StreamBody;
+use sha2::{Digest, Sha256};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, RANGE,
+    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
 };
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -65,8 +66,12 @@ struct Config {
     drop_after: Option<u64>,
     etag: Option<String>,
     etag_after: Option<(u64, String)>,
+    last_modified: Option<String>,
+    last_modified_after: Option<(u64, String)>,
+    range_not_satisfiable: bool,
     throttle: Option<Duration>,
     chunk: usize,
+    tls: bool,
 }
 
 /// A running chaos server. Dropping it shuts the server down (the held [`DropGuard`] cancels the
@@ -91,8 +96,12 @@ impl ChaosServer {
                 drop_after: None,
                 etag: None,
                 etag_after: None,
+                last_modified: None,
+                last_modified_after: None,
+                range_not_satisfiable: false,
                 throttle: None,
                 chunk: 64 * 1024,
+                tls: false,
             },
         }
     }
@@ -198,6 +207,38 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// The `Last-Modified` value served initially (a strong validator for `If-Range` when no `ETag`
+    /// is offered).
+    #[must_use]
+    pub fn last_modified(mut self, value: impl Into<String>) -> Self {
+        self.cfg.last_modified = Some(value.into());
+        self
+    }
+
+    /// Serve a different `Last-Modified` starting with the request after `requests`, so a resume's
+    /// date `If-Range` no longer matches and the server falls back to a full `200`.
+    #[must_use]
+    pub fn change_last_modified_after(mut self, requests: u64, value: impl Into<String>) -> Self {
+        self.cfg.last_modified_after = Some((requests, value.into()));
+        self
+    }
+
+    /// Answer any request carrying a `Range` header with `416 Range Not Satisfiable`, forcing a
+    /// resume to demote to a fresh `200` from zero.
+    #[must_use]
+    pub fn range_not_satisfiable(mut self, on: bool) -> Self {
+        self.cfg.range_not_satisfiable = on;
+        self
+    }
+
+    /// Serve over HTTPS with a freshly generated self-signed certificate for `127.0.0.1`. The
+    /// certificate is exposed via [`ChaosServer::cert_der`] so a client can be built to trust it.
+    #[must_use]
+    pub fn tls(mut self) -> Self {
+        self.cfg.tls = true;
+        self
+    }
+
     /// Sleep between body chunks.
     #[must_use]
     pub fn throttle(mut self, delay: Duration) -> Self {
@@ -232,19 +273,34 @@ async fn handle(
         return Ok(status_only(StatusCode::METHOD_NOT_ALLOWED));
     }
 
+    // A server that cannot satisfy the range refuses every ranged request, forcing a resume to demote
+    // to a fresh request from zero.
+    if cfg.range_not_satisfiable && req.headers().get(RANGE).is_some() {
+        return Ok(status_only(StatusCode::RANGE_NOT_SATISFIABLE));
+    }
+
     let current_etag = match &cfg.etag_after {
         Some((after, new)) if request_index > *after => Some(new.clone()),
         _ => cfg.etag.clone(),
     };
+    let current_last_modified = match &cfg.last_modified_after {
+        Some((after, new)) if request_index > *after => Some(new.clone()),
+        _ => cfg.last_modified.clone(),
+    };
 
-    // Honor a `bytes=START-` range only when ranges are enabled and any `If-Range` still matches.
+    // Honor a `bytes=START-` range only when ranges are enabled and any `If-Range` still matches the
+    // current `ETag` or `Last-Modified`.
     let range_start = if cfg.accept_ranges {
         parse_range_start(req.headers().get(RANGE))
     } else {
         None
     };
     let if_range_matches = match req.headers().get(IF_RANGE) {
-        Some(sent) => current_etag.as_deref().map(str::as_bytes) == Some(sent.as_bytes()),
+        Some(sent) => {
+            let sent = sent.as_bytes();
+            current_etag.as_deref().map(str::as_bytes) == Some(sent)
+                || current_last_modified.as_deref().map(str::as_bytes) == Some(sent)
+        }
         None => true,
     };
     let (start, status) = match range_start {
@@ -267,6 +323,9 @@ async fn handle(
     }
     if let Some(tag) = &current_etag {
         builder = builder.header(ETAG, tag.clone());
+    }
+    if let Some(value) = &current_last_modified {
+        builder = builder.header(LAST_MODIFIED, value.clone());
     }
 
     let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(4);
@@ -365,6 +424,30 @@ pub fn generated_vec(seed: u64, offset: u64, len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     generate_into(seed, offset, &mut out);
     out
+}
+
+/// The SHA256 of the deterministic body `[0, len)` from `seed`, streamed so a large expectation is
+/// never materialized. A test uses this to state the whole-file digest the download must produce.
+#[must_use]
+pub fn body_sha256(seed: u64, len: u64) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut off = 0u64;
+    while off < len {
+        let want = (len - off).min(buf.len() as u64) as usize;
+        generate_into(seed, off, &mut buf[..want]);
+        hasher.update(&buf[..want]);
+        off += want as u64;
+    }
+    hasher.finalize().into()
+}
+
+/// The SHA256 of a byte slice.
+#[must_use]
+pub fn sha256_of(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
 }
 
 #[cfg(test)]

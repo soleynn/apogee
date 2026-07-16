@@ -340,6 +340,17 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_middle_record_discards_every_later_record() {
+        // Corrupt the first of three records: the fold must stop there, not skip ahead to a later
+        // still-valid record naming bytes past the torn gap.
+        let id = identity();
+        let header = encode_header(&id).unwrap().len();
+        let mut buf = image(&id, &[1000, 2000, 3000]);
+        buf[header] ^= 0xFF; // flip a byte of the first record's watermark
+        assert_eq!(decode(&buf).unwrap().watermark, 0);
+    }
+
+    #[test]
     fn bad_magic_is_start_over() {
         let mut buf = image(&identity(), &[1000]);
         buf[0] = b'X';
