@@ -16,6 +16,15 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-test-support
 - Add a scriptable streaming test http server _(added)_
+- Game-install sandbox builder _(added)_
+
+### sqex-proto
+- Session registration with version report _(added)_
+- Strip a leading BOM from version files like the launcher _(fixed)_
+- Cover UID-header, unreadable, and backup edge cases _(testing)_
+
+### sqex-proto-probe
+- Register step in the live login probe _(added)_
 
 ### workspace
 - Roll -pre checkpoint tags into the next release's changelog _(ci)_
