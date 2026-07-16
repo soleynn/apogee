@@ -5,9 +5,11 @@
 //! naming bytes that are not on disk. On success the file is verified, atomically renamed onto its
 //! destination, and the journal removed. An interrupted transfer resumes from the journal watermark
 //! with `Range` + `If-Range`; a source that changed (a `200` where a `206` was asked for) restarts
-//! cleanly from zero.
+//! cleanly from zero. An existing destination is re-hashed against the validator, not trusted on its
+//! path, so a `VerifiedFile` is never minted over unverified bytes.
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
@@ -25,11 +27,12 @@ use crate::progress::{Phase, Progress};
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
-/// How many bytes are streamed between `fsync` + journal-commit points: the trade of throughput
-/// against the bytes a kill can cost (a resume re-fetches at most this much).
+/// How many bytes are streamed between `fsync` + journal-commit points, and the size of the in-memory
+/// write buffer: the trade of throughput (one large write and one fsync per batch) against the bytes a
+/// kill can cost (a resume re-fetches at most this much).
 const BATCH: u64 = 1024 * 1024;
-/// The buffer size for re-hashing an existing `.part` prefix on resume.
-const RESEED_CHUNK: usize = 64 * 1024;
+/// The buffer size for reading a file back to hash it (resume re-seed, existing-dest verification).
+const READ_CHUNK: usize = 64 * 1024;
 
 /// Run one download to completion.
 pub(crate) async fn run(
@@ -52,10 +55,12 @@ pub(crate) async fn run(
     let part = sidecar(dest, ".part");
     let apdl = sidecar(dest, ".apdl");
 
-    // Idempotent skip: a file at the destination was verified before it was renamed there.
+    // Idempotent skip: return an existing destination only if it still satisfies the validator, so a
+    // VerifiedFile is never minted over unverified or stale bytes. The re-hash reads local disk only,
+    // never the network, so an unchanged file is not re-downloaded.
     if let Ok(meta) = tokio::fs::metadata(dest).await
         && meta.is_file()
-        && spec.expected_len().is_none_or(|n| meta.len() == n)
+        && dest_satisfies(dest, meta.len(), expected_sha, spec.expected_len()).await?
     {
         emit(
             &progress,
@@ -112,15 +117,6 @@ pub(crate) async fn run(
         None
     };
 
-    emit(
-        &progress,
-        Progress {
-            bytes_done: start,
-            total: spec.expected_len(),
-            phase: Phase::Connecting,
-        },
-    );
-
     let resp = obtain_response(
         client,
         spec,
@@ -132,6 +128,17 @@ pub(crate) async fn run(
         &mut if_range,
     )
     .await?;
+
+    // The first progress event is emitted only after the resume disposition is settled, so
+    // `bytes_done` never regresses (a 200-restart has already reset `start` to 0 here).
+    emit(
+        &progress,
+        Progress {
+            bytes_done: start,
+            total: spec.expected_len(),
+            phase: Phase::Connecting,
+        },
+    );
 
     if let (Some(exp), Some(cl)) = (spec.expected_len(), resp.content_length()) {
         let server_total = start.saturating_add(cl);
@@ -155,10 +162,12 @@ pub(crate) async fn run(
             .map_err(|e| FetchError::io(&apdl, e))?;
     }
 
-    // Stream the body: write, hash, and flush the journal one batch behind the fsynced data.
+    // Stream the body into a batch buffer: one write and one fsync+journal-commit per batch, so a
+    // multi-GB transfer issues thousands of writes, not millions. Hashing reads the arriving chunk,
+    // so it is unaffected by the buffering.
     let mut stream = Box::pin(resp.bytes_stream());
     let mut written = start;
-    let mut since_sync = 0u64;
+    let mut batch: Vec<u8> = Vec::with_capacity(BATCH as usize);
     emit(
         &progress,
         Progress {
@@ -171,26 +180,23 @@ pub(crate) async fn run(
         let item = tokio::select! {
             biased;
             () = cancel.cancelled() => {
+                write_batch(&mut part_file, &part, &mut batch).await?;
                 flush_and_commit(&mut part_file, &part, &mut journal, &apdl, written).await?;
                 return Err(FetchError::Cancelled);
             }
             item = stream.next() => item,
         };
         let Some(chunk) = item else { break };
-        let chunk = chunk.map_err(|e| net_error(spec.url(), e))?;
+        let chunk = chunk.map_err(|e| transport_error(spec.url(), e))?;
         let bytes: &[u8] = chunk.as_ref();
-        part_file
-            .write_all(bytes)
-            .await
-            .map_err(|e| FetchError::io(&part, e))?;
         if let Some(h) = hasher.as_mut() {
             h.update(bytes);
         }
+        batch.extend_from_slice(bytes);
         written += bytes.len() as u64;
-        since_sync += bytes.len() as u64;
-        if since_sync >= BATCH {
+        if batch.len() as u64 >= BATCH {
+            write_batch(&mut part_file, &part, &mut batch).await?;
             flush_and_commit(&mut part_file, &part, &mut journal, &apdl, written).await?;
-            since_sync = 0;
             emit(
                 &progress,
                 Progress {
@@ -201,6 +207,7 @@ pub(crate) async fn run(
             );
         }
     }
+    write_batch(&mut part_file, &part, &mut batch).await?;
     flush_and_commit(&mut part_file, &part, &mut journal, &apdl, written).await?;
 
     if let Some(exp) = spec.expected_len()
@@ -221,9 +228,11 @@ pub(crate) async fn run(
                 phase: Phase::Verifying,
             },
         );
-        let mut got = [0u8; 32];
-        got.copy_from_slice(&h.finalize());
+        let got = digest_bytes(h);
         if got != exp {
+            // Drop the journal so a retry restarts from zero instead of re-hashing the same bad bytes;
+            // the .part survives for triage.
+            let _ = tokio::fs::remove_file(&apdl).await;
             return Err(FetchError::FileVerifyFailed {
                 expected: hex(&exp),
                 got: hex(&got),
@@ -231,17 +240,13 @@ pub(crate) async fn run(
         }
     }
 
-    // Publish: durable file, atomic rename, durable rename, drop the journal.
+    // Publish: durable file, then an atomic rename that replaces any existing dest in one step,
+    // then a directory fsync for rename durability, then drop the journal.
     part_file
         .sync_all()
         .await
         .map_err(|e| FetchError::io(&part, e))?;
     drop(part_file);
-    if tokio::fs::try_exists(dest).await.unwrap_or(false) {
-        tokio::fs::remove_file(dest)
-            .await
-            .map_err(|e| FetchError::io(dest, e))?;
-    }
     tokio::fs::rename(&part, dest)
         .await
         .map_err(|e| FetchError::io(dest, e))?;
@@ -283,14 +288,12 @@ async fn obtain_response(
                 req = req.header(IF_RANGE, header);
             }
         }
-        let resp = req.send().await.map_err(|e| net_error(spec.url(), e))?;
+        let resp = req.send().await.map_err(|e| connect_error(spec.url(), e))?;
         let status = resp.status().as_u16();
 
         if status == 200 {
             if *start > 0 {
-                reset_to_zero(part_file, part, hasher, journal).await?;
-                *start = 0;
-                *if_range = None;
+                reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
             }
             return Ok(resp);
         }
@@ -298,9 +301,7 @@ async fn obtain_response(
             return Ok(resp);
         }
         if (status == 206 || status == 416) && *start > 0 && attempt == 0 {
-            reset_to_zero(part_file, part, hasher, journal).await?;
-            *start = 0;
-            *if_range = None;
+            reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
             continue;
         }
         return Err(FetchError::Http {
@@ -341,9 +342,9 @@ async fn open_part(
             .await
             .map_err(|e| FetchError::io(part, e))?;
         let mut remaining = start;
-        let mut buf = vec![0u8; RESEED_CHUNK];
+        let mut buf = vec![0u8; READ_CHUNK];
         while remaining > 0 {
-            let want = usize::try_from(remaining.min(RESEED_CHUNK as u64)).unwrap_or(RESEED_CHUNK);
+            let want = usize::try_from(remaining.min(READ_CHUNK as u64)).unwrap_or(READ_CHUNK);
             let read = file
                 .read(&mut buf[..want])
                 .await
@@ -361,13 +362,15 @@ async fn open_part(
     Ok(file)
 }
 
-/// Truncate the `.part`, reset the running hash, and drop the journal so a fresh body streams from
-/// zero.
+/// Truncate the `.part`, reset the running hash, drop the journal, and clear the resume position, so
+/// a fresh body streams from zero.
 async fn reset_to_zero(
     part_file: &mut tokio::fs::File,
     part: &Path,
     hasher: &mut Option<Sha256>,
     journal: &mut Option<Journal>,
+    start: &mut u64,
+    if_range: &mut Option<Vec<u8>>,
 ) -> Result<(), FetchError> {
     part_file
         .set_len(0)
@@ -381,6 +384,24 @@ async fn reset_to_zero(
         *h = Sha256::new();
     }
     *journal = None;
+    *start = 0;
+    *if_range = None;
+    Ok(())
+}
+
+/// Flush the buffered batch to the part file.
+async fn write_batch(
+    part_file: &mut tokio::fs::File,
+    part: &Path,
+    batch: &mut Vec<u8>,
+) -> Result<(), FetchError> {
+    if !batch.is_empty() {
+        part_file
+            .write_all(batch)
+            .await
+            .map_err(|e| FetchError::io(part, e))?;
+        batch.clear();
+    }
     Ok(())
 }
 
@@ -407,6 +428,49 @@ async fn flush_and_commit(
             .map_err(|e| FetchError::io(apdl, e))?;
     }
     Ok(())
+}
+
+/// Whether an existing destination already satisfies the request: the declared length (if any) and,
+/// for a hashing validator, the whole-file digest. The digest is recomputed from disk so the skip
+/// never trusts a file's path as proof.
+async fn dest_satisfies(
+    dest: &Path,
+    len: u64,
+    expected_sha: Option<[u8; 32]>,
+    expected_len: Option<u64>,
+) -> Result<bool, FetchError> {
+    if expected_len.is_some_and(|n| n != len) {
+        return Ok(false);
+    }
+    match expected_sha {
+        None => Ok(true),
+        Some(expected) => Ok(hash_file(dest).await? == expected),
+    }
+}
+
+/// SHA256 a file on disk in bounded memory.
+async fn hash_file(path: &Path) -> Result<[u8; 32], FetchError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| FetchError::io(path, e))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; READ_CHUNK];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| FetchError::io(path, e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(digest_bytes(hasher))
+}
+
+/// Finalize a SHA256 into a fixed array.
+fn digest_bytes(hasher: Sha256) -> [u8; 32] {
+    hasher.finalize().into()
 }
 
 /// Whether a `206`'s `Content-Range` starts exactly where we resumed and (when known) reports the
@@ -446,9 +510,18 @@ async fn sync_parent_dir(path: &Path) {
     }
 }
 
-fn net_error(url: &Url, source: reqwest::Error) -> FetchError {
+/// A failure establishing the connection.
+fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
     FetchError::Connect {
         host: url.host_str().unwrap_or_default().to_owned(),
+        source: std::io::Error::other(source),
+    }
+}
+
+/// A failure after the connection was established (a mid-stream body error).
+fn transport_error(url: &Url, source: reqwest::Error) -> FetchError {
+    FetchError::Transport {
+        url: url.clone(),
         source: std::io::Error::other(source),
     }
 }
@@ -468,8 +541,7 @@ fn emit(progress: &Option<mpsc::UnboundedSender<Progress>>, event: Progress) {
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        out.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
+        let _ = write!(out, "{b:02x}");
     }
     out
 }
