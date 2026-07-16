@@ -112,4 +112,5 @@ is tagged with its change type. Versioning aims to follow
 - Regenerate changelog _(miscellaneous)_
 - Regenerate changelog _(miscellaneous)_
 - Regenerate changelog _(miscellaneous)_
+- Regenerate changelog _(miscellaneous)_
 
