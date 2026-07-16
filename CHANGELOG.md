@@ -6,6 +6,11 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### workspace
+- Roll -pre checkpoint tags into the next release's changelog _(ci)_
+- Scope release notes and prerelease flag to the tag kind _(ci)_
+## [0.1.0] - 2026-07-16
+
 ### apogee-addons
 - Stub the async Injectable seam, and add async-trait to the workspace _(added)_
 
