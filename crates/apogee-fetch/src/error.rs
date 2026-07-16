@@ -44,6 +44,16 @@ pub enum FetchError {
         source: std::io::Error,
     },
 
+    /// The transfer failed after the connection was established: a dropped connection, a read error,
+    /// or a TLS error while streaming the response body. Distinct from [`Connect`](FetchError::Connect)
+    /// so a mid-stream drop is not mistaken for an unreachable host.
+    #[error("transport error for {url}")]
+    Transport {
+        url: Url,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The server answered with a status the download cannot accept.
     #[error("http {status} for {url}")]
     Http { status: u16, url: Url },

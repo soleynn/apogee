@@ -45,9 +45,7 @@ impl Validator {
             }
             Validator::None => hasher.update([0x00]),
         }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&hasher.finalize());
-        out
+        hasher.finalize().into()
     }
 }
 

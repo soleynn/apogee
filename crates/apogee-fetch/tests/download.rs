@@ -166,7 +166,7 @@ async fn a_dropped_connection_resumes_from_the_journal() {
         .download(&spec, None, CancellationToken::new())
         .await
         .unwrap_err();
-    assert!(matches!(err, FetchError::Connect { .. }));
+    assert!(matches!(err, FetchError::Transport { .. }));
     assert!(!dest.exists());
 
     let verified = downloader
