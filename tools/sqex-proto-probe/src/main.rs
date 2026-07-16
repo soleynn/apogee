@@ -3,14 +3,28 @@
 //! Drives `sqex-proto`'s OAuth flow against live Square Enix servers with a real account, recording
 //! each raw request/response into `target/capture/<scenario>/` so a genuine login can be sanitized into
 //! test fixtures. It runs one successful login and one deliberate wrong-password login (to capture the
-//! failure page), printing each step's shape without ever printing or persisting the session id.
+//! failure page), printing each step's shape without ever printing or persisting the session id, the
+//! TOTP secret, or the generated code.
 //!
-//! Reads `SQEX_ID` and `SQEX_PASSWORD` from the process environment or a `.env` file in the working
-//! directory. Never run in CI: it needs a real account and a network. Run from the repo root:
+//! Reads from the process environment or a `.env` file in the working directory:
+//!
+//! - `SQEX_ID`, `SQEX_PASSWORD` (required).
+//! - `SQEX_TOTP_SECRET` (optional): a base32 setup key or an `otpauth://` URI for a 2FA account. When
+//!   set, the probe generates the current 6-digit SHA-1/30 s code **at the server's `Date` time** (the
+//!   clock-skew-corrected path) and submits it, capturing the success under `target/capture/otp/`.
+//! - `SQEX_OTP` (optional): a manually-typed 6-digit code, used only when `SQEX_TOTP_SECRET` is unset.
+//!   Codes expire in 30 s, so this is racy; the secret is preferred.
+//!
+//! With no OTP configured it behaves as before (plain `success` scenario), so it still works on a
+//! no-2FA account. Never run in CI: it needs a real account and a network. Run from the repo root:
 //!
 //! ```text
 //! cargo run --manifest-path tools/sqex-proto-probe/Cargo.toml
 //! ```
+//!
+//! Sanitizing a capture into a fixture: keep the response bodies, replace the session id and `_STORED_`
+//! blob with same-shape fakes, and delete the `*-request.txt` files (they carry the password and the
+//! OTP code). The whole `target/capture/` tree is gitignored.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,14 +35,26 @@ use sqex_proto::{
     begin_login, ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext,
     ProtoError, ProtoRequest, ProtoResponse, Transport, TransportError,
 };
+use totp_rs::{Algorithm, Secret, TOTP};
 
 const CAPTURE_ROOT: &str = "target/capture";
+
+/// Where a scenario's one-time password comes from.
+enum OtpPlan {
+    /// No 2FA: submit an empty `otppw` (the original behavior).
+    None,
+    /// A code typed by the operator, submitted verbatim (no skew correction).
+    Manual(String),
+    /// A TOTP secret the probe generates a code from, at server time.
+    Totp(Vec<u8>),
+}
 
 #[tokio::main]
 async fn main() {
     load_dotenv();
     let sqexid = env_or_die("SQEX_ID");
     let password = env_or_die("SQEX_PASSWORD");
+    let otp_plan = resolve_otp_plan();
 
     let client = reqwest::Client::builder()
         .gzip(true)
@@ -36,15 +62,33 @@ async fn main() {
         .build()
         .expect("build http client");
 
-    // One real login, captured as the success fixtures.
-    run_login(&client, "success", &sqexid, &password).await;
+    // The success capture: `otp` when 2FA is configured (the fixture we need), else the plain
+    // no-OTP login so the probe still works on a no-2FA account.
+    match otp_plan {
+        OtpPlan::None => run_login(&client, "success", &sqexid, &password, &OtpPlan::None).await,
+        _ => run_login(&client, "otp", &sqexid, &password, &otp_plan).await,
+    }
+
     // One deliberate wrong password, captured as the failure fixture. Derived from the real one (so it
-    // is not a hard-coded secret) and guaranteed to differ. A single attempt, no retries.
+    // is not a hard-coded secret) and guaranteed to differ. A single attempt, no retries, no OTP.
     let wrong_password = format!("{password}-invalid");
-    run_login(&client, "wrong_password", &sqexid, &wrong_password).await;
+    run_login(
+        &client,
+        "wrong_password",
+        &sqexid,
+        &wrong_password,
+        &OtpPlan::None,
+    )
+    .await;
 }
 
-async fn run_login(client: &reqwest::Client, scenario: &str, sqexid: &str, password: &str) {
+async fn run_login(
+    client: &reqwest::Client,
+    scenario: &str,
+    sqexid: &str,
+    password: &str,
+    otp_plan: &OtpPlan,
+) {
     let transport = RecordingTransport::new(client.clone(), Path::new(CAPTURE_ROOT).join(scenario));
 
     // Fixed synthetic identity: the captures carry no real machine data.
@@ -79,12 +123,45 @@ async fn run_login(client: &reqwest::Client, scenario: &str, sqexid: &str, passw
     };
     println!("[{scenario}] server date: {:?}", flow.server_date());
 
+    // Build the OTP code from the plan. For TOTP, generate at the server's `Date` time so a skewed
+    // local clock cannot desync the code. The code is never printed.
+    let code = match otp_plan {
+        OtpPlan::None => None,
+        OtpPlan::Manual(code) => {
+            println!("[{scenario}] submitting an operator-supplied code (no skew correction)");
+            Some(code.clone())
+        }
+        OtpPlan::Totp(secret) => {
+            let local = utc_unix();
+            let base = match flow.server_date().and_then(parse_http_date) {
+                Some(server) => {
+                    println!(
+                        "[{scenario}] clock skew vs server: {}s (generating at server time)",
+                        server as i64 - local as i64
+                    );
+                    server
+                }
+                None => {
+                    println!("[{scenario}] no usable server Date; generating at local time");
+                    local
+                }
+            };
+            let totp = TOTP::new_unchecked(Algorithm::SHA1, 6, 1, 30, secret.clone());
+            let generated = totp.generate(base);
+            println!(
+                "[{scenario}] otp code generated (redacted, {} digits)",
+                generated.len()
+            );
+            Some(generated)
+        }
+    };
+
     println!("[{scenario}] submitting credentials");
     match flow
         .submit(Credentials {
             sqexid,
             password,
-            otp: None,
+            otp: code.as_deref(),
         })
         .await
     {
@@ -102,6 +179,39 @@ async fn run_login(client: &reqwest::Client, scenario: &str, sqexid: &str, passw
         Err(err) => println!("[{scenario}] submit failed: {err}"),
     }
     println!("[{scenario}] capture written under {CAPTURE_ROOT}/{scenario}");
+}
+
+/// Resolve the OTP source from the environment, preferring a stored secret over a typed code.
+fn resolve_otp_plan() -> OtpPlan {
+    if let Some(raw) = env_opt("SQEX_TOTP_SECRET") {
+        let base32 = extract_base32_secret(&raw);
+        match Secret::Encoded(base32).to_bytes() {
+            Ok(bytes) => return OtpPlan::Totp(bytes),
+            Err(err) => {
+                eprintln!("SQEX_TOTP_SECRET is not a valid base32 secret: {err:?}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if let Some(code) = env_opt("SQEX_OTP") {
+        return OtpPlan::Manual(code);
+    }
+    OtpPlan::None
+}
+
+/// Pull the base32 secret out of an `otpauth://` URI, or accept a raw setup key (spaces stripped,
+/// upper-cased). If a URI carries no `secret=`, the whole string falls through and fails to decode.
+fn extract_base32_secret(input: &str) -> String {
+    let input = input.trim();
+    let raw = if input.starts_with("otpauth://") {
+        input
+            .split(['?', '&'])
+            .find_map(|kv| kv.strip_prefix("secret="))
+            .unwrap_or(input)
+    } else {
+        input
+    };
+    raw.replace(' ', "").to_uppercase()
 }
 
 /// A [`Transport`] over reqwest that records every exchange to disk for later sanitizing.
@@ -133,8 +243,8 @@ impl Transport for RecordingTransport {
         };
         let stem = format!("{seq:02}-{label}");
 
-        // The request body can contain the password, so this whole directory is gitignored and never
-        // committed; only the sanitized response bodies become fixtures.
+        // The request body can contain the password and the OTP code, so this whole directory is
+        // gitignored and never committed; only the sanitized response bodies become fixtures.
         std::fs::write(
             self.dir.join(format!("{stem}-request.txt")),
             render_request(&req),
@@ -232,13 +342,75 @@ fn load_dotenv() {
 }
 
 fn env_or_die(key: &str) -> String {
-    match std::env::var(key) {
-        Ok(value) if !value.is_empty() => value,
-        _ => {
+    match env_opt(key) {
+        Some(value) => value,
+        None => {
             eprintln!("set {key} in the environment or a .env file in the working directory");
             std::process::exit(2);
         }
     }
+}
+
+/// A non-empty environment variable, or `None`.
+fn env_opt(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => None,
+    }
+}
+
+/// Seconds since the Unix epoch, for the skew comparison.
+fn utc_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Parse an HTTP-date (`Wed, 09 Jul 2025 12:00:00 GMT`, RFC 7231 IMF-fixdate) to Unix seconds. Returns
+/// `None` on anything that does not match that fixed shape.
+fn parse_http_date(s: &str) -> Option<u64> {
+    let (_weekday, rest) = s.trim().split_once(", ")?;
+    let mut fields = rest.split(' ');
+    let day: i64 = fields.next()?.parse().ok()?;
+    let month = month_num(fields.next()?)?;
+    let year: i64 = fields.next()?.parse().ok()?;
+    let mut time = fields.next()?.split(':');
+    let hour: u64 = time.next()?.parse().ok()?;
+    let minute: u64 = time.next()?.parse().ok()?;
+    let second: u64 = time.next()?.parse().ok()?;
+    let days = days_from_civil(year, month, day);
+    Some(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn month_num(name: &str) -> Option<i64> {
+    Some(match name {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    })
+}
+
+/// Days since the Unix epoch for a civil date (Howard Hinnant's `days_from_civil`, the inverse of the
+/// `civil_from_days` in [`utc_now`]).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// The current UTC broken down into launcher-time parts, via the civil-from-days algorithm (no date
