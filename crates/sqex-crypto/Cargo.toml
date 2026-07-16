@@ -9,6 +9,11 @@ license.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
+# The host monotonic clock read; Linux-only so the windows-gnu cross-build never pulls rustix's `time`
+# backend (unimplemented there). The tick source is a `todo!()` stub off Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["time"] }
+
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
 insta.workspace = true
