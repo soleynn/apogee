@@ -143,6 +143,35 @@ fn rejects_a_malformed_block_hash() {
 }
 
 #[test]
+fn rejects_an_entry_with_too_few_fields() {
+    // Five tab fields: one short of the six a boot entry needs.
+    let bad = "1\t0\t0\t0\tD2024.01.01.0000.0000";
+    let err = parse_patch_list(&envelope(&[bad])).unwrap_err();
+    assert!(matches!(
+        err,
+        ProtoError::PatchListParse {
+            reason: "too few tab-separated fields",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rejects_a_non_numeric_hash_block_size() {
+    // A nine-field game entry whose block-size field (index 6) is not a number.
+    let bad =
+        format!("10\t0\t0\t0\tD2024\tsha1\tnotanumber\t{TWO_HASHES}\thttp://x/game/y/z.patch");
+    let err = parse_patch_list(&envelope(&[bad.as_str()])).unwrap_err();
+    assert!(matches!(
+        err,
+        ProtoError::PatchListParse {
+            reason: "invalid hash block size",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn reports_the_one_based_line_of_a_bad_entry() {
     // preamble is lines 1-5; entries at 6, 7, 8; the bad one is line 8.
     let good = boot_entry(1, "D1", "http://x/boot/y/a.patch");
