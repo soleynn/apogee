@@ -11,6 +11,7 @@ use apogee_secrets::Secrets;
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use uuid::Uuid;
 
 use crate::command::{Command, Event};
 use crate::error::CoreError;
@@ -57,7 +58,6 @@ impl CoreConfig {
             patch_store: xdg_dir("XDG_CACHE_HOME", ".cache").join("apogee/patches"),
         }
     }
-
 }
 
 /// Resolve an XDG base directory from `var`, falling back to `$HOME/<fallback>`.
@@ -177,32 +177,41 @@ impl Core {
         Ok(self.store.save_settings(settings)?)
     }
 
+    /// Persist `profile`, keyed by its id.
+    ///
+    /// # Errors
+    /// Returns a [`CoreError::Store`] if the profile cannot be written.
+    pub fn save_profile(&self, profile: &Profile) -> Result<(), CoreError> {
+        Ok(self.store.save_profile(profile)?)
+    }
+
+    /// Delete the profile with `id`.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, or a [`CoreError::Store`] on an IO
+    /// failure.
+    pub fn delete_profile(&self, id: Uuid) -> Result<(), CoreError> {
+        self.store.delete_profile(id).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoProfile(id),
+            other => other.into(),
+        })
+    }
+
     /// Run `cmd`, yielding the events it produces.
     ///
-    /// Profile queries and mutations run against the store and surface only failures as events; the
-    /// login-to-play flows are not yet built.
+    /// `execute` drives the async login-to-play flows; synchronous store CRUD is the direct methods
+    /// above (`profiles`, `save_profile`, `settings`, ...), not a command. The flow arms are stubbed
+    /// until they land in a later change.
     pub fn execute(&self, cmd: Command) -> impl Stream<Item = Event> + Unpin {
         let (tx, rx) = mpsc::unbounded_channel();
+        self.run(cmd, tx);
+        UnboundedReceiverStream::new(rx)
+    }
+
+    /// Drive `cmd`'s flow, emitting events on `_tx`. Every arm is a login-to-play flow that lands in a
+    /// later change, at which point `_tx` carries its state and progress.
+    fn run(&self, cmd: Command, _tx: mpsc::UnboundedSender<Event>) {
         match cmd {
-            Command::ListProfiles => {
-                if let Err(e) = self.store.list_profiles() {
-                    let _ = tx.send(Event::Error(e.into()));
-                }
-            }
-            Command::SaveProfile(profile) => {
-                if let Err(e) = self.store.save_profile(&profile) {
-                    let _ = tx.send(Event::Error(e.into()));
-                }
-            }
-            Command::DeleteProfile(id) => {
-                if let Err(e) = self.store.delete_profile(id) {
-                    let event = match e {
-                        StoreError::NotFound { .. } => CoreError::NoProfile(id),
-                        other => other.into(),
-                    };
-                    let _ = tx.send(Event::Error(event));
-                }
-            }
             Command::Login { .. } => todo!("orchestrate the login-to-play flow"),
             Command::PatchAndPlay { .. } => todo!("run preflight, patch, then launch the game"),
             Command::Repair { .. } => todo!("verify and repair the installation"),
@@ -211,6 +220,5 @@ impl Core {
             Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
             Command::SupportBundle => todo!("collect a redacted diagnostic bundle"),
         }
-        UnboundedReceiverStream::new(rx)
     }
 }
