@@ -8,9 +8,10 @@
 
 use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError};
 
-/// A reqwest-backed [`Transport`]: a pooled client with dual-stack dialing.
+/// A reqwest-backed [`Transport`]: a pooled client with dual-stack dialing. Internal wiring: the
+/// composition root is the only place a concrete transport is assembled, so this type is not exported.
 #[derive(Debug, Clone)]
-pub struct HttpTransport {
+pub(crate) struct HttpTransport {
     // Held for the request path that lands with the login flow.
     #[allow(dead_code)]
     client: reqwest::Client,
@@ -19,7 +20,7 @@ pub struct HttpTransport {
 impl HttpTransport {
     /// Wrap a configured reqwest client.
     #[must_use]
-    pub fn new(client: reqwest::Client) -> Self {
+    pub(crate) fn new(client: reqwest::Client) -> Self {
         Self { client }
     }
 }
