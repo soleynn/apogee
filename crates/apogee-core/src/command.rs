@@ -10,16 +10,14 @@ use apogee_otp::OtpSource;
 use uuid::Uuid;
 
 use crate::error::CoreError;
-use crate::model::Profile;
 
 /// A request from a shell to the core.
+///
+/// These are the async, event-emitting flows. Synchronous store CRUD (list/save/delete profiles,
+/// load/save settings) is the direct methods on [`Core`](crate::Core), not a command.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Command {
-    ListProfiles,
-    /// Boxed because a profile is far larger than any other command payload.
-    SaveProfile(Box<Profile>),
-    DeleteProfile(Uuid),
     /// Log in with the given profile's account, sourcing the one-time password as specified.
     Login {
         profile: Uuid,
