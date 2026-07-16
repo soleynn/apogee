@@ -20,5 +20,9 @@ bytes.workspace = true
 http.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+# Drives the chaos server in its own self-test.
+reqwest.workspace = true
+
 [lints]
 workspace = true
