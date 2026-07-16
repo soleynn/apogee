@@ -24,5 +24,4 @@ pub use model::{
     RunnerSelection, Settings,
 };
 pub use store::StoreError;
-pub use transport::HttpTransport;
 pub use uuid::Uuid;
