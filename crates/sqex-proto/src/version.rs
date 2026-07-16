@@ -134,7 +134,7 @@ impl VersionReport {
     /// Assemble a report from its already-read parts. Pure: no filesystem, no sanity checks (callers
     /// reading from disk go through [`VersionReport::from_install`], which gates on sanity first).
     ///
-    /// `exe_hashes` is `(byte length, lowercase-hex SHA1)` for the four boot EXEs in [`BOOT_EXES`]
+    /// `exe_hashes` is `(byte length, lowercase-hex SHA1)` for the four boot EXEs in `BOOT_EXES`
     /// order; `expansions` is the `ex{n}.ver` contents, expansion 1 first. The body always ends with a
     /// line feed, matching the reference launcher.
     #[must_use]
@@ -166,7 +166,7 @@ impl VersionReport {
     ///
     /// The crate's only filesystem access: read-only and synchronous, run before any request. Every
     /// `.ver` and any present `.bck` consulted must pass the sanity gate, or this is a repairable
-    /// [`ProtoError::InvalidVersionFiles`] and no report is produced. Expansions above [`MAX_EXPANSION`]
+    /// [`ProtoError::InvalidVersionFiles`] and no report is produced. Expansions above `MAX_EXPANSION`
     /// are ignored (the report carries at most that many).
     pub fn from_install(paths: &InstallPaths, max_expansion: u8) -> Result<Self, ProtoError> {
         let expansions = max_expansion.min(MAX_EXPANSION);
@@ -196,20 +196,19 @@ impl VersionReport {
     }
 }
 
-/// Read a required `.ver` file, gate it on sanity, and return its verbatim contents (embedded into the
+/// Read a required `.ver` file, gate it on sanity, and return its decoded contents (embedded into the
 /// report unchanged). A missing or unreadable file is a repairable fault, never a base-version fallback.
 fn read_sane_ver(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
-    let bytes = read_file(path, repo)?;
-    check_sanity(&bytes).map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind })?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let text = decode_ver(&read_file(path, repo)?);
+    check_sanity(&text).map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind })?;
+    Ok(text)
 }
 
 /// Sanity-check a `.bck` backup only when it is present; an absent backup is the normal healthy state.
 fn check_bck(path: &Path, repo: VersionRepo) -> Result<(), ProtoError> {
     match std::fs::read(path) {
-        Ok(bytes) => {
-            check_sanity(&bytes).map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind })
-        }
+        Ok(bytes) => check_sanity(&decode_ver(&bytes))
+            .map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind }),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(_) => Err(ProtoError::InvalidVersionFiles {
             repo,
@@ -218,7 +217,7 @@ fn check_bck(path: &Path, repo: VersionRepo) -> Result<(), ProtoError> {
     }
 }
 
-/// SHA1-hash the four boot EXEs into `(byte length, lowercase-hex digest)` pairs in [`BOOT_EXES`]
+/// SHA1-hash the four boot EXEs into `(byte length, lowercase-hex digest)` pairs in `BOOT_EXES`
 /// order. A missing or unreadable EXE is a repairable boot-repository fault, matching the `.ver`
 /// treatment (the reference launcher instead throws on a missing EXE). EXE contents are hashed as-is,
 /// never sanity-checked.
@@ -249,13 +248,20 @@ fn read_file(path: &Path, repo: VersionRepo) -> Result<Vec<u8>, ProtoError> {
     }
 }
 
-/// The version-file content gate: not empty/whitespace, no embedded line feed (`\n` only, not `\r`),
-/// and not all-NUL. Mirrors the reference launcher's `IsBadVersionSanity` content checks.
-fn check_sanity(bytes: &[u8]) -> Result<(), SanityKind> {
-    if !bytes.is_empty() && bytes.iter().all(|&b| b == 0) {
+/// Decode a version file's bytes to text the way the reference launcher does: lossy UTF-8 with a single
+/// leading byte-order mark stripped (`File.ReadAllText` consumes a BOM). The result is what the report
+/// embeds and what the sanity gate inspects, so both stay byte-identical to the oracle.
+fn decode_ver(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned()
+}
+
+/// The version-file content gate, over the decoded text: not empty/whitespace, no embedded line feed
+/// (`\n` only, not `\r`), and not all-NUL. Mirrors the reference launcher's `IsBadVersionSanity`.
+fn check_sanity(text: &str) -> Result<(), SanityKind> {
+    if !text.is_empty() && text.bytes().all(|b| b == 0) {
         return Err(SanityKind::AllNul);
     }
-    let text = String::from_utf8_lossy(bytes);
     if text.trim().is_empty() {
         return Err(SanityKind::Empty);
     }
@@ -324,15 +330,32 @@ mod tests {
 
     #[test]
     fn sanity_flags_empty_whitespace_newline_and_all_nul_but_not_lone_cr() {
-        assert_eq!(check_sanity(b""), Err(SanityKind::Empty));
-        assert_eq!(check_sanity(b"   \t"), Err(SanityKind::Empty));
+        assert_eq!(check_sanity(""), Err(SanityKind::Empty));
+        assert_eq!(check_sanity("   \t"), Err(SanityKind::Empty));
         assert_eq!(
-            check_sanity(b"2024.01.01.0000.0000\n"),
+            check_sanity("2024.01.01.0000.0000\n"),
             Err(SanityKind::ContainsNewline)
         );
-        assert_eq!(check_sanity(&[0, 0, 0]), Err(SanityKind::AllNul));
+        assert_eq!(check_sanity("\u{0}\u{0}\u{0}"), Err(SanityKind::AllNul));
         // A lone trailing CR is not a newline to the gate; the value passes and is embedded verbatim.
-        assert_eq!(check_sanity(b"2024.01.01.0000.0000\r"), Ok(()));
-        assert_eq!(check_sanity(b"2024.01.01.0000.0000"), Ok(()));
+        assert_eq!(check_sanity("2024.01.01.0000.0000\r"), Ok(()));
+        assert_eq!(check_sanity("2024.01.01.0000.0000"), Ok(()));
+    }
+
+    #[test]
+    fn decode_ver_strips_one_leading_bom() {
+        // The reference launcher's File.ReadAllText consumes a UTF-8 BOM, so a BOM-prefixed .ver embeds
+        // without it (a byte-identity concern for the report body and the gamever URL segment). A bare
+        // BOM decodes to empty and is then caught by the sanity gate.
+        assert_eq!(
+            decode_ver(b"\xef\xbb\xbf2024.01.01.0000.0000"),
+            "2024.01.01.0000.0000"
+        );
+        assert_eq!(decode_ver(b"2024.01.01.0000.0000"), "2024.01.01.0000.0000");
+        assert_eq!(decode_ver(b"\xef\xbb\xbf"), "");
+        assert_eq!(
+            check_sanity(&decode_ver(b"\xef\xbb\xbf")),
+            Err(SanityKind::Empty)
+        );
     }
 }
