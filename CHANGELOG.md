@@ -6,9 +6,23 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-fetch
+- Carve the download types into modules and reject unverified plain http _(added)_
+- Stream, verify, and resume single-connection downloads _(added)_
+- Pin resume waste, streaming memory, and the verified-file seal _(testing)_
+- Re-verify existing files, harden failure paths, buffer writes _(fixed)_
+- Cover resume-off, short part, 416, last-modified, and skip edges _(testing)_
+- Cover unverified downloads over TLS _(testing)_
+
+### apogee-test-support
+- Add a scriptable streaming test http server _(added)_
+
 ### workspace
 - Roll -pre checkpoint tags into the next release's changelog _(ci)_
 - Scope release notes and prerelease flag to the tag kind _(ci)_
+- Add streaming-download and test-server dependencies _(build)_
+- Update time past RUSTSEC-2026-0009 _(build)_
+- Use is_multiple_of in the base64 length check _(styling)_
 ## [0.1.0] - 2026-07-16
 
 ### apogee-addons
