@@ -108,4 +108,8 @@ is tagged with its change type. Versioning aims to follow
 - Regenerate the changelog on every merge to main _(ci)_
 - Auto-commit the regenerated changelog to each PR branch _(ci)_
 - Stop the changelog workflow from looping on its own commits _(ci)_
+- Regenerate the changelog on merge to main via an app token _(ci)_
+- Note where cliff.toml is regenerated _(documentation)_
+- Scope the changelog app token to contents:write _(ci)_
+- Ignore common editor and IDE files _(miscellaneous)_
 
