@@ -107,4 +107,5 @@ is tagged with its change type. Versioning aims to follow
 - Group the changelog by crate and catch it up _(miscellaneous)_
 - Regenerate the changelog on every merge to main _(ci)_
 - Auto-commit the regenerated changelog to each PR branch _(ci)_
+- Stop the changelog workflow from looping on its own commits _(ci)_
 
