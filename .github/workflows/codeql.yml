@@ -31,6 +31,14 @@ jobs:
         with:
           languages: rust
           build-mode: none
+          # Test code carries fixture credentials by design (fake passwords, session ids, a fixed test
+          # signing key); exclude it so those are not flagged as hard-coded secrets. Product code is
+          # still fully analyzed.
+          config: |
+            paths-ignore:
+              - '**/tests.rs'
+              - '**/tests/**'
+              - crates/apogee-test-support/**
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
