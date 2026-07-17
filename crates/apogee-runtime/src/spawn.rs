@@ -66,6 +66,9 @@ pub(crate) fn build_command(
     let mut cmd = Command::new(exe);
     cmd.args(rest);
     apply_env(&mut cmd, plan, prefix, runner.kind());
+    if let Some(working_dir) = plan.working_dir_ref() {
+        cmd.current_dir(working_dir);
+    }
     cmd.kill_on_drop(false);
     Ok(cmd)
 }
@@ -157,4 +160,62 @@ fn which(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|p| p.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+    use crate::plan::{Prefix, RunnerHandle};
+
+    #[test]
+    fn build_command_sets_the_working_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // A custom runner needs a resolvable `wine` binary for the command to build.
+        let runner_dir = tmp.path().join("runner");
+        std::fs::create_dir_all(runner_dir.join("bin")).unwrap();
+        let wine = runner_dir.join("bin/wine");
+        std::fs::write(&wine, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let working = tmp.path().join("game");
+        std::fs::create_dir_all(&working).unwrap();
+
+        let runner = RunnerHandle {
+            dir: runner_dir,
+            kind: RunnerKind::Custom,
+            name: "test".to_owned(),
+        };
+        let prefix = Prefix::new(tmp.path().join("prefix"), runner);
+        let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new())
+            .prefix(&prefix)
+            .working_dir(&working);
+
+        let cmd = build_command(&plan, None).unwrap();
+        assert_eq!(cmd.as_std().get_current_dir(), Some(working.as_path()));
+    }
+
+    #[test]
+    fn build_command_leaves_the_working_directory_unset_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner_dir = tmp.path().join("runner");
+        std::fs::create_dir_all(runner_dir.join("bin")).unwrap();
+        let wine = runner_dir.join("bin/wine");
+        std::fs::write(&wine, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = RunnerHandle {
+            dir: runner_dir,
+            kind: RunnerKind::Custom,
+            name: "test".to_owned(),
+        };
+        let prefix = Prefix::new(tmp.path().join("prefix"), runner);
+        let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
+
+        let cmd = build_command(&plan, None).unwrap();
+        assert_eq!(cmd.as_std().get_current_dir(), None);
+    }
 }
