@@ -17,6 +17,12 @@ mod extract;
 mod install;
 mod plan;
 mod progress;
+#[cfg(target_os = "linux")]
+mod session;
+#[cfg(target_os = "linux")]
+mod spawn;
+#[cfg(target_os = "linux")]
+mod supervise;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,8 +36,12 @@ pub use catalog::{
 pub use error::{CatalogError, HealthIssue, HostTool, RuntimeError, SetupStep};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
+#[cfg(not(target_os = "linux"))]
+pub use non_linux::{GameExit, GameSession};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{Progress, RuntimeEvent};
+#[cfg(target_os = "linux")]
+pub use session::{GameExit, GameSession};
 
 /// Where the runtime stores runners and prefixes.
 #[derive(Debug, Clone, Default)]
@@ -132,6 +142,92 @@ impl Runtime {
         let tools = self.tools_dir();
         install::install_tool(&self.inner.fetcher, tool, &tools, cancel, progress).await
     }
+
+    /// Adopt an existing runner directory (bring-your-own wine/Proton) as a prepared prefix, with no
+    /// download. The runner directory must already exist.
+    pub async fn prepare_custom(
+        &self,
+        runner_dir: &std::path::Path,
+        kind: RunnerKind,
+        name: impl Into<String>,
+        prefix_dir: &std::path::Path,
+    ) -> Result<Prefix, RuntimeError> {
+        let name = name.into();
+        if !runner_dir.is_dir() {
+            return Err(RuntimeError::RunnerUnavailable {
+                name,
+                version: "custom".to_owned(),
+            });
+        }
+        tokio::fs::create_dir_all(prefix_dir)
+            .await
+            .map_err(|source| RuntimeError::Io {
+                path: prefix_dir.to_path_buf(),
+                source,
+            })?;
+        let handle = crate::plan::RunnerHandle {
+            dir: runner_dir.to_path_buf(),
+            kind,
+            name,
+        };
+        Ok(Prefix::new(prefix_dir.to_path_buf(), handle))
+    }
+
+    /// Spawn the game through the runner and supervise it, resolving once the real game process
+    /// appears in `/proc`. The returned session tracks the game, not the wrapper.
+    pub async fn launch(
+        &self,
+        plan: LaunchPlan,
+        cancel: &tokio_util::sync::CancellationToken,
+        progress: &Progress,
+    ) -> Result<GameSession, RuntimeError> {
+        let prefix = plan.prefix_ref().ok_or(RuntimeError::Unsupported {
+            what: "launch plan has no prefix",
+        })?;
+        let runner_name = prefix.runner().name().to_owned();
+        let umu = if prefix.runner().kind() == RunnerKind::ProtonUmu {
+            spawn::resolve_umu(&self.tools_dir())
+        } else {
+            None
+        };
+        let mut command = spawn::build_command(&plan, umu.as_deref())?;
+
+        progress.emit(RuntimeEvent::Spawning {
+            runner: runner_name.clone(),
+        });
+        let mut child = command.spawn().map_err(|source| RuntimeError::Spawn {
+            runner: runner_name,
+            source,
+        })?;
+
+        let program = plan.program().to_owned();
+        let basename = std::path::Path::new(&program)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(program.as_str());
+        match supervise::resolve_game(basename, prefix.path(), cancel).await {
+            Ok(pid) => {
+                // Detach the wrapper; tokio reaps it on exit. The game is tracked by pid.
+                drop(child);
+                progress.emit(RuntimeEvent::GameResolved { pid });
+                Ok(GameSession::new(pid, prefix.clone()))
+            }
+            Err(e) => {
+                let _ = child.start_kill();
+                Err(e)
+            }
+        }
+    }
+
+    /// Kill everything in a prefix (`wineserver -k`). Separate and explicit: never the default stop.
+    pub async fn kill_prefix(&self, prefix: &Prefix) -> Result<(), RuntimeError> {
+        let umu = if prefix.runner().kind() == RunnerKind::ProtonUmu {
+            spawn::resolve_umu(&self.tools_dir())
+        } else {
+            None
+        };
+        spawn::kill_prefix(prefix, umu).await
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -172,8 +268,80 @@ impl Runtime {
             what: "runner management is Linux-only at this phase",
         })
     }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn prepare_custom(
+        &self,
+        _runner_dir: &std::path::Path,
+        _kind: RunnerKind,
+        _name: impl Into<String>,
+        _prefix_dir: &std::path::Path,
+    ) -> Result<Prefix, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn launch(
+        &self,
+        _plan: LaunchPlan,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _progress: &Progress,
+    ) -> Result<GameSession, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn kill_prefix(&self, _prefix: &Prefix) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
 }
 
-/// A resolved, running game process, handed to injectables' `attach`.
-#[derive(Debug)]
-pub struct GameSession {/* pid + handles not yet modeled */}
+/// Cross-platform stand-ins for the game session types on non-Linux targets, where the runner
+/// surface is inert.
+#[cfg(not(target_os = "linux"))]
+mod non_linux {
+    /// An opaque game-exit marker (see the Linux implementation).
+    #[derive(Debug, Clone)]
+    #[non_exhaustive]
+    pub struct GameExit {}
+
+    /// A supervised game process. Constructed only by the Linux launch path; here it is uninhabited
+    /// (`launch` returns `Unsupported`), so it exists solely to satisfy cross-platform consumers.
+    pub struct GameSession(std::convert::Infallible);
+
+    impl GameSession {
+        /// The unix PID of the game process.
+        #[must_use]
+        pub fn game_pid(&self) -> i32 {
+            match self.0 {}
+        }
+
+        /// The prefix the game runs in.
+        #[must_use]
+        pub fn prefix(&self) -> &crate::Prefix {
+            match self.0 {}
+        }
+
+        /// Resolve when the game exits.
+        pub async fn wait(&self) -> Result<GameExit, crate::RuntimeError> {
+            match self.0 {}
+        }
+
+        /// Targeted kill of the game process.
+        pub async fn kill(&self) -> Result<(), crate::RuntimeError> {
+            match self.0 {}
+        }
+    }
+
+    impl std::fmt::Debug for GameSession {
+        fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {}
+        }
+    }
+}

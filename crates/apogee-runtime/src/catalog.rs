@@ -354,7 +354,10 @@ mod tests {
         let runner = cat.runner("UMU-Proton", "9-20").expect("runner present");
         assert_eq!(runner.kind, RunnerKind::ProtonUmu);
         assert_eq!(runner.archive.format, ArchiveFormat::TarGz);
-        assert_eq!(runner.archive.strip_prefix.as_deref(), Some("UMU-Proton-9-20"));
+        assert_eq!(
+            runner.archive.strip_prefix.as_deref(),
+            Some("UMU-Proton-9-20")
+        );
         assert!(cat.tool("umu-launcher").is_some());
     }
 
@@ -376,8 +379,7 @@ mod tests {
         let sig = sign_manifest(json.as_bytes());
         // The compiled-in placeholder key is a different key than the test signer.
         let other = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).expect("placeholder key parses");
-        let err =
-            Catalog::parse_and_verify(json.as_bytes(), &sig, &other).expect_err("wrong key");
+        let err = Catalog::parse_and_verify(json.as_bytes(), &sig, &other).expect_err("wrong key");
         assert!(matches!(err, CatalogError::BadSignature));
     }
 
@@ -426,7 +428,11 @@ mod tests {
 
     #[test]
     fn malformed_json_is_a_typed_error_not_a_panic() {
-        for bytes in [b"".as_slice(), b"not json".as_slice(), b"{\"version\":".as_slice()] {
+        for bytes in [
+            b"".as_slice(),
+            b"not json".as_slice(),
+            b"{\"version\":".as_slice(),
+        ] {
             let err = Catalog::from_json_bytes(bytes).expect_err("malformed");
             assert!(matches!(err, CatalogError::Malformed(_)));
         }

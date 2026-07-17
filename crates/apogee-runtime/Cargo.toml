@@ -23,10 +23,20 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 lzma-rs = { workspace = true }
 ruzstd = { workspace = true }
+# /proc reads via std::fs; pidfd + signals via rustix, keeping #![forbid(unsafe_code)].
+rustix = { workspace = true, features = ["process"] }
+
+[features]
+# Gates tests that need a real host `wine`; run only in the wine-present CI job.
+wine-integration = []
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
+apogee-fetch = { path = "../apogee-fetch" }
 tempfile = { workspace = true }
+serial_test = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 
 # The extraction integration tests build fixture tarballs in-process (encode side of the decoders).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -34,6 +44,10 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 lzma-rs = { workspace = true }
 ruzstd = { workspace = true }
+
+[[test]]
+name = "supervise_wine"
+required-features = ["wine-integration"]
 
 [lints]
 workspace = true
