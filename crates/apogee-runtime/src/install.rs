@@ -15,11 +15,12 @@ use crate::extract::extract_archive;
 use crate::progress::{Progress, RuntimeEvent};
 
 /// A marker written into a runner/tool directory once its extraction completed, so a re-run skips a
-/// finished install but retries an interrupted one.
-const INSTALLED_MARKER: &str = ".apogee-installed";
+/// finished install but retries an interrupted one. It lives outside the extracted tree so an
+/// archive entry cannot plant it and a partial extraction cannot leave a stale one.
+const INSTALLED_DIR: &str = ".installed";
 
-/// How many times to (re)start a download before giving up. A dropped connection resumes from the
-/// journal on the next attempt (`apogee-fetch` 0.1 has no internal retry).
+/// How many times to (re)start a download before giving up. The injected fetcher has no internal
+/// retry, so a dropped connection resumes from its journal on the next attempt.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -90,7 +91,8 @@ async fn install_artifact(
     progress: &Progress,
 ) -> Result<PathBuf, RuntimeError> {
     let dir = root.join(format!("{name}-{version}"));
-    let marker = dir.join(INSTALLED_MARKER);
+    let installed_dir = root.join(INSTALLED_DIR);
+    let marker = installed_dir.join(format!("{name}-{version}"));
     if marker.is_file() {
         return Ok(dir);
     }
@@ -105,13 +107,24 @@ async fn install_artifact(
     let layout = layout.clone();
     let target = dir.clone();
     let archive_for_err = archive.clone();
-    tokio::task::spawn_blocking(move || extract_archive(&archive, &layout, &target))
+    let entries = tokio::task::spawn_blocking(move || extract_archive(&archive, &layout, &target))
         .await
         .map_err(|_| RuntimeError::Extract {
-            archive: archive_for_err,
+            archive: archive_for_err.clone(),
             source: std::io::Error::other("extraction task panicked"),
         })??;
+    // A verified archive that yields nothing under the strip prefix (a mismatched prefix, an empty
+    // tarball) must not be sealed as a finished install, or the empty directory is cached forever.
+    if entries == 0 {
+        return Err(RuntimeError::Extract {
+            archive: archive_for_err,
+            source: std::io::Error::other("archive contained no entries under the expected prefix"),
+        });
+    }
 
+    tokio::fs::create_dir_all(&installed_dir)
+        .await
+        .map_err(|e| io_err(&installed_dir, e))?;
     tokio::fs::write(&marker, b"")
         .await
         .map_err(|e| io_err(&marker, e))?;
