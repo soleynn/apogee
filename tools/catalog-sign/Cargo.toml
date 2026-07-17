@@ -1,0 +1,17 @@
+# Its own workspace so this maintainer-only signer stays out of the main workspace's build, clippy,
+# and cross-compile jobs. It reads a private key from a local file and never contains one; the key
+# lives offline, only the 32 public bytes are committed.
+[workspace]
+
+[package]
+name = "catalog-sign"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The same primitive the runtime verifies with, so a signature this tool writes is one the runtime
+# accepts byte-for-byte.
+ed25519-dalek = "2"
+# Fill a fresh seed from the OS CSPRNG for keygen, avoiding a heavier rng dependency.
+getrandom = "0.2"
