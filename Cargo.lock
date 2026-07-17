@@ -82,8 +82,11 @@ name = "apogee-cli"
 version = "0.0.0"
 dependencies = [
  "apogee-core",
+ "apogee-test-support",
  "clap",
  "rpassword",
+ "rustix",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",

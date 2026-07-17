@@ -16,6 +16,9 @@ use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "fixtures")]
+mod fixtures;
+
 /// A convenient boxed error for the CLI's top level.
 type CliError = Box<dyn Error>;
 
@@ -143,9 +146,15 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     }
 }
 
-/// Build the core against the real network transport and XDG-resolved storage.
+/// Build the core against the real network transport and XDG-resolved storage. Under the `fixtures`
+/// feature a scripted transport may be substituted (the launch backend stays real).
 fn build_core() -> Result<Core, CliError> {
-    Ok(Core::new(CoreConfig::from_env())?)
+    let config = CoreConfig::from_env();
+    #[cfg(feature = "fixtures")]
+    if let Some(transport) = fixtures::transport() {
+        return Ok(Core::with_transport(config, transport)?);
+    }
+    Ok(Core::new(config)?)
 }
 
 /// Run `cmd`, printing each event and wiring Ctrl-C to a targeted shutdown of the game.
@@ -257,8 +266,12 @@ fn resolve_with_account(core: &Core, target: &str) -> Result<(Uuid, Account), Cl
     Ok((id, account))
 }
 
-/// Read the account password from the terminal without echoing it.
+/// Read the account password from the terminal without echoing it (or a canned value in fixture mode).
 fn read_password() -> Result<Secret, CliError> {
+    #[cfg(feature = "fixtures")]
+    if let Some(secret) = fixtures::password() {
+        return Ok(secret);
+    }
     let password = rpassword::prompt_password("Square Enix password: ")?;
     Ok(Secret::new(password.into_bytes()))
 }

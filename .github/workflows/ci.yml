@@ -106,6 +106,13 @@ jobs:
         env:
           WINEDEBUG: "-all"
         run: cargo test -p apogee-runtime --features wine-integration --test supervise_wine -- --test-threads=1
+      # End-to-end: the CLI logs in against scripted fixtures and launches a stub game through system
+      # wine, resolving the real process and killing it. This is the login → register → launch proof
+      # and the output leak detector.
+      - name: CLI login and launch under stock wine
+        env:
+          WINEDEBUG: "-all"
+        run: cargo test -p apogee-cli --features wine-integration --test e2e -- --test-threads=1
 
   build-windows-cross:
     name: build-windows-cross
