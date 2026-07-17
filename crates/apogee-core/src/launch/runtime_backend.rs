@@ -18,14 +18,6 @@ use crate::command::{Event, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
 
-/// Where the signed runner catalog is fetched from. Hosting and the production signing key are still
-/// being settled; the system-wine path needs neither and covers the launch path today.
-const CATALOG_MANIFEST_URL: &str = "https://apogee.example.invalid/runners/manifest.json";
-const CATALOG_SIGNATURE_URL: &str = "https://apogee.example.invalid/runners/manifest.json.sig";
-
-/// The catalog key for the umu launcher a managed Proton runner needs.
-const UMU_TOOL: &str = "umu-launcher";
-
 /// The real launch backend over `apogee-runtime`.
 pub(crate) struct RuntimeLauncher {
     runtime: Runtime,
@@ -59,8 +51,12 @@ impl RuntimeLauncher {
                     .await?)
             }
             RunnerSelection::Managed { name, version } => {
-                let manifest = parse_url(CATALOG_MANIFEST_URL)?;
-                let signature = parse_url(CATALOG_SIGNATURE_URL)?;
+                // Where the signed runner catalog is fetched from. Hosting and the production signing
+                // key are still being settled; the system-wine path needs neither and covers launch
+                // today.
+                let manifest = parse_url("https://apogee.example.invalid/runners/manifest.json")?;
+                let signature =
+                    parse_url("https://apogee.example.invalid/runners/manifest.json.sig")?;
                 let catalog = self
                     .runtime
                     .fetch_catalog(&manifest, &signature, cancel)
@@ -75,7 +71,7 @@ impl RuntimeLauncher {
                     })?
                     .clone();
                 if entry.kind == RunnerKind::ProtonUmu
-                    && let Some(tool) = catalog.tool(UMU_TOOL)
+                    && let Some(tool) = catalog.tool("umu-launcher")
                 {
                     self.runtime.ensure_tool(tool, cancel, progress).await?;
                 }

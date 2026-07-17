@@ -22,10 +22,8 @@ use crate::launch::fake::FakeLaunchBackend;
 use crate::model::{Account, AccountKind, Profile, Settings};
 use crate::store::{Store, UidCacheEntry};
 
-const BOOT_VER: &str = "2024.02.01.0000.0000";
-const GAME_VER: &str = "2024.03.28.0000.0000";
-const SESSION_ID: &str = "SESSIONXYZ";
-const UID: &str = "UID-TOKEN-0123456789";
+use fx::{BOOT_VERSION, GAME_VERSION, SESSION_ID, UNIQUE_ID};
+
 const REGION: u16 = 3;
 const MAX_EXPANSION: u8 = 4;
 const NOW: u64 = 1_000;
@@ -33,9 +31,9 @@ const NOW: u64 = 1_000;
 /// A game install whose expansion count matches the fixtures' `maxex`, so `from_install` succeeds.
 fn game_install() -> TempDir {
     build_game_install(
-        BOOT_VER,
+        BOOT_VERSION,
         [b"boot" as &[u8], b"boot64", b"launcher64", b""],
-        GAME_VER,
+        GAME_VERSION,
         &[
             "2024.03.28.0001.0000",
             "2024.03.28.0002.0000",
@@ -143,7 +141,7 @@ fn login_then_current() -> [ProtoResponse; 4] {
         fx::login_status_open(),
         fx::oauth_top("STOREDBLOB"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
-        fx::register_current(UID),
+        fx::register_current(UNIQUE_ID),
     ]
 }
 
@@ -226,10 +224,10 @@ async fn a_manual_otp_is_sent_and_the_session_is_cached() {
 
     // The session was cached for the account.
     let cached = h.store.load_uid_cache(h.account).unwrap().unwrap();
-    assert_eq!(cached.unique_id, UID);
+    assert_eq!(cached.unique_id, UNIQUE_ID);
     assert_eq!(cached.region, REGION);
     assert_eq!(cached.max_expansion, MAX_EXPANSION);
-    assert_eq!(cached.game_version, GAME_VER);
+    assert_eq!(cached.game_version, GAME_VERSION);
 }
 
 #[tokio::test]
@@ -305,7 +303,7 @@ async fn pending_game_patches_are_summed_and_narrated() {
         fx::oauth_top("S"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
         fx::register_with_patches(
-            UID,
+            UNIQUE_ID,
             &[
                 &fx::synthetic_patch_entry(52_430_000, "2024.03.28.0000.0001"),
                 &fx::synthetic_patch_entry(10, "2024.03.28.0000.0002"),
