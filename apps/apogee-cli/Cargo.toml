@@ -7,7 +7,11 @@ license.workspace = true
 
 [dependencies]
 apogee-core = { path = "../../crates/apogee-core" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-stream.workspace = true
+tokio-util.workspace = true
+clap.workspace = true
+rpassword.workspace = true
 
 [lints]
 workspace = true
