@@ -15,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 sqex-proto = { path = "../crates/sqex-proto" }
 sqex-crypto = { path = "../crates/sqex-crypto" }
+apogee-runtime = { path = "../crates/apogee-runtime" }
 
 [[bin]]
 name = "patchlist"
@@ -40,6 +41,13 @@ bench = false
 [[bin]]
 name = "sqex_base64"
 path = "fuzz_targets/sqex_base64.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "runner_manifest"
+path = "fuzz_targets/runner_manifest.rs"
 test = false
 doc = false
 bench = false
