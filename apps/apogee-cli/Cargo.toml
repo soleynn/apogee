@@ -12,6 +12,24 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 clap.workspace = true
 rpassword.workspace = true
+# Test-only: enabled by the `fixtures` feature to substitute a scripted transport. Never in a release
+# build (the feature is off by default).
+apogee-test-support = { path = "../../crates/apogee-test-support", optional = true }
+
+[features]
+# Substitutes a scripted login transport (driven by `APOGEE_FIXTURE_LOGIN`) for the hermetic e2e.
+fixtures = ["dep:apogee-test-support"]
+# The wine-present end-to-end test: a real launch through system wine. Implies `fixtures`.
+wine-integration = ["fixtures"]
+
+[dev-dependencies]
+# Sends SIGINT to the CLI child in the e2e test so it shuts the game down cleanly.
+rustix = { workspace = true, features = ["process"] }
+tempfile.workspace = true
+
+[[test]]
+name = "e2e"
+required-features = ["wine-integration"]
 
 [lints]
 workspace = true
