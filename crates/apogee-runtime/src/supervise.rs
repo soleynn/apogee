@@ -194,7 +194,9 @@ pub(crate) async fn terminate(watch: &ExitWatch) -> Result<(), RuntimeError> {
                 .await
                 .is_err()
             {
+                // SIGKILL is uncatchable, so wait for the confirmed termination too.
                 let _ = pidfd_send_signal(fd.get_ref(), Signal::KILL);
+                let _ = tokio::time::timeout(KILL_TOTAL_GRACE, wait_exit(watch)).await;
             }
         }
         ExitWatch::Poll(pid) => {
