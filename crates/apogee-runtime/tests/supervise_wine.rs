@@ -101,6 +101,18 @@ fn proc_exists(pid: i32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// Poll until `pid` disappears from `/proc`. A terminated game is a non-child, so its parent reaps
+/// the zombie asynchronously; termination and the `/proc` entry clearing are not simultaneous.
+async fn wait_gone(pid: i32) -> bool {
+    for _ in 0..50 {
+        if !proc_exists(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn stock_wine_launch_is_resolved_and_killed() {
@@ -113,7 +125,7 @@ async fn stock_wine_launch_is_resolved_and_killed() {
     let pid = session.game_pid();
     assert!(proc_exists(pid), "wine resolved a live game process");
     session.kill().await.expect("targeted kill");
-    assert!(!proc_exists(pid), "targeted kill stopped the game");
+    assert!(wait_gone(pid).await, "targeted kill stopped the game");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -128,12 +140,5 @@ async fn kill_prefix_is_the_separate_broad_stop() {
     let prefix = session.prefix().clone();
 
     runtime.kill_prefix(&prefix).await.expect("wineserver -k");
-    // Give wineserver a moment to tear the prefix down.
-    for _ in 0..50 {
-        if !proc_exists(pid) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(!proc_exists(pid), "kill_prefix stopped the game");
+    assert!(wait_gone(pid).await, "kill_prefix stopped the game");
 }
