@@ -125,6 +125,8 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-util",
  "url",
 ]
 

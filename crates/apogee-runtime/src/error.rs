@@ -15,8 +15,16 @@ pub enum RuntimeError {
     RunnerUnavailable { name: String, version: String },
     #[error("runner catalog is not trustworthy")]
     Catalog(#[from] CatalogError),
+    #[error("invalid download request")]
+    Spec(#[from] apogee_fetch::SpecError),
     #[error("runner download failed")]
     Download(#[from] FetchError),
+    #[error("filesystem error at {path:?}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("extract of {archive:?} failed")]
     Extract {
         archive: PathBuf,
