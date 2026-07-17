@@ -34,6 +34,7 @@ jobs:
       # The dev tools are separate workspaces, so --all skips them; format-check them too.
       - run: cargo fmt --manifest-path tools/sqex-proto-probe/Cargo.toml --all --check
       - run: cargo fmt --manifest-path tools/boot-check/Cargo.toml --all --check
+      - run: cargo fmt --manifest-path tools/catalog-sign/Cargo.toml --all --check
 
   clippy:
     name: clippy
@@ -54,6 +55,7 @@ jobs:
       # a sqex-proto API change without CI noticing.
       - run: cargo clippy --manifest-path tools/sqex-proto-probe/Cargo.toml --all-targets -- -D warnings
       - run: cargo clippy --manifest-path tools/boot-check/Cargo.toml --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path tools/catalog-sign/Cargo.toml --all-targets -- -D warnings
 
   test-linux:
     name: test-linux
@@ -78,13 +80,14 @@ jobs:
       - run: cargo test -p apogee-fetch --features testing --test none_over_tls
 
   # Process supervision on stock wine: launches a stub PE and proves the /proc scanner resolves it,
-  # kills it targeted, and that wineserver -k is the separate broad stop. Headless wine can be
-  # finicky, so this is an amber canary (continue-on-error) — the scanner logic itself is covered
-  # hermetically in test-linux without wine.
+  # kills it targeted, and that wineserver -k is the separate broad stop. A required gate: the
+  # scanner logic is also covered hermetically in test-linux without wine, but only a real wine run
+  # exercises the /proc resolution and the CLI leak detector end to end. Both steps run
+  # single-threaded with WINEDEBUG=-all to keep headless wine deterministic; if real-wine startup
+  # ever proves flaky, wrap the wine steps in a bounded retry rather than making the job advisory.
   test-linux-wine:
     name: test-linux-wine
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
