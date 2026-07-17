@@ -234,6 +234,18 @@ impl Core {
         })
     }
 
+    /// The profile with `id`, loaded by key.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, or a [`CoreError::Store`] if its
+    /// file is corrupt.
+    pub fn profile(&self, id: Uuid) -> Result<Profile, CoreError> {
+        self.store.load_profile(id).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoProfile(id),
+            other => other.into(),
+        })
+    }
+
     /// Every stored account.
     ///
     /// # Errors

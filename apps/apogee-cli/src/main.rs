@@ -112,13 +112,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Login(args) => {
-            let (id, account) = resolve_with_account(&core, &args.profile)?;
-            let password = read_password()?;
-            let otp = read_otp(&args, &account)?;
+            let (profile, password, otp) = gather(&core, &args)?;
             Ok(drive(
                 &core,
                 Command::Login {
-                    profile: id,
+                    profile,
                     password,
                     otp,
                 },
@@ -126,17 +124,15 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             .await)
         }
         Commands::Launch(args) => {
-            let id = resolve_profile(&core, &args.profile)?;
-            Ok(drive(&core, Command::Launch { profile: id }).await)
+            let profile = resolve_profile(&core, &args.profile)?.id;
+            Ok(drive(&core, Command::Launch { profile }).await)
         }
         Commands::Play(args) => {
-            let (id, account) = resolve_with_account(&core, &args.profile)?;
-            let password = read_password()?;
-            let otp = read_otp(&args, &account)?;
+            let (profile, password, otp) = gather(&core, &args)?;
             Ok(drive(
                 &core,
                 Command::PatchAndPlay {
-                    profile: id,
+                    profile,
                     password,
                     otp,
                 },
@@ -144,6 +140,16 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             .await)
         }
     }
+}
+
+/// Resolve the profile, prompt for the password, and select the one-time-password source: the shared
+/// preamble of `login` and `play`.
+fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), CliError> {
+    let profile = resolve_profile(core, &args.profile)?;
+    let account = core.account(profile.account)?;
+    let password = read_password()?;
+    let otp = read_otp(args, &account)?;
+    Ok((profile.id, password, otp))
 }
 
 /// Build the core against the real network transport and XDG-resolved storage. Under the `fixtures`
@@ -218,52 +224,35 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
             Ok(())
         }
         ProfileAction::Remove(args) => {
-            let id = resolve_profile(core, &args.profile)?;
-            let account = core
-                .profiles()?
-                .into_iter()
-                .find(|p| p.id == id)
-                .map(|p| p.account);
-            core.delete_profile(id)?;
+            let profile = resolve_profile(core, &args.profile)?;
+            let account = profile.account;
+            core.delete_profile(profile.id)?;
             // Prune the account only if no remaining profile still references it.
-            if let Some(account) = account
-                && !core.profiles()?.iter().any(|p| p.account == account)
-            {
+            if !core.profiles()?.iter().any(|p| p.account == account) {
                 let _ = core.delete_account(account);
             }
-            println!("removed profile {id}");
+            println!("removed profile {}", profile.id);
             Ok(())
         }
     }
 }
 
-/// Resolve a profile id or unique name to its id.
-fn resolve_profile(core: &Core, target: &str) -> Result<Uuid, CliError> {
+/// Resolve a profile id or unique name to the profile. An id is loaded by key (one file); a name is
+/// disambiguated by scanning the profile list.
+fn resolve_profile(core: &Core, target: &str) -> Result<Profile, CliError> {
     if let Ok(id) = Uuid::parse_str(target) {
-        return Ok(id);
+        return Ok(core.profile(id)?);
     }
-    let matches: Vec<Profile> = core
+    let mut matches: Vec<Profile> = core
         .profiles()?
         .into_iter()
         .filter(|p| p.name == target)
         .collect();
-    match matches.as_slice() {
-        [p] => Ok(p.id),
-        [] => Err(format!("no profile named {target:?}").into()),
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!("no profile named {target:?}").into()),
         _ => Err(format!("multiple profiles named {target:?}; use the id").into()),
     }
-}
-
-/// Resolve a profile and load its account (to learn whether it uses a one-time password).
-fn resolve_with_account(core: &Core, target: &str) -> Result<(Uuid, Account), CliError> {
-    let id = resolve_profile(core, target)?;
-    let profile = core
-        .profiles()?
-        .into_iter()
-        .find(|p| p.id == id)
-        .ok_or_else(|| format!("no profile with id {id}"))?;
-    let account = core.account(profile.account)?;
-    Ok((id, account))
 }
 
 /// Read the account password from the terminal without echoing it (or a canned value in fixture mode).
