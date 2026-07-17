@@ -49,6 +49,7 @@ is tagged with its change type. Versioning aims to follow
 - Use is_multiple_of in the base64 length check _(styling)_
 - Run apogee-runtime supervision under wine and fuzz the manifest _(ci)_
 - Refresh stale action pins flagged by zizmor _(ci)_
+- Silence zizmor ref-version-mismatch on the rust-toolchain pin _(ci)_
 ## [0.1.0] - 2026-07-16
 
 ### apogee-addons
