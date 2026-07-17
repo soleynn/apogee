@@ -41,6 +41,9 @@ rustix           = "1"
 tar              = "0.4"
 lzma-rs          = "0.3"
 ruzstd           = "0.8"
+# CLI: argument parsing and a no-echo password prompt, gated to the apogee-cli app.
+clap             = { version = "4", features = ["derive"] }
+rpassword        = "7"
 # in-repo streaming test HTTP server (the download harness), gated to apogee-test-support
 hyper            = { version = "1", features = ["server", "http1"] }
 hyper-util       = { version = "0.1", features = ["tokio"] }
