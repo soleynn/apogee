@@ -10,6 +10,13 @@ use http::header::DATE;
 use http::{HeaderName, HeaderValue};
 use sqex_proto::ProtoResponse;
 
+/// The scripted values a current-game login scenario assumes, so a test can pin the same session id,
+/// unique id, and install versions into its fixtures, its game install, and its assertions.
+pub const SESSION_ID: &str = "SESSIONXYZ";
+pub const UNIQUE_ID: &str = "UID-TOKEN-0123456789";
+pub const BOOT_VERSION: &str = "2024.02.01.0000.0000";
+pub const GAME_VERSION: &str = "2024.03.28.0000.0000";
+
 /// The `Date` header stamped on the OAuth top page (the flow uses it for TOTP clock-skew correction).
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";
 
