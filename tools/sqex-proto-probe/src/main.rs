@@ -76,15 +76,28 @@ async fn main() {
 
     // One deliberate wrong password, captured as the failure fixture. Derived from the real one (so it
     // is not a hard-coded secret) and guaranteed to differ. A single attempt, no retries, no OTP.
-    let wrong_password = format!("{password}-invalid");
-    run_login(
-        &client,
-        "wrong_password",
-        &sqexid,
-        &wrong_password,
-        &OtpPlan::None,
-    )
-    .await;
+    // Off by default so a routine run does not throw a bad login at a real account; opt in with
+    // SQEX_CAPTURE_WRONG_PASSWORD when the failure fixture actually needs re-recording.
+    if std::env::var_os("SQEX_CAPTURE_WRONG_PASSWORD").is_some() {
+        let wrong_password = format!("{password}-invalid");
+        run_login(
+            &client,
+            "wrong_password",
+            &sqexid,
+            &wrong_password,
+            &OtpPlan::None,
+        )
+        .await;
+    }
+}
+
+/// The OAuth region to log in under. Defaults to 3 (the global/Europe login); override with
+/// SQEX_REGION to match an account whose home region differs (e.g. 2 for North America).
+fn probe_region() -> u16 {
+    std::env::var("SQEX_REGION")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(3)
 }
 
 async fn run_login(
@@ -108,9 +121,10 @@ async fn run_login(
                 "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
         },
         lng: "en",
-        region: 3,
+        region: probe_region(),
     };
 
+    println!("[{scenario}] using oauth region {}", context.region);
     println!("[{scenario}] fetching the login top page");
     let flow = match begin_login(
         &transport,
