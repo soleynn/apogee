@@ -11,6 +11,9 @@
 .env
 .env.*
 
+# Offline signing key for the runner catalog: the private seed stays on the maintainer's machine
+/.catalog-signing/
+
 # OS cruft
 .DS_Store
 
