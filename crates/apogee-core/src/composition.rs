@@ -1,6 +1,7 @@
 //! The composition root: the one place every subsystem is constructed, tuned, and injected.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use apogee_addons::{Addons, ComponentManifest};
 use apogee_fetch::Fetcher;
@@ -8,6 +9,7 @@ use apogee_otp::Otp;
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::Secrets;
+use sqex_proto::Transport;
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -77,8 +79,9 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
 /// the login-to-play flows that read them arrive in a later change, so the fields are dormant today.
 #[allow(dead_code)]
 pub struct Core {
-    /// The one concrete network transport, owned here and handed to the protocol layer.
-    transport: HttpTransport,
+    /// The network transport handed to the protocol layer. The composition root assembles the one
+    /// concrete transport; tests inject a scripted double through [`Core::with_transport`].
+    transport: Arc<dyn Transport>,
     fetcher: Fetcher,
     patcher: Patcher,
     runtime: Runtime,
@@ -95,6 +98,30 @@ impl Core {
     /// Returns [`CoreError::Init`] if the network client cannot be built, or the wrapped subsystem
     /// error if a subsystem fails to construct.
     pub fn new(config: CoreConfig) -> Result<Self, CoreError> {
+        // The one concrete transport. gzip/deflate are enabled so reqwest negotiates and decompresses
+        // the login pages automatically (the request path forwards no accept-encoding of its own).
+        // HTTP-version tuning (1.1 for the plain-HTTP patch CDN, 2 for HTTPS hosts) lands with the
+        // patch flow; the dual-stack default already applies.
+        let client = reqwest::Client::builder()
+            .gzip(true)
+            .deflate(true)
+            .build()
+            .map_err(|e| CoreError::Init {
+                detail: e.to_string(),
+            })?;
+        Self::with_transport(config, Arc::new(HttpTransport::new(client)))
+    }
+
+    /// Construct and wire every subsystem from `config`, using the injected `transport` in place of
+    /// the concrete network client. The composition-root seam that lets a headless test drive the
+    /// flows against a scripted transport.
+    ///
+    /// # Errors
+    /// Returns the wrapped subsystem error if a subsystem fails to construct.
+    pub fn with_transport(
+        config: CoreConfig,
+        transport: Arc<dyn Transport>,
+    ) -> Result<Self, CoreError> {
         // `config` is consumed here, so move its owned paths into each subsystem rather than clone.
         let CoreConfig {
             store_dir,
@@ -103,15 +130,6 @@ impl Core {
             patch_store,
         } = config;
         let store = Store::new(store_dir);
-
-        // Client tuning (HTTP/1.1 for the plain-HTTP patch CDN, HTTP/2 for HTTPS hosts) lands with
-        // the transport's request path; the dual-stack default already applies.
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| CoreError::Init {
-                detail: e.to_string(),
-            })?;
-        let transport = HttpTransport::new(client);
 
         let fetcher = Fetcher::builder().build()?;
         let runtime = Runtime::new(
@@ -235,6 +253,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let core = Core::new(CoreConfig::with_base(dir.path())).unwrap();
         (dir, core)
+    }
+
+    #[test]
+    fn a_scripted_transport_can_be_injected() {
+        use std::sync::Arc;
+
+        use apogee_test_support::transport::FixtureTransport;
+
+        let dir = TempDir::new().unwrap();
+        let transport = Arc::new(FixtureTransport::new([]));
+        let core = Core::with_transport(CoreConfig::with_base(dir.path()), transport);
+        assert!(core.is_ok());
     }
 
     #[test]

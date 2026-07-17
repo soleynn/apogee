@@ -84,6 +84,9 @@ impl Migrate for Settings {
 
 /// Per-entity storage rooted at one base directory: `profiles/<id>.json`, `accounts/<id>.json`, and
 /// `settings.json`. One file per entity keeps a corrupt file's blast radius to a single record.
+///
+/// A cheap handle over a path: clone it to share (the flow driver holds its own copy).
+#[derive(Clone)]
 pub struct Store {
     base: PathBuf,
 }
