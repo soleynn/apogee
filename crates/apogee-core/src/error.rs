@@ -33,6 +33,10 @@ pub enum CoreError {
     Otp(#[from] apogee_otp::OtpError),
     #[error("no profile with id {0}")]
     NoProfile(Uuid),
+    #[error("no account with id {0}")]
+    NoAccount(Uuid),
+    #[error("the account password is not valid text")]
+    InvalidCredential,
     #[error("import from {path:?} failed: {detail}")]
     Import { path: PathBuf, detail: String },
     #[error("initialization failed: {detail}")]
