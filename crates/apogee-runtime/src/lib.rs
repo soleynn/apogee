@@ -181,8 +181,8 @@ impl Runtime {
         cancel: &tokio_util::sync::CancellationToken,
         progress: &Progress,
     ) -> Result<GameSession, RuntimeError> {
-        let prefix = plan.prefix_ref().ok_or(RuntimeError::Unsupported {
-            what: "launch plan has no prefix",
+        let prefix = plan.prefix_ref().ok_or(RuntimeError::InvalidLaunchPlan {
+            reason: "launch plan has no prefix",
         })?;
         let runner_name = prefix.runner().name().to_owned();
         let umu = if prefix.runner().kind() == RunnerKind::ProtonUmu {
