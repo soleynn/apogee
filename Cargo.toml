@@ -52,6 +52,7 @@ insta            = "1"
 rstest           = "0.23"
 proptest         = "1"
 tempfile         = "3"
+serial_test      = "3"
 # Forward-declared for test types not yet wired up: wiremock backs an HTTP-mock transport,
 # assert_cmd + predicates a CLI end-to-end harness, trybuild the compile-fail invariant tests.
 wiremock         = "0.6"

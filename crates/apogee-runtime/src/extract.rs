@@ -80,14 +80,13 @@ fn unpack<R: Read>(
     let mut ar = tar::Archive::new(reader);
     for entry in ar.entries().map_err(|e| io_err(archive, e))? {
         let mut entry = entry.map_err(|e| io_err(archive, e))?;
-        let raw = entry
-            .path()
-            .map_err(|e| io_err(archive, e))?
-            .into_owned();
+        let raw = entry.path().map_err(|e| io_err(archive, e))?.into_owned();
         let rel = match resolve(&raw, strip_prefix) {
             Resolved::Path(p) => p,
             Resolved::Skip => continue,
-            Resolved::Reject => return Err(confined(archive, "entry path escapes the runner directory")),
+            Resolved::Reject => {
+                return Err(confined(archive, "entry path escapes the runner directory"));
+            }
         };
         let out = dest.join(&rel);
         let kind = entry.header().entry_type();
@@ -96,7 +95,10 @@ fn unpack<R: Read>(
         } else if kind.is_symlink() {
             let link = link_target(&mut entry, archive)?;
             if !symlink_within_dest(&rel, &link) {
-                return Err(confined(archive, "symlink target escapes the runner directory"));
+                return Err(confined(
+                    archive,
+                    "symlink target escapes the runner directory",
+                ));
             }
             make_parent(&out, archive)?;
             let _ = fs::remove_file(&out);
@@ -107,7 +109,10 @@ fn unpack<R: Read>(
             let target_rel = match resolve(&link, strip_prefix) {
                 Resolved::Path(p) => p,
                 Resolved::Skip | Resolved::Reject => {
-                    return Err(confined(archive, "hardlink target escapes the runner directory"));
+                    return Err(confined(
+                        archive,
+                        "hardlink target escapes the runner directory",
+                    ));
                 }
             };
             make_parent(&out, archive)?;
@@ -255,21 +260,39 @@ mod tests {
 
     #[test]
     fn resolve_rejects_traversal_and_absolute() {
-        assert!(matches!(resolve(Path::new("../escape"), None), Resolved::Reject));
+        assert!(matches!(
+            resolve(Path::new("../escape"), None),
+            Resolved::Reject
+        ));
         assert!(matches!(
             resolve(Path::new("runner/../../escape"), Some("runner")),
             Resolved::Reject
         ));
-        assert!(matches!(resolve(Path::new("/etc/passwd"), None), Resolved::Reject));
+        assert!(matches!(
+            resolve(Path::new("/etc/passwd"), None),
+            Resolved::Reject
+        ));
     }
 
     #[test]
     fn symlink_confinement() {
         // In-tree relative links are fine.
-        assert!(symlink_within_dest(Path::new("lib/libfoo.so"), Path::new("libfoo.so.1")));
-        assert!(symlink_within_dest(Path::new("lib/a/b.so"), Path::new("../c.so")));
+        assert!(symlink_within_dest(
+            Path::new("lib/libfoo.so"),
+            Path::new("libfoo.so.1")
+        ));
+        assert!(symlink_within_dest(
+            Path::new("lib/a/b.so"),
+            Path::new("../c.so")
+        ));
         // Escaping or absolute targets are not.
-        assert!(!symlink_within_dest(Path::new("bin/x"), Path::new("../../etc/passwd")));
-        assert!(!symlink_within_dest(Path::new("bin/x"), Path::new("/etc/passwd")));
+        assert!(!symlink_within_dest(
+            Path::new("bin/x"),
+            Path::new("../../etc/passwd")
+        ));
+        assert!(!symlink_within_dest(
+            Path::new("bin/x"),
+            Path::new("/etc/passwd")
+        ));
     }
 }

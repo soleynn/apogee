@@ -140,6 +140,18 @@ impl LaunchPlan {
     pub fn push_wrapper(&mut self, wrapper: impl Into<String>) {
         self.wrappers.push(wrapper.into());
     }
+
+    pub(crate) fn prefix_ref(&self) -> Option<&Prefix> {
+        self.prefix.as_ref()
+    }
+
+    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
+    pub(crate) fn wrapper_list(&self) -> &[String] {
+        &self.wrappers
+    }
 }
 
 /// Redacts the opaque encrypted args (they carry session material) while keeping the rest legible.

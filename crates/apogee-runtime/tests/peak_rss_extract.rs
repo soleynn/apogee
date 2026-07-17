@@ -31,7 +31,11 @@ fn write_big_gz_archive(path: &Path, file_len: u64) -> io::Result<()> {
     header.set_size(file_len);
     header.set_mode(0o644);
     header.set_entry_type(tar::EntryType::Regular);
-    builder.append_data(&mut header, "runner-1.0/big.bin", io::repeat(0u8).take(file_len))?;
+    builder.append_data(
+        &mut header,
+        "runner-1.0/big.bin",
+        io::repeat(0u8).take(file_len),
+    )?;
     builder.into_inner()?.finish()?;
     Ok(())
 }

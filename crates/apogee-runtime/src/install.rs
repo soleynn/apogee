@@ -147,7 +147,10 @@ pub(crate) async fn download_verified(
     let mut attempt = 0u32;
     let outcome: Result<VerifiedFile, FetchError> = loop {
         attempt += 1;
-        match fetcher.download(&spec, Some(tx.clone()), cancel.clone()).await {
+        match fetcher
+            .download(&spec, Some(tx.clone()), cancel.clone())
+            .await
+        {
             Ok(verified) => break Ok(verified),
             Err(e) if attempt < MAX_DOWNLOAD_ATTEMPTS && is_transient(&e) => {
                 tokio::time::sleep(RETRY_DELAY).await;
@@ -185,7 +188,8 @@ pub(crate) async fn fetch_catalog(
     let signature = tokio::fs::read(&signature_path)
         .await
         .map_err(|e| io_err(&signature_path, e))?;
-    let key = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).map_err(|_| CatalogError::BadSignature)?;
+    let key =
+        VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).map_err(|_| CatalogError::BadSignature)?;
     Ok(Catalog::parse_and_verify(&manifest, &signature, &key)?)
 }
 
@@ -293,7 +297,12 @@ mod tests {
         };
 
         let prefix = runtime
-            .prepare(&runner, &prefix_dir, &CancellationToken::new(), &Progress::none())
+            .prepare(
+                &runner,
+                &prefix_dir,
+                &CancellationToken::new(),
+                &Progress::none(),
+            )
             .await
             .expect("prepare");
 
@@ -337,12 +346,22 @@ mod tests {
         };
 
         runtime
-            .prepare(&runner, &prefix_dir, &CancellationToken::new(), &Progress::none())
+            .prepare(
+                &runner,
+                &prefix_dir,
+                &CancellationToken::new(),
+                &Progress::none(),
+            )
             .await
             .expect("first install");
         let after_first = server.stats().requests();
         runtime
-            .prepare(&runner, &prefix_dir, &CancellationToken::new(), &Progress::none())
+            .prepare(
+                &runner,
+                &prefix_dir,
+                &CancellationToken::new(),
+                &Progress::none(),
+            )
             .await
             .expect("second install");
 
@@ -353,4 +372,3 @@ mod tests {
         );
     }
 }
-
