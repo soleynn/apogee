@@ -11,8 +11,18 @@ use apogee_runtime::{ArchiveFormat, ArchiveLayout, RuntimeError, extract_archive
 /// A small runner tree under `top/`: an executable, a nested data file, and an in-tree symlink.
 fn build_archive(top: &str, format: ArchiveFormat) -> io::Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
-    add_file(&mut builder, &format!("{top}/bin/wine"), b"#!/bin/sh\n", 0o755)?;
-    add_file(&mut builder, &format!("{top}/share/note.txt"), b"hello", 0o644)?;
+    add_file(
+        &mut builder,
+        &format!("{top}/bin/wine"),
+        b"#!/bin/sh\n",
+        0o755,
+    )?;
+    add_file(
+        &mut builder,
+        &format!("{top}/share/note.txt"),
+        b"hello",
+        0o644,
+    )?;
     add_symlink(&mut builder, &format!("{top}/bin/wine64"), "wine")?;
     let tar = builder.into_inner()?;
     compress(&tar, format)
@@ -50,8 +60,7 @@ fn add_symlink(builder: &mut tar::Builder<Vec<u8>>, path: &str, target: &str) ->
 fn compress(tar: &[u8], format: ArchiveFormat) -> io::Result<Vec<u8>> {
     match format {
         ArchiveFormat::TarGz => {
-            let mut enc =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             enc.write_all(tar)?;
             enc.finish()
         }
@@ -75,7 +84,11 @@ fn mode_bits(path: &Path) -> io::Result<u32> {
 
 #[test]
 fn extracts_each_format_stripping_the_prefix() {
-    for format in [ArchiveFormat::TarGz, ArchiveFormat::TarXz, ArchiveFormat::TarZst] {
+    for format in [
+        ArchiveFormat::TarGz,
+        ArchiveFormat::TarXz,
+        ArchiveFormat::TarZst,
+    ] {
         let bytes = build_archive("runner-1.0", format).expect("build archive");
         let tmp = tempfile::tempdir().expect("tempdir");
         let archive = tmp.path().join("runner.tar");
