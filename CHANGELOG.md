@@ -14,14 +14,29 @@ is tagged with its change type. Versioning aims to follow
 - Cover resume-off, short part, 416, last-modified, and skip edges _(testing)_
 - Cover unverified downloads over TLS _(testing)_
 
+### apogee-runtime
+- Add signed runner catalog with Ed25519 verification _(added)_
+- Stream-extract runner tarballs in-process _(added)_
+- Install runners and umu via apogee-fetch _(added)_
+- Spawn through the runner and supervise via /proc _(added)_
+- Fuzz the runner manifest parser _(testing)_
+- Confine extraction against symlink escapes and empty installs _(fixed)_
+- Signal the game through its pidfd and match a pfx-named prefix _(fixed)_
+- Distinguish an invalid launch plan from an unsupported platform _(changed)_
+- Confirm termination after SIGKILL and poll for reaping in tests _(fixed)_
+
 ### apogee-test-support
 - Add a scriptable streaming test http server _(added)_
 - Game-install sandbox builder _(added)_
+
+### sqex-crypto
+- Source the launch-arg key tick from the host monotonic clock (#28) _(added)_
 
 ### sqex-proto
 - Session registration with version report _(added)_
 - Strip a leading BOM from version files like the launcher _(fixed)_
 - Cover UID-header, unreadable, and backup edge cases _(testing)_
+- Pin the observed 204 No Content registration success _(testing)_
 
 ### sqex-proto-probe
 - Register step in the live login probe _(added)_
@@ -32,6 +47,7 @@ is tagged with its change type. Versioning aims to follow
 - Add streaming-download and test-server dependencies _(build)_
 - Update time past RUSTSEC-2026-0009 _(build)_
 - Use is_multiple_of in the base64 length check _(styling)_
+- Run apogee-runtime supervision under wine and fuzz the manifest _(ci)_
 ## [0.1.0] - 2026-07-16
 
 ### apogee-addons
