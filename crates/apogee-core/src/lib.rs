@@ -11,6 +11,9 @@
 mod command;
 mod composition;
 mod error;
+// Dormant until the login flow reads the clock and identity it provides.
+#[allow(dead_code)]
+mod host;
 mod model;
 mod store;
 mod transport;
