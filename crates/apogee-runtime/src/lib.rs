@@ -6,6 +6,8 @@
 
 mod catalog;
 mod error;
+#[cfg(target_os = "linux")]
+mod extract;
 
 use std::path::PathBuf;
 
@@ -16,6 +18,8 @@ pub use catalog::{
     Runner, RunnerKind, ToolEntry,
 };
 pub use error::{CatalogError, HealthIssue, HostTool, RuntimeError, SetupStep};
+#[cfg(target_os = "linux")]
+pub use extract::extract_archive;
 
 /// Where the runtime stores runners and prefixes.
 #[derive(Debug, Clone, Default)]

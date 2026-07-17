@@ -13,8 +13,25 @@ url = { workspace = true }
 ed25519-dalek = { workspace = true }
 apogee-fetch = { path = "../apogee-fetch" }
 
+# Linux-first: runner download/extract and /proc supervision use unix-only filesystem and syscall
+# operations. The windows-gnu cross-build compiles the crate without these; prepare/launch return
+# `Unsupported` there.
+[target.'cfg(target_os = "linux")'.dependencies]
+tar = { workspace = true }
+flate2 = { workspace = true }
+lzma-rs = { workspace = true }
+ruzstd = { workspace = true }
+
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
+tempfile = { workspace = true }
+
+# The extraction integration tests build fixture tarballs in-process (encode side of the decoders).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tar = { workspace = true }
+flate2 = { workspace = true }
+lzma-rs = { workspace = true }
+ruzstd = { workspace = true }
 
 [lints]
 workspace = true
