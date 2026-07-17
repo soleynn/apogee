@@ -6,6 +6,24 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-cli
+- Profile, login, launch, and play commands _(added)_
+- End-to-end login and launch against scripted fixtures _(testing)_
+- Resolve a profile by key and share the login/play preamble _(performance)_
+
+### apogee-core
+- Inject the network transport _(changed)_
+- Host identity and an injectable clock _(added)_
+- Persist accounts and the session cache _(added)_
+- A launch backend seam over the runner _(added)_
+- Credentials and dispositions on the command surface _(added)_
+- Drive login through to a running game _(added)_
+- Recover from a corrupt session cache and neutralize deferral notes _(fixed)_
+- Surface the two needed response headers without cloning the map _(performance)_
+- Share the entity-delete path between profiles and accounts _(changed)_
+- Cover the cancel-kill, detach, and error branches of the flow _(testing)_
+- Keep string constants out of the composition root _(fixed)_
+
 ### apogee-fetch
 - Carve the download types into modules and reject unverified plain http _(added)_
 - Stream, verify, and resume single-connection downloads _(added)_
@@ -24,10 +42,12 @@ is tagged with its change type. Versioning aims to follow
 - Signal the game through its pidfd and match a pfx-named prefix _(fixed)_
 - Distinguish an invalid launch plan from an unsupported platform _(changed)_
 - Confirm termination after SIGKILL and poll for reaping in tests _(fixed)_
+- Run the game from its install directory _(added)_
 
 ### apogee-test-support
 - Add a scriptable streaming test http server _(added)_
 - Game-install sandbox builder _(added)_
+- Scripted login and registration exchanges _(added)_
 
 ### sqex-crypto
 - Source the launch-arg key tick from the host monotonic clock (#28) _(added)_
@@ -50,6 +70,7 @@ is tagged with its change type. Versioning aims to follow
 - Run apogee-runtime supervision under wine and fuzz the manifest _(ci)_
 - Refresh stale action pins flagged by zizmor _(ci)_
 - Silence zizmor ref-version-mismatch on the rust-toolchain pin _(ci)_
+- Exclude test code from CodeQL analysis _(ci)_
 ## [0.1.0] - 2026-07-16
 
 ### apogee-addons
