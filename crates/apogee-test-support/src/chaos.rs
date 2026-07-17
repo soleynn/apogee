@@ -63,6 +63,9 @@ impl Stats {
 struct Config {
     seed: u64,
     len: u64,
+    /// Fixed bytes to serve instead of the generated body (e.g. a real tarball fixture). When set,
+    /// `len` equals its length.
+    body: Option<Arc<Vec<u8>>>,
     accept_ranges: bool,
     drop_after: Option<u64>,
     etag: Option<String>,
@@ -94,6 +97,7 @@ impl ChaosServer {
             cfg: Config {
                 seed,
                 len,
+                body: None,
                 accept_ranges: true,
                 drop_after: None,
                 etag: None,
@@ -106,6 +110,17 @@ impl ChaosServer {
                 tls: false,
             },
         }
+    }
+
+    /// Configure a server that serves the exact `bytes` provided instead of generated content, so a
+    /// test can download a real fixture (e.g. a runner tarball) through the same Range/resume/drop
+    /// machinery. `stats().bytes_served()` still backs the waste-budget assertion.
+    #[must_use]
+    pub fn serving(bytes: impl Into<Vec<u8>>) -> ChaosServerBuilder {
+        let bytes = bytes.into();
+        let mut builder = Self::builder(0, bytes.len() as u64);
+        builder.cfg.body = Some(Arc::new(bytes));
+        builder
     }
 
     async fn start(cfg: Config) -> std::io::Result<Self> {
@@ -370,7 +385,13 @@ async fn handle(
             }
             let this = usize::try_from((body_cfg.len - off).min(body_cfg.chunk as u64))
                 .unwrap_or(body_cfg.chunk);
-            generate_into(body_cfg.seed, off, &mut buf[..this]);
+            match &body_cfg.body {
+                Some(bytes) => {
+                    let start = off as usize;
+                    buf[..this].copy_from_slice(&bytes[start..start + this]);
+                }
+                None => generate_into(body_cfg.seed, off, &mut buf[..this]),
+            }
             if let Some(delay) = body_cfg.throttle {
                 tokio::time::sleep(delay).await;
             }

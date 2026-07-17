@@ -11,6 +11,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 ed25519-dalek = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 apogee-fetch = { path = "../apogee-fetch" }
 
 # Linux-first: runner download/extract and /proc supervision use unix-only filesystem and syscall
