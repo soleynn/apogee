@@ -274,6 +274,7 @@ impl Core {
     fn run(&self, cmd: Command, _tx: mpsc::UnboundedSender<Event>) {
         match cmd {
             Command::Login { .. } => todo!("orchestrate the login-to-play flow"),
+            Command::Launch { .. } => todo!("launch from a cached session"),
             Command::PatchAndPlay { .. } => todo!("run preflight, patch, then launch the game"),
             Command::Repair { .. } => todo!("verify and repair the installation"),
             Command::FirstRun(_) => todo!("walk the initial setup"),
