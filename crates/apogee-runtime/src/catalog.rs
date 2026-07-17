@@ -15,12 +15,12 @@ pub const CATALOG_MANIFEST_VERSION: u32 = 1;
 
 /// The compiled-in public key runner catalogs are authenticated against.
 ///
-/// PLACEHOLDER — a throwaway key whose private half was generated and discarded. The real key and
-/// where the catalog is hosted are settled before the first real-catalog download; replacing this
-/// constant is the only change that takes.
+/// The matching private key is held offline by the maintainer; it signs the hosted `manifest.json`
+/// and only these public bytes are committed. Rotating the key is a change to this constant plus a
+/// re-sign of the manifest.
 pub const CATALOG_PUBLIC_KEY: [u8; 32] = [
-    0x02, 0x12, 0x6d, 0xf0, 0xd3, 0xed, 0x62, 0xc6, 0x71, 0xdc, 0x1f, 0x34, 0x12, 0x9f, 0x62, 0x20,
-    0x06, 0x36, 0x52, 0x97, 0x8c, 0x38, 0x7c, 0x0d, 0xcd, 0x3f, 0x81, 0xa6, 0xab, 0xca, 0x2a, 0xd1,
+    0x5e, 0x3e, 0xed, 0x4c, 0xe1, 0x58, 0xa5, 0xb5, 0xf0, 0x4e, 0x6c, 0x36, 0x3c, 0xcb, 0x98, 0xc8,
+    0x5c, 0xb4, 0xea, 0x34, 0x7a, 0x69, 0x86, 0x9c, 0x59, 0x2d, 0xe8, 0xca, 0xd7, 0x2b, 0xa3, 0x27,
 ];
 
 /// The three runner kinds the launch path understands.
@@ -377,8 +377,8 @@ mod tests {
     fn signature_rejects_the_wrong_key() {
         let json = manifest(GOOD_PIN);
         let sig = sign_manifest(json.as_bytes());
-        // The compiled-in placeholder key is a different key than the test signer.
-        let other = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).expect("placeholder key parses");
+        // The compiled-in key is a different key than the test signer.
+        let other = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).expect("compiled-in key parses");
         let err = Catalog::parse_and_verify(json.as_bytes(), &sig, &other).expect_err("wrong key");
         assert!(matches!(err, CatalogError::BadSignature));
     }
@@ -441,5 +441,22 @@ mod tests {
     #[test]
     fn the_compiled_in_key_parses() {
         assert!(VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).is_ok());
+    }
+
+    /// The hosted manifest and its detached signature, embedded at build time, must verify against
+    /// the compiled-in key and expose the runner and tool the managed launch path resolves. This
+    /// catches a mistyped key, a manifest reformatted after signing, or a dropped entry.
+    #[test]
+    fn the_hosted_manifest_verifies_against_the_compiled_in_key() {
+        let manifest = include_bytes!("../../../site/runners/manifest.json");
+        let signature = include_bytes!("../../../site/runners/manifest.json.sig");
+        let key = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).expect("compiled-in key parses");
+        let catalog = Catalog::parse_and_verify(manifest, signature, &key)
+            .expect("hosted manifest verifies and parses against the compiled-in key");
+        let runner = catalog
+            .runner("GE-Proton", "11-1")
+            .expect("proton runner present");
+        assert_eq!(runner.kind, RunnerKind::ProtonUmu);
+        assert!(catalog.tool("umu-launcher").is_some());
     }
 }
