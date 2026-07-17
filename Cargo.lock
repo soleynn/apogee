@@ -58,7 +58,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 

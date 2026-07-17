@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 use crate::command::{Command, Event};
 use crate::error::CoreError;
+use crate::launch::LaunchBackend;
+use crate::launch::runtime_backend::RuntimeLauncher;
 use crate::model::{Account, Profile, Settings};
 use crate::store::{Store, StoreError};
 use crate::transport::HttpTransport;
@@ -85,10 +87,14 @@ pub struct Core {
     fetcher: Fetcher,
     patcher: Patcher,
     runtime: Runtime,
+    /// The launch seam over the runner. Held as a trait object so a test can inject a fake.
+    launch: Arc<dyn LaunchBackend>,
     addons: Addons,
     secrets: Secrets,
     otp: Otp,
     store: Store,
+    /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
+    prefixes_dir: PathBuf,
 }
 
 impl Core {
@@ -135,10 +141,12 @@ impl Core {
         let runtime = Runtime::new(
             fetcher.clone(),
             RuntimePaths {
-                runners: runners_dir,
-                prefixes: prefixes_dir,
+                runners: runners_dir.clone(),
+                prefixes: prefixes_dir.clone(),
             },
         );
+        let launch: Arc<dyn LaunchBackend> =
+            Arc::new(RuntimeLauncher::new(runtime.clone(), runners_dir));
         // A patch operation's game root is known only once a profile is chosen; a baseline empty root
         // lets the subsystem graph construct, and a flow supplies the real paths later.
         let patcher = Patcher::new(
@@ -163,10 +171,12 @@ impl Core {
             fetcher,
             patcher,
             runtime,
+            launch,
             addons,
             secrets,
             otp,
             store,
+            prefixes_dir,
         })
     }
 
