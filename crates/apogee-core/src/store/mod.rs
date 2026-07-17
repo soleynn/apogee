@@ -179,12 +179,7 @@ impl Store {
 
     /// Remove the profile with `id`. A missing profile is [`StoreError::NotFound`].
     pub fn delete_profile(&self, id: Uuid) -> Result<(), StoreError> {
-        let path = self.profile_path(id);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::NotFound => Err(StoreError::NotFound { path }),
-            Err(source) => Err(StoreError::Io { path, source }),
-        }
+        self.remove(self.profile_path(id))
     }
 
     /// Every stored profile. A missing directory is an empty list, not an error.
@@ -209,7 +204,12 @@ impl Store {
 
     /// Remove the account with `id`. A missing account is [`StoreError::NotFound`].
     pub fn delete_account(&self, id: Uuid) -> Result<(), StoreError> {
-        let path = self.account_path(id);
+        self.remove(self.account_path(id))
+    }
+
+    /// Delete `path`, mapping a missing file to [`StoreError::NotFound`] (the shared shape for the
+    /// entity deletes; `clear_uid_cache`'s missing-is-Ok variant is deliberately separate).
+    fn remove(&self, path: PathBuf) -> Result<(), StoreError> {
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Err(StoreError::NotFound { path }),
