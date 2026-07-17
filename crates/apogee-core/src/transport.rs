@@ -6,14 +6,13 @@
 //! `Accept-Encoding`), because the header set is plausibly fingerprinted. The request translation
 //! and response mapping land with the login flow that first drives this.
 
+use reqwest::header::{DATE, HeaderName};
 use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError};
 
 /// A reqwest-backed [`Transport`]: a pooled client with dual-stack dialing. Internal wiring: the
 /// composition root is the only place a concrete transport is assembled, so this type is not exported.
 #[derive(Debug, Clone)]
 pub(crate) struct HttpTransport {
-    // Held for the request path that lands with the login flow.
-    #[allow(dead_code)]
     client: reqwest::Client,
 }
 
@@ -27,7 +26,42 @@ impl HttpTransport {
 
 #[async_trait::async_trait]
 impl Transport for HttpTransport {
-    async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
-        todo!("translate the request to reqwest preserving exact header order and map the response")
+    async fn execute(&self, req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+        let mut builder = self.client.request(req.method.clone(), req.url.clone());
+        for (name, value) in &req.headers {
+            // reqwest runs its own content negotiation (the client enables gzip/deflate); forwarding
+            // the declared accept-encoding would suppress its automatic decompression, leaving the
+            // parser a compressed body.
+            if name.as_str() == "accept-encoding" {
+                continue;
+            }
+            builder = builder.header(name.clone(), value.clone());
+        }
+        if let Some(body) = &req.body {
+            builder = builder.body(body.as_bytes().to_vec());
+        }
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| TransportError::new(format!("request failed: {err}")))?;
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| TransportError::new(format!("reading response body failed: {err}")))?
+            .to_vec();
+
+        // sqex-proto reads only two response headers: the top page's `Date` (for TOTP clock-skew
+        // correction) and the registration `X-Patch-Unique-Id`. Surface just those.
+        let mut out = ProtoResponse::new(status, body);
+        for name in [DATE, HeaderName::from_static("x-patch-unique-id")] {
+            if let Some(value) = headers.get(&name) {
+                let value = value.clone();
+                out = out.with_header(name, value);
+            }
+        }
+        Ok(out)
     }
 }
