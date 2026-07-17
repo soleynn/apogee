@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustix::process::{Pid, PidfdFlags, Signal, kill_process, pidfd_open};
+use rustix::process::{Pid, PidfdFlags, Signal, kill_process, pidfd_open, pidfd_send_signal};
 use tokio::io::unix::AsyncFd;
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +23,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// SIGTERM grace before escalating to SIGKILL.
 const KILL_GRACE: Duration = Duration::from_millis(100);
 const KILL_ATTEMPTS: u32 = 20;
+/// Total time to wait for a graceful exit before SIGKILL.
+const KILL_TOTAL_GRACE: Duration = Duration::from_millis(2000);
 
 /// Poll `/proc` until a process matching `program_basename` (by `comm`) and `prefix_path` (by
 /// normalized `WINEPREFIX`) appears, or the deadline passes.
@@ -109,16 +111,25 @@ fn find_env(environ: &[u8], key: &[u8]) -> Option<PathBuf> {
         .map(|entry| PathBuf::from(OsStr::from_bytes(&entry[needle.len()..])))
 }
 
-/// Whether a process's `WINEPREFIX` refers to `expected`, accounting for Proton relocating the live
-/// prefix to `<expected>/pfx`.
+/// Whether a process's `WINEPREFIX` refers to `expected`. Matches the raw path (plain wine) or, for
+/// Proton which relocates the live prefix to `<expected>/pfx`, the `pfx`-stripped parent — so a
+/// plain-wine prefix whose own directory is named `pfx` still matches via the raw path.
 fn wineprefix_matches(found: &Path, expected: &Path) -> bool {
-    let candidate = if found.file_name() == Some(OsStr::new("pfx")) {
-        found.parent().unwrap_or(found)
-    } else {
-        found
-    };
-    let canonical = candidate.canonicalize();
-    canonical.as_deref().unwrap_or(candidate) == expected
+    if canonical_eq(found, expected) {
+        return true;
+    }
+    if found.file_name() == Some(OsStr::new("pfx"))
+        && let Some(parent) = found.parent()
+    {
+        return canonical_eq(parent, expected);
+    }
+    false
+}
+
+/// Whether `path` canonicalizes to `expected`, falling back to a literal compare when it cannot be
+/// canonicalized (e.g. it no longer exists).
+fn canonical_eq(path: &Path, expected: &Path) -> bool {
+    path.canonicalize().as_deref().unwrap_or(path) == expected
 }
 
 /// How a resolved process's exit is observed.
@@ -171,16 +182,32 @@ fn signal(pid: i32, sig: Signal) {
     }
 }
 
-/// Targeted kill: SIGTERM, then SIGKILL after a grace period. Hits only `pid`.
-pub(crate) async fn kill_pid(pid: i32) -> Result<(), RuntimeError> {
-    signal(pid, Signal::TERM);
-    for _ in 0..KILL_ATTEMPTS {
-        if !proc_exists(pid) {
-            return Ok(());
+/// Targeted kill: SIGTERM, then SIGKILL after a grace period. When a pidfd is held the signal is
+/// delivered through it, so it hits exactly the resolved process and can never signal a recycled
+/// pid; the numeric fallback is used only when no pidfd could be opened.
+pub(crate) async fn terminate(watch: &ExitWatch) -> Result<(), RuntimeError> {
+    match watch {
+        ExitWatch::Pidfd(fd) => {
+            let _ = pidfd_send_signal(fd.get_ref(), Signal::TERM);
+            // Wait for a graceful exit (the pidfd goes readable) before escalating to SIGKILL.
+            if tokio::time::timeout(KILL_TOTAL_GRACE, wait_exit(watch))
+                .await
+                .is_err()
+            {
+                let _ = pidfd_send_signal(fd.get_ref(), Signal::KILL);
+            }
         }
-        tokio::time::sleep(KILL_GRACE).await;
+        ExitWatch::Poll(pid) => {
+            signal(*pid, Signal::TERM);
+            for _ in 0..KILL_ATTEMPTS {
+                if !proc_exists(*pid) {
+                    return Ok(());
+                }
+                tokio::time::sleep(KILL_GRACE).await;
+            }
+            signal(*pid, Signal::KILL);
+        }
     }
-    signal(pid, Signal::KILL);
     Ok(())
 }
 
@@ -216,5 +243,15 @@ mod tests {
         // A different prefix does not match.
         let other = tempfile::tempdir().expect("tempdir");
         assert!(!wineprefix_matches(other.path(), &expected));
+    }
+
+    #[test]
+    fn wineprefix_matches_a_plain_wine_prefix_named_pfx() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prefix = dir.path().join("pfx");
+        std::fs::create_dir(&prefix).expect("mkdir pfx");
+        let expected = prefix.canonicalize().expect("canonicalize");
+        // A plain-wine prefix whose own directory is literally `pfx` must match via the raw path.
+        assert!(wineprefix_matches(&prefix, &expected));
     }
 }
