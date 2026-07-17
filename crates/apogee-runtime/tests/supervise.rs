@@ -101,6 +101,18 @@ fn proc_exists(pid: i32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// Poll until `pid` disappears from `/proc`. A terminated game is a non-child, so its parent reaps
+/// the zombie asynchronously; termination and the `/proc` entry clearing are not simultaneous.
+async fn wait_gone(pid: i32) -> bool {
+    for _ in 0..50 {
+        if !proc_exists(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
 #[tokio::test]
 #[serial]
 async fn launch_resolves_the_game_and_wait_returns_on_exit() {
@@ -161,5 +173,5 @@ async fn targeted_kill_stops_the_game() {
     assert!(proc_exists(pid), "game is running");
 
     session.kill().await.expect("kill");
-    assert!(!proc_exists(pid), "targeted kill stopped the game");
+    assert!(wait_gone(pid).await, "targeted kill stopped the game");
 }
