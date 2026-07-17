@@ -14,6 +14,9 @@ mod error;
 // Dormant until the login flow reads the clock and identity it provides.
 #[allow(dead_code)]
 mod host;
+// Dormant until the login flow drives it; the composition root already wires the concrete backend.
+#[allow(dead_code)]
+mod launch;
 mod model;
 mod store;
 mod transport;
