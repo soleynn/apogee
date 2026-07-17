@@ -36,6 +36,17 @@ fn build_escaping_symlink_archive() -> io::Result<Vec<u8>> {
     compress(&tar, ArchiveFormat::TarGz)
 }
 
+/// The core of the symlink depth-inflation escape: an in-tree symlink `a/b` -> `..` (which the
+/// lexical check accepts on its own) followed by a write under it. The extractor must refuse to
+/// traverse the planted symlink rather than follow it out of the tree.
+fn build_symlink_traversal_archive() -> io::Result<Vec<u8>> {
+    let mut builder = tar::Builder::new(Vec::new());
+    add_symlink(&mut builder, "a/b", "..")?;
+    add_file(&mut builder, "a/b/escape", b"pwned", 0o644)?;
+    let tar = builder.into_inner()?;
+    compress(&tar, ArchiveFormat::TarGz)
+}
+
 fn add_file(
     builder: &mut tar::Builder<Vec<u8>>,
     path: &str,
@@ -99,7 +110,8 @@ fn extracts_each_format_stripping_the_prefix() {
             strip_prefix: Some("runner-1.0".to_owned()),
         };
 
-        extract_archive(&archive, &layout, &dest).expect("extract");
+        let entries = extract_archive(&archive, &layout, &dest).expect("extract");
+        assert_eq!(entries, 3, "{format:?}: two files and a symlink extracted");
 
         assert!(dest.join("bin/wine").is_file(), "{format:?}: wine present");
         assert_eq!(
@@ -152,4 +164,25 @@ fn rejects_a_symlink_escaping_the_destination() {
     let err = extract_archive(&archive, &layout, &dest).expect_err("escaping symlink must reject");
     assert!(matches!(err, RuntimeError::Extract { .. }));
     assert!(!dest.join("escape").exists(), "nothing escaped");
+}
+
+#[test]
+fn refuses_to_write_through_a_symlinked_parent() {
+    let bytes = build_symlink_traversal_archive().expect("build archive");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let archive = tmp.path().join("evil.tar.gz");
+    std::fs::write(&archive, &bytes).expect("write archive");
+    let dest = tmp.path().join("out");
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::TarGz,
+        strip_prefix: None,
+    };
+
+    let err = extract_archive(&archive, &layout, &dest).expect_err("traversal must reject");
+    assert!(matches!(err, RuntimeError::Extract { .. }));
+    // The write never happened: nothing landed at dest/ or through the planted link.
+    assert!(
+        !dest.join("escape").exists(),
+        "no write through the symlink"
+    );
 }
