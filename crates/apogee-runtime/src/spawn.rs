@@ -27,8 +27,8 @@ pub(crate) fn build_command(
     plan: &LaunchPlan,
     umu_run: Option<&Path>,
 ) -> Result<Command, RuntimeError> {
-    let prefix = plan.prefix_ref().ok_or(RuntimeError::Unsupported {
-        what: "launch plan has no prefix",
+    let prefix = plan.prefix_ref().ok_or(RuntimeError::InvalidLaunchPlan {
+        reason: "launch plan has no prefix",
     })?;
     let runner = prefix.runner();
 
@@ -60,8 +60,8 @@ pub(crate) fn build_command(
     argv.extend(plan.wrapper_list().iter().cloned());
     argv.extend(invocation);
 
-    let (exe, rest) = argv.split_first().ok_or(RuntimeError::Unsupported {
-        what: "empty launch command",
+    let (exe, rest) = argv.split_first().ok_or(RuntimeError::InvalidLaunchPlan {
+        reason: "empty launch command",
     })?;
     let mut cmd = Command::new(exe);
     cmd.args(rest);

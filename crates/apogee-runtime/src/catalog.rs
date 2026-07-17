@@ -71,7 +71,7 @@ pub struct ToolEntry {
     pub archive: ArchiveLayout,
 }
 
-/// A DXVK build. Parsed at 0.1 but not installed until the environment matrix lands.
+/// A DXVK build. Parsed here but not yet installed; installation lands with the environment matrix.
 #[derive(Debug, Clone)]
 pub struct DxvkEntry {
     pub version: String,
