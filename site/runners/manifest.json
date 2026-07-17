@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "runners": [
+    {
+      "name": "GE-Proton",
+      "version": "11-1",
+      "kind": "proton_umu",
+      "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-1/GE-Proton11-1.tar.gz",
+      "sha256": "ce6dd663ea01725a31805ed5c165723a253cdf0945a6642907330742ae2de5e4",
+      "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-1" }
+    }
+  ],
+  "tools": [
+    {
+      "name": "umu-launcher",
+      "version": "1.4.1",
+      "url": "https://soleynn.github.io/apogee/runners/artifacts/umu-launcher-1.4.1.tar.gz",
+      "sha256": "7f978dc7bf94ffe4e05e38387050c39602f78b3df6c16f3a8f14b296341b4570",
+      "archive": { "format": "tar.gz", "strip_prefix": "umu" }
+    }
+  ],
+  "dxvk": []
+}
