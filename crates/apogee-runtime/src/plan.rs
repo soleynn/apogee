@@ -72,6 +72,7 @@ pub struct LaunchPlan {
     wrappers: Vec<String>,
     dpi_aware: bool,
     prefix: Option<Prefix>,
+    working_dir: Option<PathBuf>,
 }
 
 impl LaunchPlan {
@@ -90,6 +91,7 @@ impl LaunchPlan {
             wrappers: Vec::new(),
             dpi_aware: false,
             prefix: None,
+            working_dir: None,
         }
     }
 
@@ -97,6 +99,14 @@ impl LaunchPlan {
     #[must_use]
     pub fn prefix(mut self, prefix: &Prefix) -> Self {
         self.prefix = Some(prefix.clone());
+        self
+    }
+
+    /// Set the child process working directory (the game runs from its own install directory, e.g.
+    /// `<game>/game`, so it resolves data paths relative to the exe).
+    #[must_use]
+    pub fn working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(dir.into());
         self
     }
 
@@ -145,6 +155,10 @@ impl LaunchPlan {
         self.prefix.as_ref()
     }
 
+    pub(crate) fn working_dir_ref(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
+    }
+
     pub(crate) fn env(&self) -> &BTreeMap<String, String> {
         &self.env
     }
@@ -164,6 +178,7 @@ impl fmt::Debug for LaunchPlan {
             .field("wrappers", &self.wrappers)
             .field("dpi_aware", &self.dpi_aware)
             .field("prefix", &self.prefix)
+            .field("working_dir", &self.working_dir)
             .finish()
     }
 }
