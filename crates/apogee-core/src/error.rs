@@ -37,4 +37,6 @@ pub enum CoreError {
     Import { path: PathBuf, detail: String },
     #[error("initialization failed: {detail}")]
     Init { detail: String },
+    #[error("preparing the launch failed: {detail}")]
+    Launch { detail: String },
 }

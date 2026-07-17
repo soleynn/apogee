@@ -13,7 +13,9 @@ uuid.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 reqwest.workspace = true
+url.workspace = true
 async-trait.workspace = true
 sqex-proto = { path = "../sqex-proto" }
 apogee-fetch = { path = "../apogee-fetch" }
