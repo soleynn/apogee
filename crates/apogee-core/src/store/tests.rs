@@ -6,8 +6,18 @@ use std::fs;
 use rstest::rstest;
 use tempfile::TempDir;
 
-use super::{Migrate, Store, StoreError};
+use super::{Migrate, Store, StoreError, UidCacheEntry};
 use crate::model::{Account, AccountKind, Profile, Settings};
+
+fn cache_entry(game_version: &str, expires_at: u64) -> UidCacheEntry {
+    UidCacheEntry {
+        unique_id: "UID-TOKEN-0123456789".to_string(),
+        region: 3,
+        max_expansion: 4,
+        game_version: game_version.to_string(),
+        expires_at,
+    }
+}
 
 fn store() -> (TempDir, Store) {
     let dir = TempDir::new().unwrap();
@@ -146,6 +156,72 @@ fn an_account_round_trips_through_serde() {
     };
     let json = serde_json::to_value(&account).unwrap();
     assert_eq!(serde_json::from_value::<Account>(json).unwrap(), account);
+}
+
+#[test]
+fn an_account_round_trips_through_the_store() {
+    let (_dir, store) = store();
+    let account = Account {
+        use_otp: true,
+        ..Account::new("me@example.invalid", AccountKind::Standard)
+    };
+    store.save_account(&account).unwrap();
+    assert_eq!(store.load_account(account.id).unwrap(), account);
+    assert_eq!(store.list_accounts().unwrap(), vec![account.clone()]);
+
+    store.delete_account(account.id).unwrap();
+    assert!(matches!(
+        store.load_account(account.id).unwrap_err(),
+        StoreError::NotFound { .. }
+    ));
+}
+
+#[test]
+fn a_session_cache_entry_round_trips_and_is_absent_when_unwritten() {
+    let (_dir, store) = store();
+    let account = uuid::Uuid::new_v4();
+    assert_eq!(store.load_uid_cache(account).unwrap(), None);
+
+    let entry = cache_entry("2024.03.28.0000.0000", 5_000);
+    store.save_uid_cache(account, &entry).unwrap();
+    assert_eq!(store.load_uid_cache(account).unwrap(), Some(entry));
+
+    store.clear_uid_cache(account).unwrap();
+    assert_eq!(store.load_uid_cache(account).unwrap(), None);
+    // Clearing an already-absent entry is not an error.
+    store.clear_uid_cache(account).unwrap();
+}
+
+#[test]
+fn a_session_cache_entry_is_valid_only_inside_its_window_and_for_its_version() {
+    let entry = cache_entry("2024.03.28.0000.0000", 5_000);
+    // Inside the window and matching the install version.
+    assert!(entry.is_valid(4_999, "2024.03.28.0000.0000"));
+    // Expired.
+    assert!(!entry.is_valid(5_000, "2024.03.28.0000.0000"));
+    // The install was patched to a newer version since the token was cached.
+    assert!(!entry.is_valid(4_999, "2024.04.01.0000.0000"));
+}
+
+#[test]
+fn a_corrupt_session_cache_entry_is_preserved_not_deleted() {
+    let (dir, store) = store();
+    let account = uuid::Uuid::new_v4();
+    let path = dir.path().join("uid-cache").join(format!("{account}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = b"{ not valid json".to_vec();
+    fs::write(&path, &original).unwrap();
+
+    match store.load_uid_cache(account).unwrap_err() {
+        StoreError::Corrupt { backup, .. } => {
+            assert!(backup.exists());
+            assert_eq!(fs::read(&backup).unwrap(), original);
+        }
+        other => panic!("expected a corrupt error, got {other:?}"),
+    }
+    // The original survives byte-for-byte.
+    assert!(path.exists());
+    assert_eq!(fs::read(&path).unwrap(), original);
 }
 
 proptest::proptest! {

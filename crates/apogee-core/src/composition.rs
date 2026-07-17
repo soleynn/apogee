@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::command::{Command, Event};
 use crate::error::CoreError;
-use crate::model::{Profile, Settings};
+use crate::model::{Account, Profile, Settings};
 use crate::store::{Store, StoreError};
 use crate::transport::HttpTransport;
 
@@ -213,6 +213,39 @@ impl Core {
             StoreError::NotFound { .. } => CoreError::NoProfile(id),
             other => other.into(),
         })
+    }
+
+    /// Every stored account.
+    ///
+    /// # Errors
+    /// Returns a [`CoreError::Store`] if the account directory cannot be read or an account file is
+    /// corrupt.
+    pub fn accounts(&self) -> Result<Vec<Account>, CoreError> {
+        Ok(self.store.list_accounts()?)
+    }
+
+    /// The account with `id`.
+    ///
+    /// # Errors
+    /// Returns a [`CoreError::Store`] if no such account exists or its file is corrupt.
+    pub fn account(&self, id: Uuid) -> Result<Account, CoreError> {
+        Ok(self.store.load_account(id)?)
+    }
+
+    /// Persist `account`, keyed by its id.
+    ///
+    /// # Errors
+    /// Returns a [`CoreError::Store`] if the account cannot be written.
+    pub fn save_account(&self, account: &Account) -> Result<(), CoreError> {
+        Ok(self.store.save_account(account)?)
+    }
+
+    /// Delete the account with `id`.
+    ///
+    /// # Errors
+    /// Returns a [`CoreError::Store`] if no such account exists or on an IO failure.
+    pub fn delete_account(&self, id: Uuid) -> Result<(), CoreError> {
+        Ok(self.store.delete_account(id)?)
     }
 
     /// Run `cmd`, yielding the events it produces.

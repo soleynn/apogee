@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::model::{Profile, Settings};
+use crate::model::{Account, Profile, Settings};
 
 #[cfg(test)]
 mod tests;
@@ -64,6 +64,47 @@ impl Migrate for Profile {
     }
 }
 
+impl Migrate for Account {
+    const CURRENT_VERSION: u32 = 1;
+    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err(format!("no migration from schema version {from}"))
+    }
+}
+
+/// A cached session-registration result for an account, valid until `expires_at`. Persisted so a
+/// re-login inside the window skips OAuth and registration and launches straight from the cached
+/// token (XL's `UniqueIdCache`, relocated here).
+///
+/// The `unique_id` is a session-scoped token, not a login credential: it expires with the window and
+/// cannot be replayed afterward. Persisting it is the one deliberate exception to the redacted
+/// newtype's "callers must not persist" rule; no password or OAuth session id is ever stored here.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UidCacheEntry {
+    pub(crate) unique_id: String,
+    pub(crate) region: u16,
+    pub(crate) max_expansion: u8,
+    pub(crate) game_version: String,
+    /// Whole seconds since the Unix epoch after which this entry is stale.
+    pub(crate) expires_at: u64,
+}
+
+impl UidCacheEntry {
+    /// Whether this entry is still usable at `now` (seconds since the epoch) for an install at
+    /// `game_version`. An install patched since caching changes its version and invalidates the token.
+    #[allow(dead_code)]
+    pub(crate) fn is_valid(&self, now: u64, game_version: &str) -> bool {
+        now < self.expires_at && self.game_version == game_version
+    }
+}
+
+impl Migrate for UidCacheEntry {
+    const CURRENT_VERSION: u32 = 1;
+    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err(format!("no migration from schema version {from}"))
+    }
+}
+
 impl Migrate for Settings {
     const CURRENT_VERSION: u32 = 2;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -102,12 +143,28 @@ impl Store {
         self.base.join("profiles")
     }
 
+    fn accounts_dir(&self) -> PathBuf {
+        self.base.join("accounts")
+    }
+
+    fn uid_cache_dir(&self) -> PathBuf {
+        self.base.join("uid-cache")
+    }
+
     fn settings_file(&self) -> PathBuf {
         self.base.join("settings.json")
     }
 
     fn profile_path(&self, id: Uuid) -> PathBuf {
         self.profiles_dir().join(format!("{id}.json"))
+    }
+
+    fn account_path(&self, id: Uuid) -> PathBuf {
+        self.accounts_dir().join(format!("{id}.json"))
+    }
+
+    fn uid_cache_path(&self, account: Uuid) -> PathBuf {
+        self.uid_cache_dir().join(format!("{account}.json"))
     }
 
     /// Persist `profile`, keyed by its id.
@@ -127,22 +184,59 @@ impl Store {
 
     /// Every stored profile. A missing directory is an empty list, not an error.
     pub fn list_profiles(&self) -> Result<Vec<Profile>, StoreError> {
-        let dir = self.profiles_dir();
-        let entries = match fs::read_dir(&dir) {
+        self.list_dir(&self.profiles_dir())
+    }
+
+    /// Persist `account`, keyed by its id.
+    pub fn save_account(&self, account: &Account) -> Result<(), StoreError> {
+        self.save(&self.account_path(account.id), account)
+    }
+
+    /// Load the account with `id`. A missing account is [`StoreError::NotFound`].
+    pub fn load_account(&self, id: Uuid) -> Result<Account, StoreError> {
+        self.load(&self.account_path(id))
+    }
+
+    /// Every stored account. A missing directory is an empty list, not an error.
+    pub fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
+        self.list_dir(&self.accounts_dir())
+    }
+
+    /// Remove the account with `id`. A missing account is [`StoreError::NotFound`].
+    pub fn delete_account(&self, id: Uuid) -> Result<(), StoreError> {
+        let path = self.account_path(id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Err(StoreError::NotFound { path }),
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
+    }
+
+    /// Load and deserialize every `.json` entity in `dir`. A missing directory is an empty list; a
+    /// `.corrupt` backup or `.tmp` write-in-progress is skipped.
+    fn list_dir<T>(&self, dir: &Path) -> Result<Vec<T>, StoreError>
+    where
+        T: DeserializeOwned + Migrate,
+    {
+        let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => return Err(StoreError::Io { path: dir, source }),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: dir.to_path_buf(),
+                    source,
+                });
+            }
         };
-        let mut profiles = Vec::new();
+        let mut out = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(io_at(&dir))?;
+            let entry = entry.map_err(io_at(dir))?;
             let path = entry.path();
-            // Only entity files; a `.corrupt` backup or `.tmp` write-in-progress is skipped.
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                profiles.push(self.load(&path)?);
+                out.push(self.load(&path)?);
             }
         }
-        Ok(profiles)
+        Ok(out)
     }
 
     /// Persist launcher-wide settings.
@@ -255,6 +349,36 @@ impl Store {
         }
 
         serde_json::from_value(data).map_err(|e| preserve(path, &bytes, e.to_string()))
+    }
+}
+
+/// The session cache: per-account registration tokens with a validity window. Dormant until the
+/// login flow reads and writes them.
+#[allow(dead_code)]
+impl Store {
+    /// Persist the session-cache `entry` for `account`.
+    pub fn save_uid_cache(&self, account: Uuid, entry: &UidCacheEntry) -> Result<(), StoreError> {
+        self.save(&self.uid_cache_path(account), entry)
+    }
+
+    /// The session-cache entry for `account`, or `None` when none is stored. A corrupt entry is
+    /// preserved and surfaced as [`StoreError::Corrupt`] (the caller falls back to a full login).
+    pub fn load_uid_cache(&self, account: Uuid) -> Result<Option<UidCacheEntry>, StoreError> {
+        match self.load(&self.uid_cache_path(account)) {
+            Ok(entry) => Ok(Some(entry)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Drop the session-cache entry for `account`. A missing entry is not an error.
+    pub fn clear_uid_cache(&self, account: Uuid) -> Result<(), StoreError> {
+        let path = self.uid_cache_path(account);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
     }
 }
 
