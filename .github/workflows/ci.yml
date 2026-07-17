@@ -77,6 +77,36 @@ jobs:
       # exposed only behind apogee-fetch's test-only `testing` feature, so it runs as its own step.
       - run: cargo test -p apogee-fetch --features testing --test none_over_tls
 
+  # Process supervision on stock wine: launches a stub PE and proves the /proc scanner resolves it,
+  # kills it targeted, and that wineserver -k is the separate broad stop. Headless wine can be
+  # finicky, so this is an amber canary (continue-on-error) — the scanner logic itself is covered
+  # hermetically in test-linux without wine.
+  test-linux-wine:
+    name: test-linux-wine
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: wine
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Host wine runs the game; the MinGW cross-compiler builds the stub PE the test launches.
+      - name: Install wine and the MinGW cross toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y wine64 wine gcc-mingw-w64-x86-64
+      - name: Supervision under stock wine
+        env:
+          WINEDEBUG: "-all"
+        run: cargo test -p apogee-runtime --features wine-integration --test supervise_wine -- --test-threads=1
+
   build-windows-cross:
     name: build-windows-cross
     runs-on: ubuntu-latest
@@ -148,6 +178,8 @@ jobs:
       - run: cargo +nightly fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
       - run: cargo +nightly fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly fuzz build runner_manifest --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
 
   # The one live call: an unauthenticated GET to SE's boot endpoint, confirming the patchlist parser
   # handles genuinely-current output. An amber canary (continue-on-error) with one retry, so an SE CDN
