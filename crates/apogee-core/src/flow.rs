@@ -132,7 +132,7 @@ async fn authenticate_and_register(
     otp: OtpSource,
     tx: &UnboundedSender<Event>,
 ) -> Result<Option<UidCacheEntry>, CoreError> {
-    // The one-time password: only a manually entered code is honored at this milestone.
+    // The one-time password: only a manually entered code is honored for now.
     let otp_code = match (account.use_otp, &otp) {
         (false, _) => None,
         (true, OtpSource::Manual(code)) if !code.is_empty() => Some(code.clone()),
@@ -256,16 +256,26 @@ async fn launch_game(
     Ok(())
 }
 
-/// The still-valid cached session for `profile`, or `None` (clearing a stale entry).
+/// The still-valid cached session for `profile`, or `None`. Stale, expired, or corrupt entries are
+/// cleared so a bare launch falls back to a full login cleanly.
 fn valid_cached_session(
     ctx: &FlowContext,
     profile: &Profile,
 ) -> Result<Option<UidCacheEntry>, CoreError> {
-    // A corrupt cache is preserved by the store; here it simply means "no fast path".
-    let Some(session) = ctx.store.load_uid_cache(profile.account).ok().flatten() else {
-        return Ok(None);
+    let session = match ctx.store.load_uid_cache(profile.account) {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(None),
+        // A corrupt entry is preserved by the store; clear it so a bare launch stops minting a fresh
+        // sidecar every run, then fall back to a full login. A transient read error is left in place
+        // (it may read next time).
+        Err(StoreError::Corrupt { .. }) => {
+            let _ = ctx.store.clear_uid_cache(profile.account);
+            return Ok(None);
+        }
+        Err(_) => return Ok(None),
     };
-    // The install's version must still match the cached token; an unreadable install means no fast path.
+    // The install's version must still match the cached token; an unreadable install means no fast
+    // path this run (the entry is left in place).
     let Ok(report) = VersionReport::from_install(
         &InstallPaths::new(&profile.game_path),
         session.max_expansion,
@@ -294,10 +304,16 @@ fn resolve(ctx: &FlowContext, profile_id: Uuid) -> Result<(Profile, Account), Co
     Ok((profile, account))
 }
 
-/// The ordered game arguments, encrypted under a fresh tick key. `DEV.TestSID` is the registration
-/// unique id (not the OAuth session id), matching the reference launcher.
+/// The ordered game arguments, encrypted under a fresh tick key.
 fn build_launch_args(session: &UidCacheEntry, language: u8) -> String {
-    let args = ArgumentBuilder::new()
+    launch_arguments(session, language)
+        .build_encrypted(&ArgKey::from_tick(TickCount::now_for_game()))
+}
+
+/// The ordered game arguments before encryption. `DEV.TestSID` is the registration unique id (not the
+/// OAuth session id), and the fixed set and order match the reference launcher (byte-identity oracle).
+fn launch_arguments(session: &UidCacheEntry, language: u8) -> ArgumentBuilder {
+    ArgumentBuilder::new()
         .add("DEV.DataPathType", "1")
         .add(
             "DEV.MaxEntitledExpansionID",
@@ -308,8 +324,7 @@ fn build_launch_args(session: &UidCacheEntry, language: u8) -> String {
         .add("SYS.Region", session.region.to_string())
         .add("language", language.to_string())
         .add("resetConfig", "0")
-        .add("ver", &session.game_version);
-    args.build_encrypted(&ArgKey::from_tick(TickCount::now_for_game()))
+        .add("ver", &session.game_version)
 }
 
 /// The launch environment: the profile's extra variables (DXVK passthrough, etc.).
@@ -336,7 +351,7 @@ fn language_id(language: &str) -> u8 {
     }
 }
 
-/// The OAuth region code. Only the global region is wired at this milestone.
+/// The OAuth region code. Only the global region is wired today.
 fn oauth_region(_region: Region) -> u16 {
     3
 }
