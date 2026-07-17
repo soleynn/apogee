@@ -83,6 +83,17 @@ pub fn submit_no_service(session_id: &str, region: u16, max_expansion: u8) -> Pr
     )
 }
 
+/// A submit that failed authentication (the `login=auth,ng,...` callback), which the OAuth parser
+/// reports as `ProtoError::OauthFailed`. The message is credential-free.
+#[must_use]
+pub fn submit_auth_failed() -> ProtoResponse {
+    ProtoResponse::new(
+        200,
+        br#"<script>window.external.user("login=auth,ng,err,authentication failed");</script>"#
+            .to_vec(),
+    )
+}
+
 /// Attach the registration unique-id header to `response`.
 fn with_uid(response: ProtoResponse, unique_id: &str) -> ProtoResponse {
     let value =

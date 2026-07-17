@@ -68,6 +68,7 @@ pub(crate) mod fake {
     //! handle whose exit is test-controlled, so the `Launching`/`Running`/`Exited` sequence is
     //! assertable without a runner or a real process.
 
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
     use tokio::sync::Notify;
@@ -78,26 +79,30 @@ pub(crate) mod fake {
     };
 
     /// A fake backend. `exiting` returns handles that exit immediately (drives through to `Exited`);
-    /// `running` returns handles that stay running until killed.
+    /// `running` returns handles that stay running until killed. `was_killed` reports whether any
+    /// launched game's `kill()` ran (the Ctrl-C path).
     pub(crate) struct FakeLaunchBackend {
         recorded: Mutex<Vec<LaunchRequest>>,
         auto_exit: bool,
+        killed: Arc<AtomicBool>,
     }
 
     impl FakeLaunchBackend {
         /// A backend whose launched games exit immediately.
         pub(crate) fn exiting() -> Self {
-            Self {
-                recorded: Mutex::new(Vec::new()),
-                auto_exit: true,
-            }
+            Self::with_auto_exit(true)
         }
 
         /// A backend whose launched games keep running until killed.
         pub(crate) fn running() -> Self {
+            Self::with_auto_exit(false)
+        }
+
+        fn with_auto_exit(auto_exit: bool) -> Self {
             Self {
                 recorded: Mutex::new(Vec::new()),
-                auto_exit: false,
+                auto_exit,
+                killed: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -117,6 +122,11 @@ pub(crate) mod fake {
                 .unwrap_or_else(PoisonError::into_inner)
                 .len()
         }
+
+        /// Whether a launched game was killed.
+        pub(crate) fn was_killed(&self) -> bool {
+            self.killed.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait::async_trait]
@@ -133,6 +143,7 @@ pub(crate) mod fake {
                 .push(req);
             let handle = FakeHandle {
                 exited: Arc::new(Notify::new()),
+                killed: self.killed.clone(),
             };
             if self.auto_exit {
                 handle.exited.notify_one();
@@ -143,6 +154,7 @@ pub(crate) mod fake {
 
     struct FakeHandle {
         exited: Arc<Notify>,
+        killed: Arc<AtomicBool>,
     }
 
     #[async_trait::async_trait]
@@ -157,6 +169,7 @@ pub(crate) mod fake {
         }
 
         async fn kill(&self) -> Result<(), CoreError> {
+            self.killed.store(true, Ordering::SeqCst);
             self.exited.notify_one();
             Ok(())
         }
