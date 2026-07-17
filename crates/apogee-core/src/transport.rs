@@ -46,19 +46,24 @@ impl Transport for HttpTransport {
             .await
             .map_err(|err| TransportError::new(format!("request failed: {err}")))?;
         let status = response.status().as_u16();
-        let headers = response.headers().clone();
+
+        // sqex-proto reads only two response headers: the top page's `Date` (for TOTP clock-skew
+        // correction) and the registration `X-Patch-Unique-Id`. Copy just those out before consuming
+        // the response for its body, rather than cloning the whole header map.
+        let uid = HeaderName::from_static("x-patch-unique-id");
+        let surfaced = [DATE, uid].map(|name| {
+            let value = response.headers().get(&name).cloned();
+            (name, value)
+        });
         let body = response
             .bytes()
             .await
             .map_err(|err| TransportError::new(format!("reading response body failed: {err}")))?
             .to_vec();
 
-        // sqex-proto reads only two response headers: the top page's `Date` (for TOTP clock-skew
-        // correction) and the registration `X-Patch-Unique-Id`. Surface just those.
         let mut out = ProtoResponse::new(status, body);
-        for name in [DATE, HeaderName::from_static("x-patch-unique-id")] {
-            if let Some(value) = headers.get(&name) {
-                let value = value.clone();
+        for (name, value) in surfaced {
+            if let Some(value) = value {
                 out = out.with_header(name, value);
             }
         }
