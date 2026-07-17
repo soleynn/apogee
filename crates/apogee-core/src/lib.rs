@@ -27,5 +27,6 @@ pub use model::{
     Account, AccountKind, ComponentSelection, LaunchSettings, PrefixSelection, Profile, Region,
     RunnerSelection, Settings,
 };
+pub use sqex_proto::Transport;
 pub use store::StoreError;
 pub use uuid::Uuid;
