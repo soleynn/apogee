@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::error::RuntimeError;
 use crate::plan::Prefix;
-use crate::supervise::{ExitWatch, kill_pid, wait_exit, watch_exit};
+use crate::supervise::{ExitWatch, terminate, wait_exit, watch_exit};
 
 /// An opaque marker that the game process exited. The game is a non-child descendant of the runner,
 /// so no exit code can be reaped; this signals exit, not status.
@@ -47,10 +47,10 @@ impl GameSession {
         Ok(GameExit {})
     }
 
-    /// Targeted kill of the game process only. The broad prefix stop is the separate, explicit
-    /// [`Runtime::kill_prefix`](crate::Runtime::kill_prefix).
+    /// Targeted kill of the game process only, delivered through the process's pidfd. The broad
+    /// prefix stop is the separate, explicit [`Runtime::kill_prefix`](crate::Runtime::kill_prefix).
     pub async fn kill(&self) -> Result<(), RuntimeError> {
-        kill_pid(self.game_pid).await
+        terminate(&self.exit).await
     }
 }
 
