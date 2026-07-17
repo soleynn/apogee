@@ -2,6 +2,7 @@
 //! backend, plus the session-cache fast path. No network, no real process.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use apogee_otp::OtpSource;
 use apogee_secrets::Secret;
@@ -13,13 +14,13 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{FlowContext, drive};
+use super::{FlowContext, drive, language_id, launch_arguments};
 use crate::command::{Command, Event, FlowState};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, Profile};
-use crate::store::Store;
+use crate::model::{Account, AccountKind, Profile, Settings};
+use crate::store::{Store, UidCacheEntry};
 
 const BOOT_VER: &str = "2024.02.01.0000.0000";
 const GAME_VER: &str = "2024.03.28.0000.0000";
@@ -56,6 +57,12 @@ struct Harness {
 }
 
 fn harness(use_otp: bool) -> Harness {
+    harness_customized(use_otp, |_| {})
+}
+
+/// Like [`harness`], but the profile can be customized (runner, launch env/wrappers, prefix) before
+/// it is saved.
+fn harness_customized(use_otp: bool, customize: impl FnOnce(&mut Profile)) -> Harness {
     let game = game_install();
     let store_dir = TempDir::new().unwrap();
     let prefixes = TempDir::new().unwrap();
@@ -65,7 +72,8 @@ fn harness(use_otp: bool) -> Harness {
         use_otp,
         ..Account::new("testuser", AccountKind::Standard)
     };
-    let profile = Profile::new("Main", account.id, game.path().to_path_buf());
+    let mut profile = Profile::new("Main", account.id, game.path().to_path_buf());
+    customize(&mut profile);
     store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
 
@@ -139,6 +147,35 @@ fn login_then_current() -> [ProtoResponse; 4] {
     ]
 }
 
+/// A no-OTP login command for `profile`.
+fn login_no_otp(profile: Uuid) -> Command {
+    Command::Login {
+        profile,
+        password: secret("pw"),
+        otp: OtpSource::Manual(String::new()),
+    }
+}
+
+/// A no-OTP play command for `profile`.
+fn play_no_otp(profile: Uuid) -> Command {
+    Command::PatchAndPlay {
+        profile,
+        password: secret("pw"),
+        otp: OtpSource::Manual(String::new()),
+    }
+}
+
+/// Drive `cmd` with a caller-supplied cancellation token (for the Ctrl-C path), collecting events.
+async fn run_with_cancel(ctx: FlowContext, cmd: Command, cancel: CancellationToken) -> Vec<Event> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    drive(ctx, cmd, tx, cancel).await;
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
 #[tokio::test]
 async fn use_otp_without_a_usable_code_asks_for_one_before_any_request() {
     let h = harness(true);
@@ -206,15 +243,7 @@ async fn terms_not_accepted_is_narrated() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch, NOW);
 
-    let events = run(
-        ctx,
-        Command::Login {
-            profile: h.profile,
-            password: secret("pw"),
-            otp: OtpSource::Manual(String::new()),
-        },
-    )
-    .await;
+    let events = run(ctx, login_no_otp(h.profile)).await;
 
     assert_eq!(states(&events), [FlowState::NeedsTerms]);
     assert_eq!(transport.recorded().len(), 3, "no registration after terms");
@@ -229,15 +258,7 @@ async fn a_closed_login_server_is_no_service() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch, NOW);
 
-    let events = run(
-        ctx,
-        Command::Login {
-            profile: h.profile,
-            password: secret("pw"),
-            otp: OtpSource::Manual(String::new()),
-        },
-    )
-    .await;
+    let events = run(ctx, login_no_otp(h.profile)).await;
 
     assert_eq!(states(&events), [FlowState::NoService]);
     assert_eq!(transport.recorded().len(), 1, "stops at the gate");
@@ -254,15 +275,7 @@ async fn an_inactive_service_is_no_service() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch, NOW);
 
-    let events = run(
-        ctx,
-        Command::Login {
-            profile: h.profile,
-            password: secret("pw"),
-            otp: OtpSource::Manual(String::new()),
-        },
-    )
-    .await;
+    let events = run(ctx, login_no_otp(h.profile)).await;
 
     assert_eq!(states(&events), [FlowState::NoService]);
 }
@@ -279,15 +292,7 @@ async fn a_boot_patch_requirement_is_narrated() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch, NOW);
 
-    let events = run(
-        ctx,
-        Command::Login {
-            profile: h.profile,
-            password: secret("pw"),
-            otp: OtpSource::Manual(String::new()),
-        },
-    )
-    .await;
+    let events = run(ctx, login_no_otp(h.profile)).await;
 
     assert_eq!(states(&events), [FlowState::NeedsBootPatch]);
 }
@@ -310,15 +315,7 @@ async fn pending_game_patches_are_summed_and_narrated() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch, NOW);
 
-    let events = run(
-        ctx,
-        Command::Login {
-            profile: h.profile,
-            password: secret("pw"),
-            otp: OtpSource::Manual(String::new()),
-        },
-    )
-    .await;
+    let events = run(ctx, login_no_otp(h.profile)).await;
 
     assert_eq!(
         states(&events),
@@ -426,4 +423,227 @@ async fn an_unknown_profile_is_a_typed_error() {
     )
     .await;
     assert_eq!(errors(&events).len(), 1);
+}
+
+#[tokio::test]
+async fn a_version_no_longer_serviced_is_narrated() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_not_serviced(),
+    ]));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch, NOW);
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+    assert_eq!(states(&events), [FlowState::VersionNotServiced]);
+}
+
+#[tokio::test]
+async fn a_rejected_password_surfaces_as_one_error() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_auth_failed(),
+    ]));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport.clone(), launch, NOW);
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+    assert!(
+        states(&events).is_empty(),
+        "an auth failure is an error, not a disposition"
+    );
+    assert_eq!(errors(&events).len(), 1);
+    assert_eq!(
+        transport.recorded().len(),
+        3,
+        "no registration after a failed submit"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_install_surfaces_as_one_error_on_the_login_path() {
+    let empty = TempDir::new().unwrap();
+    let path = empty.path().to_path_buf();
+    let h = harness_customized(false, move |p| p.game_path = path);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+    ]));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport.clone(), launch, NOW);
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+    assert_eq!(errors(&events).len(), 1, "a bad install surfaces one error");
+    assert_eq!(
+        transport.recorded().len(),
+        3,
+        "the version report is read before registration"
+    );
+}
+
+#[tokio::test]
+async fn a_profile_referencing_a_missing_account_is_a_typed_error() {
+    let h = harness(false);
+    // Drop the account the profile points at, leaving it dangling.
+    h.store.delete_account(h.account).unwrap();
+    let transport = Arc::new(FixtureTransport::new([]));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport.clone(), launch, NOW);
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+    let errs = errors(&events);
+    assert_eq!(errs.len(), 1);
+    assert!(
+        errs[0].contains("no account"),
+        "expected NoAccount, got {errs:?}"
+    );
+    assert_eq!(
+        transport.recorded().len(),
+        0,
+        "resolution fails before any request"
+    );
+}
+
+#[tokio::test]
+async fn launch_carries_the_profile_env_and_wrappers() {
+    let h = harness_customized(false, |p| {
+        p.launch.extra_env = vec![("DXVK_HUD".to_string(), "fps".to_string())];
+        p.launch.wrappers = vec!["gamescope".to_string()];
+    });
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let request = launch.last_request().unwrap();
+    assert_eq!(request.env.get("DXVK_HUD").map(String::as_str), Some("fps"));
+    assert_eq!(request.wrappers, vec!["gamescope".to_string()]);
+}
+
+#[tokio::test]
+async fn close_after_launch_detaches_without_supervising() {
+    let h = harness(false);
+    h.store
+        .save_settings(&Settings {
+            language: "en".to_string(),
+            close_after_launch: true,
+        })
+        .unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    // A running backend would block wait() forever; detach must return before ever awaiting it.
+    let launch = Arc::new(FakeLaunchBackend::running());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = tokio::time::timeout(Duration::from_secs(5), run(ctx, play_no_otp(h.profile)))
+        .await
+        .expect("close_after_launch must not block on supervision");
+
+    assert_eq!(states(&events), [FlowState::Launching, FlowState::Running]);
+    assert!(
+        !launch.was_killed(),
+        "a detached launch does not kill the game"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_running_launch_kills_the_game_and_exits() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::running());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    // A pre-cancelled token: the supervise select! takes its cancel arm the moment it is reached,
+    // deterministically exercising the kill path without racing on timing.
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let events = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_with_cancel(ctx, play_no_otp(h.profile), cancel),
+    )
+    .await
+    .expect("cancel must unblock the supervised launch");
+
+    assert_eq!(
+        states(&events),
+        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+    );
+    assert!(launch.was_killed(), "cancel must kill the running game");
+}
+
+#[tokio::test]
+async fn a_corrupt_cache_is_cleared_and_launch_asks_to_log_in() {
+    let h = harness(false);
+    let dir = h._store_dir.path().join("uid-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{}.json", h.account)), b"{ not valid json").unwrap();
+
+    let transport = Arc::new(FixtureTransport::new([]));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport.clone(), launch, NOW);
+
+    let events = run(ctx, Command::Launch { profile: h.profile }).await;
+    assert_eq!(states(&events), [FlowState::NeedsLogin]);
+    assert_eq!(transport.recorded().len(), 0);
+    // The corrupt entry was cleared, so a repeat launch would not keep re-preserving it.
+    assert_eq!(h.store.load_uid_cache(h.account).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_corrupt_cache_falls_back_to_a_full_login_on_play() {
+    let h = harness(false);
+    let dir = h._store_dir.path().join("uid-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{}.json", h.account)), b"garbage").unwrap();
+
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport.clone(), launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert_eq!(
+        transport.recorded().len(),
+        4,
+        "a corrupt cache forces a full login"
+    );
+    assert_eq!(launch.launch_count(), 1);
+}
+
+#[test]
+fn language_id_maps_client_languages() {
+    assert_eq!(language_id("ja"), 0);
+    assert_eq!(language_id("en"), 1);
+    assert_eq!(language_id("de"), 2);
+    assert_eq!(language_id("fr"), 3);
+    assert_eq!(
+        language_id("zz"),
+        1,
+        "an unknown language defaults to English"
+    );
+}
+
+#[test]
+fn launch_arguments_carry_the_fixed_set_in_order() {
+    let session = UidCacheEntry {
+        unique_id: "UID-XYZ".to_string(),
+        region: 7,
+        max_expansion: 4,
+        game_version: "2024.03.28.0000.0000".to_string(),
+        expires_at: 0,
+    };
+    // The plaintext form pins the byte-identity-critical set: order, DEV.TestSID = the unique id,
+    // SYS.Region, the language byte, and the game version.
+    assert_eq!(
+        launch_arguments(&session, 3).build_plain(),
+        " DEV.DataPathType=1 DEV.MaxEntitledExpansionID=4 DEV.TestSID=UID-XYZ DEV.UseSqPack=1 \
+         SYS.Region=7 language=3 resetConfig=0 ver=2024.03.28.0000.0000"
+    );
 }
