@@ -6,6 +6,7 @@
 pub mod catalog_sign;
 pub mod chaos;
 pub mod golden;
+pub mod login_fixtures;
 pub mod redact;
 pub mod rt;
 pub mod sandbox;
