@@ -51,12 +51,7 @@ impl RuntimeLauncher {
                     .await?)
             }
             RunnerSelection::Managed { name, version } => {
-                // Where the signed runner catalog is fetched from. Hosting and the production signing
-                // key are still being settled; the system-wine path needs neither and covers launch
-                // today.
-                let manifest = parse_url("https://apogee.example.invalid/runners/manifest.json")?;
-                let signature =
-                    parse_url("https://apogee.example.invalid/runners/manifest.json.sig")?;
+                let (manifest, signature) = catalog_urls()?;
                 let catalog = self
                     .runtime
                     .fetch_catalog(&manifest, &signature, cancel)
@@ -145,6 +140,18 @@ fn relay_progress(events: &UnboundedSender<Event>) -> Progress {
         }
     });
     Progress::new(tx)
+}
+
+/// Resolve the runner catalog manifest and signature URLs. The catalog is hosted at a fixed HTTPS
+/// location with the detached signature beside it under the same name plus `.sig`.
+/// `APOGEE_RUNNER_CATALOG_URL` overrides the manifest URL for a mirror or a pre-deploy test. The
+/// override cannot weaken trust: the Ed25519 signature over the manifest is the authenticity gate
+/// regardless of origin, and the fetcher refuses plain `http`.
+fn catalog_urls() -> Result<(Url, Url), CoreError> {
+    let manifest = std::env::var("APOGEE_RUNNER_CATALOG_URL")
+        .unwrap_or_else(|_| "https://soleynn.github.io/apogee/runners/manifest.json".to_owned());
+    let signature = format!("{manifest}.sig");
+    Ok((parse_url(&manifest)?, parse_url(&signature)?))
 }
 
 fn parse_url(raw: &str) -> Result<Url, CoreError> {
