@@ -45,6 +45,8 @@ pub enum RuntimeError {
         #[source]
         source: std::io::Error,
     },
+    #[error("invalid launch plan: {reason}")]
+    InvalidLaunchPlan { reason: &'static str },
     #[error("game process not found after {waited:?}")]
     GameProcessNotFound { waited: Duration },
     #[error("path mapping failed for {path:?}: {reason}")]
