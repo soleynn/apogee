@@ -18,6 +18,7 @@ reqwest.workspace = true
 url.workspace = true
 async-trait.workspace = true
 sqex-proto = { path = "../sqex-proto" }
+sqex-crypto = { path = "../sqex-crypto" }
 apogee-fetch = { path = "../apogee-fetch" }
 apogee-patcher = { path = "../apogee-patcher" }
 apogee-runtime = { path = "../apogee-runtime" }
