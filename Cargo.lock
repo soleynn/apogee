@@ -53,6 +53,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "sqex-crypto",
  "sqex-proto",
  "tempfile",
  "thiserror",

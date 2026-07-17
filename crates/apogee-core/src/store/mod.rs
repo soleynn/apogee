@@ -172,6 +172,11 @@ impl Store {
         self.save(&self.profile_path(profile.id), profile)
     }
 
+    /// Load the profile with `id`. A missing profile is [`StoreError::NotFound`].
+    pub fn load_profile(&self, id: Uuid) -> Result<Profile, StoreError> {
+        self.load(&self.profile_path(id))
+    }
+
     /// Remove the profile with `id`. A missing profile is [`StoreError::NotFound`].
     pub fn delete_profile(&self, id: Uuid) -> Result<(), StoreError> {
         let path = self.profile_path(id);

@@ -9,14 +9,17 @@ use apogee_otp::Otp;
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::Secrets;
-use sqex_proto::Transport;
+use sqex_proto::{ComputerId, Transport};
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::command::{Command, Event};
 use crate::error::CoreError;
+use crate::flow::{self, FlowContext};
+use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
 use crate::model::{Account, Profile, Settings};
@@ -93,6 +96,10 @@ pub struct Core {
     secrets: Secrets,
     otp: Otp,
     store: Store,
+    /// The launcher's machine fingerprint, sent on OAuth/frontier requests.
+    computer_id: ComputerId,
+    /// The wall-clock source the session-cache window is measured against.
+    clock: Clock,
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
 }
@@ -176,6 +183,8 @@ impl Core {
             secrets,
             otp,
             store,
+            computer_id: host::computer_id(),
+            clock: host::system_clock(),
             prefixes_dir,
         })
     }
@@ -261,26 +270,36 @@ impl Core {
     /// Run `cmd`, yielding the events it produces.
     ///
     /// `execute` drives the async login-to-play flows; synchronous store CRUD is the direct methods
-    /// above (`profiles`, `save_profile`, `settings`, ...), not a command. The flow arms are stubbed
-    /// until they land in a later change.
+    /// above (`profiles`, `save_profile`, `settings`, ...), not a command.
+    ///
+    /// The flow runs on a spawned task, so an ambient Tokio runtime must exist. Use
+    /// [`Core::execute_cancellable`] to thread a cancellation token (a shell wires Ctrl-C to it).
     pub fn execute(&self, cmd: Command) -> impl Stream<Item = Event> + Unpin {
+        self.execute_cancellable(cmd, CancellationToken::new())
+    }
+
+    /// Like [`Core::execute`], but honoring `cancel`: cancelling supervises the game down (a targeted
+    /// kill) and ends the stream.
+    pub fn execute_cancellable(
+        &self,
+        cmd: Command,
+        cancel: CancellationToken,
+    ) -> impl Stream<Item = Event> + Unpin {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.run(cmd, tx);
+        let ctx = self.flow_context();
+        tokio::spawn(async move { flow::drive(ctx, cmd, tx, cancel).await });
         UnboundedReceiverStream::new(rx)
     }
 
-    /// Drive `cmd`'s flow, emitting events on `_tx`. Every arm is a login-to-play flow that lands in a
-    /// later change, at which point `_tx` carries its state and progress.
-    fn run(&self, cmd: Command, _tx: mpsc::UnboundedSender<Event>) {
-        match cmd {
-            Command::Login { .. } => todo!("orchestrate the login-to-play flow"),
-            Command::Launch { .. } => todo!("launch from a cached session"),
-            Command::PatchAndPlay { .. } => todo!("run preflight, patch, then launch the game"),
-            Command::Repair { .. } => todo!("verify and repair the installation"),
-            Command::FirstRun(_) => todo!("walk the initial setup"),
-            Command::ImportXivLauncher(_) => todo!("import an existing launcher configuration"),
-            Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
-            Command::SupportBundle => todo!("collect a redacted diagnostic bundle"),
+    /// A snapshot of the injected seams the flow reads, cheap to clone onto the spawned task.
+    fn flow_context(&self) -> FlowContext {
+        FlowContext {
+            transport: self.transport.clone(),
+            launch: self.launch.clone(),
+            store: self.store.clone(),
+            clock: self.clock.clone(),
+            computer_id: self.computer_id,
+            prefixes_dir: self.prefixes_dir.clone(),
         }
     }
 }
