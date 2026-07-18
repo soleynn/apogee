@@ -88,6 +88,9 @@ struct Config {
     unavailable_first: Option<(u64, RetryAfter)>,
     /// On the first request only, serve this many bytes then hang forever (a hard stall).
     stall_after: Option<u64>,
+    /// Reject a request whose header bytes exceed this budget with `431`, so range packing must stay
+    /// under a header-size cap.
+    max_header_bytes: Option<usize>,
     throttle: Option<Duration>,
     chunk: usize,
     tls: bool,
@@ -122,6 +125,7 @@ impl ChaosServer {
                 range_not_satisfiable: false,
                 unavailable_first: None,
                 stall_after: None,
+                max_header_bytes: None,
                 throttle: None,
                 chunk: 64 * 1024,
                 tls: false,
@@ -295,6 +299,16 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Reject any request whose header bytes (method + path + header names and values) exceed `max`
+    /// with `431 Request Header Fields Too Large`. Keep `max` below hyper's own connection-level
+    /// limit so this app-level rejection is the one that fires. Forces the client to cap
+    /// ranges-per-request rather than pack an unbounded `Range` header.
+    #[must_use]
+    pub fn max_request_header_bytes(mut self, max: usize) -> Self {
+        self.cfg.max_header_bytes = Some(max);
+        self
+    }
+
     /// Serve over HTTPS with a freshly generated self-signed certificate for `127.0.0.1`. The
     /// certificate is exposed via [`ChaosServer::cert_der`] so a client can be built to trust it.
     #[must_use]
@@ -335,6 +349,12 @@ async fn handle(
 
     if req.method() != Method::GET {
         return Ok(status_only(StatusCode::METHOD_NOT_ALLOWED));
+    }
+
+    if let Some(max) = cfg.max_header_bytes
+        && request_header_bytes(&req) > max
+    {
+        return Ok(status_only(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE));
     }
 
     // The first N requests are refused with 503 + Retry-After, then service resumes, so a retry loop
@@ -537,6 +557,15 @@ fn empty_body() -> ChaosBody {
     StreamBody::new(ReceiverStream::new(rx))
 }
 
+/// The approximate on-wire header size of a request: method, path, and every header name and value.
+fn request_header_bytes(req: &Request<Incoming>) -> usize {
+    let mut total = req.method().as_str().len() + req.uri().path().len();
+    for (name, value) in req.headers() {
+        total += name.as_str().len() + value.as_bytes().len();
+    }
+    total
+}
+
 /// Parse the start offset of an open-ended `bytes=START-` range, ignoring any end. Returns `None`
 /// for anything else.
 fn parse_range_start(header: Option<&HeaderValue>) -> Option<u64> {
@@ -689,6 +718,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.len(), 8192);
+    }
+
+    #[tokio::test]
+    async fn oversized_request_headers_are_rejected() {
+        let server = ChaosServer::builder(2, 512)
+            .max_request_header_bytes(1024)
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        // A normal request is under budget and serves.
+        let ok = client.get(server.url("f.bin")).send().await.unwrap();
+        assert_eq!(ok.status().as_u16(), 200);
+
+        // A packed multi-range header (~2.7 KiB) is over budget but under hyper's own limit.
+        let big_range = format!(
+            "bytes={}",
+            (0..250)
+                .map(|i| format!("{}-{}", i * 10, i * 10 + 5))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(big_range.len() > 1024);
+        let resp = client
+            .get(server.url("f.bin"))
+            .header("Range", big_range)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 431);
     }
 
     #[tokio::test]
