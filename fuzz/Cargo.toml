@@ -75,5 +75,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "zipatch_apply"
+path = "fuzz_targets/zipatch_apply.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
