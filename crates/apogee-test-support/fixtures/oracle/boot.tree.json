@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "cef_license.txt",
+      "len": 686653,
+      "sha256": "7432cb8eb0cd060e3ae8cc1777fcffabf7b5fed8f7c1b234143343e911c61a31"
+    },
+    {
+      "path": "ffxivboot.exe",
+      "len": 1132288,
+      "sha256": "617fbe09e081a8db4b67d0aa2762bc0220d951aa8902e91b6a5285b5d676c88d"
+    },
+    {
+      "path": "ffxivboot64.exe",
+      "len": 1327872,
+      "sha256": "cc02f29a0297463ebb6a107823ea7a0bbdf8d6d1aedb287d5212868f1e89bdb6"
+    },
+    {
+      "path": "ffxivconfig64.exe",
+      "len": 296704,
+      "sha256": "09f6da29de205b2071c7c5997f177bb87a089c5fe4c68ea025ed70a750f19635"
+    },
+    {
+      "path": "ffxivlauncher64.exe",
+      "len": 13981440,
+      "sha256": "157763b97307f11dc44a631e918efad823db250ef360478a19b208d711e2b4fc"
+    },
+    {
+      "path": "ffxivsysinfo.exe",
+      "len": 306432,
+      "sha256": "65a7d6c0df3914de2adf47a6790dffc4db9ba685899036d6a95d6186d975e932"
+    },
+    {
+      "path": "ffxivsysinfo64.exe",
+      "len": 331008,
+      "sha256": "63414fa07a6d99840af1c748b8f9acdc29397f3e14321d08fc927c0f39a3e5a5"
+    },
+    {
+      "path": "ffxivupdater64.exe",
+      "len": 1379584,
+      "sha256": "8c38a491ae21e979a4a3aa6e6e9faba981989f835f54d6032161148f05d0dcb7"
+    },
+    {
+      "path": "fileinfo.fiin",
+      "len": 1216,
+      "sha256": "588492c68d28460fa8d4b9aa5710f21ec9774ca3daf48056c1c052949354464f"
+    },
+    {
+      "path": "icudt.dll",
+      "len": 9970256,
+      "sha256": "b2564668c8ab531adf5cb02436a17fc64a7dacc09eda7801f80326f3730752ce"
+    },
+    {
+      "path": "libcef.dll",
+      "len": 24992336,
+      "sha256": "3dedbde8ebf98aa667300f0d8b78d6a886abf00b517a297bf00f120e31f17fe0"
+    },
+    {
+      "path": "license.txt",
+      "len": 25210,
+      "sha256": "17d85f34a05bf37ff304f31b55ec4383991f88b9b23af9f76bfdee65614af445"
+    },
+    {
+      "path": "locales/fileinfo.fiin",
+      "len": 1120,
+      "sha256": "70c1883e9565e744da126debc41b1d9802e96307011a33c9e15bb2308de64ab7"
+    },
+    {
+      "path": "locales/reserved.txt",
+      "len": 12,
+      "sha256": "8cb265aeeaa99baef818e32ce4e34da700d8dc2e02c217a73fdc46b380fe0904"
+    },
+    {
+      "path": "steam_api.dll",
+      "len": 263080,
+      "sha256": "1ac139ebad2a653adff5700347274cf9816256eb5d69ae6dc43c4cf9c8532aa7"
+    },
+    {
+      "path": "steam_api64.dll",
+      "len": 295336,
+      "sha256": "4df999c0c8cb12589f0864d52be5d4c775577aeb27fee28b49b188f9ba083eea"
+    }
+  ]
+}

@@ -1,3 +1,14 @@
 {
-  "entries": []
+  "entries": [
+    {
+      "url": "http://patch-dl.ffxiv.com/boot/2b5cbc63/D2013.06.18.0000.0000.patch",
+      "sha256": "920d740280f1eebb3a0f5433f69dab5b4e2231df0ed1c6504b70d9571fbc6b36",
+      "name": "boot-2013.06.18.0000.0000"
+    },
+    {
+      "url": "http://patch-dl.ffxiv.com/boot/2b5cbc63/D2026.04.10.0000.0001.patch",
+      "sha256": "b71e3b89c06bf32be71ba205ed33e2b4f4014199d6863504c032824c3dc10017",
+      "name": "boot-2026.04.10.0000.0001"
+    }
+  ]
 }
