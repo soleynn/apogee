@@ -221,6 +221,8 @@ dependencies = [
  "hyper-util",
  "rcgen",
  "reqwest",
+ "serde",
+ "serde_json",
  "sha2",
  "sqex-proto",
  "tempfile",
