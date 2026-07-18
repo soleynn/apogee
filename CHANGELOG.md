@@ -23,6 +23,7 @@ is tagged with its change type. Versioning aims to follow
 - Share the entity-delete path between profiles and accounts _(changed)_
 - Cover the cancel-kill, detach, and error branches of the flow _(testing)_
 - Keep string constants out of the composition root _(fixed)_
+- Resolve the runner catalog from its hosted url _(added)_
 
 ### apogee-fetch
 - Carve the download types into modules and reject unverified plain http _(added)_
@@ -43,6 +44,9 @@ is tagged with its change type. Versioning aims to follow
 - Distinguish an invalid launch plan from an unsupported platform _(changed)_
 - Confirm termination after SIGKILL and poll for reaping in tests _(fixed)_
 - Run the game from its install directory _(added)_
+- Authenticate runners against the hosted catalog key _(added)_
+- Track the real game process, not the wine loader _(fixed)_
+- Follow the game across the runner's loader handoffs _(fixed)_
 
 ### apogee-test-support
 - Add a scriptable streaming test http server _(added)_
@@ -57,9 +61,12 @@ is tagged with its change type. Versioning aims to follow
 - Strip a leading BOM from version files like the launcher _(fixed)_
 - Cover UID-header, unreadable, and backup edge cases _(testing)_
 - Pin the observed 204 No Content registration success _(testing)_
+- Accept the integer login-status flag the frontier sends _(fixed)_
+- Back the current-registration disposition with a live capture _(testing)_
 
 ### sqex-proto-probe
 - Register step in the live login probe _(added)_
+- Guard the wrong-password login and allow a region override _(fixed)_
 
 ### workspace
 - Roll -pre checkpoint tags into the next release's changelog _(ci)_
@@ -71,6 +78,8 @@ is tagged with its change type. Versioning aims to follow
 - Refresh stale action pins flagged by zizmor _(ci)_
 - Silence zizmor ref-version-mismatch on the rust-toolchain pin _(ci)_
 - Exclude test code from CodeQL analysis _(ci)_
+- Add the runner catalog signing helper _(build)_
+- Lint the catalog signer and require the wine supervision job _(ci)_
 ## [0.1.0] - 2026-07-16
 
 ### apogee-addons
