@@ -208,7 +208,8 @@ mod tests {
     #[test]
     fn header_prefix_byte_pin() {
         // A byte-for-byte pin of the little-endian prefix: magic, platform=win32, header_size=0x400,
-        // version=1, type=index.
+        // version=1, type=index. These 24 bytes are exactly what a real install's `.index` header
+        // carries (confirmed against a live install by the recorded-fact test in tests/real_headers).
         let buf = common_header(0, 2);
         assert_eq!(
             &buf[0..0x18],

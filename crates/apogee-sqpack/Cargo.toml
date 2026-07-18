@@ -14,6 +14,10 @@ flate2.workspace = true
 [dev-dependencies]
 # Temp game trees for install-enumeration tests.
 tempfile.workspace = true
+# Recorded-fact header fixtures (parsed field values + a sha256, no SE bytes) captured from a real
+# install; serde_json reads them, sha2 re-hashes the live header in the install-gated test.
+serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
