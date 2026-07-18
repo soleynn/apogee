@@ -212,6 +212,7 @@ dependencies = [
 name = "apogee-test-support"
 version = "0.0.0"
 dependencies = [
+ "apogee-fetch",
  "async-trait",
  "bytes",
  "ed25519-dalek",
@@ -226,6 +227,7 @@ dependencies = [
  "sha2",
  "sqex-proto",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
