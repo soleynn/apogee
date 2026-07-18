@@ -1,0 +1,13 @@
+# Sanitized capture of a real session-registration response for a current game, taken from a live
+# login during the launch-and-verify run. The service answers 204 No Content with the patch unique id
+# in a header and an empty body. Only the x-patch-unique-id value is sensitive; it is redacted here to
+# the fixtures' UID token. The game version is public. `register.rs` keys on the unique-id header, so
+# the extra headers are carried but unconsumed; this records that they are present.
+HTTP/1.1 204 No Content
+server: nginx
+content-type: text/html; charset=UTF-8
+x-patch-module: ZiPatch
+x-protocol: http
+x-latest-version: 2026.06.18.0000.0000
+x-patch-unique-id: UID-TOKEN-0123456789
+
