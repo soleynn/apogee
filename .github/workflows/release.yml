@@ -37,13 +37,38 @@ jobs:
         with:
           config: cliff.toml
           args: ${{ steps.tag.outputs.cliff_args }}
+      # Stable tags ship a binary; pre-release checkpoints do not (§3.3). Build, strip, and package the
+      # CLI so the release carries a self-contained tarball plus a sha256 sidecar. Linux only for now.
+      - name: Set up Rust
+        if: steps.tag.outputs.prerelease == 'false'
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+      - name: Build and package the CLI
+        id: package
+        if: steps.tag.outputs.prerelease == 'false'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          triple=x86_64-unknown-linux-gnu
+          cargo build --release -p apogee-cli
+          strip target/release/apogee-cli
+          pkg="apogee-cli-${REF_NAME}-${triple}"
+          install -Dm755 target/release/apogee-cli "dist/${pkg}/apogee-cli"
+          tar -C dist -czf "${pkg}.tar.gz" "${pkg}"
+          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          echo "tarball=${pkg}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=${pkg}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           NOTES: ${{ steps.git-cliff.outputs.content }}
           PRERELEASE: ${{ steps.tag.outputs.prerelease }}
-        # Attach binaries here once the app produces them: add file paths after the tag.
+          TARBALL: ${{ steps.package.outputs.tarball }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
         run: |
-          flag=--latest
-          [ "$PRERELEASE" = "true" ] && flag=--prerelease
-          gh release create "$GITHUB_REF_NAME" --notes "$NOTES" "$flag"
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --prerelease
+          else
+            gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --latest "$TARBALL" "$CHECKSUM"
+          fi
