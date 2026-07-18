@@ -53,6 +53,9 @@ is tagged with its change type. Versioning aims to follow
 - Game-install sandbox builder _(added)_
 - Scripted login and registration exchanges _(added)_
 
+### release
+- Attach the apogee-cli linux binary on stable tags _(ci)_
+
 ### sqex-crypto
 - Source the launch-arg key tick from the host monotonic clock (#28) _(added)_
 
