@@ -14,6 +14,23 @@ pub fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Decode lowercase- or uppercase-hex back to bytes, or `None` if the input is not an even-length
+/// run of hex digits. The inverse of [`to_hex`].
+#[must_use]
+pub fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for pair in bytes.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
+}
+
 /// Byte offset of the first difference, or `None` when the slices are byte-identical (a length
 /// difference reports at the first excess byte).
 #[must_use]
@@ -75,5 +92,19 @@ mod tests {
     #[test]
     fn hex_is_zero_padded() {
         assert_eq!(to_hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+    }
+
+    #[test]
+    fn from_hex_round_trips() {
+        let bytes = [0x00, 0x0f, 0xa0, 0xff];
+        assert_eq!(from_hex(&to_hex(&bytes)), Some(bytes.to_vec()));
+        assert_eq!(from_hex("000FA0FF"), Some(bytes.to_vec()));
+        assert_eq!(from_hex(""), Some(vec![]));
+    }
+
+    #[test]
+    fn from_hex_rejects_malformed() {
+        assert_eq!(from_hex("abc"), None); // odd length
+        assert_eq!(from_hex("zz"), None); // non-hex digits
     }
 }
