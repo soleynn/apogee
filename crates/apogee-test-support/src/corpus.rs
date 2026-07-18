@@ -207,4 +207,23 @@ mod tests {
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         assert_eq!(CorpusManifest::from_json(&json).unwrap(), manifest);
     }
+
+    #[test]
+    fn the_committed_manifest_is_well_formed() {
+        let manifest =
+            CorpusManifest::from_json(include_str!("../corpus/manifest.json")).expect("parse");
+        assert!(!manifest.entries.is_empty(), "corpus manifest is empty");
+        for entry in &manifest.entries {
+            assert!(
+                decode_pin(&entry.name, &entry.sha256).is_ok(),
+                "bad pin for {}",
+                entry.name
+            );
+            assert!(
+                entry.url.starts_with("http://") || entry.url.starts_with("https://"),
+                "bad url for {}",
+                entry.name
+            );
+        }
+    }
 }
