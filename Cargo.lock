@@ -244,11 +244,15 @@ name = "apogee-zipatch"
 version = "0.0.0"
 dependencies = [
  "apogee-sqpack",
+ "apogee-test-support",
  "crc32fast",
+ "flate2",
  "proptest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "trybuild",
 ]
 
 [[package]]

@@ -33,6 +33,8 @@ pub enum Limit {
     FileSize,
     /// A confined path nested deeper than the cap.
     PathDepth,
+    /// A compressed block declared a decompressed size past the decode cap.
+    BlockSize,
 }
 
 /// ZiPatch parse/apply failures. Byte offsets travel with every variant for triage.
@@ -68,4 +70,45 @@ pub enum Error {
     Corrupt { offset: u64, detail: &'static str },
     #[error("unsupported: {what}")]
     Unsupported { what: &'static str },
+    #[error("apply cancelled")]
+    Cancelled,
+}
+
+impl Error {
+    /// Rebase a shared-codec block-decode failure onto the patch file. The codec reports offsets
+    /// relative to the block it was handed, but this crate's contract is patch-file-absolute, so add
+    /// the block's own offset (`block_off`) back in. `declared`/`limit` supply the numbers a
+    /// field-less codec `LimitExceeded` cannot carry itself.
+    pub(crate) fn from_block(
+        source: apogee_sqpack::Error,
+        block_off: u64,
+        declared: u32,
+        limit: u32,
+    ) -> Self {
+        use apogee_sqpack::Error as Codec;
+        match source {
+            Codec::BlockCorrupt { offset, detail } => Error::Corrupt {
+                offset: block_off + offset,
+                detail,
+            },
+            Codec::Truncated { offset, needed } => Error::Truncated {
+                offset: block_off + offset,
+                needed,
+            },
+            Codec::LimitExceeded => Error::LimitExceeded {
+                what: Limit::BlockSize,
+                value: u64::from(declared),
+                max: u64::from(limit),
+            },
+            Codec::Io(source) => Error::Io {
+                source,
+                target: None,
+                during: Op::Write,
+            },
+            _ => Error::Corrupt {
+                offset: block_off,
+                detail: "block decode failed",
+            },
+        }
+    }
 }

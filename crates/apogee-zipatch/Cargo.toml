@@ -20,6 +20,14 @@ serde_json.workspace = true
 # Round-trip properties over the field value space (offsets, ids) catch endianness/shift bugs a fixed
 # fixture would miss.
 proptest.workspace = true
+# The boot apply gate applies into a scratch dir and diffs the result against the committed oracle
+# tree manifest; tree_manifest lives in test-support (default features, no corpus/apogee-fetch pull).
+apogee-test-support = { path = "../apogee-test-support" }
+tempfile.workspace = true
+# Builds the compressed F:A block payloads the synthetic apply tests decode (raw DEFLATE, no wrapper).
+flate2.workspace = true
+# Compile-fail proof that SafePath/TargetPath cannot be minted outside the crate.
+trybuild.workspace = true
 
 [lints]
 workspace = true

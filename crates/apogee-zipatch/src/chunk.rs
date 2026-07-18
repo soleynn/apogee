@@ -362,6 +362,9 @@ pub struct FileOp<'a> {
     pub expansion_id: u16,
     pub path: String,
     pub blocks: &'a [u8],
+    /// Absolute patch-file offset of `blocks[0]`. The apply engine frames the block stream from here,
+    /// so a decode fault reports a patch-file offset, not a block-relative one.
+    pub blocks_off: u64,
 }
 
 /// Whether a `SQPK` `I` index command adds or deletes.

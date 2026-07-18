@@ -414,6 +414,7 @@ fn parse_file_op<'a>(c: &mut Cursor<'a>) -> Result<FileOp<'a>> {
     c.skip(2)?; // padding
     let path = decode_path(c.take(path_len)?);
     // Only AddFile is followed by the compressed-block stream; the rest carry no trailing data.
+    let blocks_off = c.offset();
     let blocks: &'a [u8] = if operation == FileOperation::AddFile {
         c.rest()
     } else {
@@ -426,6 +427,7 @@ fn parse_file_op<'a>(c: &mut Cursor<'a>) -> Result<FileOp<'a>> {
         expansion_id,
         path,
         blocks,
+        blocks_off,
     })
 }
 
