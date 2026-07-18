@@ -378,4 +378,20 @@ mod tests {
         assert!(diff.is_match(), "{diff}");
         assert_eq!(diff.ignored, ["ffxivgame.ver"]);
     }
+
+    #[test]
+    fn the_committed_oracle_manifest_is_well_formed() {
+        let manifest = TreeManifest::from_json(include_str!("../fixtures/oracle/boot.tree.json"))
+            .expect("parse");
+        assert_eq!(manifest.version, MANIFEST_VERSION);
+        assert!(!manifest.files.is_empty(), "oracle manifest is empty");
+        for fact in &manifest.files {
+            assert_eq!(fact.sha256.len(), 64, "bad digest for {}", fact.path);
+            assert!(
+                !fact.path.starts_with('/'),
+                "path not relative: {}",
+                fact.path
+            );
+        }
+    }
 }
