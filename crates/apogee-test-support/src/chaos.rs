@@ -19,7 +19,8 @@ use bytes::Bytes;
 use http_body_util::StreamBody;
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
+    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED,
+    RANGE, RETRY_AFTER,
 };
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -58,6 +59,16 @@ impl Stats {
     }
 }
 
+/// How a `503` names its retry delay: either delta-seconds or an HTTP-date, so both `Retry-After`
+/// forms a client must parse are exercisable.
+#[derive(Debug, Clone)]
+pub enum RetryAfter {
+    /// `Retry-After: <n>` (delta-seconds).
+    Seconds(u64),
+    /// `Retry-After: <http-date>` (the caller supplies the exact header string).
+    HttpDate(String),
+}
+
 /// The scripted behavior of one server.
 #[derive(Debug, Clone)]
 struct Config {
@@ -73,6 +84,10 @@ struct Config {
     last_modified: Option<String>,
     last_modified_after: Option<(u64, String)>,
     range_not_satisfiable: bool,
+    /// Answer the first `n` requests with `503` + this `Retry-After`, then serve normally.
+    unavailable_first: Option<(u64, RetryAfter)>,
+    /// On the first request only, serve this many bytes then hang forever (a hard stall).
+    stall_after: Option<u64>,
     throttle: Option<Duration>,
     chunk: usize,
     tls: bool,
@@ -105,6 +120,8 @@ impl ChaosServer {
                 last_modified: None,
                 last_modified_after: None,
                 range_not_satisfiable: false,
+                unavailable_first: None,
+                stall_after: None,
                 throttle: None,
                 chunk: 64 * 1024,
                 tls: false,
@@ -261,6 +278,23 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Answer the first `times` requests with `503 Service Unavailable` and the given `Retry-After`,
+    /// then serve normally. Exercises the client's backoff-and-retry.
+    #[must_use]
+    pub fn service_unavailable(mut self, times: u64, retry_after: RetryAfter) -> Self {
+        self.cfg.unavailable_first = Some((times, retry_after));
+        self
+    }
+
+    /// On the first request only, serve `bytes` body bytes and then hang with no further data and no
+    /// EOF, so the client's no-progress timeout must fire. Later requests complete, so a resume can
+    /// finish (like [`drop_after`](Self::drop_after), but a silent stall rather than a reset).
+    #[must_use]
+    pub fn stall_after(mut self, bytes: u64) -> Self {
+        self.cfg.stall_after = Some(bytes);
+        self
+    }
+
     /// Serve over HTTPS with a freshly generated self-signed certificate for `127.0.0.1`. The
     /// certificate is exposed via [`ChaosServer::cert_der`] so a client can be built to trust it.
     #[must_use]
@@ -301,6 +335,14 @@ async fn handle(
 
     if req.method() != Method::GET {
         return Ok(status_only(StatusCode::METHOD_NOT_ALLOWED));
+    }
+
+    // The first N requests are refused with 503 + Retry-After, then service resumes, so a retry loop
+    // is exercised end to end.
+    if let Some((times, retry_after)) = &cfg.unavailable_first
+        && request_index <= *times
+    {
+        return Ok(service_unavailable(retry_after));
     }
 
     // A server that cannot satisfy the range refuses every ranged request, forcing a resume to demote
@@ -359,11 +401,11 @@ async fn handle(
     }
 
     let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(4);
-    // Only the first request drops; a resume must be able to finish.
-    let drop_after = if request_index == 1 {
-        cfg.drop_after
+    // Only the first request drops or stalls; a resume must be able to finish.
+    let (drop_after, stall_after) = if request_index == 1 {
+        (cfg.drop_after, cfg.stall_after)
     } else {
-        None
+        (None, None)
     };
     let body_cfg = cfg.clone();
     let body_stats = stats.clone();
@@ -372,6 +414,14 @@ async fn handle(
         let mut served = 0u64;
         let mut buf = vec![0u8; body_cfg.chunk];
         while off < body_cfg.len {
+            if let Some(limit) = stall_after
+                && served >= limit
+            {
+                // Hang: no more frames, no EOF. `closed()` resolves when the client hangs up or the
+                // server shuts down (its receiver drops), so the task frees instead of leaking.
+                tx.closed().await;
+                return;
+            }
             if let Some(limit) = drop_after
                 && served >= limit
             {
@@ -459,6 +509,19 @@ fn build_acceptor(cert_der: &[u8], key_der: &[u8]) -> std::io::Result<TlsAccepto
         .with_single_cert(certs, key)
         .map_err(std::io::Error::other)?;
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// A `503 Service Unavailable` carrying a `Retry-After` and an empty body.
+fn service_unavailable(retry_after: &RetryAfter) -> Response<ChaosBody> {
+    let value = match retry_after {
+        RetryAfter::Seconds(secs) => secs.to_string(),
+        RetryAfter::HttpDate(date) => date.clone(),
+    };
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(RETRY_AFTER, value)
+        .body(empty_body())
+        .unwrap_or_else(|_| status_only(StatusCode::SERVICE_UNAVAILABLE))
 }
 
 /// A response carrying `status` and an empty body.
@@ -562,6 +625,70 @@ mod tests {
         let body = resp.bytes().await.unwrap();
         assert_eq!(body.len(), 4096 - 1000);
         assert_eq!(&body[..], &generated_vec(3, 1000, 4096 - 1000)[..]);
+    }
+
+    #[tokio::test]
+    async fn service_unavailable_then_succeeds() {
+        let server = ChaosServer::builder(5, 1024)
+            .service_unavailable(2, RetryAfter::Seconds(1))
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        for _ in 0..2 {
+            let resp = client.get(server.url("f.bin")).send().await.unwrap();
+            assert_eq!(resp.status().as_u16(), 503);
+            assert_eq!(resp.headers().get("retry-after").unwrap(), "1");
+        }
+        let ok = client.get(server.url("f.bin")).send().await.unwrap();
+        assert_eq!(ok.status().as_u16(), 200);
+        assert_eq!(ok.bytes().await.unwrap().len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn retry_after_can_be_an_http_date() {
+        let date = "Wed, 21 Oct 2026 07:28:00 GMT";
+        let server = ChaosServer::builder(0, 16)
+            .service_unavailable(1, RetryAfter::HttpDate(date.to_string()))
+            .start()
+            .await
+            .unwrap();
+        let resp = reqwest::get(server.url("f.bin")).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 503);
+        assert_eq!(resp.headers().get("retry-after").unwrap(), date);
+    }
+
+    #[tokio::test]
+    async fn a_hard_stall_times_out_then_the_resume_completes() {
+        let server = ChaosServer::builder(9, 8192)
+            .stall_after(1024)
+            .chunk(256)
+            .start()
+            .await
+            .unwrap();
+
+        // First request serves 1024 bytes then hangs; a short client timeout must fire.
+        let stalled = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap()
+            .get(server.url("f.bin"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await;
+        assert!(stalled.is_err(), "the stalled read should time out");
+
+        // The second request does not stall, so a resume finishes.
+        let body = reqwest::get(server.url("f.bin"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 8192);
     }
 
     #[tokio::test]
