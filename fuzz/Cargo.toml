@@ -16,6 +16,7 @@ libfuzzer-sys = "0.4"
 sqex-proto = { path = "../crates/sqex-proto" }
 sqex-crypto = { path = "../crates/sqex-crypto" }
 apogee-runtime = { path = "../crates/apogee-runtime" }
+apogee-sqpack = { path = "../crates/apogee-sqpack" }
 
 [[bin]]
 name = "patchlist"
@@ -48,6 +49,13 @@ bench = false
 [[bin]]
 name = "runner_manifest"
 path = "fuzz_targets/runner_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqpack_codec"
+path = "fuzz_targets/sqpack_codec.rs"
 test = false
 doc = false
 bench = false
