@@ -205,7 +205,10 @@ impl Runtime {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(program.as_str());
-        match supervise::resolve_game(basename, prefix.path(), cancel).await {
+        // The spawned runner process is the wine loader; it renames itself to the PE basename, so the
+        // scanner must prefer the real game process over it.
+        let wrapper_pid = child.id().map(|id| id as i32);
+        match supervise::resolve_game(basename, prefix.path(), wrapper_pid, cancel).await {
             Ok(pid) => {
                 // Detach the wrapper; tokio reaps it on exit. The game is tracked by pid.
                 drop(child);
