@@ -2,8 +2,10 @@
 //!
 //! Binds an ephemeral loopback port and serves a deterministic, position-addressable body that it
 //! generates on the fly, so neither the server nor a test holds a large file in memory. Per-server
-//! script knobs cover the hostile cases the transport must survive: honoring or ignoring `Range`,
-//! dropping the connection partway through, changing the `ETag` between requests, and throttling.
+//! script knobs cover the hostile cases the transport must survive: honoring or ignoring `Range`
+//! (a single `bytes=START-`, or several ranges as `multipart/byteranges`), dropping the connection
+//! partway through, stalling with no EOF, returning `503` + `Retry-After`, rejecting oversized
+//! headers, changing the `ETag` between requests, corrupting chosen byte ranges, and throttling.
 //! `wiremock` can express none of these, which is why this is bespoke.
 //!
 //! The body bytes come from [`generate_into`]: a test computes the same bytes (and their hash) with
@@ -20,8 +22,8 @@ use bytes::Bytes;
 use http_body_util::StreamBody;
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED,
-    RANGE, RETRY_AFTER,
+    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderValue, IF_RANGE,
+    LAST_MODIFIED, RANGE, RETRY_AFTER,
 };
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -117,6 +119,8 @@ struct Config {
     /// Byte ranges whose bytes are flipped (`^= 0xFF`) as they are served, so those blocks fail
     /// verification while the rest is pristine.
     corrupt: Vec<Range<u64>>,
+    /// The boundary string for a `multipart/byteranges` response (a request with several ranges).
+    boundary: String,
     throttle: Option<Duration>,
     chunk: usize,
     tls: bool,
@@ -153,6 +157,7 @@ impl ChaosServer {
                 stall_after: None,
                 max_header_bytes: None,
                 corrupt: Vec::new(),
+                boundary: "chaos_boundary".to_string(),
                 throttle: None,
                 chunk: 64 * 1024,
                 tls: false,
@@ -346,6 +351,17 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// The boundary string used in a `multipart/byteranges` response (served when a request carries
+    /// more than one range). A *hostile* boundary is one that also occurs inside a part's body: pair
+    /// this with [`ChaosServer::serving`] over bytes that embed `\r\n--<boundary>\r\n` so a parser
+    /// that scans for the delimiter instead of honoring each part's declared `Content-Range`/length
+    /// mis-splits the stream.
+    #[must_use]
+    pub fn multipart_boundary(mut self, boundary: impl Into<String>) -> Self {
+        self.cfg.boundary = boundary.into();
+        self
+    }
+
     /// Serve over HTTPS with a freshly generated self-signed certificate for `127.0.0.1`. The
     /// certificate is exposed via [`ChaosServer::cert_der`] so a client can be built to trust it.
     #[must_use]
@@ -432,6 +448,18 @@ async fn handle(
         }
         None => true,
     };
+
+    // A request carrying several comma-separated ranges becomes a `multipart/byteranges` response.
+    // Everything the download engine sends (no range, or one `bytes=START-`) falls through to the
+    // flat single-stream path below, left byte-identical so its resume/overshoot timing is unchanged.
+    if cfg.accept_ranges && if_range_matches && header_has_multiple_ranges(req.headers().get(RANGE))
+    {
+        let ranges = parse_ranges(req.headers().get(RANGE), cfg.len);
+        if ranges.len() > 1 {
+            return Ok(multipart_response(&ranges, &cfg, &stats));
+        }
+    }
+
     let (start, status) = match range_start {
         Some(s) if if_range_matches && s <= cfg.len => (s, StatusCode::PARTIAL_CONTENT),
         _ => (0, StatusCode::OK),
@@ -609,12 +637,175 @@ fn request_header_bytes(req: &Request<Incoming>) -> usize {
 }
 
 /// Parse the start offset of an open-ended `bytes=START-` range, ignoring any end. Returns `None`
-/// for anything else.
+/// for anything else. This drives the single-stream path; multiple ranges take [`parse_ranges`].
 fn parse_range_start(header: Option<&HeaderValue>) -> Option<u64> {
     let raw = header?.to_str().ok()?;
     let spec = raw.strip_prefix("bytes=")?;
     let (start, _end) = spec.split_once('-')?;
     start.parse::<u64>().ok()
+}
+
+/// A unit of a multipart body: framing bytes served verbatim, or a generated content range (the only
+/// kind counted into [`Stats::served_ranges`]).
+enum Segment {
+    Literal(Vec<u8>),
+    Generated(Range<u64>),
+}
+
+impl Segment {
+    fn len(&self) -> u64 {
+        match self {
+            Segment::Literal(bytes) => bytes.len() as u64,
+            Segment::Generated(range) => range.end - range.start,
+        }
+    }
+}
+
+/// True when the `Range` header lists more than one range (a comma), so the response must be
+/// `multipart/byteranges`. Cheap enough to run on every request without touching the single path.
+fn header_has_multiple_ranges(header: Option<&HeaderValue>) -> bool {
+    header
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.contains(','))
+}
+
+/// Parse a `Range: bytes=...` header into concrete `[start, end)` ranges clamped to `len`, honoring
+/// closed (`a-b`), open (`a-`), and suffix (`-n`) forms. Any malformed or empty range voids the whole
+/// header (returns empty).
+fn parse_ranges(header: Option<&HeaderValue>, len: u64) -> Vec<Range<u64>> {
+    let Some(spec) = header
+        .and_then(|h| h.to_str().ok())
+        .and_then(|raw| raw.strip_prefix("bytes="))
+    else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        let Some((a, b)) = part.split_once('-') else {
+            return Vec::new();
+        };
+        let range = match (a.is_empty(), b.is_empty()) {
+            // closed `a-b`, inclusive
+            (false, false) => match (a.parse::<u64>(), b.parse::<u64>()) {
+                (Ok(s), Ok(e)) if s <= e => Some(s..e.saturating_add(1)),
+                _ => None,
+            },
+            // open `a-`
+            (false, true) => a.parse::<u64>().ok().map(|s| s..len),
+            // suffix `-n` (the last n bytes)
+            (true, false) => b.parse::<u64>().ok().map(|n| len.saturating_sub(n)..len),
+            (true, true) => None,
+        };
+        match range {
+            Some(r) => {
+                let clamped = r.start.min(len)..r.end.min(len);
+                if clamped.start < clamped.end {
+                    ranges.push(clamped);
+                }
+            }
+            None => return Vec::new(),
+        }
+    }
+    ranges
+}
+
+/// Build the segment plan for a `multipart/byteranges` body: each range gets a boundary-delimited
+/// part header (`Content-Range` per part) followed by its generated bytes, then a closing delimiter.
+fn multipart_plan(ranges: &[Range<u64>], boundary: &str, len: u64) -> Vec<Segment> {
+    let mut plan = Vec::with_capacity(ranges.len() * 2 + 1);
+    for (i, range) in ranges.iter().enumerate() {
+        let lead = if i == 0 { "" } else { "\r\n" };
+        let header = format!(
+            "{lead}--{boundary}\r\nContent-Type: application/octet-stream\r\n\
+             Content-Range: bytes {}-{}/{}\r\n\r\n",
+            range.start,
+            range.end - 1,
+            len,
+        );
+        plan.push(Segment::Literal(header.into_bytes()));
+        plan.push(Segment::Generated(range.clone()));
+    }
+    plan.push(Segment::Literal(
+        format!("\r\n--{boundary}--\r\n").into_bytes(),
+    ));
+    plan
+}
+
+/// Build a `206 multipart/byteranges` response for `ranges` and spawn its body task. Separate from
+/// the single-stream path so the common download path stays untouched.
+fn multipart_response(
+    ranges: &[Range<u64>],
+    cfg: &Arc<Config>,
+    stats: &Arc<Stats>,
+) -> Response<ChaosBody> {
+    let plan = multipart_plan(ranges, &cfg.boundary, cfg.len);
+    let content_length: u64 = plan.iter().map(Segment::len).sum();
+    let mut builder = Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(CONTENT_LENGTH, content_length)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/byteranges; boundary={}", cfg.boundary),
+        );
+    if cfg.accept_ranges {
+        builder = builder.header(ACCEPT_RANGES, "bytes");
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(4);
+    let body_cfg = cfg.clone();
+    let body_stats = stats.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; body_cfg.chunk];
+        for segment in &plan {
+            match segment {
+                Segment::Literal(bytes) => {
+                    if tx
+                        .send(Ok(Frame::data(Bytes::copy_from_slice(bytes))))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    body_stats
+                        .bytes_served
+                        .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+                }
+                Segment::Generated(range) => {
+                    let mut off = range.start;
+                    while off < range.end {
+                        let this = usize::try_from((range.end - off).min(body_cfg.chunk as u64))
+                            .unwrap_or(body_cfg.chunk);
+                        match &body_cfg.body {
+                            Some(bytes) => {
+                                let at = off as usize;
+                                buf[..this].copy_from_slice(&bytes[at..at + this]);
+                            }
+                            None => generate_into(body_cfg.seed, off, &mut buf[..this]),
+                        }
+                        corrupt_into(&body_cfg.corrupt, off, &mut buf[..this]);
+                        if tx
+                            .send(Ok(Frame::data(Bytes::copy_from_slice(&buf[..this]))))
+                            .await
+                            .is_err()
+                        {
+                            body_stats.record_range(range.start..off);
+                            return;
+                        }
+                        body_stats
+                            .bytes_served
+                            .fetch_add(this as u64, Ordering::SeqCst);
+                        off += this as u64;
+                    }
+                    body_stats.record_range(range.clone());
+                }
+            }
+        }
+    });
+
+    builder
+        .body(StreamBody::new(ReceiverStream::new(rx)))
+        .unwrap_or_else(|_| status_only(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 /// Fill `buf` with the deterministic pseudo-random bytes for the byte offsets
@@ -821,6 +1012,112 @@ mod tests {
             }
         }
         assert_eq!(server.stats().served_ranges(), vec![0..4096]);
+    }
+
+    #[test]
+    fn parse_ranges_handles_every_form() {
+        let hv = |s: &str| HeaderValue::from_str(s).unwrap();
+        assert_eq!(parse_ranges(Some(&hv("bytes=0-9")), 100), vec![0..10]);
+        assert_eq!(parse_ranges(Some(&hv("bytes=90-")), 100), vec![90..100]);
+        assert_eq!(parse_ranges(Some(&hv("bytes=-10")), 100), vec![90..100]);
+        assert_eq!(
+            parse_ranges(Some(&hv("bytes=0-9,50-59")), 100),
+            vec![0..10, 50..60]
+        );
+        assert_eq!(parse_ranges(Some(&hv("bytes=0-9")), 5), vec![0..5]); // clamped to len
+        assert!(parse_ranges(Some(&hv("bytes=nonsense")), 100).is_empty());
+        assert!(parse_ranges(None, 100).is_empty());
+        assert!(header_has_multiple_ranges(Some(&hv("bytes=0-9,50-59"))));
+        assert!(!header_has_multiple_ranges(Some(&hv("bytes=0-"))));
+    }
+
+    fn multipart_part(
+        boundary: &str,
+        first: bool,
+        range: Range<u64>,
+        len: u64,
+        bytes: &[u8],
+    ) -> Vec<u8> {
+        let lead = if first { "" } else { "\r\n" };
+        let mut part = format!(
+            "{lead}--{boundary}\r\nContent-Type: application/octet-stream\r\n\
+             Content-Range: bytes {}-{}/{}\r\n\r\n",
+            range.start,
+            range.end - 1,
+            len
+        )
+        .into_bytes();
+        part.extend_from_slice(bytes);
+        part
+    }
+
+    #[tokio::test]
+    async fn multipart_serves_each_requested_range() {
+        let server = ChaosServer::builder(6, 4096).start().await.unwrap();
+        let resp = reqwest::Client::new()
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=0-99,2000-2099")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 206);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "multipart/byteranges; boundary=chaos_boundary"
+        );
+        let declared_len = resp.content_length();
+        let body = resp.bytes().await.unwrap();
+
+        let mut expected = multipart_part(
+            "chaos_boundary",
+            true,
+            0..100,
+            4096,
+            &generated_vec(6, 0, 100),
+        );
+        expected.extend(multipart_part(
+            "chaos_boundary",
+            false,
+            2000..2100,
+            4096,
+            &generated_vec(6, 2000, 100),
+        ));
+        expected.extend_from_slice(b"\r\n--chaos_boundary--\r\n");
+
+        assert_eq!(&body[..], &expected[..]);
+        assert_eq!(declared_len, Some(expected.len() as u64));
+        assert_eq!(server.stats().served_ranges(), vec![0..100, 2000..2100]);
+    }
+
+    #[tokio::test]
+    async fn a_boundary_can_collide_with_the_body() {
+        // A part body that literally contains the boundary delimiter: a parser scanning for the
+        // delimiter instead of honoring the declared part length mis-splits here.
+        let mut fixed = generated_vec(0, 0, 300);
+        let decoy = b"\r\n--X\r\n";
+        fixed[50..50 + decoy.len()].copy_from_slice(decoy);
+
+        let server = ChaosServer::serving(fixed.clone())
+            .multipart_boundary("X")
+            .start()
+            .await
+            .unwrap();
+        let resp = reqwest::Client::new()
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=0-99,200-249")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 206);
+        let body = resp.bytes().await.unwrap();
+
+        let mut expected = multipart_part("X", true, 0..100, 300, &fixed[0..100]);
+        expected.extend(multipart_part("X", false, 200..250, 300, &fixed[200..250]));
+        expected.extend_from_slice(b"\r\n--X--\r\n");
+
+        assert_eq!(&body[..], &expected[..]);
+        assert!(fixed[0..100].windows(decoy.len()).any(|w| w == decoy));
+        assert_eq!(server.stats().served_ranges(), vec![0..100, 200..250]);
     }
 
     #[tokio::test]
