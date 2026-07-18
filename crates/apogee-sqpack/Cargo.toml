@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# The block codec's DEFLATE payloads (raw, no zlib wrapper); one implementation shared with the
+# patcher via this crate's `codec` module.
+flate2.workspace = true
 
 [lints]
 workspace = true
