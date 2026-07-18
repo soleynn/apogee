@@ -11,8 +11,9 @@
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -42,6 +43,7 @@ type ChaosBody = StreamBody<ReceiverStream<Result<Frame<Bytes>, std::io::Error>>
 pub struct Stats {
     requests: AtomicU64,
     bytes_served: AtomicU64,
+    served_ranges: Mutex<Vec<Range<u64>>>,
 }
 
 impl Stats {
@@ -56,6 +58,27 @@ impl Stats {
     #[must_use]
     pub fn bytes_served(&self) -> u64 {
         self.bytes_served.load(Ordering::SeqCst)
+    }
+
+    /// Every contiguous byte range the server actually served, in served order. Backs the repair
+    /// assertion that a block-granular re-fetch touched *only* the dirty ranges, not the whole file.
+    #[must_use]
+    pub fn served_ranges(&self) -> Vec<Range<u64>> {
+        self.served_ranges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Record a served range (ignoring an empty one).
+    fn record_range(&self, range: Range<u64>) {
+        if range.start >= range.end {
+            return;
+        }
+        self.served_ranges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(range);
     }
 }
 
@@ -91,6 +114,9 @@ struct Config {
     /// Reject a request whose header bytes exceed this budget with `431`, so range packing must stay
     /// under a header-size cap.
     max_header_bytes: Option<usize>,
+    /// Byte ranges whose bytes are flipped (`^= 0xFF`) as they are served, so those blocks fail
+    /// verification while the rest is pristine.
+    corrupt: Vec<Range<u64>>,
     throttle: Option<Duration>,
     chunk: usize,
     tls: bool,
@@ -126,6 +152,7 @@ impl ChaosServer {
                 unavailable_first: None,
                 stall_after: None,
                 max_header_bytes: None,
+                corrupt: Vec::new(),
                 throttle: None,
                 chunk: 64 * 1024,
                 tls: false,
@@ -309,6 +336,16 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Serve `range` with its bytes flipped (`^= 0xFF`), so that block fails its hash while every
+    /// other block stays pristine. Repeatable: call once per corrupt block. Combined with
+    /// [`ChaosServer::stats`]'s `served_ranges`, this drives the "repair re-fetches only the dirty
+    /// blocks" assertion.
+    #[must_use]
+    pub fn corrupt_range(mut self, range: Range<u64>) -> Self {
+        self.cfg.corrupt.push(range);
+        self
+    }
+
     /// Serve over HTTPS with a freshly generated self-signed certificate for `127.0.0.1`. The
     /// certificate is exposed via [`ChaosServer::cert_der`] so a client can be built to trust it.
     #[must_use]
@@ -439,6 +476,7 @@ async fn handle(
             {
                 // Hang: no more frames, no EOF. `closed()` resolves when the client hangs up or the
                 // server shuts down (its receiver drops), so the task frees instead of leaking.
+                body_stats.record_range(start..off);
                 tx.closed().await;
                 return;
             }
@@ -451,6 +489,7 @@ async fn handle(
                         "chaos: dropped mid-body",
                     )))
                     .await;
+                body_stats.record_range(start..off);
                 return;
             }
             let this = usize::try_from((body_cfg.len - off).min(body_cfg.chunk as u64))
@@ -462,6 +501,7 @@ async fn handle(
                 }
                 None => generate_into(body_cfg.seed, off, &mut buf[..this]),
             }
+            corrupt_into(&body_cfg.corrupt, off, &mut buf[..this]);
             if let Some(delay) = body_cfg.throttle {
                 tokio::time::sleep(delay).await;
             }
@@ -470,7 +510,8 @@ async fn handle(
                 .await
                 .is_err()
             {
-                return; // the client hung up
+                body_stats.record_range(start..off); // the client hung up
+                return;
             }
             body_stats
                 .bytes_served
@@ -478,6 +519,7 @@ async fn handle(
             off += this as u64;
             served += this as u64;
         }
+        body_stats.record_range(start..off);
     });
 
     let body = StreamBody::new(ReceiverStream::new(rx));
@@ -588,6 +630,20 @@ pub fn generate_into(seed: u64, offset: u64, buf: &mut [u8]) {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         *byte = (z ^ (z >> 31)) as u8;
+    }
+}
+
+/// Flip (`^= 0xFF`) every byte in `buf` whose absolute offset (`offset + index`) falls in any
+/// `corrupt` range. A no-op when `corrupt` is empty.
+fn corrupt_into(corrupt: &[Range<u64>], offset: u64, buf: &mut [u8]) {
+    if corrupt.is_empty() {
+        return;
+    }
+    for (i, byte) in buf.iter_mut().enumerate() {
+        let abs = offset.wrapping_add(i as u64);
+        if corrupt.iter().any(|r| r.contains(&abs)) {
+            *byte ^= 0xFF;
+        }
     }
 }
 
@@ -718,6 +774,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.len(), 8192);
+    }
+
+    #[tokio::test]
+    async fn served_ranges_record_what_was_served() {
+        let server = ChaosServer::builder(4, 4096).start().await.unwrap();
+        // A full request records the whole file.
+        reqwest::get(server.url("f.bin"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        // An open-ended range records only the tail it served.
+        reqwest::Client::new()
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=1000-")
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(server.stats().served_ranges(), vec![0..4096, 1000..4096]);
+    }
+
+    #[tokio::test]
+    async fn corrupt_range_flips_only_those_bytes() {
+        let server = ChaosServer::builder(8, 4096)
+            .corrupt_range(100..110)
+            .start()
+            .await
+            .unwrap();
+        let body = reqwest::get(server.url("f.bin"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let pristine = generated_vec(8, 0, 4096);
+        for i in 0..4096usize {
+            if (100..110).contains(&i) {
+                assert_eq!(body[i], pristine[i] ^ 0xFF, "byte {i} should be flipped");
+            } else {
+                assert_eq!(body[i], pristine[i], "byte {i} should be pristine");
+            }
+        }
+        assert_eq!(server.stats().served_ranges(), vec![0..4096]);
     }
 
     #[tokio::test]
