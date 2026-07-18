@@ -80,6 +80,7 @@ is tagged with its change type. Versioning aims to follow
 - Exclude test code from CodeQL analysis _(ci)_
 - Add the runner catalog signing helper _(build)_
 - Lint the catalog signer and require the wine supervision job _(ci)_
+- Stop tracking the dev tools' build output _(build)_
 ## [0.1.0] - 2026-07-16
 
 ### apogee-addons
