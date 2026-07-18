@@ -17,6 +17,7 @@ sqex-proto = { path = "../crates/sqex-proto" }
 sqex-crypto = { path = "../crates/sqex-crypto" }
 apogee-runtime = { path = "../crates/apogee-runtime" }
 apogee-sqpack = { path = "../crates/apogee-sqpack" }
+apogee-zipatch = { path = "../crates/apogee-zipatch" }
 
 [[bin]]
 name = "patchlist"
@@ -56,6 +57,20 @@ bench = false
 [[bin]]
 name = "sqpack_codec"
 path = "fuzz_targets/sqpack_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zipatch_chunk"
+path = "fuzz_targets/zipatch_chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zipatch_sqpk"
+path = "fuzz_targets/zipatch_sqpk.rs"
 test = false
 doc = false
 bench = false
