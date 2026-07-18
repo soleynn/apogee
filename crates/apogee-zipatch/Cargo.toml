@@ -7,8 +7,19 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-# Shared compressed-block format lives in sqpack::codec (wired later).
+# IEEE CRC32 over each chunk's type+payload (the container's only integrity check on boot patches).
+crc32fast.workspace = true
+# Shared compressed-block format lives in sqpack::codec (consumed by the apply engine, next phase).
 apogee-sqpack = { path = "../apogee-sqpack" }
+
+[dev-dependencies]
+# The corpus-dump gate reads the real boot patches from a primed cache; serde parses the committed
+# corpus manifest to learn their digests.
+serde = { workspace = true }
+serde_json.workspace = true
+# Round-trip properties over the field value space (offsets, ids) catch endianness/shift bugs a fixed
+# fixture would miss.
+proptest.workspace = true
 
 [lints]
 workspace = true
