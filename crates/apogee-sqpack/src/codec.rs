@@ -184,6 +184,30 @@ pub fn read_block(src: &mut impl Read, out: &mut impl Write, limits: &Limits) ->
     })
 }
 
+/// Decode a raw-DEFLATE block payload into `out`, requiring exactly `decompressed_len` output bytes.
+///
+/// This is the compressed arm of [`read_block`] exposed for a caller that has already framed the
+/// block itself and holds just the DEFLATE payload (the ZiPatch `F:A` apply path, which walks the
+/// block stream to resolve write offsets before handing each payload to a sink). Output is capped as
+/// it is produced, so a stream inflating past `decompressed_len` is rejected rather than allocated.
+///
+/// # Errors
+/// - [`Error::LimitExceeded`] if `decompressed_len` exceeds `limits.max_decompressed`.
+/// - [`Error::BlockCorrupt`] if the DEFLATE stream does not decode to exactly `decompressed_len`
+///   bytes (offset relative to the block's payload).
+/// - [`Error::Io`] if `out` fails to accept the decoded bytes.
+pub fn inflate(
+    compressed: &[u8],
+    out: &mut impl Write,
+    decompressed_len: u32,
+    limits: &Limits,
+) -> Result<()> {
+    if decompressed_len > limits.max_decompressed {
+        return Err(Error::LimitExceeded);
+    }
+    inflate_bounded(compressed, out, decompressed_len)
+}
+
 /// Read exactly `buf.len()` bytes, mapping a short read to a typed truncation at `offset`.
 fn read_full(src: &mut impl Read, buf: &mut [u8], offset: u64) -> Result<()> {
     match src.read_exact(buf) {
