@@ -213,7 +213,7 @@ impl Runtime {
                 // Detach the wrapper; tokio reaps it on exit. The game is tracked by pid.
                 drop(child);
                 progress.emit(RuntimeEvent::GameResolved { pid });
-                Ok(GameSession::new(pid, prefix.clone()))
+                Ok(GameSession::new(pid, basename.to_owned(), prefix.clone()))
             }
             Err(e) => {
                 let _ = child.start_kill();
