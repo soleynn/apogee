@@ -206,6 +206,7 @@ name = "apogee-sqpack"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "tempfile",
  "thiserror",
 ]
 

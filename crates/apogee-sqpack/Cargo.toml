@@ -11,5 +11,9 @@ thiserror.workspace = true
 # patcher via this crate's `codec` module.
 flate2.workspace = true
 
+[dev-dependencies]
+# Temp game trees for install-enumeration tests.
+tempfile.workspace = true
+
 [lints]
 workspace = true
