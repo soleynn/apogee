@@ -78,6 +78,9 @@ jobs:
       # The unverified-download-over-TLS test needs a client that trusts a loopback test certificate,
       # exposed only behind apogee-fetch's test-only `testing` feature, so it runs as its own step.
       - run: cargo test -p apogee-fetch --features testing --test none_over_tls
+      # The corpus fetcher lives behind the `corpus` feature (off by default so it stays out of the
+      # plain and cross builds); its self-test is hermetic (chaos-server-backed, no network).
+      - run: cargo test -p apogee-test-support --features corpus corpus
 
   # Process supervision on stock wine: launches a stub PE and proves the /proc scanner resolves it,
   # kills it targeted, and that wineserver -k is the separate broad stop. A required gate: the

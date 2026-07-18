@@ -28,6 +28,15 @@ rcgen.workspace = true
 # Signs synthetic runner/component manifests with a fixed test key so the Ed25519 verify path is
 # exercised without a real key in the tree.
 ed25519-dalek.workspace = true
+# The corpus fetcher (behind the `corpus` feature) reuses the real download+verify transport rather
+# than a second HTTP client, so a pinned digest covers the on-wire bytes (apogee-fetch disables gzip).
+apogee-fetch = { path = "../apogee-fetch", optional = true }
+thiserror = { workspace = true, optional = true }
+
+[features]
+# Download-by-URL+SHA256 corpus fetch into a content-addressed cache. Off by default so the plain
+# `--workspace` and Windows-cross builds never pull apogee-fetch into test-support's normal graph.
+corpus = ["dep:apogee-fetch", "dep:thiserror"]
 
 [dev-dependencies]
 # Drives the chaos server in its own self-test.

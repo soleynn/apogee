@@ -16,6 +16,9 @@ tools/*/target/
 # Offline signing key for the runner catalog: the private seed stays on the maintainer's machine
 /.catalog-signing/
 
+# Corpus cache: boot patches fetched by URL+SHA256 on demand, keyed by digest, never checked in
+/.corpus-cache/
+
 # OS cruft
 .DS_Store
 

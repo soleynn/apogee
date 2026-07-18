@@ -5,6 +5,8 @@
 
 pub mod catalog_sign;
 pub mod chaos;
+#[cfg(feature = "corpus")]
+pub mod corpus;
 pub mod golden;
 pub mod login_fixtures;
 pub mod redact;
