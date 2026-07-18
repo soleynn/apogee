@@ -5,13 +5,16 @@
 //! SE adds fields additively, and a strict-parse canary over a committed fixture surfaces such
 //! additions as a visible-but-green diff.
 //!
-//! `status` is modeled as the reference does, a bool; SE's exact open/closed encoding is a schema
-//! detail to confirm against a real capture. The frontier also serves display data (news, banners,
-//! notices, world status); those endpoints are added once their payloads are captured, so their lenient
-//! schemas can be pinned from fact rather than guessed.
+//! `status` is SE's open/closed flag, sent as an integer (`0` closed, non-zero open) as the reference
+//! reads it (`status != 0`); a JSON bool is also accepted for resilience. The frontier also serves
+//! display data (news, banners, notices, world status); those endpoints are added once their payloads
+//! are captured, so their lenient schemas can be pinned from fact rather than guessed.
+
+use std::fmt;
 
 use http::{HeaderName, HeaderValue, Method};
 use serde::Deserialize;
+use serde::de::{Deserializer, Visitor};
 use url::Url;
 
 use crate::error::{ProtoError, Step};
@@ -30,9 +33,39 @@ const LOGIN_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/login_sta
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct GateStatus {
+    #[serde(deserialize_with = "deserialize_open_flag")]
     pub status: bool,
     pub message: Vec<String>,
     pub news: Vec<String>,
+}
+
+/// Deserialize SE's open/closed flag. The frontier sends it as an integer (`0` closed, non-zero
+/// open), matching the reference launcher's `status != 0`; a JSON bool is accepted too.
+fn deserialize_open_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OpenFlag;
+    impl Visitor<'_> for OpenFlag {
+        type Value = bool;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an integer open flag or a boolean")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+    }
+    deserializer.deserialize_any(OpenFlag)
 }
 
 /// The per-install, per-locale values a frontier request carries.
@@ -123,6 +156,15 @@ mod tests {
                 .unwrap();
         assert!(status.status);
         assert_eq!(status.news, ["patch 7.1"]);
+    }
+
+    #[test]
+    fn parses_the_integer_open_flag_the_endpoint_sends() {
+        // The live login-status endpoint returns `{"status":1}` (an integer, not a JSON bool).
+        let open: GateStatus = serde_json::from_str(r#"{"status":1}"#).unwrap();
+        assert!(open.status);
+        let closed: GateStatus = serde_json::from_str(r#"{"status":0}"#).unwrap();
+        assert!(!closed.status);
     }
 
     #[test]
