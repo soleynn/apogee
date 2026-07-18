@@ -11,3 +11,4 @@ pub mod redact;
 pub mod rt;
 pub mod sandbox;
 pub mod transport;
+pub mod tree_manifest;

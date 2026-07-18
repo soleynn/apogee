@@ -20,6 +20,9 @@ bytes.workspace = true
 http.workspace = true
 url.workspace = true
 sha2.workspace = true
+# Recorded-fact tree manifests (relative path, length, sha256) serialize as reviewable JSON.
+serde.workspace = true
+serde_json.workspace = true
 tokio-rustls.workspace = true
 rcgen.workspace = true
 # Signs synthetic runner/component manifests with a fixed test key so the Ed25519 verify path is
