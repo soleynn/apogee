@@ -7,10 +7,12 @@ cd "$(dirname "$0")/.."
 status=0
 report() { printf 'FAIL: %s\n' "$1" >&2; printf '%s\n' "$2" | sed 's/^/  /' >&2; status=1; }
 
-# 1. Byte-order conversions live only in sqex-crypto's `bytes` module.
-hits=$(grep -rnE '(from|to)_(le|be)_bytes' crates/sqex-crypto/src --include='*.rs' \
-  | grep -v '/bytes\.rs:' || true)
-[ -z "$hits" ] || report "byte-order conversion outside sqex-crypto/src/bytes.rs" "$hits"
+# 1. Byte-order conversions live only in each crate's `bytes` module (the one endianness home).
+for c in sqex-crypto apogee-sqpack; do
+  hits=$(grep -rnE '(from|to)_(le|be)_bytes' "crates/$c/src" --include='*.rs' \
+    | grep -v '/bytes\.rs:' || true)
+  [ -z "$hits" ] || report "byte-order conversion outside $c/src/bytes.rs" "$hits"
+done
 
 # 2. No ambient global state in the library crates.
 libs() { grep -rnE "$1" crates/*/src --include='*.rs' | grep -v '/apogee-test-support/' || true; }
