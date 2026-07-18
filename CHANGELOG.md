@@ -22,8 +22,14 @@ is tagged with its change type. Versioning aims to follow
 - Add an example to author an oracle tree manifest _(added)_
 - Pin the real boot-patch corpus and its oracle tree _(testing)_
 
+### apogee-zipatch
+- Read the ZiPatch container into a typed chunk stream _(added)_
+- Add a patch dump tool and the corpus parse gate _(added)_
+- Fuzz the chunk and command parsers _(testing)_
+
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
+- Extend the byte-order audit to apogee-zipatch _(build)_
 ## [0.2.0] - 2026-07-18
 
 ### apogee-cli
