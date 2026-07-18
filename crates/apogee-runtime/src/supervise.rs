@@ -20,17 +20,26 @@ const COMM_MAX: usize = 15;
 /// How long to poll for the game to appear before giving up.
 const RESOLVE_DEADLINE: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
+/// How long the runner's own loader must be the *only* match before it is accepted as the game. Wine
+/// renames its loader (the process we spawned) to the PE basename; for a program that runs as one
+/// process the loader is the game, but for one that spawns a separate game process the loader is
+/// transient and the real process appears before this grace elapses.
+const LOADER_STABLE_GRACE: Duration = Duration::from_secs(3);
 /// SIGTERM grace before escalating to SIGKILL.
 const KILL_GRACE: Duration = Duration::from_millis(100);
 const KILL_ATTEMPTS: u32 = 20;
 /// Total time to wait for a graceful exit before SIGKILL.
 const KILL_TOTAL_GRACE: Duration = Duration::from_millis(2000);
 
-/// Poll `/proc` until a process matching `program_basename` (by `comm`) and `prefix_path` (by
-/// normalized `WINEPREFIX`) appears, or the deadline passes.
+/// Poll `/proc` until the real game process (matching `program_basename` by `comm` and `prefix_path`
+/// by normalized `WINEPREFIX`) appears, or the deadline passes. `wrapper_pid` is the runner process
+/// we spawned: wine renames that loader to the PE basename and then execs the game and exits, so a
+/// match at that pid is preferred against — the loader is only accepted once it proves stable (the
+/// single-process case), letting the separate game process win when there is one.
 pub(crate) async fn resolve_game(
     program_basename: &str,
     prefix_path: &Path,
+    wrapper_pid: Option<i32>,
     cancel: &CancellationToken,
 ) -> Result<i32, RuntimeError> {
     let target = comm_target(program_basename);
@@ -44,9 +53,14 @@ pub(crate) async fn resolve_game(
                 waited: start.elapsed(),
             });
         }
-        match scan_once(&target, &expected) {
-            Ok(Some(pid)) => return Ok(pid),
-            Ok(None) => {}
+        match scan_matches(&target, &expected) {
+            Ok(pids) => {
+                if let Some(pid) =
+                    pick_game(&pids, wrapper_pid, start.elapsed() >= LOADER_STABLE_GRACE)
+                {
+                    return Ok(pid);
+                }
+            }
             Err(source) => {
                 return Err(RuntimeError::Io {
                     path: PathBuf::from("/proc"),
@@ -63,8 +77,23 @@ pub(crate) async fn resolve_game(
     }
 }
 
-/// One pass over `/proc`. A pid that races away mid-scan is skipped, not fatal.
-fn scan_once(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Option<i32>> {
+/// Choose the game process from the current matches. Prefer one that is not the runner's own loader
+/// (`wrapper_pid`); accept the loader only once it has been the sole match past the grace window
+/// (`grace_elapsed`), so a program that runs as one process still resolves. `None` means keep polling.
+fn pick_game(pids: &[i32], wrapper_pid: Option<i32>, grace_elapsed: bool) -> Option<i32> {
+    if let Some(&pid) = pids.iter().find(|&&p| Some(p) != wrapper_pid) {
+        return Some(pid);
+    }
+    if grace_elapsed {
+        return pids.first().copied();
+    }
+    None
+}
+
+/// All pids whose `comm` and `WINEPREFIX` match, in `/proc` order. A pid that races away mid-scan is
+/// skipped, not fatal.
+fn scan_matches(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Vec<i32>> {
+    let mut matches = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
         let name = entry.file_name();
@@ -85,10 +114,10 @@ fn scan_once(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Optio
         if let Some(wineprefix) = find_env(&environ, b"WINEPREFIX")
             && wineprefix_matches(&wineprefix, expected_prefix)
         {
-            return Ok(Some(pid));
+            matches.push(pid);
         }
     }
-    Ok(None)
+    Ok(matches)
 }
 
 /// The `comm` string to match: the basename truncated to the kernel's limit (on a char boundary).
@@ -221,6 +250,31 @@ mod tests {
     fn comm_target_truncates_to_the_kernel_limit() {
         assert_eq!(comm_target("ffxiv_dx11.exe"), "ffxiv_dx11.exe");
         assert_eq!(comm_target("a_very_long_process_name"), "a_very_long_pro"); // 15 bytes
+    }
+
+    #[test]
+    fn pick_game_prefers_the_real_process_over_the_loader() {
+        // Wine renames the loader (the spawned wrapper) to the PE basename, then execs the game.
+        // While only the loader is visible, keep waiting rather than lock onto the transient.
+        assert_eq!(pick_game(&[10], Some(10), false), None);
+        // The real game appears alongside (or after) the loader: prefer it.
+        assert_eq!(pick_game(&[10, 42], Some(10), false), Some(42));
+        assert_eq!(pick_game(&[42], Some(10), false), Some(42));
+    }
+
+    #[test]
+    fn pick_game_accepts_the_loader_once_stable() {
+        // A single-process program: the loader is the game and never hands off, so accept it after
+        // the grace window.
+        assert_eq!(pick_game(&[10], Some(10), true), Some(10));
+        // Nothing to pick yet, grace or not.
+        assert_eq!(pick_game(&[], Some(10), true), None);
+        assert_eq!(pick_game(&[], Some(10), false), None);
+    }
+
+    #[test]
+    fn pick_game_without_a_known_wrapper_takes_the_first_match() {
+        assert_eq!(pick_game(&[42], None, false), Some(42));
     }
 
     #[test]
