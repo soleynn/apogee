@@ -25,6 +25,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// process the loader is the game, but for one that spawns a separate game process the loader is
 /// transient and the real process appears before this grace elapses.
 const LOADER_STABLE_GRACE: Duration = Duration::from_secs(3);
+/// How long to look for a handoff successor after the tracked process exits before concluding the
+/// game is really gone. Proton adds loader layers, so the game can hand off more than once.
+const SUCCESSOR_GRACE: Duration = Duration::from_secs(2);
 /// SIGTERM grace before escalating to SIGKILL.
 const KILL_GRACE: Duration = Duration::from_millis(100);
 const KILL_ATTEMPTS: u32 = 20;
@@ -75,6 +78,34 @@ pub(crate) async fn resolve_game(
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// The successor a just-exited game process handed off to, if any. Wine and Proton rename a loader to
+/// the PE basename, exec the game, and exit; when the tracked pid (`prev`) exits, a still-live match
+/// in the same prefix that is not `prev` is that handoff. Polls briefly, then concludes the game is
+/// gone.
+pub(crate) async fn successor(basename: &str, prefix_path: &Path, prev: i32) -> Option<i32> {
+    let target = comm_target(basename);
+    let expected = prefix_path
+        .canonicalize()
+        .unwrap_or_else(|_| prefix_path.to_path_buf());
+    let start = Instant::now();
+    loop {
+        if let Ok(pids) = scan_matches(&target, &expected)
+            && let Some(&pid) = pids.iter().find(|&&p| p != prev)
+        {
+            return Some(pid);
+        }
+        if start.elapsed() >= SUCCESSOR_GRACE {
+            return None;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Targeted kill of `pid` through a fresh pidfd (falling back to the numeric signal path).
+pub(crate) async fn terminate_pid(pid: i32) -> Result<(), RuntimeError> {
+    terminate(&watch_exit(pid)).await
 }
 
 /// Choose the game process from the current matches. Prefer one that is not the runner's own loader
