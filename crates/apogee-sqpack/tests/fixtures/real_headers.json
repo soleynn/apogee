@@ -1,0 +1,50 @@
+{
+  "note": "Recorded facts captured from a real FFXIV install. No Square Enix bytes: only parsed common-header field values, file lengths, and a sha256 of each header's first 1024 bytes. The hermetic test reconstructs each header's identifying prefix from these fields and asserts the parser reproduces them; the install-gated test (APOGEE_SQPACK_REAL_INSTALL) re-reads the real files and confirms the parser and the sha256 still match. All win32 index headers share one sha256 because the common header's first 0x3C0 bytes (and thus its self-hash) are identical across index files; dat0 differs only in its type byte.",
+  "records": [
+    {
+      "path": "ffxiv/000000.win32.index",
+      "file_len": 7984,
+      "platform": "win32",
+      "header_size": 1024,
+      "version": 1,
+      "kind": "index",
+      "sha256_first_1024": "93f275f2dd07ae9daaf8e82081e773e8e87fcbb757d78ee0b65d2241f90d68a3"
+    },
+    {
+      "path": "ffxiv/000000.win32.index2",
+      "file_len": 4424,
+      "platform": "win32",
+      "header_size": 1024,
+      "version": 1,
+      "kind": "index",
+      "sha256_first_1024": "93f275f2dd07ae9daaf8e82081e773e8e87fcbb757d78ee0b65d2241f90d68a3"
+    },
+    {
+      "path": "ffxiv/000000.win32.dat0",
+      "file_len": 78093056,
+      "platform": "win32",
+      "header_size": 1024,
+      "version": 1,
+      "kind": "data",
+      "sha256_first_1024": "53cf47959ca03cb1f1a37229123dde435724bb585a21c9020736f79c949ea008"
+    },
+    {
+      "path": "ex1/020100.win32.index",
+      "file_len": 2304,
+      "platform": "win32",
+      "header_size": 1024,
+      "version": 1,
+      "kind": "index",
+      "sha256_first_1024": "93f275f2dd07ae9daaf8e82081e773e8e87fcbb757d78ee0b65d2241f90d68a3"
+    },
+    {
+      "path": "ex5/020500.win32.index",
+      "file_len": 2304,
+      "platform": "win32",
+      "header_size": 1024,
+      "version": 1,
+      "kind": "index",
+      "sha256_first_1024": "93f275f2dd07ae9daaf8e82081e773e8e87fcbb757d78ee0b65d2241f90d68a3"
+    }
+  ]
+}
