@@ -6,6 +6,17 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-test-support
+- Record a tree manifest with author and compare _(added)_
+- Serve 503 retry-after and hard stalls from the chaos server _(added)_
+- Reject oversized request headers in the chaos server _(added)_
+- Record per-range bytes and inject corrupted ranges _(added)_
+- Serve multipart byte ranges with a hostile boundary _(added)_
+- Fetch a verified corpus into a content-addressed cache _(added)_
+- Add an example to author an oracle tree manifest _(added)_
+- Pin the real boot-patch corpus and its oracle tree _(testing)_
+## [0.2.0] - 2026-07-18
+
 ### apogee-cli
 - Profile, login, launch, and play commands _(added)_
 - End-to-end login and launch against scripted fixtures _(testing)_
