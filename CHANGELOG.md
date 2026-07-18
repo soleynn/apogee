@@ -6,6 +6,12 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-sqpack
+- Decode stored and compressed blocks _(added)_
+- Read the common header and enumerate an install _(added)_
+- Fuzz the block decoder _(testing)_
+- Pin the common header against a real install _(testing)_
+
 ### apogee-test-support
 - Record a tree manifest with author and compare _(added)_
 - Serve 503 retry-after and hard stalls from the chaos server _(added)_
@@ -15,6 +21,9 @@ is tagged with its change type. Versioning aims to follow
 - Fetch a verified corpus into a content-addressed cache _(added)_
 - Add an example to author an oracle tree manifest _(added)_
 - Pin the real boot-patch corpus and its oracle tree _(testing)_
+
+### workspace
+- Extend the byte-order audit to apogee-sqpack _(build)_
 ## [0.2.0] - 2026-07-18
 
 ### apogee-cli
