@@ -1,5 +1,7 @@
 # Build artifacts (the whole workspace shares one root target dir)
 /target
+# The dev tools under tools/ are separate workspaces with their own build dirs
+tools/*/target/
 
 # rustfmt backups
 **/*.rs.bk
