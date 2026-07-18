@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/target_path_extern.rs:6:13
+  |
+6 |     let _ = TargetPath(std::path::PathBuf::new());
+  |             ^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/seam.rs
+  |
+  | pub struct TargetPath(PathBuf);
+  |                       ^^^^^^^ private field
