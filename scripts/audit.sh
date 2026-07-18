@@ -8,7 +8,8 @@ status=0
 report() { printf 'FAIL: %s\n' "$1" >&2; printf '%s\n' "$2" | sed 's/^/  /' >&2; status=1; }
 
 # 1. Byte-order conversions live only in each crate's `bytes` module (the one endianness home).
-for c in sqex-crypto apogee-sqpack; do
+#    ZiPatch is the mixed-endian format, so this gate matters most there.
+for c in sqex-crypto apogee-sqpack apogee-zipatch; do
   hits=$(grep -rnE '(from|to)_(le|be)_bytes' "crates/$c/src" --include='*.rs' \
     | grep -v '/bytes\.rs:' || true)
   [ -z "$hits" ] || report "byte-order conversion outside $c/src/bytes.rs" "$hits"
