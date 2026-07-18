@@ -206,6 +206,45 @@ fn a_204_no_content_is_registered_with_no_patches() {
     }
 }
 
+/// The response mirrors the sanitized capture in `fixtures/register_current.txt`: 204 No Content with
+/// the real observed header set (unique id redacted) and an empty body.
+fn real_current_capture() -> ProtoResponse {
+    ProtoResponse::new(204, Vec::new())
+        .with_header(
+            HeaderName::from_static("x-patch-module"),
+            HeaderValue::from_static("ZiPatch"),
+        )
+        .with_header(
+            HeaderName::from_static("x-protocol"),
+            HeaderValue::from_static("http"),
+        )
+        .with_header(
+            HeaderName::from_static("x-latest-version"),
+            HeaderValue::from_static("2026.06.18.0000.0000"),
+        )
+        .with_header(
+            HeaderName::from_static("x-patch-unique-id"),
+            HeaderValue::from_static(UID),
+        )
+}
+
+#[test]
+fn a_real_current_registration_capture_is_registered_with_no_patches() {
+    // Grounded on a live 204 capture (fixtures/register_current.txt): the full observed header set,
+    // not just the unique id in isolation, must still register cleanly with no pending patches.
+    let (_transport, outcome) = login_then_register(real_current_capture());
+    match outcome.expect("registration") {
+        Registration::Registered {
+            unique_id,
+            pending_patches,
+        } => {
+            assert_eq!(unique_id.expose(), UID);
+            assert!(pending_patches.is_empty());
+        }
+        other => panic!("expected Registered, got {other:?}"),
+    }
+}
+
 #[test]
 fn uid_with_patchlist_is_registered_with_pending_patches() {
     let (_transport, outcome) = login_then_register(uid_response(game_patchlist(&[&game_entry()])));
