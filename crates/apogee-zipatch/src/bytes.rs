@@ -4,9 +4,11 @@
 //! ZiPatch is the launcher's foot-gun format: chunk framing and most command fields are big-endian
 //! (patcher-native), while a handful of fields are little-endian (game-native) — the `FHDR` version
 //! dword read via a little-endian `ReadUInt32`, and the `T` command's `u64` sizes. The compressed-
-//! block and empty-block headers are little-endian too, but those belong to the shared SqPack codec
-//! and the write-side shims, not this parser. Every field's endianness is spelled out at its read
-//! site through these helpers, and a per-field byte golden pins it.
+//! block header is little-endian too, but it belongs to the shared SqPack codec. The empty-block
+//! header the write-side shim ([`crate::datfile`]) stamps is also little-endian and is built through
+//! the [`write_u32_le`]/[`write_u64_le`] helpers here, so the one endianness home covers it and the
+//! audit gate stays satisfied. Every field's endianness is spelled out at its read site through these
+//! helpers, and a per-field byte golden pins it.
 //!
 //! [`Cursor`] is the forward-only reader over one already-buffered chunk payload: every read is
 //! bounds-checked and a short read becomes an [`Error::Truncated`] carrying the absolute file offset
@@ -84,17 +86,16 @@ pub fn write_u64_be(v: u64) -> [u8; 8] {
     v.to_be_bytes()
 }
 
-/// Write a `u32` as four little-endian bytes.
-#[cfg(test)]
+/// Write a `u32` as four little-endian bytes. The empty-block write-side shim stamps its header
+/// through this, so a game-native field can't be written in the wrong order by accident.
 #[must_use]
-pub fn write_u32_le(v: u32) -> [u8; 4] {
+pub(crate) fn write_u32_le(v: u32) -> [u8; 4] {
     v.to_le_bytes()
 }
 
-/// Write a `u64` as eight little-endian bytes.
-#[cfg(test)]
+/// Write a `u64` as eight little-endian bytes (the empty-block header's `blockCount - 1` field).
 #[must_use]
-pub fn write_u64_le(v: u64) -> [u8; 8] {
+pub(crate) fn write_u64_le(v: u64) -> [u8; 8] {
     v.to_le_bytes()
 }
 

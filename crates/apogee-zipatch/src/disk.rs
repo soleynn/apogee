@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 
 use apogee_sqpack::codec;
 
-use crate::error::{Error, Op, Result};
+use crate::chunk::expansion_folder;
+use crate::datfile;
+use crate::error::{Error, Limit, Op, Result};
 use crate::seam::{DataSource, KeepFilter, PatchSink, SafePath, TargetPath};
 
 /// How many target handles to hold open at once. Boot writes a handful of files; game patches touch
@@ -31,6 +33,16 @@ const OPEN_HANDLE_CAP: usize = 16;
 /// The decode cap for one `F:A` block. Comfortably clears real file-add blocks while still bounding a
 /// hostile `decompressed_size` claim.
 const MAX_BLOCK_DECOMPRESSED: u32 = 16 << 20;
+
+/// The cap on a single zero-fill (an `A` delete-tail or a `D`/`E` empty-block span). It clears any
+/// real dat-scale wipe or expand with room to spare while rejecting the pathological ~512 GiB span a
+/// hostile `u32` block count could claim, so a corrupt length is a typed error, not a disk-filling
+/// loop.
+const MAX_WIPE_BYTES: u64 = 8 << 30;
+
+/// The reused buffer size for a zero-fill: written once, reused across the run, so a large wipe is a
+/// handful of large writes rather than a syscall per few kilobytes.
+const WIPE_CHUNK: usize = 1 << 16;
 
 /// Applies a patch to a game tree rooted at a directory. Construct with [`DiskSink::new`], hand it to
 /// [`crate::apply`].
@@ -80,20 +92,47 @@ impl PatchSink for DiskSink {
                     Error::from_block(e, patch_off, decompressed_len, limits.max_decompressed)
                 })?;
             }
-            // The zero-fill primitive is the empty-block command's job, which lands in a later phase.
-            DataSource::Zeros { .. } => {
-                return Err(Error::Unsupported {
-                    what: "zero-fill write",
-                });
+            // An `A` command's plain delete-tail wipe: zero `len` bytes at `off`, no header.
+            DataSource::Zeros { len } => {
+                let file = self.store.get(&self.root, rel)?;
+                write_zeros(file, off, len, &self.root, rel)?;
             }
         }
         Ok(())
     }
 
-    fn write_empty_block(&mut self, _target: &TargetPath, _off: u64, _blocks: u32) -> Result<()> {
-        Err(Error::Unsupported {
-            what: "empty-block write",
-        })
+    fn write_empty_block(&mut self, target: &TargetPath, off: u64, blocks: u32) -> Result<()> {
+        let rel = target.as_path();
+        let wipe_len = u64::from(blocks) << 7;
+        check_wipe(wipe_len, MAX_WIPE_BYTES)?;
+        // `off` is a `u32 << 7` (≤ 2^39) and `wipe_len` a `u32 << 7` (≤ 2^39), so the span cannot
+        // overflow a `u64`.
+        let end = off + wipe_len;
+        let file = self.store.get(&self.root, rel)?;
+        let cur = file
+            .metadata()
+            .map_err(|e| io(e, self.root.join(rel), Op::Read))?
+            .len();
+        // Only the portion of the run that overlaps existing bytes must be written as explicit zeros
+        // (to overwrite prior data). A tail past the current end of file is grown with a sparse
+        // `set_len`: it reads back as zeros, so the file content is byte-identical to the reference's
+        // explicit wipe while a large `E` expand writes no zero bytes at all.
+        let overlap_end = end.min(cur);
+        if overlap_end > off {
+            write_zeros(file, off, overlap_end - off, &self.root, rel)?;
+        }
+        if end > cur {
+            file.set_len(end)
+                .map_err(|e| io(e, self.root.join(rel), Op::Truncate))?;
+        }
+        // Stamp the 24-byte header over the run's start.
+        write_at(
+            file,
+            off,
+            &datfile::empty_block_header(blocks),
+            &self.root,
+            rel,
+        )
     }
 
     fn truncate(&mut self, target: &TargetPath, len: u64) -> Result<()> {
@@ -122,10 +161,33 @@ impl PatchSink for DiskSink {
         }
     }
 
-    fn remove_expansion(&mut self, _expansion: u16, _keep: &KeepFilter) -> Result<()> {
-        Err(Error::Unsupported {
-            what: "expansion remove-all",
-        })
+    fn remove_expansion(&mut self, expansion: u16, keep: &KeepFilter) -> Result<()> {
+        // The reference narrows the id to a byte before naming the folder, so ids past 255 fold onto
+        // the base game. Both the archive and movie subtrees are swept, immediate files only.
+        let folder = expansion_folder(expansion as u8);
+        for sub in ["sqpack", "movie"] {
+            let dir_rel = Path::new(sub).join(&folder);
+            // A missing subtree is nothing to remove; a symlinked component is refused by ensure_dirs.
+            let Some(abs) = ensure_dirs(&self.root, &dir_rel, false)? else {
+                continue;
+            };
+            let entries = fs::read_dir(&abs).map_err(|e| io(e, abs.clone(), Op::Read))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| io(e, abs.clone(), Op::Read))?;
+                let name = entry.file_name();
+                let path = entry.path();
+                let meta =
+                    fs::symlink_metadata(&path).map_err(|e| io(e, path.clone(), Op::Read))?;
+                // Non-recursive, files only: a subdirectory is left alone, matching `GetFiles`.
+                if meta.is_dir() || keep.is_kept(&name.to_string_lossy()) {
+                    continue;
+                }
+                self.store.evict(&dir_rel.join(&name));
+                // Unlink the entry; a symlink is removed as the link itself, never followed.
+                fs::remove_file(&path).map_err(|e| io(e, path, Op::Remove))?;
+            }
+        }
+        Ok(())
     }
 
     fn make_dir_tree(&mut self, rel: &SafePath) -> Result<()> {
@@ -153,11 +215,56 @@ impl PatchSink for DiskSink {
             Err(e) => Err(io(e, abs, Op::Remove)),
         }
     }
+
+    /// Preallocate `len` bytes for a fresh target (Linux only; the default no-op covers other
+    /// targets). `KEEP_SIZE` reserves blocks without changing the logical length, so the bytes the
+    /// apply writes are identical whether or not the reservation happened. A filesystem that cannot
+    /// preallocate (tmpfs, some network mounts) returns an error that is deliberately ignored: a
+    /// best-effort hint must never fail an otherwise-valid apply.
+    #[cfg(target_os = "linux")]
+    fn reserve(&mut self, target: &TargetPath, len: u64) -> Result<()> {
+        let rel = target.as_path();
+        let file = self.store.get(&self.root, rel)?;
+        let _ = rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::KEEP_SIZE, 0, len);
+        Ok(())
+    }
 }
 
 /// The parent of `rel`, or the empty path (an empty component walk) when `rel` is a single component.
 fn parent_of(rel: &Path) -> &Path {
     rel.parent().unwrap_or(Path::new(""))
+}
+
+/// Reject a wipe/expand span past the dat-scale cap, so a corrupt length is a typed error rather than
+/// a disk-filling write (or a huge sparse extend).
+fn check_wipe(len: u64, max: u64) -> Result<()> {
+    if len > max {
+        return Err(Error::LimitExceeded {
+            what: Limit::FileSize,
+            value: len,
+            max,
+        });
+    }
+    Ok(())
+}
+
+/// Write `len` zero bytes at `off`, capped by [`MAX_WIPE_BYTES`]. One [`WIPE_CHUNK`] buffer is zeroed
+/// once and rewritten, so a large wipe is a few big writes, not a syscall per few kilobytes, and it
+/// never allocates proportionally to `len`.
+fn write_zeros(file: &mut File, off: u64, len: u64, root: &Path, rel: &Path) -> Result<()> {
+    check_wipe(len, MAX_WIPE_BYTES)?;
+    seek(file, off, root, rel)?;
+    // Cap the buffer at the smaller of the run and the chunk; the `min` in `u64` keeps the cast safe.
+    let cap = len.min(WIPE_CHUNK as u64) as usize;
+    let zeros = vec![0u8; cap];
+    let mut remaining = len;
+    while remaining > 0 {
+        let n = remaining.min(cap as u64) as usize;
+        file.write_all(&zeros[..n])
+            .map_err(|e| io(e, root.join(rel), Op::Write))?;
+        remaining -= n as u64;
+    }
+    Ok(())
 }
 
 /// A bounded LRU of open target handles. The most recently used slot is at the end; a miss opens a
