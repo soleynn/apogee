@@ -437,6 +437,33 @@ mod tests {
     }
 
     #[test]
+    fn splitting_an_empty_block_part_advances_its_decoded_offset() {
+        let mut tf = TargetFile::new("a".into());
+        tf.update(Part::empty_block(0, 512, 4)); // a 512-byte empty-block region
+        tf.update(patch_part(128, 128, 1, 0)); // overwrite the middle 128 bytes
+        assert_eq!(
+            layout(&tf),
+            vec![(0, 128, 'e'), (128, 128, 'p'), (256, 256, 'e')]
+        );
+        // The left remnant keeps decoded_from 0 (its 24-byte header still starts the region); the
+        // right remnant's decoded offset advanced past the overwritten window to 256.
+        assert!(matches!(
+            tf.parts[0].source,
+            Source::EmptyBlock {
+                block_count: 4,
+                decoded_from: 0
+            }
+        ));
+        assert!(matches!(
+            tf.parts[2].source,
+            Source::EmptyBlock {
+                block_count: 4,
+                decoded_from: 256
+            }
+        ));
+    }
+
+    #[test]
     fn adjacent_writes_stay_gapless_and_ordered() {
         let mut tf = TargetFile::new("a".into());
         tf.update(patch_part(0, 128, 0, 0));
