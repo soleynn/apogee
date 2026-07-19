@@ -33,6 +33,14 @@ is tagged with its change type. Versioning aims to follow
 - Confine deletes and harden the apply and parse edges _(fixed)_
 - Apply the game-scale SQPK commands _(added)_
 - Cover the game-scale apply engine _(testing)_
+- Count the chunk-size field in the reader position _(fixed)_
+- Add rayon and make flate2 a normal dependency _(build)_
+- Build and verify a block index of an install _(added)_
+- Add index and verify verbs to the patch tool _(added)_
+- Cover block index build, verify, and reconstruct _(testing)_
+- Make the .apzi decode total and bounded on hostile input _(fixed)_
+- Cover empty-block splits and the refine-vanished path _(testing)_
+- Drop the always-zero empty-block write offset _(changed)_
 
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
