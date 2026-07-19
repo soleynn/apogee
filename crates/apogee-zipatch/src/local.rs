@@ -46,7 +46,7 @@ impl RangeSource for LocalPatchSource {
             offset: 0,
             detail: "range source patch id out of range",
         })?;
-        let mut file = File::open(path).map_err(|e| io(e, Op::Open))?;
+        let mut file = File::open(path).map_err(|e| Error::io(e, Op::Open))?;
         let mut buf = Vec::new();
         for range in ranges {
             let len = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
@@ -54,14 +54,14 @@ impl RangeSource for LocalPatchSource {
                 detail: "range source range end precedes start",
             })?;
             file.seek(SeekFrom::Start(range.start))
-                .map_err(|e| io(e, Op::Read))?;
+                .map_err(|e| Error::io(e, Op::Read))?;
             // Grow the buffer only as bytes arrive, so an oversized range reads (at most) the real
             // file rather than pre-allocating the claimed span.
             buf.clear();
             (&mut file)
                 .take(len)
                 .read_to_end(&mut buf)
-                .map_err(|e| io(e, Op::Read))?;
+                .map_err(|e| Error::io(e, Op::Read))?;
             if buf.len() as u64 != len {
                 return Err(Error::Truncated {
                     offset: range.start,
@@ -71,13 +71,5 @@ impl RangeSource for LocalPatchSource {
             out(range.start, &buf)?;
         }
         Ok(())
-    }
-}
-
-fn io(source: std::io::Error, during: Op) -> Error {
-    Error::Io {
-        source,
-        target: None,
-        during,
     }
 }

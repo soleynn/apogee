@@ -110,7 +110,7 @@ impl Index {
         for path in &report.missing_files {
             if let Some(target) = by_path.get(path.as_path()) {
                 for part in &target.parts {
-                    attempted.push(part_ref(target, part));
+                    attempted.push(PartRef::of(target, part));
                     if let Some((idx, range)) = patch_fetch(part, sources_len) {
                         fetch.entry(idx).or_default().push(range);
                     }
@@ -173,10 +173,11 @@ impl Index {
                 Ok(f) => f,
                 // A file that vanished after verify: leave it; the re-verify re-breaks its parts.
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(open_err(e)),
+                Err(e) => return Err(Error::io(e, Op::Open)),
             };
             if let Some(&final_len) = size_fix.get(path) {
-                file.set_len(final_len).map_err(|e| ioe(e, Op::Truncate))?;
+                file.set_len(final_len)
+                    .map_err(|e| Error::io(e, Op::Truncate))?;
                 outcome.resized.push(target.path.clone());
                 resized.insert(*path);
             }
@@ -199,11 +200,11 @@ impl Index {
             match OpenOptions::new().write(true).open(root.join(path)) {
                 Ok(file) => {
                     file.set_len(target.final_len())
-                        .map_err(|e| ioe(e, Op::Truncate))?;
+                        .map_err(|e| Error::io(e, Op::Truncate))?;
                     outcome.resized.push(target.path.clone());
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(open_err(e)),
+                Err(e) => return Err(Error::io(e, Op::Open)),
             }
         }
 
@@ -297,25 +298,20 @@ fn rebuild_missing(
 ) -> Result<()> {
     let abs = root.join(&target.path);
     if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent).map_err(|e| ioe(e, Op::MakeDir))?;
+        fs::create_dir_all(parent).map_err(|e| Error::io(e, Op::MakeDir))?;
     }
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&abs)
-        .map_err(|e| ioe(e, Op::Open))?;
+        .map_err(|e| Error::io(e, Op::Open))?;
     file.set_len(target.final_len())
-        .map_err(|e| ioe(e, Op::Truncate))?;
+        .map_err(|e| Error::io(e, Op::Truncate))?;
     for part in &target.parts {
         match part.source {
             Source::Patch { .. } => {
-                if patch_fetch(part, sources_len).is_some() {
-                    let bytes = reconstruct::materialize_patch(part, bufs, limits)?;
-                    if crc32fast::hash(&bytes) == part.crc32 {
-                        write_at(&mut file, part.target_off, &bytes)?;
-                    }
-                }
+                write_checked_patch(&mut file, part, bufs, limits, sources_len)?
             }
             Source::EmptyBlock {
                 block_count,
@@ -326,7 +322,7 @@ fn rebuild_missing(
                     decoded_from,
                     part.target_len,
                 ) {
-                    write_at(&mut file, part.target_off, &header)?;
+                    reconstruct::write_at(&mut file, part.target_off, &header)?;
                 }
             }
             // Sparse zero run (covered by set_len) or an unsourceable part: nothing to write.
@@ -348,14 +344,7 @@ fn repair_in_place(
     sources_len: usize,
 ) -> Result<()> {
     match part.source {
-        Source::Patch { .. } => {
-            if patch_fetch(part, sources_len).is_some() {
-                let bytes = reconstruct::materialize_patch(part, bufs, limits)?;
-                if crc32fast::hash(&bytes) == part.crc32 {
-                    write_at(file, part.target_off, &bytes)?;
-                }
-            }
-        }
+        Source::Patch { .. } => write_checked_patch(file, part, bufs, limits, sources_len)?,
         Source::Zeros => write_zeros(file, part.target_off, part.target_len)?,
         Source::EmptyBlock {
             block_count,
@@ -365,10 +354,30 @@ fn repair_in_place(
             if let Some(header) =
                 reconstruct::empty_block_header_slice(block_count, decoded_from, part.target_len)
             {
-                write_at(file, part.target_off, &header)?;
+                reconstruct::write_at(file, part.target_off, &header)?;
             }
         }
         Source::Unavailable => {}
+    }
+    Ok(())
+}
+
+/// Materialize a patch part through the fetched buffers and write it only if its bytes match the
+/// indexed CRC. An unsourceable part (bad source index / overflowing range) and a CRC mismatch are
+/// both soft skips: nothing is written, so the re-verify reports the part still broken. Shared by the
+/// in-place and missing-file writers.
+fn write_checked_patch(
+    file: &mut File,
+    part: &Part,
+    bufs: &mut [RangeBuf],
+    limits: &codec::Limits,
+    sources_len: usize,
+) -> Result<()> {
+    if patch_fetch(part, sources_len).is_some() {
+        let bytes = reconstruct::materialize_patch(part, bufs, limits)?;
+        if crc32fast::hash(&bytes) == part.crc32 {
+            reconstruct::write_at(file, part.target_off, &bytes)?;
+        }
     }
     Ok(())
 }
@@ -384,31 +393,16 @@ fn find_part<'a>(target: &'a TargetFile, pr: &PartRef) -> Option<&'a Part> {
     (part.target_len == pr.target_len).then_some(part)
 }
 
-/// A [`PartRef`] naming `part` within `target`.
-fn part_ref(target: &TargetFile, part: &Part) -> PartRef {
-    PartRef {
-        path: target.path.clone(),
-        target_off: part.target_off,
-        target_len: part.target_len,
-    }
-}
-
-/// Write `buf` at absolute offset `off`.
-fn write_at(file: &mut File, off: u64, buf: &[u8]) -> Result<()> {
-    file.seek(SeekFrom::Start(off))
-        .map_err(|e| ioe(e, Op::Write))?;
-    file.write_all(buf).map_err(|e| ioe(e, Op::Write))
-}
-
 /// Overwrite `[off, off+len)` with zeros in bounded chunks, never allocating the run's length.
 fn write_zeros(file: &mut File, off: u64, len: u64) -> Result<()> {
     let zeros = [0u8; ZERO_CHUNK];
     file.seek(SeekFrom::Start(off))
-        .map_err(|e| ioe(e, Op::Write))?;
+        .map_err(|e| Error::io(e, Op::Write))?;
     let mut remaining = len;
     while remaining > 0 {
         let n = remaining.min(ZERO_CHUNK as u64) as usize;
-        file.write_all(&zeros[..n]).map_err(|e| ioe(e, Op::Write))?;
+        file.write_all(&zeros[..n])
+            .map_err(|e| Error::io(e, Op::Write))?;
         remaining -= n as u64;
     }
     Ok(())
@@ -416,8 +410,9 @@ fn write_zeros(file: &mut File, off: u64, len: u64) -> Result<()> {
 
 /// A sparse in-memory view of one patch's fetched ranges, presented as `Read + Seek` so the reused
 /// [`materialize_patch`](reconstruct::materialize_patch) pulls from it exactly as from a patch file.
-/// Spans are kept sorted; a read in a gap returns `Ok(0)`, and the planner guarantees each part's
-/// span sits wholly inside one contiguous span, so that only ever signals a genuinely unfetched byte.
+/// The planner delivers non-overlapping ranges, so `read` finds the covering span by scan regardless
+/// of insertion order (no sort needed); a read in a gap returns `Ok(0)`, and because each part's span
+/// sits wholly inside one contiguous span that only ever signals a genuinely unfetched byte.
 #[derive(Default)]
 struct RangeBuf {
     spans: Vec<(u64, Vec<u8>)>,
@@ -425,13 +420,13 @@ struct RangeBuf {
 }
 
 impl RangeBuf {
-    /// Store a fetched span, keeping the list sorted by start offset.
+    /// Store a fetched span. Order is irrelevant (`read` scans for the covering span), so this is a
+    /// plain append.
     fn insert(&mut self, off: u64, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
         self.spans.push((off, bytes.to_vec()));
-        self.spans.sort_by_key(|(start, _)| *start);
     }
 }
 
@@ -479,18 +474,6 @@ impl Seek for RangeBuf {
         self.cursor = cursor;
         Ok(cursor)
     }
-}
-
-fn ioe(source: io::Error, during: Op) -> Error {
-    Error::Io {
-        source,
-        target: None,
-        during,
-    }
-}
-
-fn open_err(source: io::Error) -> Error {
-    ioe(source, Op::Open)
 }
 
 #[cfg(test)]
@@ -616,6 +599,29 @@ mod tests {
         buf.seek(SeekFrom::Start(30)).unwrap();
         let mut empty = [0u8; 4];
         assert_eq!(buf.read(&mut empty).unwrap(), 0);
+    }
+
+    #[test]
+    fn range_buf_serves_out_of_order_and_duplicate_spans() {
+        // Spans inserted out of order still serve a contiguous window (read scans, no sort needed).
+        let mut buf = RangeBuf::default();
+        buf.insert(20, &[2u8; 10]);
+        buf.insert(10, &[1u8; 10]);
+        buf.seek(SeekFrom::Start(10)).unwrap();
+        let mut out = Vec::new();
+        (&mut buf).take(20).read_to_end(&mut out).unwrap();
+        assert_eq!(out.len(), 20);
+        assert_eq!(&out[..10], &[1u8; 10]);
+        assert_eq!(&out[10..], &[2u8; 10]);
+
+        // A duplicate span does not corrupt a covered read.
+        let mut dup = RangeBuf::default();
+        dup.insert(0, &[7u8; 8]);
+        dup.insert(0, &[7u8; 8]);
+        dup.seek(SeekFrom::Start(0)).unwrap();
+        let mut o = [0u8; 8];
+        assert_eq!(dup.read(&mut o).unwrap(), 8);
+        assert_eq!(o, [7u8; 8]);
     }
 
     #[test]
