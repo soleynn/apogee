@@ -248,6 +248,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

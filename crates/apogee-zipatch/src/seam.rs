@@ -106,9 +106,34 @@ fn is_drive_letter(comp: Option<&str>) -> bool {
     })
 }
 
-/// Which expansion files to keep during a [`PatchSink::remove_expansion`].
-#[derive(Debug, Clone, Default)]
-pub struct KeepFilter {/* keep-rules not yet modeled */}
+/// Which expansion files a [`PatchSink::remove_expansion`] spares. The reference keeps the variant
+/// marker (`.var`) and the four intro-movie streams (`00000.bk2`..`00003.bk2`); a file is kept when
+/// its name ends with any of the configured suffixes. The default is the reference's set (a
+/// compiled-in list; an index-shipped filter is a later concern).
+#[derive(Debug, Clone)]
+pub struct KeepFilter {
+    suffixes: &'static [&'static str],
+}
+
+/// The reference remove-all keep-set (its `RemoveAllFilter`): the variant marker and the intro
+/// movies survive an expansion wipe.
+const DEFAULT_KEEP: &[&str] = &[".var", "00000.bk2", "00001.bk2", "00002.bk2", "00003.bk2"];
+
+impl Default for KeepFilter {
+    fn default() -> Self {
+        Self {
+            suffixes: DEFAULT_KEEP,
+        }
+    }
+}
+
+impl KeepFilter {
+    /// Whether a file with this name survives a remove-all (its name ends with a kept suffix).
+    #[must_use]
+    pub fn is_kept(&self, name: &str) -> bool {
+        self.suffixes.iter().any(|s| name.ends_with(s))
+    }
+}
 
 /// Identifies one source patch file to a [`RangeSource`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +171,13 @@ pub trait PatchSink {
     fn remove_expansion(&mut self, expansion: u16, keep: &KeepFilter) -> Result<()>;
     fn make_dir_tree(&mut self, rel: &SafePath) -> Result<()>;
     fn remove_dir(&mut self, rel: &SafePath) -> Result<()>;
+
+    /// Hint that `target` is about to be filled to `len` bytes, so a sink may preallocate. Advisory:
+    /// the default does nothing, and an implementation must never let a failed hint change the bytes
+    /// it writes (so byte-identity holds whether or not preallocation is available).
+    fn reserve(&mut self, _target: &TargetPath, _len: u64) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Random-access byte-range reads over one source patch file. Ranges are pre-merged and sorted by
