@@ -35,6 +35,8 @@ pub enum Limit {
     PathDepth,
     /// A compressed block declared a decompressed size past the decode cap.
     BlockSize,
+    /// An `.apzi` index body decompressed to more than the decode cap.
+    IndexSize,
 }
 
 /// ZiPatch parse/apply failures. Byte offsets travel with every variant for triage.
@@ -72,6 +74,10 @@ pub enum Error {
     Unsupported { what: &'static str },
     #[error("apply cancelled")]
     Cancelled,
+    #[error("bad index magic")]
+    BadIndexMagic,
+    #[error("unsupported index version {version}")]
+    UnsupportedIndexVersion { version: u16 },
 }
 
 impl Error {
