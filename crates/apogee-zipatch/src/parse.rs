@@ -151,7 +151,9 @@ impl<R: Read> PatchReader<R> {
         if fourcc == *b"EOF_" {
             self.done = true;
         }
-        self.pos = chunk_start + frame_len as u64;
+        // Advance past the whole chunk: the 4-byte size field plus `frame_len` (type + payload + crc).
+        // Missing the size field here silently drifts every later chunk's absolute offset 4 bytes low.
+        self.pos = chunk_start + 4 + frame_len as u64;
 
         let payload = &self.frame[4..4 + size];
         Ok(Some(parse_chunk(&fourcc, payload, type_off)?))
@@ -1066,6 +1068,25 @@ mod tests {
                 assert_eq!(offset, 16); // fourcc sits right after the 12-byte magic + 4-byte size
             }
             other => panic!("expected UnknownChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn later_chunk_offsets_stay_file_absolute() {
+        // A padding chunk with a 4-byte payload, then an unknown chunk. The unknown chunk's reported
+        // offset must account for the full first chunk on disk (size 4 + type 4 + payload 4 + crc 4 =
+        // 16), so it sits at magic(12) + 16 + size(4) = 32. A parser that forgets the size field when
+        // advancing would report 28.
+        let mut b = PatchBuilder::new();
+        b.chunk(b"XXXX", &[1, 2, 3, 4]).chunk(b"ZZZZ", &[]);
+        let patch = b.bytes();
+        let mut reader = PatchReader::open(&patch[..]).unwrap();
+        assert!(matches!(reader.next_chunk().unwrap(), Some(Chunk::Padding)));
+        // After the first chunk, `position` is the second chunk's size field: 12 + 16 = 28.
+        assert_eq!(reader.position(), 28);
+        match reader.next_chunk() {
+            Err(Error::UnknownChunk { offset, .. }) => assert_eq!(offset, 32),
+            other => panic!("expected UnknownChunk at 32, got {other:?}"),
         }
     }
 
