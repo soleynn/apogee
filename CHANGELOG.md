@@ -11,6 +11,8 @@ is tagged with its change type. Versioning aims to follow
 - Read the common header and enumerate an install _(added)_
 - Fuzz the block decoder _(testing)_
 - Pin the common header against a real install _(testing)_
+- Expose a standalone deflate-block decoder _(added)_
+- Report standalone inflate faults at a payload-relative offset _(fixed)_
 
 ### apogee-test-support
 - Record a tree manifest with author and compare _(added)_
@@ -26,6 +28,9 @@ is tagged with its change type. Versioning aims to follow
 - Read the ZiPatch container into a typed chunk stream _(added)_
 - Add a patch dump tool and the corpus parse gate _(added)_
 - Fuzz the chunk and command parsers _(testing)_
+- Apply boot patches to a game tree _(added)_
+- Fuzz the boot apply engine _(testing)_
+- Confine deletes and harden the apply and parse edges _(fixed)_
 
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
