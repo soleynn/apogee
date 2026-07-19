@@ -82,5 +82,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "apzi_index"
+path = "fuzz_targets/apzi_index.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
