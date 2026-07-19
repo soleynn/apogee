@@ -161,7 +161,13 @@ pub fn read_block(src: &mut impl Read, out: &mut impl Write, limits: &Limits) ->
     if is_compressed {
         let mut compressed = vec![0u8; compressed_size as usize];
         read_full(src, &mut compressed, u64::from(BLOCK_HEADER_LEN))?;
-        inflate_bounded(&compressed, out, decompressed_size)?;
+        // Report decode faults relative to the block start: the payload sits after the 16-byte header.
+        inflate_bounded(
+            &compressed,
+            out,
+            decompressed_size,
+            u64::from(BLOCK_HEADER_LEN),
+        )?;
     } else {
         copy_exact(
             src,
@@ -194,7 +200,8 @@ pub fn read_block(src: &mut impl Read, out: &mut impl Write, limits: &Limits) ->
 /// # Errors
 /// - [`Error::LimitExceeded`] if `decompressed_len` exceeds `limits.max_decompressed`.
 /// - [`Error::BlockCorrupt`] if the DEFLATE stream does not decode to exactly `decompressed_len`
-///   bytes (offset relative to the block's payload).
+///   bytes. Faults are reported at offset 0 (relative to `compressed`, which is the payload the caller
+///   handed in), so the caller can rebase them onto the patch file.
 /// - [`Error::Io`] if `out` fails to accept the decoded bytes.
 pub fn inflate(
     compressed: &[u8],
@@ -205,7 +212,7 @@ pub fn inflate(
     if decompressed_len > limits.max_decompressed {
         return Err(Error::LimitExceeded);
     }
-    inflate_bounded(compressed, out, decompressed_len)
+    inflate_bounded(compressed, out, decompressed_len, 0)
 }
 
 /// Read exactly `buf.len()` bytes, mapping a short read to a typed truncation at `offset`.
@@ -246,8 +253,14 @@ fn skip_exact(src: &mut impl Read, n: u64, offset: u64) -> Result<()> {
 
 /// DEFLATE-decode `compressed` into `out`, requiring exactly `expected` output bytes. The output is
 /// capped as it is produced, so a stream that inflates past `expected` is rejected rather than
-/// allocated.
-fn inflate_bounded(compressed: &[u8], out: &mut impl Write, expected: u32) -> Result<()> {
+/// allocated. `base` is the offset a decode fault reports: the block header length when the payload
+/// sits after a header ([`read_block`]), or 0 when the caller handed in the payload directly.
+fn inflate_bounded(
+    compressed: &[u8],
+    out: &mut impl Write,
+    expected: u32,
+    base: u64,
+) -> Result<()> {
     let mut decoder = flate2::read::DeflateDecoder::new(compressed);
     let expected = expected as usize;
     let mut written = 0usize;
@@ -262,7 +275,7 @@ fn inflate_bounded(compressed: &[u8], out: &mut impl Write, expected: u32) -> Re
         let n = decoder
             .read(&mut buf[..want])
             .map_err(|_| Error::BlockCorrupt {
-                offset: u64::from(BLOCK_HEADER_LEN),
+                offset: base,
                 detail: "deflate decode failed",
             })?;
         if n == 0 {
@@ -271,7 +284,7 @@ fn inflate_bounded(compressed: &[u8], out: &mut impl Write, expected: u32) -> Re
         written += n;
         if written > expected {
             return Err(Error::BlockCorrupt {
-                offset: u64::from(BLOCK_HEADER_LEN),
+                offset: base,
                 detail: "decompressed size exceeds declared",
             });
         }
@@ -279,7 +292,7 @@ fn inflate_bounded(compressed: &[u8], out: &mut impl Write, expected: u32) -> Re
     }
     if written != expected {
         return Err(Error::BlockCorrupt {
-            offset: u64::from(BLOCK_HEADER_LEN),
+            offset: base,
             detail: "decompressed size below declared",
         });
     }
