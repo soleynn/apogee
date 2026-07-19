@@ -48,11 +48,12 @@ impl Index {
     pub fn write_apzi(&self, mut w: impl Write) -> Result<()> {
         let body = self.encode_body();
         let compressed = deflate(&body)?;
-        w.write_all(&MAGIC).map_err(io)?;
-        w.write_all(&bytes::write_u16_be(VERSION)).map_err(io)?;
+        let write = |e| io(e, Op::Write);
+        w.write_all(&MAGIC).map_err(write)?;
+        w.write_all(&bytes::write_u16_be(VERSION)).map_err(write)?;
         w.write_all(&bytes::write_u16_be(CODEC_DEFLATE))
-            .map_err(io)?;
-        w.write_all(&compressed).map_err(io)?;
+            .map_err(write)?;
+        w.write_all(&compressed).map_err(write)?;
         Ok(())
     }
 
@@ -84,7 +85,7 @@ impl Index {
         (&mut r)
             .take(MAX_COMPRESSED + 1)
             .read_to_end(&mut compressed)
-            .map_err(io)?;
+            .map_err(|e| io(e, Op::Read))?;
         if compressed.len() as u64 > MAX_COMPRESSED {
             return Err(Error::LimitExceeded {
                 what: Limit::IndexSize,
@@ -174,24 +175,41 @@ fn decode_body(body: &[u8]) -> Result<Index> {
     let mut targets = Vec::new();
     for _ in 0..target_count {
         let path = take_str(&mut c)?;
-        let _final_len = c.u64_be()?; // derived from the parts; read to advance and validate below
+        let final_len = c.u64_be()?;
         let part_count = c.u32_be()?;
         let mut parts = Vec::new();
+        // The parts must form the gapless, non-overlapping tiling of `[0, final_len)` the builder
+        // always produces. Validating it here with checked arithmetic keeps every later consumer
+        // (verify, reconstruct) free of unchecked offset math on hostile bytes, and rejects an
+        // overflowing or malformed range as a typed error rather than a panic.
+        let mut next_off = 0u64;
         for _ in 0..part_count {
-            parts.push(take_part(&mut c)?);
+            let part = take_part(&mut c)?;
+            if part.target_off != next_off {
+                return Err(Error::Corrupt {
+                    offset: c.offset(),
+                    detail: "index parts are not a gapless tiling from zero",
+                });
+            }
+            next_off = part
+                .target_off
+                .checked_add(part.target_len)
+                .ok_or(Error::Corrupt {
+                    offset: c.offset(),
+                    detail: "index part range overflows",
+                })?;
+            parts.push(part);
         }
-        let tf = TargetFile {
-            path: path.into(),
-            parts,
-        };
-        // The stored final length must equal the tiling's end, or the record is inconsistent.
-        if tf.final_len() != _final_len {
+        if next_off != final_len {
             return Err(Error::Corrupt {
                 offset: c.offset(),
                 detail: "index target final length disagrees with its parts",
             });
         }
-        targets.push(tf);
+        targets.push(TargetFile {
+            path: path.into(),
+            parts,
+        });
     }
 
     Ok(Index {
@@ -295,8 +313,8 @@ fn platform_from_byte(b: u8) -> Result<Platform> {
 /// DEFLATE-compress the body.
 fn deflate(body: &[u8]) -> Result<Vec<u8>> {
     let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(body).map_err(io)?;
-    enc.finish().map_err(io)
+    enc.write_all(body).map_err(|e| io(e, Op::Write))?;
+    enc.finish().map_err(|e| io(e, Op::Write))
 }
 
 /// Inflate the body, capping the output before it can grow past [`MAX_DECOMPRESSED`].
@@ -319,11 +337,11 @@ fn inflate(compressed: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn io(source: std::io::Error) -> Error {
+fn io(source: std::io::Error, during: Op) -> Error {
     Error::Io {
         source,
         target: None,
-        during: Op::Write,
+        during,
     }
 }
 
@@ -495,14 +513,102 @@ mod tests {
                 crc_valid: false,
             },
         );
+        assert!(matches!(read_framed(&body), Err(Error::Corrupt { .. })));
+    }
+
+    /// Wrap a raw body in the `.apzi` frame and decode it.
+    fn read_framed(body: &[u8]) -> Result<Index> {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"APZI");
         buf.extend_from_slice(&bytes::write_u16_be(VERSION));
         buf.extend_from_slice(&bytes::write_u16_be(CODEC_DEFLATE));
-        buf.extend_from_slice(&deflate(&body).expect("deflate"));
+        buf.extend_from_slice(&deflate(body).expect("deflate"));
+        Index::read_apzi(&buf[..])
+    }
+
+    /// A minimal one-target body carrying a single `part`, with the (possibly wrong) `final_len`.
+    fn one_part_body(final_len: u64, part: &Part) -> Vec<u8> {
+        let mut body = Vec::new();
+        put_str(&mut body, "v");
+        body.push(platform_byte(Platform::Win32));
+        put_u32(&mut body, 0); // no sources
+        put_u32(&mut body, 1); // one target
+        put_str(&mut body, "a.dat");
+        put_u64(&mut body, final_len);
+        put_u32(&mut body, 1); // one part
+        put_part(&mut body, part);
+        body
+    }
+
+    #[test]
+    fn an_overflowing_part_range_is_corrupt_not_a_panic() {
+        // A part whose target_off + target_len overflows u64 must decode to a typed error, never an
+        // overflow panic (the deserializer is a fuzz target and must stay total).
+        let body = one_part_body(
+            0,
+            &Part {
+                target_off: u64::MAX,
+                target_len: 1,
+                source: Source::Zeros,
+                crc32: 0,
+                crc_valid: false,
+            },
+        );
+        assert!(matches!(read_framed(&body), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn a_non_gapless_tiling_is_corrupt() {
+        // A single part that does not start at 0 leaves [0, off) uncovered: the tiling invariant the
+        // builder guarantees is broken, so decode rejects it.
+        let body = one_part_body(
+            136,
+            &Part {
+                target_off: 8,
+                target_len: 128,
+                source: Source::Zeros,
+                crc32: 0,
+                crc_valid: false,
+            },
+        );
+        assert!(matches!(read_framed(&body), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn an_over_cap_string_is_rejected_before_allocation() {
+        // The very first string (repo_version) claims a length past MAX_STRING: a bounded parser
+        // rejects it with a limit error rather than trying to allocate it.
+        let mut body = Vec::new();
+        put_u32(&mut body, (MAX_STRING + 1) as u32);
         assert!(matches!(
-            Index::read_apzi(&buf[..]),
-            Err(Error::Corrupt { .. })
+            read_framed(&body),
+            Err(Error::LimitExceeded {
+                what: Limit::IndexSize,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn round_trips_an_unavailable_part() {
+        // Unavailable parts only arise at repair time, but the format must still round-trip the tag.
+        let index = Index {
+            repo_version: "v".to_owned(),
+            platform: Platform::Win32,
+            sources: Vec::new(),
+            targets: vec![TargetFile {
+                path: "hole.dat".into(),
+                parts: vec![Part {
+                    target_off: 0,
+                    target_len: 64,
+                    source: Source::Unavailable,
+                    crc32: 0,
+                    crc_valid: false,
+                }],
+            }],
+        };
+        let mut buf = Vec::new();
+        index.write_apzi(&mut buf).expect("encode");
+        assert_eq!(Index::read_apzi(&buf[..]).expect("decode"), index);
     }
 }
