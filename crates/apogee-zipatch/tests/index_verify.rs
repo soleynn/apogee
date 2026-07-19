@@ -266,3 +266,82 @@ fn refine_rechecks_only_the_given_parts() {
         refined.broken
     );
 }
+
+#[test]
+fn refine_reports_a_vanished_file_as_broken() {
+    let chain = chain();
+    let applied = tempfile::tempdir().expect("tempdir");
+    apply_chain(applied.path(), &chain).expect("apply chain");
+    let index = build_from(&chain).expect("build index");
+
+    // A full pass over a corrupted file gives the broken part refs.
+    let boot = applied.path().join("ffxivboot.exe");
+    let mut data = std::fs::read(&boot).expect("read");
+    data[0] ^= 0xFF;
+    std::fs::write(&boot, &data).expect("write");
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert!(!report.broken.is_empty());
+
+    // Now the file vanishes before the retry: refine must re-break its referenced parts, not skip
+    // them (a repair that then re-fetches them).
+    std::fs::remove_file(&boot).expect("remove");
+    let refined = index
+        .verify(
+            applied.path(),
+            &VerifyOptions {
+                parallelism: None,
+                refine: Some(&report.broken),
+            },
+        )
+        .expect("refine verify");
+    assert!(
+        refined
+            .broken
+            .iter()
+            .any(|p| p.path == Path::new("ffxivboot.exe")),
+        "a vanished file's referenced parts must stay broken under refine, got {:?}",
+        refined.broken
+    );
+}
+
+#[test]
+fn an_empty_block_split_reconstructs_and_verifies() {
+    // Patch 1 seeds a dat and expands it with an `E` empty block; patch 2 overwrites the middle of
+    // that empty-block region, splitting it so its remnants carry decoded offsets. Reconstruct must
+    // match apply and verify must stay clean.
+    let patch1 = {
+        let mut b = PatchBuilder::new();
+        b.fhdr(b"DIFF", 0).target_info(WIN32);
+        b.add_data(DAT0, 0, &[0x11u8; 128], 0);
+        b.empty_block(b'E', DAT0, 128, 4); // empty-block region [128, 640)
+        b.eof();
+        b.bytes()
+    };
+    let patch2 = {
+        let mut b = PatchBuilder::new();
+        b.fhdr(b"DIFF", 0).target_info(WIN32);
+        b.add_data(DAT0, 256, &[0x99u8; 128], 0); // overwrite inside the empty-block region
+        b.eof();
+        b.bytes()
+    };
+    let chain = vec![patch1, patch2];
+
+    let applied = tempfile::tempdir().expect("tempdir");
+    apply_chain(applied.path(), &chain).expect("apply chain");
+    let index = build_from(&chain).expect("build index");
+
+    let rebuilt = tempfile::tempdir().expect("tempdir");
+    index
+        .reconstruct(rebuilt.path(), &mut sources(&chain))
+        .expect("reconstruct");
+    let applied_tree = tree_manifest::author(applied.path()).expect("author applied");
+    let rebuilt_tree = tree_manifest::author(rebuilt.path()).expect("author rebuilt");
+    assert_eq!(applied_tree.files, rebuilt_tree.files);
+
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert!(report.is_clean(), "expected clean, got {report:?}");
+}
