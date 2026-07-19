@@ -13,67 +13,8 @@ use std::io::Cursor;
 use std::path::Path;
 
 use apogee_test_support::tree_manifest;
-use apogee_zipatch::{
-    ApplyOptions, DiskSink, Error, Index, PatchReader, Platform, VerifyOptions, apply, build_index,
-};
-use support::{PatchBuilder, block_deflate, block_stored};
-
-const WIN32: u16 = 0;
-/// The base-game dat `sqpack/ffxiv/0a0000.win32.dat0` and its file-target triple.
-const DAT0: (u16, u16, u32) = (0x0a, 0x0000, 0);
-
-/// The first patch: seed a dat with an `A` write then supersede-and-extend it with an `H` header, and
-/// add three whole files (a stored+compressed exe, a small file later deleted, a compressed dat).
-fn patch_a() -> Vec<u8> {
-    let mut b = PatchBuilder::new();
-    b.fhdr(b"DIFF", 0).target_info(WIN32);
-    b.add_data(DAT0, 0, &[0x11u8; 384], 0);
-    b.header(b'D', b'V', DAT0, &[0x22u8; 1024]);
-    let boot = [block_stored(&[0xABu8; 100]), block_deflate(&[0xCDu8; 200])].concat();
-    b.file_op(b'A', 0, 300, "ffxivboot.exe", &boot);
-    b.file_op(b'A', 0, 10, "old.txt", &block_stored(&[0x77u8; 10]));
-    b.file_op(b'A', 0, 400, "data.bin", &block_deflate(&[0x55u8; 400]));
-    b.eof();
-    b.bytes()
-}
-
-/// The second patch: overwrite the middle of the dat (splitting the header part), expand it with an
-/// `E` empty block, delete `old.txt`, and continue `data.bin` at an interior offset (splitting the
-/// compressed part so its remnant carries a non-zero decoded offset).
-fn patch_b() -> Vec<u8> {
-    let mut b = PatchBuilder::new();
-    b.fhdr(b"DIFF", 0).target_info(WIN32);
-    b.add_data(DAT0, 256, &[0x33u8; 128], 0);
-    b.empty_block(b'E', DAT0, 1024, 4);
-    b.file_op(b'D', 0, 0, "old.txt", &[]);
-    b.file_op(b'A', 128, 0, "data.bin", &block_stored(&[0x99u8; 64]));
-    b.eof();
-    b.bytes()
-}
-
-fn chain() -> Vec<Vec<u8>> {
-    vec![patch_a(), patch_b()]
-}
-
-/// Apply a chain under `root`, one fresh sink per patch (as the patcher runs them).
-fn apply_chain(root: &Path, patches: &[Vec<u8>]) -> Result<(), Error> {
-    for patch in patches {
-        let mut reader = PatchReader::open(Cursor::new(patch.clone()))?.verify_crc(true);
-        let mut sink = DiskSink::new(root)?;
-        apply(&mut reader, &mut sink, &ApplyOptions::default())?;
-    }
-    Ok(())
-}
-
-/// Build an index over a chain (each patch a seekable in-memory source).
-fn build_from(patches: &[Vec<u8>]) -> Result<Index, Error> {
-    let inputs: Vec<(String, Cursor<Vec<u8>>)> = patches
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (format!("p{i}.patch"), Cursor::new(p.clone())))
-        .collect();
-    build_index(inputs, Platform::Win32, "test-version")
-}
+use apogee_zipatch::VerifyOptions;
+use support::{DAT0, PatchBuilder, WIN32, apply_chain, build_from, chain};
 
 /// Fresh seekable readers over the same patches, in chain order (what reconstruct expects).
 fn sources(patches: &[Vec<u8>]) -> Vec<Cursor<Vec<u8>>> {

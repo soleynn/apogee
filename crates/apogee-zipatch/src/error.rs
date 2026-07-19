@@ -81,6 +81,16 @@ pub enum Error {
 }
 
 impl Error {
+    /// An I/O fault with no specific target path, tagged with the operation in flight. The single
+    /// home for the wrapper every module used to re-declare.
+    pub(crate) fn io(source: std::io::Error, during: Op) -> Self {
+        Error::Io {
+            source,
+            target: None,
+            during,
+        }
+    }
+
     /// Rebase a shared-codec block-decode failure onto the patch file. The codec reports offsets
     /// relative to the block it was handed, but this crate's contract is patch-file-absolute, so add
     /// the block's own offset (`block_off`) back in. `declared`/`limit` supply the numbers a

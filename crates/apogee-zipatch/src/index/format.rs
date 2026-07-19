@@ -18,6 +18,7 @@ use crate::bytes::{self, Cursor};
 use crate::chunk::Platform;
 use crate::error::{Error, Limit, Op, Result};
 use crate::index::model::{Index, Part, Source, SourcePatch, TargetFile};
+use crate::seam::TargetPath;
 
 /// The four-byte file magic.
 const MAGIC: [u8; 4] = *b"APZI";
@@ -174,7 +175,11 @@ fn decode_body(body: &[u8]) -> Result<Index> {
     let target_count = c.u32_be()?;
     let mut targets = Vec::new();
     for _ in 0..target_count {
-        let path = take_str(&mut c)?;
+        // The path is hostile (a repair decodes an index pulled over the network), so it is confined
+        // to a game-root-relative, escape-free path exactly as a freshly parsed patch path is; every
+        // later consumer (verify, reconstruct, repair) joins it against the root, so a `..`/absolute/
+        // drive path here would let a write escape the tree. A single escaping path rejects the index.
+        let path = TargetPath::confine(&take_str(&mut c)?)?;
         let final_len = c.u64_be()?;
         let part_count = c.u32_be()?;
         let mut parts = Vec::new();
@@ -207,7 +212,7 @@ fn decode_body(body: &[u8]) -> Result<Index> {
             });
         }
         targets.push(TargetFile {
-            path: path.into(),
+            path: path.as_path().to_path_buf(),
             parts,
         });
     }
@@ -587,6 +592,29 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_hostile_target_path_is_rejected_on_decode() {
+        // A path that would escape the game root (traversal, absolute, backslash-folded traversal,
+        // drive) must reject the whole index at decode time, before any consumer joins it to a root.
+        for escape in ["../escape", "/etc/passwd", "..\\..\\x", "C:\\Windows\\x"] {
+            let mut body = Vec::new();
+            put_str(&mut body, "v");
+            body.push(platform_byte(Platform::Win32));
+            put_u32(&mut body, 0); // no sources
+            put_u32(&mut body, 1); // one target
+            put_str(&mut body, escape);
+            put_u64(&mut body, 0); // final_len
+            put_u32(&mut body, 0); // no parts
+            assert!(
+                matches!(
+                    read_framed(&body),
+                    Err(Error::PathEscape { .. }) | Err(Error::LimitExceeded { .. })
+                ),
+                "expected {escape:?} to be rejected as an escape"
+            );
+        }
     }
 
     #[test]

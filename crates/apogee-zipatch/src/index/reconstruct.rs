@@ -49,16 +49,16 @@ fn reconstruct_target<R: Read + Seek>(
 ) -> Result<()> {
     let abs = root.join(&target.path);
     if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent).map_err(|e| io(e, Op::MakeDir))?;
+        fs::create_dir_all(parent).map_err(|e| Error::io(e, Op::MakeDir))?;
     }
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&abs)
-        .map_err(|e| io(e, Op::Open))?;
+        .map_err(|e| Error::io(e, Op::Open))?;
     file.set_len(target.final_len())
-        .map_err(|e| io(e, Op::Truncate))?;
+        .map_err(|e| Error::io(e, Op::Truncate))?;
 
     for part in &target.parts {
         match part.source {
@@ -145,7 +145,11 @@ pub(crate) fn materialize_patch<R: Read + Seek>(
 /// The empty-block header bytes that overlap `[decoded_from, decoded_from + len)`, written at the
 /// part's start; `None` when the part lies wholly past the 24-byte header (an all-zero remainder,
 /// already covered by the sparse `set_len`).
-fn empty_block_header_slice(block_count: u32, decoded_from: u64, len: u64) -> Option<Vec<u8>> {
+pub(crate) fn empty_block_header_slice(
+    block_count: u32,
+    decoded_from: u64,
+    len: u64,
+) -> Option<Vec<u8>> {
     let header = datfile::empty_block_header(block_count);
     let header_len = header.len() as u64;
     if decoded_from >= header_len || len == 0 {
@@ -170,14 +174,14 @@ fn read_exact_at<R: Read + Seek>(
     })?;
     reader
         .seek(SeekFrom::Start(off))
-        .map_err(|e| io(e, Op::Read))?;
+        .map_err(|e| Error::io(e, Op::Read))?;
     // Grow the buffer only as bytes actually arrive, so an oversized length from a hostile index
     // reads (at most) the real source rather than pre-allocating the claimed size.
     let mut buf = Vec::new();
     reader
         .take(len as u64)
         .read_to_end(&mut buf)
-        .map_err(|e| io(e, Op::Read))?;
+        .map_err(|e| Error::io(e, Op::Read))?;
     if buf.len() != len {
         return Err(Error::Truncated {
             offset: off,
@@ -188,16 +192,8 @@ fn read_exact_at<R: Read + Seek>(
 }
 
 /// Write `buf` at absolute offset `off`.
-fn write_at(file: &mut File, off: u64, buf: &[u8]) -> Result<()> {
+pub(crate) fn write_at(file: &mut File, off: u64, buf: &[u8]) -> Result<()> {
     file.seek(SeekFrom::Start(off))
-        .map_err(|e| io(e, Op::Write))?;
-    file.write_all(buf).map_err(|e| io(e, Op::Write))
-}
-
-fn io(source: std::io::Error, during: Op) -> Error {
-    Error::Io {
-        source,
-        target: None,
-        during,
-    }
+        .map_err(|e| Error::io(e, Op::Write))?;
+    file.write_all(buf).map_err(|e| Error::io(e, Op::Write))
 }
