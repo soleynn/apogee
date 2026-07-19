@@ -70,10 +70,10 @@ fn reconstruct_target<R: Read + Seek>(
                 block_count,
                 decoded_from,
             } => {
-                if let Some((off, hdr)) =
+                if let Some(hdr) =
                     empty_block_header_slice(block_count, decoded_from, part.target_len)
                 {
-                    write_at(&mut file, part.target_off + off, &hdr)?;
+                    write_at(&mut file, part.target_off, &hdr)?;
                 }
             }
             // The file was already sized sparsely; a zero run needs no write.
@@ -142,14 +142,10 @@ pub(crate) fn materialize_patch<R: Read + Seek>(
     Ok(whole)
 }
 
-/// The empty-block header bytes that overlap `[decoded_from, decoded_from + len)`, and the offset
-/// within the part at which to write them; `None` when the part lies wholly past the 24-byte header
-/// (an all-zero remainder, already covered by the sparse `set_len`).
-fn empty_block_header_slice(
-    block_count: u32,
-    decoded_from: u64,
-    len: u64,
-) -> Option<(u64, Vec<u8>)> {
+/// The empty-block header bytes that overlap `[decoded_from, decoded_from + len)`, written at the
+/// part's start; `None` when the part lies wholly past the 24-byte header (an all-zero remainder,
+/// already covered by the sparse `set_len`).
+fn empty_block_header_slice(block_count: u32, decoded_from: u64, len: u64) -> Option<Vec<u8>> {
     let header = datfile::empty_block_header(block_count);
     let header_len = header.len() as u64;
     if decoded_from >= header_len || len == 0 {
@@ -158,7 +154,7 @@ fn empty_block_header_slice(
     // `len` is a target length from a possibly-hostile index; saturate rather than overflow before
     // clamping to the 24-byte header (`decoded_from` is already `< header_len` here).
     let end = decoded_from.saturating_add(len).min(header_len);
-    Some((0, header[decoded_from as usize..end as usize].to_vec()))
+    Some(header[decoded_from as usize..end as usize].to_vec())
 }
 
 /// Read exactly `len` bytes from source patch `idx` at byte offset `off`.
