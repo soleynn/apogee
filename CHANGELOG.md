@@ -31,6 +31,8 @@ is tagged with its change type. Versioning aims to follow
 - Apply boot patches to a game tree _(added)_
 - Fuzz the boot apply engine _(testing)_
 - Confine deletes and harden the apply and parse edges _(fixed)_
+- Apply the game-scale SQPK commands _(added)_
+- Cover the game-scale apply engine _(testing)_
 
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
