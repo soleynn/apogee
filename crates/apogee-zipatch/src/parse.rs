@@ -124,8 +124,7 @@ impl<R: Read> PatchReader<R> {
         // `type (4) + payload (size) + crc (4)`, read in one shot into the reusable buffer.
         let size = size as usize;
         let frame_len = size + 8;
-        self.frame.resize(frame_len, 0);
-        self.read_exact(chunk_start + 4)?;
+        self.fill_frame(frame_len, chunk_start + 4)?;
 
         let type_off = chunk_start + 4;
         let fourcc = [self.frame[0], self.frame[1], self.frame[2], self.frame[3]];
@@ -175,14 +174,21 @@ impl<R: Read> PatchReader<R> {
         }
     }
 
-    /// Fill the whole frame buffer, mapping a short read to truncation at `frame_off`.
-    fn read_exact(&mut self, frame_off: u64) -> Result<()> {
-        let needed = self.frame.len() as u64;
-        match self.reader.read_exact(&mut self.frame) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Error::Truncated {
-                offset: frame_off,
-                needed,
+    /// Read the next `frame_len` bytes (`type + payload + crc`) into the reusable buffer. The buffer is
+    /// cleared and grown without zero-filling (every byte is about to be overwritten), and a short read
+    /// is mapped to truncation at the exact byte that ran off the end, so the reported offset/needed
+    /// match the `Cursor`'s field-level precision rather than the frame start.
+    fn fill_frame(&mut self, frame_len: usize, frame_off: u64) -> Result<()> {
+        self.frame.clear();
+        self.frame.reserve(frame_len);
+        match (&mut self.reader)
+            .take(frame_len as u64)
+            .read_to_end(&mut self.frame)
+        {
+            Ok(got) if got == frame_len => Ok(()),
+            Ok(got) => Err(Error::Truncated {
+                offset: frame_off + got as u64,
+                needed: (frame_len - got) as u64,
             }),
             Err(source) => Err(Error::Io {
                 source,
@@ -449,13 +455,17 @@ fn parse_index(c: &mut Cursor<'_>) -> Result<IndexCommand> {
     })
 }
 
-/// Decode a fixed-length path field: ASCII with trailing NULs trimmed (the reference's
-/// `ReadFixedLengthString`). Non-ASCII bytes are lossily replaced rather than rejected, since the
-/// path is confined against the game root before any use.
+/// Decode a fixed-length path field the way the reference's `ReadFixedLengthString` does:
+/// `Encoding.ASCII.GetString` (one char per byte, every byte >= 0x80 mapped to `?`) with trailing
+/// NULs trimmed. Matching the oracle byte-for-byte keeps path resolution identical even on the
+/// non-ASCII bytes a hostile patch might inject; the result is confined against the game root anyway.
 fn decode_path(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw)
-        .trim_end_matches('\0')
-        .to_owned()
+    let mut s: String = raw
+        .iter()
+        .map(|&b| if b < 0x80 { b as char } else { '?' })
+        .collect();
+    s.truncate(s.trim_end_matches('\0').len());
+    s
 }
 
 #[cfg(test)]
