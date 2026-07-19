@@ -90,6 +90,22 @@ impl PatchBuilder {
         self.sqpk(b'F', &v)
     }
 
+    pub fn add_directory(&mut self, path: &str) -> &mut Self {
+        self.directory_chunk(b"ADIR", path)
+    }
+
+    pub fn delete_directory(&mut self, path: &str) -> &mut Self {
+        self.directory_chunk(b"DELD", path)
+    }
+
+    /// An `ADIR`/`DELD` chunk: `u32be pathLen` + path bytes.
+    fn directory_chunk(&mut self, fourcc: &[u8; 4], path: &str) -> &mut Self {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        v.extend_from_slice(path.as_bytes());
+        self.chunk(fourcc, &v)
+    }
+
     pub fn eof(&mut self) -> &mut Self {
         self.chunk(b"EOF_", &[])
     }
@@ -101,27 +117,48 @@ impl PatchBuilder {
     }
 }
 
-/// A stored (uncompressed) SqPack block carrying `payload` verbatim.
-pub fn block_stored(payload: &[u8]) -> Vec<u8> {
+/// One SqPack block: a 16-byte LE header (`header_size`, pad, `compressed_size`, `decompressed_size`)
+/// then `payload`, padded to a 128-byte boundary.
+fn block(compressed_size: u32, decompressed_size: u32, payload: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&16u32.to_le_bytes()); // header_size
     b.extend_from_slice(&0u32.to_le_bytes()); // pad
-    b.extend_from_slice(&0x7D00u32.to_le_bytes()); // compressed_size == stored sentinel
-    b.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // decompressed_size
+    b.extend_from_slice(&compressed_size.to_le_bytes());
+    b.extend_from_slice(&decompressed_size.to_le_bytes());
     b.extend_from_slice(payload);
     pad_to_128(b)
+}
+
+/// A stored (uncompressed) SqPack block carrying `payload` verbatim.
+pub fn block_stored(payload: &[u8]) -> Vec<u8> {
+    block(0x7D00, payload.len() as u32, payload)
 }
 
 /// A DEFLATE-compressed SqPack block that decodes to `plain` (raw deflate, no zlib wrapper).
 pub fn block_deflate(plain: &[u8]) -> Vec<u8> {
     let compressed = deflate_raw(plain);
-    let mut b = Vec::new();
-    b.extend_from_slice(&16u32.to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
-    b.extend_from_slice(&(plain.len() as u32).to_le_bytes());
-    b.extend_from_slice(&compressed);
-    pad_to_128(b)
+    block(compressed.len() as u32, plain.len() as u32, &compressed)
+}
+
+/// A DEFLATE block whose header claims `claimed_decompressed` output bytes (which may differ from the
+/// true size), for driving the decode-size cap and size-mismatch paths.
+pub fn block_deflate_claiming(plain: &[u8], claimed_decompressed: u32) -> Vec<u8> {
+    let compressed = deflate_raw(plain);
+    block(compressed.len() as u32, claimed_decompressed, &compressed)
+}
+
+/// A well-framed block whose payload is not valid DEFLATE, so decoding it fails.
+pub fn block_bad_deflate(payload_len: u32, decompressed: u32) -> Vec<u8> {
+    block(
+        payload_len,
+        decompressed,
+        &vec![0xFFu8; payload_len as usize],
+    )
+}
+
+/// A block with an arbitrary (possibly hostile) header, for framing/guard tests.
+pub fn block_raw(compressed_size: u32, decompressed_size: u32, payload: &[u8]) -> Vec<u8> {
+    block(compressed_size, decompressed_size, payload)
 }
 
 fn pad_to_128(mut v: Vec<u8>) -> Vec<u8> {

@@ -3,8 +3,10 @@
 //! and index cannot disagree: they are the same execution over the same stream.
 //!
 //! This is the boot profile. Boot patches use `FHDR`/`APLY`/`SQPK T`/`SQPK X`/`SQPK F`(`A`/`D`)/`EOF_`,
-//! so those are wired end to end; the directory and remaining SQPK commands are dispatched to the
-//! sink but their disk semantics (empty blocks, header writes, add-data) land in a later phase.
+//! wired end to end. The `ADIR`/`DELD` directory chunks and the other `SQPK F` operations (`R`
+//! remove-all, `M` make-dir) are dispatched to the sink as well. The remaining SQPK commands (`A`/`D`/`E`
+//! block edits, `H` header writes) are refused with [`Error::Unsupported`] at dispatch, before any sink
+//! call; their disk semantics land in a later phase.
 //!
 //! `SQPK F:A` (add-file) carries a stream of SqPack blocks. The interpreter *frames* that stream with
 //! the shared codec's header parser to find each block's boundary and write offset, then hands one
@@ -164,16 +166,22 @@ fn apply_add_file<S: PatchSink>(f: &FileOp<'_>, sink: &mut S) -> Result<u64> {
     let mut pos = f.blocks_off;
     while !rest.is_empty() {
         // Frame one block from its 16-byte header (payload size + stored/compressed), no decode.
-        let header_slice = rest.get(..16).ok_or_else(|| Error::Truncated {
-            offset: pos,
-            needed: (16 - rest.len()) as u64,
-        })?;
-        let header_bytes = <&[u8; 16]>::try_from(header_slice).map_err(|_| Error::Corrupt {
-            offset: pos,
-            detail: "block header",
-        })?;
+        let (header_bytes, _) = rest
+            .split_first_chunk::<16>()
+            .ok_or_else(|| Error::Truncated {
+                offset: pos,
+                needed: (16 - rest.len()) as u64,
+            })?;
         let header =
             codec::parse_header(header_bytes).map_err(|e| Error::from_block(e, pos, 0, 0))?;
+        // Mirror the shared codec: a compressed block's size must stay below the stored sentinel, or a
+        // hostile header would be framed as a large compressed block.
+        if !header.is_stored() && header.compressed_size > codec::STORED_SENTINEL {
+            return Err(Error::Corrupt {
+                offset: pos,
+                detail: "compressed size exceeds stored sentinel",
+            });
+        }
         let payload_len = if header.is_stored() {
             header.decompressed_size
         } else {
