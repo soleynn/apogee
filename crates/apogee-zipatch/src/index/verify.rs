@@ -252,7 +252,11 @@ fn verify_part(file: &mut File, part: &Part, buf: &mut [u8]) -> Result<bool> {
             let header = datfile::empty_block_header(block_count);
             stream_part(file, part.target_len, buf, |chunk, region_pos| {
                 chunk.iter().enumerate().all(|(i, &b)| {
-                    let abs = decoded_from + region_pos + i as u64;
+                    // `decoded_from` comes from a possibly-hostile index; saturate so a huge value
+                    // lands past the 24-byte header (expected zero) instead of overflowing.
+                    let abs = decoded_from
+                        .saturating_add(region_pos)
+                        .saturating_add(i as u64);
                     let expected = if abs < header.len() as u64 {
                         header[abs as usize]
                     } else {
