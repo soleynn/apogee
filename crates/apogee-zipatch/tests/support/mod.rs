@@ -420,6 +420,38 @@ impl RangeSource for CountingSource {
     }
 }
 
+/// A [`RangeSource`] that serves each range from the patch bytes with its first byte flipped, so a
+/// stored part decodes cleanly yet fails its CRC — exercising the soft `still_broken` path where a
+/// bad fetch must not corrupt the tree.
+pub struct TamperSource {
+    patches: Vec<Vec<u8>>,
+}
+
+impl TamperSource {
+    pub fn new(patches: Vec<Vec<u8>>) -> Self {
+        Self { patches }
+    }
+}
+
+impl RangeSource for TamperSource {
+    fn read_ranges(
+        &mut self,
+        patch: PatchId,
+        ranges: &[Range<u64>],
+        out: &mut dyn FnMut(u64, &[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let data = &self.patches[patch.0 as usize];
+        for r in ranges {
+            let mut slice = data[r.start as usize..r.end as usize].to_vec();
+            if let Some(b) = slice.first_mut() {
+                *b ^= 0xFF;
+            }
+            out(r.start, &slice)?;
+        }
+        Ok(())
+    }
+}
+
 /// A tiny deterministic PRNG (no `rand` dependency) for seeded, reproducible corruption in the repair
 /// property loop. Advance `state` and return the next value.
 pub fn splitmix64(state: &mut u64) -> u64 {

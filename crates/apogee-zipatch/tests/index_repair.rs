@@ -16,7 +16,9 @@ use apogee_zipatch::{
     ApplyOptions, DiskSink, Error, Index, LocalPatchSource, PatchReader, Platform, VerifyOptions,
     apply, build_index,
 };
-use support::{CountingSource, PatchBuilder, block_deflate, block_stored, splitmix64};
+use support::{
+    CountingSource, PatchBuilder, TamperSource, block_deflate, block_stored, splitmix64,
+};
 
 const WIN32: u16 = 0;
 /// The base-game dat and its file-target triple.
@@ -354,6 +356,108 @@ fn zeroing_random_blocks_and_repairing_is_identical_a_thousand_times() {
             "iteration {iter} diverged from baseline"
         );
     }
+}
+
+#[test]
+fn a_crc_mismatched_fetch_leaves_the_part_still_broken() {
+    let chain = chain();
+    let (applied, index, _baseline) = setup(&chain).expect("setup");
+
+    // Corrupt ffxivboot.exe's [0,100) stored part on disk.
+    overwrite(&applied.path().join("ffxivboot.exe"), 0, &[0xFF]).expect("corrupt");
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert_eq!(report.broken.len(), 1);
+    let before = std::fs::read(applied.path().join("ffxivboot.exe")).expect("read");
+
+    // The source serves bytes that fail their CRC: a soft skip, not an Err and not a write.
+    let mut source = TamperSource::new(chain.clone());
+    let outcome = index
+        .repair(applied.path(), &report, &mut source)
+        .expect("repair returns Ok on a bad fetch");
+    assert!(!outcome.is_complete());
+    assert_eq!(outcome.still_broken.len(), 1);
+    assert!(outcome.repaired.is_empty());
+
+    // The file is left exactly as it was: no half-write from the rejected fetch.
+    let after = std::fs::read(applied.path().join("ffxivboot.exe")).expect("read");
+    assert_eq!(before, after, "a CRC-failed fetch must not touch the file");
+}
+
+#[test]
+fn repair_extends_and_rewrites_a_short_file() {
+    let chain = chain();
+    let (applied, index, baseline) = setup(&chain).expect("setup");
+
+    // Truncate the dat below its indexed length, crossing content and empty-block part boundaries.
+    let dat = applied.path().join(DAT0_PATH);
+    let full = std::fs::read(&dat).expect("read");
+    std::fs::write(&dat, &full[..500]).expect("truncate short");
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert!(
+        !report.size_mismatches.is_empty(),
+        "a short file mismatches size"
+    );
+    assert!(
+        !report.broken.is_empty(),
+        "a short file breaks its tail parts"
+    );
+
+    let mut source = CountingSource::new(chain.clone());
+    let outcome = index
+        .repair(applied.path(), &report, &mut source)
+        .expect("repair");
+    // set_len extends the file first, then the broken tail parts (a fetched patch part and the
+    // empty block) are rewritten.
+    assert!(
+        outcome.is_complete(),
+        "still broken: {:?}",
+        outcome.still_broken
+    );
+    assert!(outcome.resized.contains(&PathBuf::from(DAT0_PATH)));
+
+    let now = tree_manifest::author(applied.path()).expect("author");
+    assert_eq!(now.files, baseline.files);
+}
+
+#[test]
+fn local_patch_source_errors_propagate_as_hard_faults() {
+    let chain = chain();
+    let (applied, index, _baseline) = setup(&chain).expect("setup");
+    overwrite(&applied.path().join("ffxivboot.exe"), 0, &[0xFF]).expect("corrupt");
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+
+    // A source id past the file list is a typed Corrupt, never a panic.
+    let mut empty = LocalPatchSource::new(vec![]);
+    assert!(matches!(
+        index.repair(applied.path(), &report, &mut empty),
+        Err(Error::Corrupt { .. })
+    ));
+
+    // A source file that does not exist is an Io fault.
+    let mut missing = LocalPatchSource::new(vec![
+        PathBuf::from("/nonexistent/p0.patch"),
+        PathBuf::from("/nonexistent/p1.patch"),
+    ]);
+    assert!(matches!(
+        index.repair(applied.path(), &report, &mut missing),
+        Err(Error::Io { .. })
+    ));
+
+    // A truncated patch file so the planned range runs past EOF is a Truncated fault.
+    let patch_dir = tempfile::tempdir().expect("patch dir");
+    let paths = write_patches(patch_dir.path(), &chain).expect("write patches");
+    std::fs::write(&paths[0], b"short").expect("truncate patch");
+    let mut truncated = LocalPatchSource::new(paths);
+    assert!(matches!(
+        index.repair(applied.path(), &report, &mut truncated),
+        Err(Error::Truncated { .. })
+    ));
 }
 
 /// Write each patch to `dir` as `p{i}.patch`, returning the paths in chain order (so `paths[i]` backs
