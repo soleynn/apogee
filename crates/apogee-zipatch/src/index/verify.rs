@@ -28,6 +28,17 @@ pub struct PartRef {
     pub target_len: u64,
 }
 
+impl PartRef {
+    /// The reference naming `part` within `target`.
+    pub(crate) fn of(target: &TargetFile, part: &Part) -> Self {
+        Self {
+            path: target.path.clone(),
+            target_off: part.target_off,
+            target_len: part.target_len,
+        }
+    }
+}
+
 /// A file whose on-disk length disagrees with the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SizeMismatch {
@@ -124,10 +135,13 @@ impl Index {
     /// The refine pass: re-check only the referenced parts, reporting those still broken.
     fn verify_refine(&self, root: &Path, refs: &[PartRef]) -> Result<VerifyReport> {
         let wanted: HashSet<&PartRef> = refs.iter().collect();
+        // Which files the refine set touches, as an O(1) membership test (a large retry set over a
+        // large tree would otherwise scan every ref per target).
+        let wanted_paths: HashSet<&Path> = refs.iter().map(|r| r.path.as_path()).collect();
         let outcomes: Vec<FileOutcome> = self
             .targets
             .par_iter()
-            .filter(|t| refs.iter().any(|r| r.path == t.path))
+            .filter(|t| wanted_paths.contains(t.path.as_path()))
             .map(|target| verify_file(target, root, Some(&wanted)))
             .collect::<Result<Vec<_>>>()?;
         let mut report = VerifyReport::default();
@@ -146,12 +160,12 @@ impl Index {
             let entries = match std::fs::read_dir(&dir) {
                 Ok(e) => e,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(io(e, Op::Read)),
+                Err(e) => return Err(Error::io(e, Op::Read)),
             };
             for entry in entries {
-                let entry = entry.map_err(|e| io(e, Op::Read))?;
+                let entry = entry.map_err(|e| Error::io(e, Op::Read))?;
                 let path = entry.path();
-                let meta = std::fs::symlink_metadata(&path).map_err(|e| io(e, Op::Read))?;
+                let meta = std::fs::symlink_metadata(&path).map_err(|e| Error::io(e, Op::Read))?;
                 let ty = meta.file_type();
                 if ty.is_dir() {
                     stack.push(path);
@@ -194,12 +208,12 @@ fn verify_file(
                 },
             });
         }
-        Err(e) => return Err(io(e, Op::Open)),
+        Err(e) => return Err(Error::io(e, Op::Open)),
     };
 
     let mut outcome = FileOutcome::default();
     if refine.is_none() {
-        let len = file.metadata().map_err(|e| io(e, Op::Read))?.len();
+        let len = file.metadata().map_err(|e| Error::io(e, Op::Read))?.len();
         if len != target.final_len() {
             outcome.size_mismatch = Some(SizeMismatch {
                 path: target.path.clone(),
@@ -212,12 +226,12 @@ fn verify_file(
     let mut buf = vec![0u8; VERIFY_CHUNK];
     for part in &target.parts {
         if let Some(wanted) = refine
-            && !wanted.contains(&part_ref(target, part))
+            && !wanted.contains(&PartRef::of(target, part))
         {
             continue;
         }
         if !verify_part(&mut file, part, &mut buf)? {
-            outcome.broken.push(part_ref(target, part));
+            outcome.broken.push(PartRef::of(target, part));
         }
     }
     Ok(outcome)
@@ -231,7 +245,7 @@ const VERIFY_CHUNK: usize = 1 << 16;
 /// unexpected read error propagates.
 fn verify_part(file: &mut File, part: &Part, buf: &mut [u8]) -> Result<bool> {
     file.seek(SeekFrom::Start(part.target_off))
-        .map_err(|e| io(e, Op::Read))?;
+        .map_err(|e| Error::io(e, Op::Read))?;
 
     match part.source {
         Source::Patch { .. } => {
@@ -293,18 +307,10 @@ fn stream_part(
                 remaining -= n as u64;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(io(e, Op::Read)),
+            Err(e) => return Err(Error::io(e, Op::Read)),
         }
     }
     Ok(true)
-}
-
-fn part_ref(target: &TargetFile, part: &Part) -> PartRef {
-    PartRef {
-        path: target.path.clone(),
-        target_off: part.target_off,
-        target_len: part.target_len,
-    }
 }
 
 /// Every part of `target` that the refine set references (for a file that vanished).
@@ -312,7 +318,7 @@ fn referenced_parts(target: &TargetFile, wanted: &HashSet<&PartRef>) -> Vec<Part
     target
         .parts
         .iter()
-        .map(|p| part_ref(target, p))
+        .map(|p| PartRef::of(target, p))
         .filter(|r| wanted.contains(r))
         .collect()
 }
@@ -322,12 +328,4 @@ fn is_ignored(rel: &Path) -> bool {
     rel.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|name| STRAY_IGNORE_SUFFIXES.iter().any(|s| name.ends_with(s)))
-}
-
-fn io(source: std::io::Error, during: Op) -> Error {
-    Error::Io {
-        source,
-        target: None,
-        during,
-    }
 }

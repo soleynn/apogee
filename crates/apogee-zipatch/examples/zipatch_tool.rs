@@ -1,14 +1,16 @@
-//! `zipatch-tool`: the patch-day inspection and index binary. Three verbs:
+//! `zipatch-tool`: the patch-day inspection and index binary. Four verbs:
 //!
 //! ```text
 //! cargo run -p apogee-zipatch --example zipatch_tool -- dump <file.patch>
 //! cargo run -p apogee-zipatch --example zipatch_tool -- index <out.apzi> <patch>...
 //! cargo run -p apogee-zipatch --example zipatch_tool -- verify <game-root> <index.apzi>
+//! cargo run -p apogee-zipatch --example zipatch_tool -- repair <game-root> <index.apzi> <patch>...
 //! ```
 //!
 //! `dump` renders every chunk with its file offset; `index` builds a block index from a patch chain;
-//! `verify` checks an install against one and reports broken/missing/size-mismatched/stray files. All
-//! formatting lives in the library (the `Display` impls and the typed report), so this example stays
+//! `verify` checks an install against one and reports broken/missing/size-mismatched/stray files;
+//! `repair` heals a damaged install by pulling the broken ranges from local patch files. All
+//! formatting lives in the library (the `Display` impls and the typed reports), so this example stays
 //! an I/O shell that the library never has to become.
 
 use std::error::Error;
@@ -17,7 +19,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use apogee_zipatch::{Index, PatchReader, Platform, VerifyOptions, build_index};
+use apogee_zipatch::{Index, LocalPatchSource, PatchReader, Platform, VerifyOptions, build_index};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,9 +29,10 @@ fn main() -> ExitCode {
         Some((verb, rest)) if verb == "verify" && rest.len() == 2 => {
             verify(Path::new(&rest[0]), Path::new(&rest[1]))
         }
+        Some((verb, rest)) if verb == "repair" && rest.len() >= 3 => repair(rest),
         _ => {
             eprintln!(
-                "usage:\n  zipatch_tool dump <file.patch>\n  zipatch_tool index <out.apzi> <patch>...\n  zipatch_tool verify <game-root> <index.apzi>"
+                "usage:\n  zipatch_tool dump <file.patch>\n  zipatch_tool index <out.apzi> <patch>...\n  zipatch_tool verify <game-root> <index.apzi>\n  zipatch_tool repair <game-root> <index.apzi> <patch>..."
             );
             return ExitCode::FAILURE;
         }
@@ -96,4 +99,30 @@ fn verify(root: &Path, index_path: &Path) -> Result<bool, Box<dyn Error>> {
         report.stray_files.len(),
     );
     Ok(report.is_clean())
+}
+
+/// Verify `root` against `index.apzi`, then repair the broken ranges from the given patch files (in
+/// the index's chain order). "Clean" when nothing is left broken. `args` is `root, index.apzi,
+/// patch...`.
+fn repair(args: &[String]) -> Result<bool, Box<dyn Error>> {
+    let root = Path::new(&args[0]);
+    let index = Index::read_apzi(BufReader::new(File::open(&args[1])?))?;
+    let paths: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
+
+    let report = index.verify(root, &VerifyOptions::default())?;
+    if report.is_clean() {
+        println!("already clean, nothing to repair");
+        return Ok(true);
+    }
+    let mut source = LocalPatchSource::new(paths);
+    let outcome = index.repair(root, &report, &mut source)?;
+    println!(
+        "repaired={} still_broken={} recreated={} resized={} bytes_fetched={}",
+        outcome.repaired.len(),
+        outcome.still_broken.len(),
+        outcome.recreated.len(),
+        outcome.resized.len(),
+        outcome.bytes_fetched,
+    );
+    Ok(outcome.is_complete())
 }

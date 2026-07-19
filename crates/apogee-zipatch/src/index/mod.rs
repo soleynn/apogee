@@ -11,6 +11,7 @@
 mod format;
 mod model;
 mod reconstruct;
+mod repair;
 mod sink;
 mod verify;
 
@@ -28,6 +29,7 @@ use reconstruct::MAX_BLOCK_DECOMPRESSED;
 use sink::IndexSink;
 
 pub use model::Index;
+pub use repair::{RepairOutcome, SourceRef};
 pub use verify::{PartRef, SizeMismatch, StrayFile, VerifyOptions, VerifyReport};
 
 /// Build a block index from a patch chain.
@@ -55,7 +57,9 @@ pub fn build<R: Read + Seek>(
         sink.set_source(idx);
         let mut r = PatchReader::open(&mut *reader)?.verify_crc(true);
         apply(&mut r, &mut sink, &ApplyOptions::default())?;
-        let expected_len = reader.seek(SeekFrom::End(0)).map_err(|e| io(e, Op::Read))?;
+        let expected_len = reader
+            .seek(SeekFrom::End(0))
+            .map_err(|e| Error::io(e, Op::Read))?;
         sources.push(SourcePatch {
             name: name.clone(),
             expected_len,
@@ -84,12 +88,4 @@ pub fn build<R: Read + Seek>(
         }
     }
     Ok(index)
-}
-
-fn io(source: std::io::Error, during: Op) -> Error {
-    Error::Io {
-        source,
-        target: None,
-        during,
-    }
 }
