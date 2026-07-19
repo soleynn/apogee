@@ -71,12 +71,7 @@ impl FileTarget {
     /// The `sqpack` sub-folder for this expansion (`ffxiv` for the base game, `ex{n}` otherwise).
     #[must_use]
     pub fn expansion_folder(&self) -> String {
-        let expansion = self.expansion_id();
-        if expansion == 0 {
-            "ffxiv".to_owned()
-        } else {
-            format!("ex{expansion}")
-        }
+        expansion_folder(self.expansion_id())
     }
 
     /// The bundle path shared by the dat and index files, e.g. `sqpack/ffxiv/0a0000.win32`.
@@ -106,6 +101,17 @@ impl FileTarget {
         } else {
             format!("{}.index{}", self.bundle_path(platform), self.file_id)
         }
+    }
+}
+
+/// The `sqpack`/`movie` sub-folder for an expansion id: `ffxiv` for the base game, `ex{n}` otherwise.
+/// Both the dat/index path resolution (via [`FileTarget::expansion_folder`]) and the `F:R` remove-all
+/// sweep name folders through here, so the two cannot drift from the reference's naming.
+pub(crate) fn expansion_folder(expansion: u8) -> String {
+    if expansion == 0 {
+        "ffxiv".to_owned()
+    } else {
+        format!("ex{expansion}")
     }
 }
 
@@ -232,11 +238,15 @@ pub struct AddData<'a> {
     /// Byte count to zero-wipe immediately after `data` (a plain wipe, no empty-block header).
     pub block_delete_size: u64,
     pub data: &'a [u8],
+    /// Absolute patch-file offset of `data[0]`, so an index sink can record where these bytes came
+    /// from and an error can report a patch-file offset.
+    pub data_off: u64,
 }
 
-/// The `SQPK` `D` (DeleteData) and `E` (ExpandData) commands: both write a 20-byte empty-block
-/// header at `block_offset` and zero `block_count` 128-byte blocks after it (identical in the
-/// reference).
+/// The `SQPK` `D` (DeleteData) and `E` (ExpandData) commands: both zero `block_count` 128-byte
+/// blocks at `block_offset` and stamp a 24-byte empty-block header over the start of that region
+/// (identical in the reference). The header's count-minus-one field is a little-endian `u64`, so the
+/// header is 24 bytes, not 20 (`crate::datfile`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyBlock {
     pub target: FileTarget,
@@ -317,6 +327,8 @@ pub struct Header<'a> {
     pub header_kind: HeaderTargetKind,
     pub target: FileTarget,
     pub data: &'a [u8],
+    /// Absolute patch-file offset of `data[0]`, for index provenance and offset-carrying errors.
+    pub data_off: u64,
 }
 
 impl Header<'_> {

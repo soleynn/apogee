@@ -12,6 +12,12 @@ crc32fast.workspace = true
 # Shared compressed-block format lives in sqpack::codec (consumed by the apply engine, next phase).
 apogee-sqpack = { path = "../apogee-sqpack" }
 
+# Best-effort file preallocation for fresh add-file targets. Linux-only (fallocate); the cross-build
+# compiles without it and the reserve hook is a no-op there. `fallocate` is safe, so the crate keeps
+# #![forbid(unsafe_code)].
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 # The corpus-dump gate reads the real boot patches from a primed cache; serde parses the committed
 # corpus manifest to learn their digests.

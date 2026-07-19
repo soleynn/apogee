@@ -2,11 +2,13 @@
 //! [`PatchSink`] calls. The sink decides what a call *does* (write to disk, index, trace), so apply
 //! and index cannot disagree: they are the same execution over the same stream.
 //!
-//! This is the boot profile. Boot patches use `FHDR`/`APLY`/`SQPK T`/`SQPK X`/`SQPK F`(`A`/`D`)/`EOF_`,
-//! wired end to end. The `ADIR`/`DELD` directory chunks and the other `SQPK F` operations (`R`
-//! remove-all, `M` make-dir) are dispatched to the sink as well. The remaining SQPK commands (`A`/`D`/`E`
-//! block edits, `H` header writes) are refused with [`Error::Unsupported`] at dispatch, before any sink
-//! call; their disk semantics land in a later phase.
+//! Every SQPK command a game or expansion patch uses is wired end to end: `T`/`X` config, `F`
+//! (`A` add-file, `D` delete-file, `R` remove-all, `M` make-dir), the `A`/`D`/`E` dat-block edits,
+//! and `H` header writes, plus the `ADIR`/`DELD` directory chunks. `A` (AddData) writes raw bytes
+//! then a plain zero wipe; `D`/`E` (Delete/ExpandData) zero a run and stamp an empty-block header
+//! (`crate::datfile`); `H` overwrites a 1024-byte file header; `F:R` deletes an expansion's files
+//! past a keep-filter. Dat/index paths resolve against the platform the `T` command set (only Win32
+//! is applied; the console variants are refused at `T`).
 //!
 //! `SQPK F:A` (add-file) carries a stream of SqPack blocks. The interpreter *frames* that stream with
 //! the shared codec's header parser to find each block's boundary and write offset, then hands one
@@ -20,7 +22,7 @@ use std::sync::mpsc::Sender;
 
 use apogee_sqpack::codec;
 
-use crate::chunk::{Chunk, FileOp, FileOperation, Platform, Sqpk};
+use crate::chunk::{AddData, Chunk, EmptyBlock, FileOp, FileOperation, Header, Platform, Sqpk};
 use crate::error::{Error, Result};
 use crate::parse::PatchReader;
 use crate::seam::{DataSource, KeepFilter, PatchSink, SafePath, TargetPath};
@@ -61,6 +63,9 @@ pub fn apply<R: Read, S: PatchSink>(
     opts: &ApplyOptions<'_>,
 ) -> Result<()> {
     let mut bytes_done = 0u64;
+    // The platform the later dat/index path resolution uses. It defaults to Win32 (the reference's
+    // enum default) and the `T` command sets it; only Win32 is ever applied.
+    let mut platform = Platform::Win32;
     while let Some(chunk) = reader.next_chunk()? {
         if opts.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(Error::Cancelled);
@@ -70,7 +75,7 @@ pub fn apply<R: Read, S: PatchSink>(
             Chunk::FileHeader(_) | Chunk::ApplyOption(_) | Chunk::ApplyFreeSpace(_) => {}
             Chunk::AddDirectory(d) => sink.make_dir_tree(&SafePath::confine(&d.path)?)?,
             Chunk::DeleteDirectory(d) => sink.remove_dir(&SafePath::confine(&d.path)?)?,
-            Chunk::Sqpk(sqpk) => bytes_done += apply_sqpk(sqpk, sink)?,
+            Chunk::Sqpk(sqpk) => bytes_done += apply_sqpk(sqpk, sink, &mut platform)?,
             Chunk::EndOfFile => break,
             Chunk::Padding => {}
         }
@@ -96,32 +101,91 @@ pub fn scan_crc<R: Read>(reader: &mut PatchReader<R>) -> Result<()> {
     Ok(())
 }
 
-/// Dispatch one SQPK command, returning the payload bytes it wrote (for progress).
-fn apply_sqpk<S: PatchSink>(sqpk: Sqpk<'_>, sink: &mut S) -> Result<u64> {
+/// Dispatch one SQPK command, returning the payload bytes it wrote (for progress). `platform` tracks
+/// the target the later path resolution uses; the `T` command updates it.
+fn apply_sqpk<S: PatchSink>(sqpk: Sqpk<'_>, sink: &mut S, platform: &mut Platform) -> Result<u64> {
     match sqpk {
         // Sets the platform for path resolution. The launcher only installs Win32; console targets
         // parse but are refused here rather than mis-applied.
         Sqpk::TargetInfo(t) if t.platform != Platform::Win32 => Err(Error::Unsupported {
             what: "non-Win32 target platform",
         }),
-        Sqpk::TargetInfo(_) | Sqpk::PatchInfo(_) => Ok(0),
+        Sqpk::TargetInfo(t) => {
+            *platform = t.platform;
+            Ok(0)
+        }
+        Sqpk::PatchInfo(_) => Ok(0),
         Sqpk::File(f) => apply_file_op(f, sink),
         // A NOP on modern patchers: index files are rewritten wholesale via H/F.
         Sqpk::Index(_) => Ok(0),
-        // Present in game/expansion patches, not boot; their disk semantics land in a later phase.
-        Sqpk::AddData(_) => Err(Error::Unsupported {
-            what: "SQPK A (add-data) apply",
-        }),
-        Sqpk::DeleteData(_) => Err(Error::Unsupported {
-            what: "SQPK D (delete-data) apply",
-        }),
-        Sqpk::ExpandData(_) => Err(Error::Unsupported {
-            what: "SQPK E (expand-data) apply",
-        }),
-        Sqpk::Header(_) => Err(Error::Unsupported {
-            what: "SQPK H (header) apply",
-        }),
+        Sqpk::AddData(a) => apply_add_data(&a, sink, *platform),
+        // Delete and Expand share the empty-block write, identical in the reference.
+        Sqpk::DeleteData(e) | Sqpk::ExpandData(e) => apply_empty_block(&e, sink, *platform),
+        Sqpk::Header(h) => apply_header(&h, sink, *platform),
     }
+}
+
+/// `SQPK A` (AddData): write the raw bytes at the block offset, then zero the delete-tail immediately
+/// after them (a plain wipe, no empty-block header, unlike `D`/`E`).
+fn apply_add_data<S: PatchSink>(a: &AddData<'_>, sink: &mut S, platform: Platform) -> Result<u64> {
+    let target = TargetPath::confine(&a.target.dat_path(platform))?;
+    sink.write(
+        &target,
+        a.block_offset,
+        DataSource::Raw {
+            patch_off: a.data_off,
+            bytes: a.data,
+        },
+    )?;
+    if a.block_delete_size > 0 {
+        let wipe_off = a
+            .block_offset
+            .checked_add(a.block_size)
+            .ok_or(Error::Corrupt {
+                offset: a.data_off,
+                detail: "add-data wipe offset overflow",
+            })?;
+        sink.write(
+            &target,
+            wipe_off,
+            DataSource::Zeros {
+                len: a.block_delete_size,
+            },
+        )?;
+    }
+    Ok(a.block_size + a.block_delete_size)
+}
+
+/// `SQPK D`/`E` (Delete/ExpandData): zero the run at the block offset and stamp an empty-block header
+/// over its start. The sink owns the exact bytes; the interpreter only supplies offset and count.
+fn apply_empty_block<S: PatchSink>(
+    e: &EmptyBlock,
+    sink: &mut S,
+    platform: Platform,
+) -> Result<u64> {
+    let target = TargetPath::confine(&e.target.dat_path(platform))?;
+    sink.write_empty_block(&target, e.block_offset, e.block_count)?;
+    Ok(e.byte_len())
+}
+
+/// `SQPK H` (Header): overwrite the 1024-byte file header at offset 0 (version) or 1024 (others), on
+/// the dat or index file the command targets.
+fn apply_header<S: PatchSink>(h: &Header<'_>, sink: &mut S, platform: Platform) -> Result<u64> {
+    let path = if h.file_kind.is_index() {
+        h.target.index_path(platform)
+    } else {
+        h.target.dat_path(platform)
+    };
+    let target = TargetPath::confine(&path)?;
+    sink.write(
+        &target,
+        h.header_kind.write_offset(),
+        DataSource::Raw {
+            patch_off: h.data_off,
+            bytes: h.data,
+        },
+    )?;
+    Ok(h.data.len() as u64)
 }
 
 /// Dispatch one `SQPK F` file operation to the sink.
@@ -159,6 +223,13 @@ fn apply_add_file<S: PatchSink>(f: &FileOp<'_>, sink: &mut S) -> Result<u64> {
     })?;
     if write_off == 0 {
         sink.truncate(&target, 0)?;
+        // A fresh file's final size is declared up front, so hint it to the sink for preallocation.
+        // The hint is advisory (default no-op) and never changes the bytes written.
+        if let Ok(len) = u64::try_from(f.file_size)
+            && len > 0
+        {
+            sink.reserve(&target, len)?;
+        }
     }
 
     let mut written = 0u64;

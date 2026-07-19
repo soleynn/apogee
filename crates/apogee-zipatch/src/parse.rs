@@ -370,6 +370,7 @@ fn parse_add_data<'a>(c: &mut Cursor<'a>) -> Result<AddData<'a>> {
     let block_offset = u64::from(c.u32_be()?) << 7;
     let block_size = u64::from(c.u32_be()?) << 7;
     let block_delete_size = u64::from(c.u32_be()?) << 7;
+    let data_off = c.offset();
     let data = c.take(usize::try_from(block_size).map_err(|_| Error::Corrupt {
         offset: c.offset(),
         detail: "add-data block size exceeds usize",
@@ -380,6 +381,7 @@ fn parse_add_data<'a>(c: &mut Cursor<'a>) -> Result<AddData<'a>> {
         block_size,
         block_delete_size,
         data,
+        data_off,
     })
 }
 
@@ -401,12 +403,14 @@ fn parse_header<'a>(c: &mut Cursor<'a>) -> Result<Header<'a>> {
     let header_kind = HeaderTargetKind::parse(c.u8()?);
     c.skip(1)?; // alignment
     let target = parse_target(c)?;
+    let data_off = c.offset();
     let data = c.take(Header::HEADER_LEN)?;
     Ok(Header {
         file_kind,
         header_kind,
         target,
         data,
+        data_off,
     })
 }
 

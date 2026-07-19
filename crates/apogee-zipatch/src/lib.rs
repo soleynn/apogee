@@ -17,6 +17,7 @@
 mod apply;
 mod bytes;
 mod chunk;
+mod datfile;
 mod disk;
 mod error;
 mod parse;
