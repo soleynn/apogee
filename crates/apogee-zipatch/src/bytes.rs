@@ -58,31 +58,28 @@ pub fn u64_le(bytes: [u8; 8]) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-/// Write a `u16` as two big-endian bytes. Test fixtures build patch bytes through the same home.
-#[cfg(test)]
+/// Write a `u16` as two big-endian bytes (the `.apzi` version/flags words; test fixtures too).
 #[must_use]
-pub fn write_u16_be(v: u16) -> [u8; 2] {
+pub(crate) fn write_u16_be(v: u16) -> [u8; 2] {
     v.to_be_bytes()
 }
 
-/// Write a `u32` as four big-endian bytes.
-#[cfg(test)]
+/// Write a `u32` as four big-endian bytes (the `.apzi` counts/crc/len fields).
 #[must_use]
-pub fn write_u32_be(v: u32) -> [u8; 4] {
+pub(crate) fn write_u32_be(v: u32) -> [u8; 4] {
     v.to_be_bytes()
 }
 
-/// Write an `i64` as eight big-endian bytes.
+/// Write an `i64` as eight big-endian bytes. Used only by the test patch builders.
 #[cfg(test)]
 #[must_use]
 pub fn write_i64_be(v: i64) -> [u8; 8] {
     v.to_be_bytes()
 }
 
-/// Write a `u64` as eight big-endian bytes.
-#[cfg(test)]
+/// Write a `u64` as eight big-endian bytes (the `.apzi` offset/length fields).
 #[must_use]
-pub fn write_u64_be(v: u64) -> [u8; 8] {
+pub(crate) fn write_u64_be(v: u64) -> [u8; 8] {
     v.to_be_bytes()
 }
 

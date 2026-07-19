@@ -20,6 +20,7 @@ mod chunk;
 mod datfile;
 mod disk;
 mod error;
+mod index;
 mod parse;
 mod seam;
 
@@ -31,5 +32,8 @@ pub use chunk::{
 };
 pub use disk::DiskSink;
 pub use error::{Error, Limit, Op, Result};
+pub use index::{
+    Index, PartRef, SizeMismatch, StrayFile, VerifyOptions, VerifyReport, build as build_index,
+};
 pub use parse::{DEFAULT_MAX_CHUNK_SIZE, Limits, PatchReader};
 pub use seam::{DataSource, KeepFilter, PatchId, PatchSink, RangeSource, SafePath, TargetPath};
