@@ -9,9 +9,12 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use apogee_zipatch::{DataSource, Error, KeepFilter, MAGIC, PatchSink, SafePath, TargetPath};
+use apogee_zipatch::{
+    DataSource, Error, KeepFilter, MAGIC, PatchId, PatchSink, RangeSource, SafePath, TargetPath,
+};
 
 /// Builds ZiPatch bytes chunk by chunk, framing each `[u32be size][4-char type][payload][u32be crc]`
 /// exactly as the container does; SQPK chunks get the `innerSize`/command prefix.
@@ -373,6 +376,58 @@ impl PatchSink for InMemorySink {
     fn remove_dir(&mut self, _rel: &SafePath) -> Result<(), Error> {
         Ok(())
     }
+}
+
+/// A [`RangeSource`] over in-memory patch bytes that records what it serves, so a repair test can
+/// assert it pulled only the broken ranges. `patches[i]` backs `PatchId(i)`, matching the index's
+/// chain order.
+pub struct CountingSource {
+    patches: Vec<Vec<u8>>,
+    pub bytes_served: u64,
+    pub ranges: Vec<(u32, Range<u64>)>,
+}
+
+impl CountingSource {
+    pub fn new(patches: Vec<Vec<u8>>) -> Self {
+        Self {
+            patches,
+            bytes_served: 0,
+            ranges: Vec::new(),
+        }
+    }
+
+    /// Bytes served for a specific patch id.
+    pub fn ranges_for(&self, patch: u32) -> usize {
+        self.ranges.iter().filter(|(p, _)| *p == patch).count()
+    }
+}
+
+impl RangeSource for CountingSource {
+    fn read_ranges(
+        &mut self,
+        patch: PatchId,
+        ranges: &[Range<u64>],
+        out: &mut dyn FnMut(u64, &[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let data = &self.patches[patch.0 as usize];
+        for r in ranges {
+            let slice = &data[r.start as usize..r.end as usize];
+            self.bytes_served += slice.len() as u64;
+            self.ranges.push((patch.0, r.clone()));
+            out(r.start, slice)?;
+        }
+        Ok(())
+    }
+}
+
+/// A tiny deterministic PRNG (no `rand` dependency) for seeded, reproducible corruption in the repair
+/// property loop. Advance `state` and return the next value.
+pub fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// A [`PatchSink`] that records each call as a byte-free line, for deterministic effect-trace asserts.
