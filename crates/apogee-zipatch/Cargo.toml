@@ -7,10 +7,14 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-# IEEE CRC32 over each chunk's type+payload (the container's only integrity check on boot patches).
+# IEEE CRC32 over each chunk's type+payload and every indexed block's target bytes.
 crc32fast.workspace = true
-# Shared compressed-block format lives in sqpack::codec (consumed by the apply engine, next phase).
+# Shared compressed-block format lives in sqpack::codec (the apply engine decodes F:A blocks through it).
 apogee-sqpack = { path = "../apogee-sqpack" }
+# DEFLATE for the .apzi index body (the same codec the shared block format uses; no new C linkage).
+flate2.workspace = true
+# Work-stealing parallelism for the block-index CRC sweep (build's crc pass and verify).
+rayon.workspace = true
 
 # Best-effort file preallocation for fresh add-file targets. Linux-only (fallocate); the cross-build
 # compiles without it and the reserve hook is a no-op there. `fallocate` is safe, so the crate keeps
@@ -30,8 +34,6 @@ proptest.workspace = true
 # tree manifest; tree_manifest lives in test-support (default features, no corpus/apogee-fetch pull).
 apogee-test-support = { path = "../apogee-test-support" }
 tempfile.workspace = true
-# Builds the compressed F:A block payloads the synthetic apply tests decode (raw DEFLATE, no wrapper).
-flate2.workspace = true
 # Compile-fail proof that SafePath/TargetPath cannot be minted outside the crate.
 trybuild.workspace = true
 

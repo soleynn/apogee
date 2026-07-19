@@ -41,6 +41,8 @@ rustix           = "1"
 tar              = "0.4"
 lzma-rs          = "0.3"
 ruzstd           = "0.8"
+# work-stealing data parallelism for the block-index CRC sweep (build + verify), gated to apogee-zipatch
+rayon            = "1"
 # CLI: argument parsing and a no-echo password prompt, gated to the apogee-cli app.
 clap             = { version = "4", features = ["derive"] }
 rpassword        = "7"
