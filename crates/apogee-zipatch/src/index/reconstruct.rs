@@ -145,7 +145,11 @@ pub(crate) fn materialize_patch<R: Read + Seek>(
 /// The empty-block header bytes that overlap `[decoded_from, decoded_from + len)`, written at the
 /// part's start; `None` when the part lies wholly past the 24-byte header (an all-zero remainder,
 /// already covered by the sparse `set_len`).
-fn empty_block_header_slice(block_count: u32, decoded_from: u64, len: u64) -> Option<Vec<u8>> {
+pub(crate) fn empty_block_header_slice(
+    block_count: u32,
+    decoded_from: u64,
+    len: u64,
+) -> Option<Vec<u8>> {
     let header = datfile::empty_block_header(block_count);
     let header_len = header.len() as u64;
     if decoded_from >= header_len || len == 0 {

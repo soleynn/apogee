@@ -11,6 +11,7 @@
 mod format;
 mod model;
 mod reconstruct;
+mod repair;
 mod sink;
 mod verify;
 
@@ -28,6 +29,7 @@ use reconstruct::MAX_BLOCK_DECOMPRESSED;
 use sink::IndexSink;
 
 pub use model::Index;
+pub use repair::{RepairOutcome, SourceRef};
 pub use verify::{PartRef, SizeMismatch, StrayFile, VerifyOptions, VerifyReport};
 
 /// Build a block index from a patch chain.
