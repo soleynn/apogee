@@ -8,74 +8,14 @@
 
 mod support;
 
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use apogee_test_support::tree_manifest;
-use apogee_zipatch::{
-    ApplyOptions, DiskSink, Error, Index, LocalPatchSource, PatchReader, Platform, VerifyOptions,
-    apply, build_index,
-};
+use apogee_zipatch::{Error, Index, LocalPatchSource, VerifyOptions};
 use support::{
-    CountingSource, PatchBuilder, TamperSource, block_deflate, block_stored, splitmix64,
+    CountingSource, DAT0, DAT0_PATH, PatchBuilder, TamperSource, WIN32, apply_chain, build_from,
+    chain, splitmix64,
 };
-
-const WIN32: u16 = 0;
-/// The base-game dat and its file-target triple.
-const DAT0: (u16, u16, u32) = (0x0a, 0x0000, 0);
-const DAT0_PATH: &str = "sqpack/ffxiv/0a0000.win32.dat0";
-
-/// First patch: seed a dat with an `A` write superseded-and-extended by an `H` header, and add a
-/// stored+compressed exe, a small file later deleted, and a compressed dat.
-fn patch_a() -> Vec<u8> {
-    let mut b = PatchBuilder::new();
-    b.fhdr(b"DIFF", 0).target_info(WIN32);
-    b.add_data(DAT0, 0, &[0x11u8; 384], 0);
-    b.header(b'D', b'V', DAT0, &[0x22u8; 1024]);
-    let boot = [block_stored(&[0xABu8; 100]), block_deflate(&[0xCDu8; 200])].concat();
-    b.file_op(b'A', 0, 300, "ffxivboot.exe", &boot);
-    b.file_op(b'A', 0, 10, "old.txt", &block_stored(&[0x77u8; 10]));
-    b.file_op(b'A', 0, 400, "data.bin", &block_deflate(&[0x55u8; 400]));
-    b.eof();
-    b.bytes()
-}
-
-/// Second patch: overwrite the middle of the dat, expand it with an `E` empty block, delete
-/// `old.txt`, and continue `data.bin` at an interior offset (splitting the compressed part).
-fn patch_b() -> Vec<u8> {
-    let mut b = PatchBuilder::new();
-    b.fhdr(b"DIFF", 0).target_info(WIN32);
-    b.add_data(DAT0, 256, &[0x33u8; 128], 0);
-    b.empty_block(b'E', DAT0, 1024, 4);
-    b.file_op(b'D', 0, 0, "old.txt", &[]);
-    b.file_op(b'A', 128, 0, "data.bin", &block_stored(&[0x99u8; 64]));
-    b.eof();
-    b.bytes()
-}
-
-fn chain() -> Vec<Vec<u8>> {
-    vec![patch_a(), patch_b()]
-}
-
-/// Apply a chain under `root`, one fresh sink per patch (as the patcher runs them).
-fn apply_chain(root: &Path, patches: &[Vec<u8>]) -> Result<(), Error> {
-    for patch in patches {
-        let mut reader = PatchReader::open(Cursor::new(patch.clone()))?.verify_crc(true);
-        let mut sink = DiskSink::new(root)?;
-        apply(&mut reader, &mut sink, &ApplyOptions::default())?;
-    }
-    Ok(())
-}
-
-/// Build an index over a chain (each patch a seekable in-memory source).
-fn build_from(patches: &[Vec<u8>]) -> Result<Index, Error> {
-    let inputs: Vec<(String, Cursor<Vec<u8>>)> = patches
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (format!("p{i}.patch"), Cursor::new(p.clone())))
-        .collect();
-    build_index(inputs, Platform::Win32, "test-version")
-}
 
 /// Overwrite a byte range of a file with `fill` (whole-file read/modify/write; the fixtures are tiny).
 fn overwrite(path: &Path, off: usize, fill: &[u8]) -> std::io::Result<()> {
@@ -421,6 +361,67 @@ fn repair_extends_and_rewrites_a_short_file() {
 
     let now = tree_manifest::author(applied.path()).expect("author");
     assert_eq!(now.files, baseline.files);
+}
+
+#[test]
+fn repair_reconstructs_a_corrupted_empty_block_without_fetching() {
+    let chain = chain();
+    let (applied, index, baseline) = setup(&chain).expect("setup");
+
+    // The dat's [1024,1536) is a `D`/`E` empty block (24-byte header then zeros). Corrupt both the
+    // header area and a zero-tail byte; repair reconstructs it locally with no fetch.
+    let dat = applied.path().join(DAT0_PATH);
+    overwrite(&dat, 1024, &[0xFFu8; 8]).expect("corrupt header");
+    overwrite(&dat, 1400, &[0x01]).expect("corrupt zero tail");
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert!(!report.is_clean());
+
+    let mut source = CountingSource::new(chain.clone());
+    let outcome = index
+        .repair(applied.path(), &report, &mut source)
+        .expect("repair");
+    assert!(outcome.is_complete());
+    assert_eq!(
+        outcome.bytes_fetched, 0,
+        "an empty block needs no source bytes"
+    );
+    assert!(source.ranges.is_empty());
+
+    let now = tree_manifest::author(applied.path()).expect("author");
+    assert_eq!(now.files, baseline.files);
+}
+
+#[test]
+fn repair_leaves_strays_untouched() {
+    let chain = chain();
+    let (applied, index, _baseline) = setup(&chain).expect("setup");
+
+    // Plant a stray file and corrupt a real part.
+    let stray = applied.path().join("stray.bin");
+    std::fs::write(&stray, b"i am not indexed").expect("write stray");
+    overwrite(&applied.path().join("ffxivboot.exe"), 0, &[0xFF]).expect("corrupt");
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert!(
+        report
+            .stray_files
+            .iter()
+            .any(|s| s.path == Path::new("stray.bin"))
+    );
+
+    let mut source = CountingSource::new(chain.clone());
+    let outcome = index
+        .repair(applied.path(), &report, &mut source)
+        .expect("repair");
+    assert!(outcome.is_complete());
+    // Repair never quarantines or deletes a stray: that is the caller's job.
+    assert_eq!(
+        std::fs::read(&stray).expect("read stray"),
+        b"i am not indexed"
+    );
 }
 
 #[test]

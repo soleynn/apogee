@@ -121,7 +121,10 @@ impl Index {
             merge_ranges(ranges);
         }
 
-        // Fetch each patch's merged ranges into its buffer, counting the bytes served.
+        // Fetch each patch's merged ranges into its buffer, counting the bytes served. Every buffer
+        // is held for the whole pass, so peak memory is the sum of the fetched broken bytes: bounded
+        // by the repair size (the point of block-level repair), not the tree size. A pathological
+        // many-patch repair could stream per file instead; not worth the complexity at this scale.
         let mut bufs: Vec<RangeBuf> = (0..sources_len).map(|_| RangeBuf::default()).collect();
         let mut bytes_fetched: u64 = 0;
         for (idx, ranges) in &fetch {
@@ -366,6 +369,10 @@ fn repair_in_place(
 /// indexed CRC. An unsourceable part (bad source index / overflowing range) and a CRC mismatch are
 /// both soft skips: nothing is written, so the re-verify reports the part still broken. Shared by the
 /// in-place and missing-file writers.
+///
+/// A compressed block split across several broken parts is inflated once per part here (each slices
+/// its own window); the whole-block decode is bounded by [`MAX_BLOCK_DECOMPRESSED`], and the split
+/// case is rare, so a shared-block inflate cache is a deliberate non-goal.
 fn write_checked_patch(
     file: &mut File,
     part: &Part,
@@ -535,6 +542,53 @@ mod tests {
         assert_eq!(outcome.still_broken.len(), 1);
         assert!(outcome.repaired.is_empty());
         assert!(!outcome.is_complete());
+    }
+
+    #[test]
+    fn a_missing_file_with_an_unavailable_part_is_recreated_but_reports_it_broken() {
+        // A missing file whose index carries a sourceless zeros part and an unavailable part: repair
+        // recreates the file (sized correctly, the zeros clean) yet reports the unavailable part still
+        // broken, so a partial rebuild is honest rather than silently "complete".
+        let index = Index {
+            repo_version: "v".to_owned(),
+            platform: Platform::Win32,
+            sources: Vec::new(),
+            targets: vec![TargetFile {
+                path: "part.dat".into(),
+                parts: vec![
+                    Part {
+                        target_off: 0,
+                        target_len: 64,
+                        source: Source::Zeros,
+                        crc32: 0,
+                        crc_valid: false,
+                    },
+                    Part {
+                        target_off: 64,
+                        target_len: 64,
+                        source: Source::Unavailable,
+                        crc32: 0,
+                        crc_valid: false,
+                    },
+                ],
+            }],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // The file is absent, so verify reports it missing.
+        let report = index.verify(dir.path(), &VerifyOptions::default()).unwrap();
+        assert_eq!(report.missing_files.len(), 1);
+
+        let outcome = index.repair(dir.path(), &report, &mut NoSource).unwrap();
+        assert_eq!(outcome.recreated, vec![PathBuf::from("part.dat")]);
+        assert_eq!(outcome.bytes_fetched, 0);
+        // The zeros part heals; the unavailable part cannot and stays broken.
+        assert_eq!(outcome.repaired.len(), 1);
+        assert_eq!(outcome.still_broken.len(), 1);
+        assert_eq!(outcome.still_broken[0].target_off, 64);
+        assert!(!outcome.is_complete());
+        // The file exists at its full length.
+        let meta = std::fs::metadata(dir.path().join("part.dat")).unwrap();
+        assert_eq!(meta.len(), 128);
     }
 
     #[test]

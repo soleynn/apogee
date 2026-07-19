@@ -8,12 +8,13 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use apogee_zipatch::{
-    DataSource, Error, KeepFilter, MAGIC, PatchId, PatchSink, RangeSource, SafePath, TargetPath,
+    ApplyOptions, DataSource, DiskSink, Error, Index, KeepFilter, MAGIC, PatchId, PatchReader,
+    PatchSink, Platform, RangeSource, SafePath, TargetPath, apply, build_index,
 };
 
 /// Builds ZiPatch bytes chunk by chunk, framing each `[u32be size][4-char type][payload][u32be crc]`
@@ -460,6 +461,68 @@ pub fn splitmix64(state: &mut u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+// ---- Shared boot-chain fixture (the two-patch chain the index integration tests exercise) ----
+
+/// Platform id for the target-info command in the fixtures.
+pub const WIN32: u16 = 0;
+/// The base-game dat and its file-target triple.
+pub const DAT0: (u16, u16, u32) = (0x0a, 0x0000, 0);
+/// The confined relative path `DAT0` resolves to.
+pub const DAT0_PATH: &str = "sqpack/ffxiv/0a0000.win32.dat0";
+
+/// First patch: seed a dat with an `A` write superseded-and-extended by an `H` header, and add a
+/// stored+compressed exe, a small file later deleted, and a compressed dat.
+pub fn patch_a() -> Vec<u8> {
+    let mut b = PatchBuilder::new();
+    b.fhdr(b"DIFF", 0).target_info(WIN32);
+    b.add_data(DAT0, 0, &[0x11u8; 384], 0);
+    b.header(b'D', b'V', DAT0, &[0x22u8; 1024]);
+    let boot = [block_stored(&[0xABu8; 100]), block_deflate(&[0xCDu8; 200])].concat();
+    b.file_op(b'A', 0, 300, "ffxivboot.exe", &boot);
+    b.file_op(b'A', 0, 10, "old.txt", &block_stored(&[0x77u8; 10]));
+    b.file_op(b'A', 0, 400, "data.bin", &block_deflate(&[0x55u8; 400]));
+    b.eof();
+    b.bytes()
+}
+
+/// Second patch: overwrite the middle of the dat, expand it with an `E` empty block, delete
+/// `old.txt`, and continue `data.bin` at an interior offset (splitting the compressed part).
+pub fn patch_b() -> Vec<u8> {
+    let mut b = PatchBuilder::new();
+    b.fhdr(b"DIFF", 0).target_info(WIN32);
+    b.add_data(DAT0, 256, &[0x33u8; 128], 0);
+    b.empty_block(b'E', DAT0, 1024, 4);
+    b.file_op(b'D', 0, 0, "old.txt", &[]);
+    b.file_op(b'A', 128, 0, "data.bin", &block_stored(&[0x99u8; 64]));
+    b.eof();
+    b.bytes()
+}
+
+/// The two-patch chain.
+pub fn chain() -> Vec<Vec<u8>> {
+    vec![patch_a(), patch_b()]
+}
+
+/// Apply a chain under `root`, one fresh sink per patch (as the patcher runs them).
+pub fn apply_chain(root: &Path, patches: &[Vec<u8>]) -> Result<(), Error> {
+    for patch in patches {
+        let mut reader = PatchReader::open(Cursor::new(patch.clone()))?.verify_crc(true);
+        let mut sink = DiskSink::new(root)?;
+        apply(&mut reader, &mut sink, &ApplyOptions::default())?;
+    }
+    Ok(())
+}
+
+/// Build an index over a chain (each patch a seekable in-memory source).
+pub fn build_from(patches: &[Vec<u8>]) -> Result<Index, Error> {
+    let inputs: Vec<(String, Cursor<Vec<u8>>)> = patches
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (format!("p{i}.patch"), Cursor::new(p.clone())))
+        .collect();
+    build_index(inputs, Platform::Win32, "test-version")
 }
 
 /// A [`PatchSink`] that records each call as a byte-free line, for deterministic effect-trace asserts.
