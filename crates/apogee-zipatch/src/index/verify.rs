@@ -135,10 +135,13 @@ impl Index {
     /// The refine pass: re-check only the referenced parts, reporting those still broken.
     fn verify_refine(&self, root: &Path, refs: &[PartRef]) -> Result<VerifyReport> {
         let wanted: HashSet<&PartRef> = refs.iter().collect();
+        // Which files the refine set touches, as an O(1) membership test (a large retry set over a
+        // large tree would otherwise scan every ref per target).
+        let wanted_paths: HashSet<&Path> = refs.iter().map(|r| r.path.as_path()).collect();
         let outcomes: Vec<FileOutcome> = self
             .targets
             .par_iter()
-            .filter(|t| refs.iter().any(|r| r.path == t.path))
+            .filter(|t| wanted_paths.contains(t.path.as_path()))
             .map(|target| verify_file(target, root, Some(&wanted)))
             .collect::<Result<Vec<_>>>()?;
         let mut report = VerifyReport::default();
