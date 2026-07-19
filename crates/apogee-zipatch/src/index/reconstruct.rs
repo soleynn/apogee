@@ -10,7 +10,7 @@
 //! written, so an `E` expand of many gigabytes costs a handful of writes, exactly like the applier.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use apogee_sqpack::codec;
@@ -135,7 +135,11 @@ pub(crate) fn materialize_patch<R: Read + Seek>(
             detail: "index part decoded slice out of range",
         });
     }
-    Ok(whole[start..end].to_vec())
+    // Keep only the requested window in place: the common unsplit part (`start == 0`, `end == len`)
+    // returns the whole block with no extra allocation or copy.
+    whole.truncate(end);
+    whole.drain(..start);
+    Ok(whole)
 }
 
 /// The empty-block header bytes that overlap `[decoded_from, decoded_from + len)`, and the offset
@@ -151,7 +155,9 @@ fn empty_block_header_slice(
     if decoded_from >= header_len || len == 0 {
         return None;
     }
-    let end = (decoded_from + len).min(header_len);
+    // `len` is a target length from a possibly-hostile index; saturate rather than overflow before
+    // clamping to the 24-byte header (`decoded_from` is already `< header_len` here).
+    let end = decoded_from.saturating_add(len).min(header_len);
     Some((0, header[decoded_from as usize..end as usize].to_vec()))
 }
 
@@ -169,15 +175,20 @@ fn read_exact_at<R: Read + Seek>(
     reader
         .seek(SeekFrom::Start(off))
         .map_err(|e| io(e, Op::Read))?;
-    let mut buf = vec![0u8; len];
-    match reader.read_exact(&mut buf) {
-        Ok(()) => Ok(buf),
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Error::Truncated {
+    // Grow the buffer only as bytes actually arrive, so an oversized length from a hostile index
+    // reads (at most) the real source rather than pre-allocating the claimed size.
+    let mut buf = Vec::new();
+    reader
+        .take(len as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| io(e, Op::Read))?;
+    if buf.len() != len {
+        return Err(Error::Truncated {
             offset: off,
-            needed: len as u64,
-        }),
-        Err(e) => Err(io(e, Op::Read)),
+            needed: (len - buf.len()) as u64,
+        });
     }
+    Ok(buf)
 }
 
 /// Write `buf` at absolute offset `off`.
