@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use apogee_zipatch::{DataSource, Error, KeepFilter, MAGIC, PatchSink, SafePath, TargetPath};
 
@@ -90,6 +90,80 @@ impl PatchBuilder {
         self.sqpk(b'F', &v)
     }
 
+    /// A `SQPK A` (AddData) command. `block_offset` and `block_delete` are byte counts (128-aligned),
+    /// and `data`'s length must be 128-aligned; the wire stores each `>> 7`.
+    pub fn add_data(
+        &mut self,
+        target: (u16, u16, u32),
+        block_offset: u64,
+        data: &[u8],
+        block_delete: u64,
+    ) -> &mut Self {
+        assert_eq!(block_offset % 128, 0, "block offset must be 128-aligned");
+        assert_eq!(data.len() % 128, 0, "add-data length must be 128-aligned");
+        assert_eq!(block_delete % 128, 0, "wipe length must be 128-aligned");
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0, 0, 0]); // alignment
+        v.extend_from_slice(&target_bytes(target));
+        v.extend_from_slice(&((block_offset >> 7) as u32).to_be_bytes());
+        v.extend_from_slice(&((data.len() as u64 >> 7) as u32).to_be_bytes());
+        v.extend_from_slice(&((block_delete >> 7) as u32).to_be_bytes());
+        v.extend_from_slice(data);
+        self.sqpk(b'A', &v)
+    }
+
+    /// A `SQPK D`/`E` (Delete/Expand) command. `cmd` is `b'D'` or `b'E'`; `block_offset` is a
+    /// 128-aligned byte count stored `>> 7`, `block_count` is the raw (unshifted) 128-byte block span.
+    pub fn empty_block(
+        &mut self,
+        cmd: u8,
+        target: (u16, u16, u32),
+        block_offset: u64,
+        block_count: u32,
+    ) -> &mut Self {
+        assert_eq!(block_offset % 128, 0, "block offset must be 128-aligned");
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0, 0, 0]); // alignment
+        v.extend_from_slice(&target_bytes(target));
+        v.extend_from_slice(&((block_offset >> 7) as u32).to_be_bytes());
+        v.extend_from_slice(&block_count.to_be_bytes()); // NOT shifted
+        v.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        self.sqpk(cmd, &v)
+    }
+
+    /// A `SQPK H` (Header) command. `file_kind` is `b'D'` (dat) or `b'I'` (index); `header_kind` is
+    /// `b'V'`/`b'I'`/`b'D'`; `blob` must be exactly 1024 bytes.
+    pub fn header(
+        &mut self,
+        file_kind: u8,
+        header_kind: u8,
+        target: (u16, u16, u32),
+        blob: &[u8],
+    ) -> &mut Self {
+        assert_eq!(blob.len(), 1024, "header blob must be 1024 bytes");
+        let mut v = Vec::new();
+        v.push(file_kind);
+        v.push(header_kind);
+        v.push(0); // alignment
+        v.extend_from_slice(&target_bytes(target));
+        v.extend_from_slice(blob);
+        self.sqpk(b'H', &v)
+    }
+
+    /// A `SQPK F:R` (RemoveAll) command for `expansion_id`. The path field is unused by the apply.
+    pub fn removeall(&mut self, expansion_id: u16, path: &str) -> &mut Self {
+        let mut v = Vec::new();
+        v.push(b'R');
+        v.extend_from_slice(&[0, 0]); // alignment
+        v.extend_from_slice(&0i64.to_be_bytes()); // fileOffset
+        v.extend_from_slice(&0i64.to_be_bytes()); // fileSize
+        v.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        v.extend_from_slice(&expansion_id.to_be_bytes());
+        v.extend_from_slice(&[0, 0]); // padding
+        v.extend_from_slice(path.as_bytes());
+        self.sqpk(b'F', &v)
+    }
+
     pub fn add_directory(&mut self, path: &str) -> &mut Self {
         self.directory_chunk(b"ADIR", path)
     }
@@ -115,6 +189,25 @@ impl PatchBuilder {
         out.extend_from_slice(&self.body);
         out
     }
+}
+
+/// The 8-byte file-target triple: mainId/subId big-endian u16, fileId big-endian u32.
+fn target_bytes((main_id, sub_id, file_id): (u16, u16, u32)) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&main_id.to_be_bytes());
+    v.extend_from_slice(&sub_id.to_be_bytes());
+    v.extend_from_slice(&file_id.to_be_bytes());
+    v
+}
+
+/// The 24-byte empty-block header a `D`/`E` command stamps, encoded here independently of the crate
+/// so a test asserts against its own copy of the layout. Five little-endian fields: block size 128,
+/// two zeros, `blockCount - 1` as a **u64** (so `block_count == 0` wraps to all ones), a trailing zero.
+pub fn empty_block_header(block_count: u32) -> [u8; 24] {
+    let mut out = [0u8; 24];
+    out[0..4].copy_from_slice(&128u32.to_le_bytes());
+    out[12..20].copy_from_slice(&(u64::from(block_count).wrapping_sub(1)).to_le_bytes());
+    out
 }
 
 /// One SqPack block: a 16-byte LE header (`header_size`, pad, `compressed_size`, `decompressed_size`)
@@ -220,7 +313,18 @@ impl PatchSink for InMemorySink {
         Ok(())
     }
 
-    fn write_empty_block(&mut self, _t: &TargetPath, _off: u64, _blocks: u32) -> Result<(), Error> {
+    fn write_empty_block(
+        &mut self,
+        target: &TargetPath,
+        off: u64,
+        blocks: u32,
+    ) -> Result<(), Error> {
+        // Faithful to the disk sink: zero the whole run, then stamp the 24-byte header over its start
+        // (including the block_count == 0 case, where the wipe is empty but the header still lands).
+        let path = target.as_path().to_path_buf();
+        let wipe = vec![0u8; (u64::from(blocks) << 7) as usize];
+        self.splice(path.clone(), off, &wipe);
+        self.splice(path, off, &empty_block_header(blocks));
         Ok(())
     }
 
@@ -237,7 +341,28 @@ impl PatchSink for InMemorySink {
         Ok(())
     }
 
-    fn remove_expansion(&mut self, _exp: u16, _keep: &KeepFilter) -> Result<(), Error> {
+    fn remove_expansion(&mut self, exp: u16, keep: &KeepFilter) -> Result<(), Error> {
+        // Model the reference sweep over the modeled tree: immediate files of sqpack/{xpac} and
+        // movie/{xpac}, keeping those the filter spares.
+        let folder = if (exp as u8) == 0 {
+            "ffxiv".to_owned()
+        } else {
+            format!("ex{}", exp as u8)
+        };
+        let dirs = [format!("sqpack/{folder}"), format!("movie/{folder}")];
+        self.files.retain(|path, _| {
+            let in_sweep = path
+                .parent()
+                .is_some_and(|p| dirs.iter().any(|d| p == Path::new(d)));
+            if !in_sweep {
+                return true;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            keep.is_kept(&name)
+        });
         Ok(())
     }
 
