@@ -5,9 +5,22 @@ mod support;
 
 use std::path::Path;
 
-use apogee_zipatch::{ApplyOptions, DiskSink, Error, PatchReader, apply};
+use apogee_zipatch::{ApplyOptions, Chunk, DiskSink, Error, Limit, PatchReader, Sqpk, apply};
 
-use support::{PatchBuilder, block_deflate, block_stored};
+use support::{
+    PatchBuilder, block_bad_deflate, block_deflate, block_deflate_claiming, block_stored,
+};
+
+/// Parse `patch` and return the first `SQPK F:A` block stream's absolute patch offset.
+fn add_file_blocks_off(patch: &[u8]) -> Result<u64, Error> {
+    let mut reader = PatchReader::open(patch)?;
+    while let Some(chunk) = reader.next_chunk()? {
+        if let Chunk::Sqpk(Sqpk::File(f)) = chunk {
+            return Ok(f.blocks_off);
+        }
+    }
+    Ok(0)
+}
 
 const WIN32: u16 = 0;
 
@@ -111,4 +124,119 @@ fn a_symlinked_parent_is_refused() {
     ));
     // The write never escaped into the symlink target.
     assert!(!outside.path().join("x.txt").exists());
+}
+
+#[test]
+fn a_continuation_survives_handle_eviction() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // One apply, one handle store: write a.dat's head, fill the 16-handle store with other files to
+    // evict a.dat, then continue a.dat at offset 4. The reopen must not truncate, or the head is lost.
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 4, "a.dat", &block_stored(b"HEAD"));
+        for i in 0..20 {
+            b.file_op(
+                b'A',
+                0,
+                4,
+                &format!("filler{i}.dat"),
+                &block_stored(b"----"),
+            );
+        }
+        b.file_op(b'A', 4, 4, "a.dat", &block_stored(b"TAIL"));
+    });
+    apply_patch(dir.path(), &patch).expect("apply");
+    assert_eq!(
+        std::fs::read(dir.path().join("a.dat")).unwrap(),
+        b"HEADTAIL"
+    );
+}
+
+#[test]
+fn an_over_cap_block_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // One past MAX_BLOCK_DECOMPRESSED; the decode cap must reject it before allocating.
+    let over = (16u32 << 20) + 1;
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 1, "big.dat", &block_deflate_claiming(b"x", over));
+    });
+    assert!(matches!(
+        apply_patch(dir.path(), &patch),
+        Err(Error::LimitExceeded {
+            what: Limit::BlockSize,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_corrupt_deflate_block_reports_a_patch_absolute_offset() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 8, "x.dat", &block_bad_deflate(8, 8));
+    });
+    // The DEFLATE payload begins 16 bytes past the block stream (after the block header).
+    let payload_off = add_file_blocks_off(&patch).expect("parse") + 16;
+    match apply_patch(dir.path(), &patch) {
+        Err(Error::Corrupt { offset, .. }) => assert_eq!(offset, payload_off),
+        other => panic!("expected Corrupt at {payload_off}, got {other:?}"),
+    }
+}
+
+#[test]
+fn makes_and_removes_a_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let make = boot_patch(|b| {
+        b.add_directory("extra")
+            .file_op(b'A', 0, 2, "extra/f.bin", &block_stored(b"hi"));
+    });
+    apply_patch(dir.path(), &make).expect("apply make");
+    assert!(dir.path().join("extra/f.bin").exists());
+
+    let remove = boot_patch(|b| {
+        b.delete_directory("extra");
+    });
+    apply_patch(dir.path(), &remove).expect("apply remove");
+    assert!(!dir.path().join("extra").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_blocks_a_file_delete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret"), b"keep").unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("mods")).expect("symlink");
+
+    let patch = boot_patch(|b| {
+        b.file_op(b'D', 0, 0, "mods/secret", &[]);
+    });
+    assert!(matches!(
+        apply_patch(dir.path(), &patch),
+        Err(Error::PathEscape { .. })
+    ));
+    assert!(
+        outside.path().join("secret").exists(),
+        "the delete escaped the root through an in-tree symlink"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_target_blocks_a_recursive_delete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::write(outside.path().join("keep"), b"x").unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("mods")).expect("symlink");
+
+    let patch = boot_patch(|b| {
+        b.delete_directory("mods");
+    });
+    assert!(matches!(
+        apply_patch(dir.path(), &patch),
+        Err(Error::PathEscape { .. })
+    ));
+    assert!(
+        outside.path().join("keep").exists(),
+        "the recursive delete followed the symlink out of the root"
+    );
 }

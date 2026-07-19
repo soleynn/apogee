@@ -8,7 +8,7 @@ use std::sync::mpsc;
 
 use apogee_zipatch::{ApplyOptions, ApplyProgress, Error, PatchReader, apply, scan_crc};
 
-use support::{InMemorySink, PatchBuilder, TraceSink, block_deflate, block_stored};
+use support::{InMemorySink, PatchBuilder, TraceSink, block_deflate, block_raw, block_stored};
 
 const WIN32: u16 = 0;
 const PS3: u16 = 1;
@@ -205,4 +205,89 @@ fn scan_crc_accepts_a_clean_patch_and_rejects_a_corrupt_one() {
         scan_crc(&mut reader),
         Err(Error::ChunkCrcMismatch { .. })
     ));
+}
+
+#[test]
+fn scan_crc_reports_a_truncated_patch() {
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 4, "data.bin", &block_stored(b"WXYZ"));
+    });
+    // Cut into a chunk body: the CRC/frame read runs off the end.
+    let truncated = &patch[..patch.len() - 12];
+    let mut reader = PatchReader::open(truncated).expect("open");
+    assert!(matches!(
+        scan_crc(&mut reader),
+        Err(Error::Truncated { .. })
+    ));
+}
+
+#[test]
+fn a_negative_add_file_offset_is_rejected() {
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', -1, 4, "data.bin", &block_stored(b"WXYZ"));
+    });
+    assert!(matches!(apply_to_mem(&patch), Err(Error::Corrupt { .. })));
+}
+
+#[test]
+fn a_short_block_header_is_truncated() {
+    // Fewer than the 16 header bytes a block needs.
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 4, "data.bin", &[0u8; 10]);
+    });
+    assert!(matches!(apply_to_mem(&patch), Err(Error::Truncated { .. })));
+}
+
+#[test]
+fn a_block_claiming_more_than_the_stream_holds_is_truncated() {
+    // A valid header whose padded block length exceeds the bytes actually present.
+    let mut blocks = block_stored(&[0u8; 32]);
+    blocks.truncate(20);
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 4, "data.bin", &blocks);
+    });
+    assert!(matches!(apply_to_mem(&patch), Err(Error::Truncated { .. })));
+}
+
+#[test]
+fn a_compressed_size_at_or_above_the_sentinel_is_corrupt() {
+    // 0x8000 is above the 0x7D00 stored sentinel, so it is neither a stored block nor a legal
+    // compressed size; the framer must reject it like the shared codec does.
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 0, "data.bin", &block_raw(0x8000, 0, &[]));
+    });
+    assert!(matches!(apply_to_mem(&patch), Err(Error::Corrupt { .. })));
+}
+
+#[test]
+fn an_unknown_file_op_is_unsupported() {
+    let patch = boot_patch(|b| {
+        b.file_op(b'Z', 0, 0, "data.bin", &[]);
+    });
+    assert!(matches!(
+        apply_to_mem(&patch),
+        Err(Error::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn a_backslash_traversal_path_is_rejected_at_apply() {
+    // Confinement folds backslashes before the component walk, so this reaches apply as an escape.
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 4, "..\\..\\escape.bin", &block_stored(b"evil"));
+    });
+    assert!(matches!(
+        apply_to_mem(&patch),
+        Err(Error::PathEscape { .. })
+    ));
+}
+
+#[test]
+fn a_zero_block_add_creates_an_empty_file() {
+    // An offset-0 add with no blocks truncates-or-creates the file and writes nothing.
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 0, "empty.dat", &[]);
+    });
+    let sink = apply_to_mem(&patch).expect("apply");
+    assert_eq!(sink.get("empty.dat"), Some(&b""[..]));
 }

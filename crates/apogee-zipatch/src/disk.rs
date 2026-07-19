@@ -2,13 +2,18 @@
 //!
 //! Every path a patch names is confined before it reaches here (only a [`TargetPath`]/[`SafePath`]
 //! can be constructed), so this layer's remaining defense is against a symlink planted *inside* the
-//! tree: parent directories are created one component at a time, refusing to traverse a symlink, and
-//! a symlink squatting the final path component is removed before a write. Writes are positioned
-//! (seek + write), so re-running an interrupted apply converges.
+//! tree. Both writes and deletes descend the same way ([`ensure_dirs`]): every directory component is
+//! stat'd one at a time and refused if it is a symlink or a non-directory, so a planted link can never
+//! relocate an operation outside the root. Writes also strip a symlink squatting the final component;
+//! `remove_dir` refuses a symlinked target so a recursive delete cannot follow it out of the tree.
 //!
-//! Boot patches touch the same handful of files repeatedly, so open handles are held in a small LRU
-//! store rather than reopened per command. Handles carry no application-level buffer, so eviction is
-//! a plain close with nothing to lose.
+//! This is a lexical-then-stat confinement: a concurrent *local* writer could still race a component
+//! between the stat and the following open/unlink/remove. A hostile patch cannot (no apply op plants a
+//! symlink); a fully race-free descent would need `openat`-relative traversal from a root fd, deferred.
+//!
+//! Writes are positioned (seek + write), so re-running an interrupted apply converges. Boot patches
+//! touch the same handful of files repeatedly, so open handles are held in a small LRU store rather
+//! than reopened per command. Handles carry no application-level buffer, so eviction is a plain close.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -60,7 +65,7 @@ impl PatchSink for DiskSink {
         match src {
             DataSource::Raw { bytes, .. } => {
                 let file = self.store.get(&self.root, rel)?;
-                write_at(file, off, bytes, rel)?;
+                write_at(file, off, bytes, &self.root, rel)?;
             }
             DataSource::Deflate {
                 bytes,
@@ -69,15 +74,17 @@ impl PatchSink for DiskSink {
                 ..
             } => {
                 let file = self.store.get(&self.root, rel)?;
-                seek(file, off, rel)?;
+                seek(file, off, &self.root, rel)?;
                 // inflate checks the size cap before decoding, so a hostile header never allocates.
                 codec::inflate(bytes, file, decompressed_len, &limits).map_err(|e| {
                     Error::from_block(e, patch_off, decompressed_len, limits.max_decompressed)
                 })?;
             }
-            DataSource::Zeros { len } => {
-                let file = self.store.get(&self.root, rel)?;
-                write_zeros(file, off, len, rel)?;
+            // The zero-fill primitive is the empty-block command's job, which lands in a later phase.
+            DataSource::Zeros { .. } => {
+                return Err(Error::Unsupported {
+                    what: "zero-fill write",
+                });
             }
         }
         Ok(())
@@ -99,6 +106,12 @@ impl PatchSink for DiskSink {
     fn remove_file(&mut self, target: &TargetPath) -> Result<()> {
         let rel = target.as_path();
         self.store.evict(rel);
+        // Refuse a symlinked ancestor before touching the tree; a missing ancestor means the target is
+        // already gone. `remove_file` on the final component unlinks a symlink itself (never follows
+        // it), so only the parents need the symlink check.
+        if ensure_dirs(&self.root, parent_of(rel), false)?.is_none() {
+            return Ok(());
+        }
         let abs = self.root.join(rel);
         match fs::remove_file(&abs) {
             Ok(()) => Ok(()),
@@ -116,17 +129,35 @@ impl PatchSink for DiskSink {
     }
 
     fn make_dir_tree(&mut self, rel: &SafePath) -> Result<()> {
-        make_tree(&self.root, rel.as_path())
+        ensure_dirs(&self.root, rel.as_path(), true)?;
+        Ok(())
     }
 
     fn remove_dir(&mut self, rel: &SafePath) -> Result<()> {
-        let abs = self.root.join(rel.as_path());
-        match fs::remove_dir_all(&abs) {
-            Ok(()) => Ok(()),
+        let rel = rel.as_path();
+        if ensure_dirs(&self.root, parent_of(rel), false)?.is_none() {
+            return Ok(());
+        }
+        let abs = self.root.join(rel);
+        match fs::symlink_metadata(&abs) {
+            // A symlinked target could redirect the recursive delete outside the tree; refuse it.
+            Ok(meta) if meta.file_type().is_symlink() => Err(Error::PathEscape {
+                raw: abs.display().to_string(),
+            }),
+            Ok(_) => match fs::remove_dir_all(&abs) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(io(e, abs, Op::Remove)),
+            },
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io(e, abs, Op::Remove)),
         }
     }
+}
+
+/// The parent of `rel`, or the empty path (an empty component walk) when `rel` is a single component.
+fn parent_of(rel: &Path) -> &Path {
+    rel.parent().unwrap_or(Path::new(""))
 }
 
 /// A bounded LRU of open target handles. The most recently used slot is at the end; a miss opens a
@@ -179,9 +210,7 @@ impl HandleStore {
 
 /// Open `root/rel` read/write, creating it and its parents. Never truncates.
 fn open_target(root: &Path, rel: &Path) -> Result<File> {
-    if let Some(parent) = rel.parent() {
-        make_tree(root, parent)?;
-    }
+    ensure_dirs(root, parent_of(rel), true)?;
     let abs = root.join(rel);
     unlink_if_symlink(&abs)?;
     OpenOptions::new()
@@ -195,12 +224,15 @@ fn open_target(root: &Path, rel: &Path) -> Result<File> {
         .map_err(|e| io(e, abs, Op::Open))
 }
 
-/// Create `root/rel` and every ancestor as a real directory, refusing to traverse an existing
-/// symlink or non-directory (a crafted patch could otherwise plant an in-tree link that relocates a
-/// later write). `rel` is already confined, so only `Normal` components reach here.
-fn make_tree(root: &Path, rel: &Path) -> Result<()> {
+/// Walk each directory component of `dirs` under `root`, refusing any that is a symlink or a
+/// non-directory (a planted link would relocate a following write or delete outside the tree). With
+/// `create`, a missing component is made (the write path); without it, a missing component ends the
+/// walk with `None` (the delete path, where a missing ancestor means the target is already gone).
+/// `dirs` is already confined, so only `Normal` components reach here. Returns the resolved absolute
+/// path on success.
+fn ensure_dirs(root: &Path, dirs: &Path, create: bool) -> Result<Option<PathBuf>> {
     let mut cur = root.to_path_buf();
-    for comp in rel.components() {
+    for comp in dirs.components() {
         cur.push(comp.as_os_str());
         match fs::symlink_metadata(&cur) {
             Ok(meta) if meta.is_dir() => {}
@@ -210,12 +242,16 @@ fn make_tree(root: &Path, rel: &Path) -> Result<()> {
                 });
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(&cur).map_err(|e| io(e, cur.clone(), Op::MakeDir))?;
+                if create {
+                    fs::create_dir(&cur).map_err(|e| io(e, cur.clone(), Op::MakeDir))?;
+                } else {
+                    return Ok(None);
+                }
             }
             Err(e) => return Err(io(e, cur, Op::MakeDir)),
         }
     }
-    Ok(())
+    Ok(Some(cur))
 }
 
 /// Remove `path` if it is an existing symlink, so a write never follows a link planted at the final
@@ -229,32 +265,18 @@ fn unlink_if_symlink(path: &Path) -> Result<()> {
     }
 }
 
-/// Seek a handle to `off`, tagging a failure with the target path.
-fn seek(file: &mut File, off: u64, rel: &Path) -> Result<()> {
+/// Seek a handle to `off`, tagging a failure with the absolute target path (computed only on error).
+fn seek(file: &mut File, off: u64, root: &Path, rel: &Path) -> Result<()> {
     file.seek(SeekFrom::Start(off))
         .map(|_| ())
-        .map_err(|e| io(e, rel.to_path_buf(), Op::Write))
+        .map_err(|e| io(e, root.join(rel), Op::Write))
 }
 
 /// Write `buf` at `off`.
-fn write_at(file: &mut File, off: u64, buf: &[u8], rel: &Path) -> Result<()> {
-    seek(file, off, rel)?;
+fn write_at(file: &mut File, off: u64, buf: &[u8], root: &Path, rel: &Path) -> Result<()> {
+    seek(file, off, root, rel)?;
     file.write_all(buf)
-        .map_err(|e| io(e, rel.to_path_buf(), Op::Write))
-}
-
-/// Write `len` zero bytes at `off`.
-fn write_zeros(file: &mut File, off: u64, len: u64, rel: &Path) -> Result<()> {
-    seek(file, off, rel)?;
-    let zeros = [0u8; 8192];
-    let mut remaining = len;
-    while remaining > 0 {
-        let n = remaining.min(zeros.len() as u64) as usize;
-        file.write_all(&zeros[..n])
-            .map_err(|e| io(e, rel.to_path_buf(), Op::Write))?;
-        remaining -= n as u64;
-    }
-    Ok(())
+        .map_err(|e| io(e, root.join(rel), Op::Write))
 }
 
 /// Build an [`Error::Io`] carrying the target path and the operation in flight.
