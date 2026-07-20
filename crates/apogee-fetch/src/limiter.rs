@@ -97,7 +97,9 @@ impl LimitHandle {
     fn lock(&self) -> std::sync::MutexGuard<'_, Bucket> {
         // The bucket mutex is only ever held for the O(1) refill math, never across an await, so a
         // poisoned lock cannot happen from a panic mid-await; recover the guard rather than propagate.
-        self.bucket.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.bucket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -168,6 +170,9 @@ mod tests {
         // n (2 MB) exceeds the 1 MB/s one-second ceiling; the draw must complete, not deadlock.
         let handle = LimitHandle::with_limit(1_000_000);
         let elapsed = drain(&handle, 2_000_000, 2_000_000).await.as_secs_f64();
-        assert!(elapsed >= 1.9, "a 2 MB draw at 1 MB/s should take about 2s, took {elapsed}s");
+        assert!(
+            elapsed >= 1.9,
+            "a 2 MB draw at 1 MB/s should take about 2s, took {elapsed}s"
+        );
     }
 }
