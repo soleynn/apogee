@@ -537,7 +537,10 @@ fn content_range_ok(resp: &reqwest::Response, start: u64, expected_len: Option<u
     }
 }
 
-fn header_bytes(resp: &reqwest::Response, name: &reqwest::header::HeaderName) -> Option<Vec<u8>> {
+pub(crate) fn header_bytes(
+    resp: &reqwest::Response,
+    name: &reqwest::header::HeaderName,
+) -> Option<Vec<u8>> {
     resp.headers().get(name).map(|v| v.as_bytes().to_vec())
 }
 

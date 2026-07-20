@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::header::{CONTENT_RANGE, RANGE};
+use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -77,12 +77,15 @@ pub(crate) async fn dispatch(
         return Ok(verified);
     }
 
-    let capability = match shared.capabilities.get(spec.url()) {
-        Some(cap) => cap,
+    // A cache hit knows only the capability, not the URL's validators (which are per-URL, not per-host),
+    // so a fresh cache-hit download records no validators; a resume then relies on the whole-file hash
+    // to catch a changed source.
+    let (capability, etag, last_modified) = match shared.capabilities.get(spec.url()) {
+        Some(cap) => (cap, None, None),
         None => {
-            let cap = probe(client, spec, &cancel).await?;
-            shared.capabilities.set(spec.url(), cap);
-            cap
+            let probe = probe(client, spec, &cancel).await?;
+            shared.capabilities.set(spec.url(), probe.capability);
+            (probe.capability, probe.etag, probe.last_modified)
         }
     };
     match capability {
@@ -94,6 +97,8 @@ pub(crate) async fn dispatch(
                 len,
                 seg_size,
                 expected_sha,
+                etag,
+                last_modified,
                 progress,
                 cancel,
                 shared,
@@ -103,26 +108,41 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// Probe range support with a one-byte ranged request, classifying the response and dropping its body
-/// (so a range-ignoring `200` wastes only a socket buffer, never the whole file).
+/// A probe's verdict plus the server validators to record for a later resume's `If-Range`.
+struct Probe {
+    capability: Capability,
+    etag: Option<Vec<u8>>,
+    last_modified: Option<Vec<u8>>,
+}
+
+/// Probe range support with a one-byte ranged request, classifying the response and capturing its
+/// validators, then dropping its body (so a range-ignoring `200` wastes only a socket buffer, never
+/// the whole file).
 async fn probe(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     cancel: &CancellationToken,
-) -> Result<Capability, FetchError> {
+) -> Result<Probe, FetchError> {
     let request = client.get(spec.url().clone()).header(RANGE, "bytes=0-0");
     let resp = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(FetchError::Cancelled),
         sent = request.send() => sent.map_err(|e| download::connect_error(spec.url(), e))?,
     };
-    match resp.status().as_u16() {
-        200 | 206 => Ok(classify(&resp)),
-        status => Err(FetchError::Http {
-            status,
-            url: spec.url().clone(),
-        }),
-    }
+    let capability = match resp.status().as_u16() {
+        200 | 206 => classify(&resp),
+        status => {
+            return Err(FetchError::Http {
+                status,
+                url: spec.url().clone(),
+            });
+        }
+    };
+    Ok(Probe {
+        capability,
+        etag: download::header_bytes(&resp, &ETAG),
+        last_modified: download::header_bytes(&resp, &LAST_MODIFIED),
+    })
 }
 
 /// Shared state for one segmented transfer: the work queue, the durable-byte counter, the journal, and
@@ -134,6 +154,8 @@ struct TransferState {
     apdl: PathBuf,
     len: u64,
     stall_timeout: Duration,
+    /// The `If-Range` value (ETag or Last-Modified) sent on resume, or `None` on a fresh transfer.
+    if_range: Option<Vec<u8>>,
     limiter: crate::limiter::LimitHandle,
     scheduler: Arc<crate::scheduler::Scheduler>,
     queue: Mutex<VecDeque<Range<u64>>>,
@@ -228,6 +250,8 @@ async fn transfer(
     len: u64,
     seg_size: u64,
     expected_sha: Option<[u8; 32]>,
+    etag: Option<Vec<u8>>,
+    last_modified: Option<Vec<u8>>,
     progress: Option<mpsc::UnboundedSender<Progress>>,
     cancel: CancellationToken,
     shared: &Shared,
@@ -236,17 +260,20 @@ async fn transfer(
     let part = download::sidecar(dest, ".part");
     let apdl = download::sidecar(dest, ".apdl");
 
+    // A fresh transfer records the probe's validators so a later resume can revalidate with `If-Range`.
     let identity = Identity {
         url: spec.url().as_str().to_owned(),
         expected_len: Some(len),
         validator_digest: spec.validator().config_digest(),
-        etag: None,
-        last_modified: None,
+        etag,
+        last_modified,
     };
 
     // Resume: trust the journaled intervals only when the identity matches and the `.part` is fully
-    // preallocated (so every covered byte is within the file).
+    // preallocated (so every covered byte is within the file). The recorded validator becomes this
+    // run's `If-Range` so a source that changed since is caught.
     let mut covered = IntervalSet::new();
+    let mut if_range = None;
     if spec.resume()
         && let Some(loaded) = journal::load(&apdl)
             .await
@@ -256,6 +283,11 @@ async fn transfer(
         && meta.is_file()
         && meta.len() >= len
     {
+        if_range = loaded
+            .identity
+            .etag
+            .clone()
+            .or_else(|| loaded.identity.last_modified.clone());
         covered = loaded.intervals;
     }
 
@@ -303,6 +335,7 @@ async fn transfer(
             apdl: apdl.clone(),
             len,
             stall_timeout: shared.stall_timeout,
+            if_range,
             limiter: shared.limiter.clone(),
             scheduler: shared.scheduler.clone(),
             queue: Mutex::new(queue),
@@ -434,10 +467,17 @@ async fn stream_segment(
         Err(err) => return SegmentResult::Fatal(err),
     };
 
-    let request = state
+    let mut request = state
         .client
         .get(state.url.clone())
         .header(RANGE, format!("bytes={}-{}", range.start, range.end - 1));
+    // On resume, revalidate the source against the recorded validator: a changed source answers a
+    // conditional range with a full `200`, which we treat as a changed source.
+    if let Some(value) = &state.if_range
+        && let Ok(header) = reqwest::header::HeaderValue::from_bytes(value)
+    {
+        request = request.header(IF_RANGE, header);
+    }
     let resp = tokio::select! {
         biased;
         () = cancel.cancelled() => return SegmentResult::Stop,
@@ -458,11 +498,31 @@ async fn stream_segment(
             });
         }
     }
-    if content_range_start(&resp) != Some(range.start) {
-        return SegmentResult::Fatal(FetchError::Http {
-            status: 206,
-            url: state.url.clone(),
-        });
+    match content_range(&resp) {
+        // The range must start where we asked, and the server's total (when concrete) must match the
+        // caller's declared length - the §3.7 cross-check the single-connection path also enforces.
+        Some((first, total)) => {
+            if first != range.start {
+                return SegmentResult::Fatal(FetchError::Http {
+                    status: 206,
+                    url: state.url.clone(),
+                });
+            }
+            if let Some(total) = total
+                && total != state.len
+            {
+                return SegmentResult::Fatal(FetchError::LengthMismatch {
+                    expected: state.len,
+                    got: total,
+                });
+            }
+        }
+        None => {
+            return SegmentResult::Fatal(FetchError::Http {
+                status: 206,
+                url: state.url.clone(),
+            });
+        }
     }
 
     let mut stream = Box::pin(resp.bytes_stream());
@@ -557,11 +617,17 @@ async fn open_segment_file(part: &Path, at: u64) -> Result<tokio::fs::File, Fetc
 }
 
 /// The first byte of a `Content-Range: bytes first-last/total` header.
-fn content_range_start(resp: &reqwest::Response) -> Option<u64> {
+fn content_range(resp: &reqwest::Response) -> Option<(u64, Option<u64>)> {
     let value = resp.headers().get(CONTENT_RANGE)?.to_str().ok()?;
-    let (range, _total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
     let (first, _last) = range.split_once('-')?;
-    first.parse::<u64>().ok()
+    let first = first.parse::<u64>().ok()?;
+    let total = if total == "*" {
+        None
+    } else {
+        Some(total.parse::<u64>().ok()?)
+    };
+    Some((first, total))
 }
 
 /// Re-hash the completed `.part` (for a whole-file validator), then publish it: durable, atomic
