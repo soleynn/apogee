@@ -21,6 +21,19 @@ is tagged with its change type. Versioning aims to follow
 - Segmented length cross-check and If-Range revalidation _(fixed)_
 - Scheduler cannot leak an admission slot to a cancelled waiter _(fixed)_
 - Share identity/publish helpers and a lock helper _(changed)_
+- Interval-set removal and full-coverage query _(added)_
+- Per-request HTTP header policy _(added)_
+- Mirror sources, header policy, and block-layout checks on the spec _(added)_
+- Block layout and per-block hashing _(added)_
+- Verify per-block SHA1 while downloading, re-fetching only dirty blocks _(added)_
+- Carry the header policy on the range-capability probe _(fixed)_
+- Block verification coverage and a recorded boot-patch gate _(testing)_
+- Rustfmt and keep free test helpers unwrap-free _(styling)_
+- Make the segmented resume test's interruption deterministic _(testing)_
+- Harden the block verifier against races and hostile bodies _(fixed)_
+- Review cleanups and a shared block-hash test helper _(changed)_
+- Cover the block-verification gaps found by review _(testing)_
+- Rustfmt and sync the lockfile _(styling)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
@@ -40,6 +53,7 @@ is tagged with its change type. Versioning aims to follow
 - Add an example to author an oracle tree manifest _(added)_
 - Pin the real boot-patch corpus and its oracle tree _(testing)_
 - Per-segment chaos knobs and concurrency counter _(testing)_
+- One-shot block corruption and request-header capture _(testing)_
 
 ### apogee-zipatch
 - Read the ZiPatch container into a typed chunk stream _(added)_
