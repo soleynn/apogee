@@ -140,6 +140,7 @@ dependencies = [
  "futures-util",
  "proptest",
  "reqwest",
+ "rustix",
  "sha2",
  "tempfile",
  "thiserror",
