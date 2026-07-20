@@ -600,7 +600,7 @@ fn digest_bytes(hasher: Sha256) -> [u8; 32] {
 }
 
 /// Whether a `206`'s `Content-Range` starts exactly where we resumed and (when known) reports the
-/// expected total.
+/// expected total. Parses through the one shared [`parse_content_range`](crate::multipart::parse_content_range).
 fn content_range_ok(resp: &reqwest::Response, start: u64, expected_len: Option<u64>) -> bool {
     let Some(value) = resp
         .headers()
@@ -609,19 +609,13 @@ fn content_range_ok(resp: &reqwest::Response, start: u64, expected_len: Option<u
     else {
         return false;
     };
-    let Some((range, total)) = value.strip_prefix("bytes ").and_then(|r| r.split_once('/')) else {
-        return false;
-    };
-    let Some((first, _last)) = range.split_once('-') else {
-        return false;
-    };
-    if first.parse::<u64>().ok() != Some(start) {
-        return false;
-    }
-    match (expected_len, total) {
-        (Some(exp), t) if t != "*" => t.parse::<u64>().ok() == Some(exp),
-        _ => true,
-    }
+    crate::multipart::parse_content_range(value).is_some_and(|(first, _last, total)| {
+        first == start
+            && match (expected_len, total) {
+                (Some(exp), Some(t)) => t == exp,
+                _ => true,
+            }
+    })
 }
 
 pub(crate) fn header_bytes(

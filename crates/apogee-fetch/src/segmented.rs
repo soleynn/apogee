@@ -814,18 +814,11 @@ async fn open_segment_file(part: &Path, at: u64) -> Result<tokio::fs::File, Fetc
     Ok(file)
 }
 
-/// The first byte of a `Content-Range: bytes first-last/total` header.
+/// The first byte and total of a `Content-Range: bytes first-last/total` header, through the one
+/// shared parser.
 fn content_range(resp: &reqwest::Response) -> Option<(u64, Option<u64>)> {
     let value = resp.headers().get(CONTENT_RANGE)?.to_str().ok()?;
-    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
-    let (first, _last) = range.split_once('-')?;
-    let first = first.parse::<u64>().ok()?;
-    let total = if total == "*" {
-        None
-    } else {
-        Some(total.parse::<u64>().ok()?)
-    };
-    Some((first, total))
+    crate::multipart::parse_content_range(value).map(|(first, _last, total)| (first, total))
 }
 
 /// Re-hash the completed `.part` (for a whole-file validator), then publish it: durable, atomic
