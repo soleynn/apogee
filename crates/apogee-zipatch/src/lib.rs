@@ -25,6 +25,11 @@ mod local;
 mod parse;
 mod seam;
 
+/// Synthetic patch builders shared by this crate's tests and `apogee-fetch`'s repair e2e. Behind the
+/// `test-fixtures` feature; never compiled into a release build.
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
+
 pub use apply::{ApplyOptions, ApplyProgress, apply, scan_crc};
 pub use chunk::{
     AddData, ApplyFreeSpace, ApplyOption, ApplyOptionKind, Chunk, Directory, EmptyBlock,
