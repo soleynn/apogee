@@ -61,7 +61,6 @@ impl DownloadSpec {
     }
 
     /// The primary URL followed by each mirror, the source list a transfer rotates through.
-    #[allow(dead_code)] // consumed by the segmented engine's mirror rotation
     pub(crate) fn sources(&self) -> Vec<Url> {
         let mut sources = Vec::with_capacity(1 + self.mirrors.len());
         sources.push(self.url.clone());

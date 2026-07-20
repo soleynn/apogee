@@ -22,13 +22,24 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::block::BlockPlan;
 use crate::error::FetchError;
+use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
 use crate::limiter::LimitHandle;
 use crate::progress::{Phase, Progress};
 use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
+
+/// What a download must prove before it publishes: a whole-file SHA256, a per-block SHA1 map, or
+/// nothing. Derived from the [`Validator`] once via [`plan`] and threaded through both engines so the
+/// two never disagree about what "verified" means.
+#[derive(Clone)]
+pub(crate) struct Verify {
+    pub(crate) sha: Option<[u8; 32]>,
+    pub(crate) blocks: Option<Arc<BlockPlan>>,
+}
 
 /// How many bytes are streamed between `fsync` + journal-commit points, and the size of the in-memory
 /// write buffer: the trade of throughput (one large write and one fsync per batch) against the bytes a
@@ -45,19 +56,18 @@ const READ_CHUNK: usize = 64 * 1024;
 pub(crate) async fn run(
     client: &reqwest::Client,
     spec: &DownloadSpec,
+    verify: Verify,
     progress: Option<mpsc::UnboundedSender<Progress>>,
     cancel: CancellationToken,
     limiter: &LimitHandle,
     scheduler: &Arc<Scheduler>,
 ) -> Result<VerifiedFile, FetchError> {
-    let expected_sha = expected_sha(spec.validator())?;
-
     let dest = spec.dest();
     let part = sidecar(dest, ".part");
     let apdl = sidecar(dest, ".apdl");
 
     if let Some(verified) =
-        check_existing_dest(dest, expected_sha, spec.expected_len(), &progress).await?
+        check_existing_dest(dest, &verify, spec.expected_len(), &progress).await?
     {
         return Ok(verified);
     }
@@ -92,7 +102,9 @@ pub(crate) async fn run(
         journal_identity = loaded.identity;
     }
 
-    let mut hasher: Option<Sha256> = expected_sha.map(|_| Sha256::new());
+    // Block mode leaves the running hasher off (there is no whole-file digest on that path); its
+    // per-block SHA1s are checked from disk after the stream completes.
+    let mut hasher: Option<Sha256> = verify.sha.map(|_| Sha256::new());
     let mut part_file = open_part(&part, start, hasher.as_mut()).await?;
     let mut journal: Option<Journal> = if spec.resume() && start > 0 {
         Some(
@@ -208,7 +220,7 @@ pub(crate) async fn run(
         });
     }
 
-    if let (Some(h), Some(exp)) = (hasher.take(), expected_sha) {
+    if let (Some(h), Some(exp)) = (hasher.take(), verify.sha) {
         emit(
             &progress,
             Progress {
@@ -229,12 +241,35 @@ pub(crate) async fn run(
         }
     }
 
-    // Make the data durable through the handle we wrote, then hand off to the shared publish tail.
+    // Make the data durable through the handle we wrote before hashing it back or handing it off.
     part_file
         .sync_all()
         .await
         .map_err(|e| FetchError::io(&part, e))?;
     drop(part_file);
+
+    // Block mode over a range-ignoring host: the whole file streamed on one connection, so verify each
+    // block from disk now. Without ranges a bad block cannot be re-fetched in isolation, so a mismatch
+    // fails the file and drops the journal (a retry restarts clean).
+    if let Some(plan) = &verify.blocks {
+        emit(
+            &progress,
+            Progress {
+                bytes_done: written,
+                total,
+                phase: Phase::Verifying,
+            },
+        );
+        if let Some(block) = verify_blocks_seq(&part, plan).await? {
+            let _ = tokio::fs::remove_file(&apdl).await;
+            return Err(FetchError::BlockVerifyFailed {
+                block,
+                offset: plan.block_range(block).start,
+                attempts: 1,
+            });
+        }
+    }
+
     publish(dest, &part, &apdl, written, total, &progress).await
 }
 
@@ -253,7 +288,7 @@ async fn obtain_response(
     if_range: &mut Option<Vec<u8>>,
 ) -> Result<reqwest::Response, FetchError> {
     for attempt in 0..2 {
-        let mut req = client.get(spec.url().clone());
+        let mut req = apply_headers(client.get(spec.url().clone()), spec.header_policy());
         if *start > 0 {
             req = req.header(RANGE, format!("bytes={}-", *start));
             if let Some(value) = if_range.as_deref()
@@ -446,19 +481,50 @@ pub(crate) async fn publish(
     Ok(VerifiedFile::mint(dest))
 }
 
-/// The whole-file SHA256 a validator expects: `Some` for [`Validator::Sha256`], `None` for
-/// [`Validator::None`]. Block-hash validation is not implemented on this path yet.
-///
-/// # Errors
-/// [`FetchError::Unsupported`] for [`Validator::BlockSha1`].
-pub(crate) fn expected_sha(validator: &Validator) -> Result<Option<[u8; 32]>, FetchError> {
+/// Derive what a download must prove from its validator: a whole-file SHA256, a per-block SHA1 map, or
+/// nothing. The spec builder has already checked a block validator's layout, so the length is present
+/// and consistent here.
+pub(crate) fn plan(validator: &Validator, expected_len: Option<u64>) -> Result<Verify, FetchError> {
     match validator {
-        Validator::Sha256(digest) => Ok(Some(*digest)),
-        Validator::None => Ok(None),
-        Validator::BlockSha1 { .. } => Err(FetchError::Unsupported {
-            what: "block-hash validation",
+        Validator::Sha256(digest) => Ok(Verify {
+            sha: Some(*digest),
+            blocks: None,
         }),
+        Validator::None => Ok(Verify {
+            sha: None,
+            blocks: None,
+        }),
+        Validator::BlockSha1 { block_size, hashes } => {
+            let len = expected_len.ok_or(FetchError::Unsupported {
+                what: "block-hash validation requires a declared length",
+            })?;
+            Ok(Verify {
+                sha: None,
+                blocks: Some(Arc::new(BlockPlan::new(*block_size, hashes.clone(), len))),
+            })
+        }
     }
+}
+
+/// Hash each block of `path` from disk in order, returning the index of the first block whose SHA1 does
+/// not match its plan, or `None` when every block verifies. Each block is hashed on a blocking worker.
+pub(crate) async fn verify_blocks_seq(
+    path: &Path,
+    plan: &BlockPlan,
+) -> Result<Option<u32>, FetchError> {
+    for i in 0..plan.count() {
+        let range = plan.block_range(i);
+        let want = plan.expected(i);
+        let owned = path.to_path_buf();
+        let got = tokio::task::spawn_blocking(move || crate::block::hash_block(&owned, range))
+            .await
+            .map_err(|e| FetchError::io(path, std::io::Error::other(e)))?
+            .map_err(|e| FetchError::io(path, e))?;
+        if got != want {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
 }
 
 /// Idempotent skip: return an existing destination only if it still satisfies the validator, so a
@@ -467,13 +533,13 @@ pub(crate) fn expected_sha(validator: &Validator) -> Result<Option<[u8; 32]>, Fe
 /// proceed with the download".
 pub(crate) async fn check_existing_dest(
     dest: &Path,
-    expected_sha: Option<[u8; 32]>,
+    verify: &Verify,
     expected_len: Option<u64>,
     progress: &Option<mpsc::UnboundedSender<Progress>>,
 ) -> Result<Option<VerifiedFile>, FetchError> {
     if let Ok(meta) = tokio::fs::metadata(dest).await
         && meta.is_file()
-        && dest_satisfies(dest, meta.len(), expected_sha, expected_len).await?
+        && dest_satisfies(dest, meta.len(), verify, expected_len).await?
     {
         emit(
             progress,
@@ -488,19 +554,22 @@ pub(crate) async fn check_existing_dest(
     Ok(None)
 }
 
-/// Whether an existing destination already satisfies the request: the declared length (if any) and,
-/// for a hashing validator, the whole-file digest. The digest is recomputed from disk so the skip
-/// never trusts a file's path as proof.
+/// Whether an existing destination already satisfies the request: the declared length (if any) and the
+/// validator's proof (a whole-file digest, or every block's SHA1), recomputed from disk so the skip
+/// never trusts a file's path as proof. A block download is skipped only when *every* block verifies.
 async fn dest_satisfies(
     dest: &Path,
     len: u64,
-    expected_sha: Option<[u8; 32]>,
+    verify: &Verify,
     expected_len: Option<u64>,
 ) -> Result<bool, FetchError> {
     if expected_len.is_some_and(|n| n != len) {
         return Ok(false);
     }
-    match expected_sha {
+    if let Some(plan) = &verify.blocks {
+        return Ok(verify_blocks_seq(dest, plan).await?.is_none());
+    }
+    match verify.sha {
         None => Ok(true),
         Some(expected) => Ok(hash_file(dest).await? == expected),
     }

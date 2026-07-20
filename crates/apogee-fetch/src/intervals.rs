@@ -31,7 +31,6 @@ impl IntervalSet {
     /// Insert `[start, end)`, coalescing with any overlapping or adjacent runs. An empty or reversed
     /// range (`start >= end`) is ignored. (The set is otherwise built in bulk via [`from_runs`]; this
     /// incremental form backs the tests and the set's contract.)
-    #[allow(dead_code)]
     pub(crate) fn insert(&mut self, start: u64, end: u64) {
         if start >= end {
             return;
@@ -44,7 +43,6 @@ impl IntervalSet {
     /// overlap, and drop a fully-covered run. An empty or reversed range is ignored. Backs a dirty
     /// block's clear-and-re-fetch, so `covered_len` drops by exactly the removed coverage. The runs
     /// stay sorted, disjoint, and non-adjacent (each remainder lies within its original run's bounds).
-    #[allow(dead_code)]
     pub(crate) fn remove(&mut self, start: u64, end: u64) {
         if start >= end {
             return;
@@ -68,7 +66,6 @@ impl IntervalSet {
 
     /// Whether `[range.start, range.end)` is fully covered. Since runs are coalesced (disjoint and
     /// non-adjacent), a covered range lies within one single run. An empty range is trivially covered.
-    #[allow(dead_code)]
     pub(crate) fn covers(&self, range: &Range<u64>) -> bool {
         if range.start >= range.end {
             return true;
