@@ -353,11 +353,21 @@ async fn a_persistently_corrupt_block_fails_after_exhausting_its_retries() {
         .unwrap_err();
 
     assert!(
-        matches!(err, FetchError::BlockVerifyFailed { block: 1, offset: 100_000, .. }),
+        matches!(
+            err,
+            FetchError::BlockVerifyFailed {
+                block: 1,
+                offset: 100_000,
+                ..
+            }
+        ),
         "got {err:?}"
     );
     assert!(!dest.exists(), "no verified file is published");
-    assert!(!sidecar(&dest, ".apdl").exists(), "the journal is dropped on failure");
+    assert!(
+        !sidecar(&dest, ".apdl").exists(),
+        "the journal is dropped on failure"
+    );
 }
 
 #[tokio::test]
