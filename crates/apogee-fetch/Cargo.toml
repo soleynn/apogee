@@ -16,6 +16,8 @@ bytes.workspace = true
 sha2.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
+# safe fallocate wrapper for eager preallocation; keeps #![forbid(unsafe_code)] intact.
+rustix = { workspace = true, features = ["fs"] }
 # Implements zipatch's RangeSource (HttpRangeSource); wired later.
 apogee-zipatch = { path = "../apogee-zipatch" }
 

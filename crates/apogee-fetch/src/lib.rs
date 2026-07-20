@@ -12,6 +12,7 @@ mod error;
 mod fetcher;
 mod intervals;
 mod journal;
+mod prealloc;
 mod progress;
 mod spec;
 mod validator;
