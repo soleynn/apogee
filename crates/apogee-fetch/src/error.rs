@@ -30,6 +30,12 @@ pub enum SpecError {
     /// The source scheme is neither `http` nor `https`.
     #[error("unsupported url scheme: {scheme}")]
     UnsupportedScheme { scheme: String },
+
+    /// A `Validator::BlockSha1` whose block layout is inconsistent: no declared length, a zero block
+    /// size, an empty hash list, or a hash count that disagrees with the block count the length and
+    /// block size imply. Caught before any request so a mis-specified block map cannot start a transfer.
+    #[error("invalid block-hash layout: {reason}")]
+    BlockLayout { reason: &'static str },
 }
 
 /// Download failures.
