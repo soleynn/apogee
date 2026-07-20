@@ -20,10 +20,14 @@ async fn resumes_a_segmented_download_across_a_new_fetcher() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.bin");
     let len = 24 * MIB;
-    // A small per-chunk delay keeps the transfer in flight long enough to cancel it mid-way.
+    // The last segment (starting at 16 MiB) hangs one-shot after 512 KiB, so the first attempt cannot
+    // reach completion no matter how the runner schedules the progress watcher; the cancel always lands
+    // mid-transfer. The resume re-fetches that segment normally (the one-shot stall has fired). The
+    // per-chunk delay just keeps the other segments streaming rather than completing in one burst.
     let server = ChaosServer::builder(8, len)
         .throttle(Duration::from_millis(1))
         .chunk(256 * 1024)
+        .stall_range_at(16 * MIB, 512 * 1024)
         .start()
         .await
         .unwrap();
