@@ -12,6 +12,7 @@ mod error;
 mod fetcher;
 mod intervals;
 mod journal;
+mod limiter;
 mod prealloc;
 mod progress;
 mod spec;
@@ -19,6 +20,7 @@ mod validator;
 
 pub use error::{FetchError, SpecError};
 pub use fetcher::{Fetcher, FetcherBuilder};
+pub use limiter::LimitHandle;
 pub use progress::{Phase, Progress};
 pub use spec::{DownloadSpec, DownloadSpecBuilder};
 pub use validator::{Validator, VerifiedFile};
