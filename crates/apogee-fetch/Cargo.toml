@@ -14,6 +14,7 @@ tokio-util.workspace = true
 tokio-stream.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
@@ -40,9 +41,11 @@ trybuild.workspace = true
 # test-util adds paused virtual time for the limiter and stall-detector tests.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-util.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 url.workspace = true
 reqwest.workspace = true
+serde_json.workspace = true
 
 [[test]]
 name = "none_over_tls"
