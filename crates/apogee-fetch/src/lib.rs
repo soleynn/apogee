@@ -10,6 +10,7 @@
 mod download;
 mod error;
 mod fetcher;
+mod intervals;
 mod journal;
 mod progress;
 mod spec;
@@ -20,3 +21,10 @@ pub use fetcher::{Fetcher, FetcherBuilder};
 pub use progress::{Phase, Progress};
 pub use spec::{DownloadSpec, DownloadSpecBuilder};
 pub use validator::{Validator, VerifiedFile};
+
+/// Unstable surface for fuzz targets only; gated to the `fuzzing` feature and never part of the
+/// public contract.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    pub use crate::journal::fuzz_decode;
+}
