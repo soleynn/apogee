@@ -250,6 +250,7 @@ version = "0.0.0"
 dependencies = [
  "apogee-sqpack",
  "apogee-test-support",
+ "apogee-zipatch",
  "crc32fast",
  "flate2",
  "proptest",
