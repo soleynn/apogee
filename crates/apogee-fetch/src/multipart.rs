@@ -372,6 +372,33 @@ pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)
     Some((first, last, total))
 }
 
+/// Drive the parser over arbitrary bytes, for the `fetch_multipart` fuzz target. The first input byte
+/// picks the feed chunk size (so chunk-boundary handling is fuzzed too); the rest is the response
+/// body, parsed against a fixed boundary and permissive expectations. The property is panic-freedom
+/// and bounded allocation on any input, never a particular parse outcome.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_multipart(data: &[u8]) {
+    let Some((&chunk_ctl, body)) = data.split_first() else {
+        return;
+    };
+    let chunk = (chunk_ctl as usize).max(1);
+    let expect = RangeExpect {
+        start: 0,
+        end: u64::MAX,
+        total: 1_000_000,
+    };
+    let Ok(mut parser) = MultipartParser::new(b"sep", expect) else {
+        return;
+    };
+    let mut sink = |_off: u64, _bytes: &[u8]| -> Result<(), FetchError> { Ok(()) };
+    for piece in body.chunks(chunk) {
+        if parser.feed(piece, &mut sink).is_err() {
+            return;
+        }
+    }
+    let _ = parser.finish();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
