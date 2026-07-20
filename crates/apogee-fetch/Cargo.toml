@@ -33,7 +33,8 @@ apogee-test-support = { path = "../apogee-test-support" }
 tempfile.workspace = true
 proptest.workspace = true
 trybuild.workspace = true
-tokio.workspace = true
+# test-util adds paused virtual time for the limiter and stall-detector tests.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-util.workspace = true
 sha2.workspace = true
 url.workspace = true
