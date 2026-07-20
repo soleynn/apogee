@@ -66,13 +66,7 @@ pub(crate) async fn run(
     // the same cap as a segment. Released when this scope ends.
     let _conn = scheduler.acquire_connection().await;
 
-    let core_identity = Identity {
-        url: spec.url().as_str().to_owned(),
-        expected_len: spec.expected_len(),
-        validator_digest: spec.validator().config_digest(),
-        etag: None,
-        last_modified: None,
-    };
+    let core_identity = base_identity(spec, spec.expected_len());
 
     // Reconcile a prior attempt: resume only when the journal matches this request, records real
     // progress, and the `.part` is at least that long.
@@ -235,28 +229,13 @@ pub(crate) async fn run(
         }
     }
 
-    // Publish: durable file, then an atomic rename that replaces any existing dest in one step,
-    // then a directory fsync for rename durability, then drop the journal.
+    // Make the data durable through the handle we wrote, then hand off to the shared publish tail.
     part_file
         .sync_all()
         .await
         .map_err(|e| FetchError::io(&part, e))?;
     drop(part_file);
-    tokio::fs::rename(&part, dest)
-        .await
-        .map_err(|e| FetchError::io(dest, e))?;
-    sync_parent_dir(dest).await;
-    let _ = tokio::fs::remove_file(&apdl).await;
-
-    emit(
-        &progress,
-        Progress {
-            bytes_done: written,
-            total,
-            phase: Phase::Complete,
-        },
-    );
-    Ok(VerifiedFile::mint(dest))
+    publish(dest, &part, &apdl, written, total, &progress).await
 }
 
 /// Send the request, handling the resume dispositions: a valid `206` continues from `start`; a `200`
@@ -425,6 +404,46 @@ async fn flush_and_commit(
             .map_err(|e| FetchError::io(apdl, e))?;
     }
     Ok(())
+}
+
+/// The request fingerprint shared by both engines: source, declared length, and validator digest.
+/// `etag`/`last_modified` start empty; the segmented engine fills them from its probe. Keeping this in
+/// one place means a new fingerprint field cannot be set in one engine and forgotten in the other.
+pub(crate) fn base_identity(spec: &DownloadSpec, expected_len: Option<u64>) -> Identity {
+    Identity {
+        url: spec.url().as_str().to_owned(),
+        expected_len,
+        validator_digest: spec.validator().config_digest(),
+        etag: None,
+        last_modified: None,
+    }
+}
+
+/// The shared publish tail: atomically rename the verified `.part` onto `dest`, `fsync` the parent for
+/// rename durability, drop the journal, and emit `Complete`. The data itself must already be durable
+/// (each engine `fsync`s the part its own way before calling this).
+pub(crate) async fn publish(
+    dest: &Path,
+    part: &Path,
+    apdl: &Path,
+    bytes: u64,
+    total: Option<u64>,
+    progress: &Option<mpsc::UnboundedSender<Progress>>,
+) -> Result<VerifiedFile, FetchError> {
+    tokio::fs::rename(part, dest)
+        .await
+        .map_err(|e| FetchError::io(dest, e))?;
+    sync_parent_dir(dest).await;
+    let _ = tokio::fs::remove_file(apdl).await;
+    emit(
+        progress,
+        Progress {
+            bytes_done: bytes,
+            total,
+            phase: Phase::Complete,
+        },
+    );
+    Ok(VerifiedFile::mint(dest))
 }
 
 /// The whole-file SHA256 a validator expects: `Some` for [`Validator::Sha256`], `None` for
