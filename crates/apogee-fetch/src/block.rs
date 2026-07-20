@@ -7,6 +7,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Mutex;
 
 use sha1::{Digest, Sha1};
 use tokio::sync::Notify;
@@ -76,6 +77,9 @@ struct BlockState {
 struct States {
     blocks: Vec<BlockState>,
     verified: u32,
+    /// The indices still in `Pending` (not yet claimed for hashing), so a claim scan is O(pending)
+    /// rather than O(blocks). A block is in this list iff its status is `Pending`.
+    pending: Vec<u32>,
 }
 
 /// The shared, concurrent verification state for one block-hashed transfer. The transfer engine
@@ -83,26 +87,27 @@ struct States {
 /// newly-ready blocks, hashes them off-thread, and reports the result back here.
 pub(crate) struct BlockVerify {
     plan: std::sync::Arc<BlockPlan>,
-    states: std::sync::Mutex<States>,
+    states: Mutex<States>,
     /// Woken by the transfer engine whenever the durable set grows.
     pub(crate) notify: Notify,
 }
 
 impl BlockVerify {
     pub(crate) fn new(plan: std::sync::Arc<BlockPlan>) -> Self {
-        let count = plan.count() as usize;
+        let count = plan.count();
         Self {
-            plan,
-            states: std::sync::Mutex::new(States {
+            states: Mutex::new(States {
                 blocks: vec![
                     BlockState {
                         status: Status::Pending,
                         attempts: 0,
                     };
-                    count
+                    count as usize
                 ],
                 verified: 0,
+                pending: (0..count).collect(),
             }),
+            plan,
             notify: Notify::new(),
         }
     }
@@ -122,18 +127,21 @@ impl BlockVerify {
         self.plan.expected(i)
     }
 
-    /// Claim every `Pending` block now fully covered by `covered`, marking each `Hashing`, and return
-    /// their indices. A block is claimed once (it leaves `Pending`), so a hash is never dispatched twice
-    /// for the same coverage.
-    pub(crate) fn take_ready(&self, covered: &IntervalSet) -> Vec<u32> {
+    /// Claim every `Pending` block now fully covered, marking each `Hashing`, and return their indices.
+    /// Coverage is read from `covered` LIVE inside the same critical section that flips the status, so a
+    /// block cleared by a concurrent [`clear_and_reset`](Self::clear_and_reset) is never re-claimed
+    /// against stale coverage. Only still-pending indices are scanned, so this is O(pending). Lock order
+    /// is states-then-covered (the one order used crate-wide, so no inversion).
+    pub(crate) fn take_ready(&self, covered: &Mutex<IntervalSet>) -> Vec<u32> {
         let mut states = lock(&self.states);
+        let covered = lock(covered);
         let mut ready = Vec::new();
-        for i in 0..self.plan.count() {
-            if states.blocks[i as usize].status == Status::Pending
-                && covered.covers(&self.plan.block_range(i))
-            {
+        for i in std::mem::take(&mut states.pending) {
+            if covered.covers(&self.plan.block_range(i)) {
                 states.blocks[i as usize].status = Status::Hashing;
                 ready.push(i);
+            } else {
+                states.pending.push(i); // still uncovered: re-fetch has not landed yet
             }
         }
         ready
@@ -148,8 +156,8 @@ impl BlockVerify {
     }
 
     /// Record a failed hash: bump block `i`'s attempt count and return it. Status is left `Hashing`
-    /// until the caller decides between a re-fetch ([`reset_pending`](Self::reset_pending)) and giving
-    /// up, so a spent budget never leaves the block re-dispatchable.
+    /// until the caller decides between a re-fetch ([`clear_and_reset`](Self::clear_and_reset)) and
+    /// giving up, so a spent budget never leaves the block re-dispatchable.
     pub(crate) fn bump_attempt(&self, i: u32) -> u32 {
         let mut states = lock(&self.states);
         let block = &mut states.blocks[i as usize];
@@ -157,10 +165,15 @@ impl BlockVerify {
         block.attempts
     }
 
-    /// Reset block `i` to `Pending` so its re-fetched bytes will be re-hashed. The caller clears the
-    /// block's coverage first, so this cannot be re-dispatched until the re-fetch lands.
-    pub(crate) fn reset_pending(&self, i: u32) {
-        lock(&self.states).blocks[i as usize].status = Status::Pending;
+    /// Clear block `i`'s coverage and reset it to `Pending` in one step so a re-fetch re-hashes it. The
+    /// coverage removal and the status/pending update happen under the states lock together, so a
+    /// concurrent [`take_ready`](Self::take_ready) can never observe the block as pending-and-covered
+    /// mid-reset and re-dispatch it before its bytes are re-fetched.
+    pub(crate) fn clear_and_reset(&self, i: u32, covered: &Mutex<IntervalSet>, range: Range<u64>) {
+        let mut states = lock(&self.states);
+        lock(covered).remove(range.start, range.end);
+        states.blocks[i as usize].status = Status::Pending;
+        states.pending.push(i);
     }
 }
 
