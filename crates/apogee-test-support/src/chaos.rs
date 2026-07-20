@@ -678,7 +678,10 @@ async fn handle(
     // containment means a `bytes=0-0` capability probe never trips a range that starts at 0.
     let mut effective_corrupt = cfg.corrupt.clone();
     if !cfg.corrupt_once.is_empty() {
-        let mut fired = cfg.corrupt_fired.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut fired = cfg
+            .corrupt_fired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for range in &cfg.corrupt_once {
             let contains = range.start >= start && range.end <= end;
             if contains && fired.insert(range.start) {
