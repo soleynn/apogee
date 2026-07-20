@@ -22,6 +22,12 @@ rayon.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
+[features]
+# Exposes src/fixtures.rs (synthetic patch builders) so this crate's own integration tests and
+# apogee-fetch's repair-over-HTTP e2e share one patch-format authority instead of each hand-rolling
+# ZiPatch bytes. Test-only; never a default feature (release builds never compile it).
+test-fixtures = []
+
 [dev-dependencies]
 # The corpus-dump gate reads the real boot patches from a primed cache; serde parses the committed
 # corpus manifest to learn their digests.
@@ -36,6 +42,9 @@ apogee-test-support = { path = "../apogee-test-support" }
 tempfile.workspace = true
 # Compile-fail proof that SafePath/TargetPath cannot be minted outside the crate.
 trybuild.workspace = true
+# Self dev-dependency: enables `test-fixtures` for this crate's own integration tests without making
+# it a default feature, so `cargo test` sees `apogee_zipatch::fixtures` with no extra flags.
+apogee-zipatch = { path = ".", features = ["test-fixtures"] }
 
 [lints]
 workspace = true

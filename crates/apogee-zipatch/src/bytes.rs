@@ -70,10 +70,17 @@ pub(crate) fn write_u32_be(v: u32) -> [u8; 4] {
     v.to_be_bytes()
 }
 
-/// Write an `i64` as eight big-endian bytes. Used only by the test patch builders.
-#[cfg(test)]
+/// Write an `i16` as two big-endian bytes (a `T` command's global-region `-1`). Fixture builders only.
+#[cfg(any(test, feature = "test-fixtures"))]
 #[must_use]
-pub fn write_i64_be(v: i64) -> [u8; 8] {
+pub(crate) fn write_i16_be(v: i16) -> [u8; 2] {
+    v.to_be_bytes()
+}
+
+/// Write an `i64` as eight big-endian bytes (a `SQPK F`/`A` file offset and size). Fixture builders only.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[must_use]
+pub(crate) fn write_i64_be(v: i64) -> [u8; 8] {
     v.to_be_bytes()
 }
 
