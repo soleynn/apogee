@@ -256,7 +256,11 @@ pub fn block_deflate_claiming(plain: &[u8], claimed_decompressed: u32) -> Vec<u8
 /// A well-framed block whose payload is not valid DEFLATE, so decoding it fails.
 #[must_use]
 pub fn block_bad_deflate(payload_len: u32, decompressed: u32) -> Vec<u8> {
-    block(payload_len, decompressed, &vec![0xFFu8; payload_len as usize])
+    block(
+        payload_len,
+        decompressed,
+        &vec![0xFFu8; payload_len as usize],
+    )
 }
 
 /// A block with an arbitrary (possibly hostile) header, for framing/guard tests.
