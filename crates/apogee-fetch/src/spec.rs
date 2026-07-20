@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 use crate::error::SpecError;
+use crate::headers::HeaderPolicy;
 use crate::scheduler::Priority;
 use crate::validator::Validator;
 
@@ -15,11 +16,13 @@ use crate::validator::Validator;
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
     url: Url,
+    mirrors: Vec<Url>,
     dest: PathBuf,
     expected_len: Option<u64>,
     validator: Validator,
     resume: bool,
     priority: Priority,
+    header_policy: Option<HeaderPolicy>,
 }
 
 impl DownloadSpec {
@@ -33,19 +36,43 @@ impl DownloadSpec {
     ) -> DownloadSpecBuilder {
         DownloadSpecBuilder {
             url,
+            mirrors: Vec::new(),
             dest: dest.into(),
             expected_len: None,
             validator,
             resume: true,
             priority: Priority::default(),
             allow_unverified: false,
+            header_policy: None,
         }
     }
 
-    /// The source URL.
+    /// The primary source URL. Also the resume identity key, so rotating to a mirror never invalidates
+    /// journaled progress.
     #[must_use]
     pub fn url(&self) -> &Url {
         &self.url
+    }
+
+    /// The alternate source URLs, tried in order when a block repeatedly fails from the primary.
+    #[must_use]
+    pub fn mirrors(&self) -> &[Url] {
+        &self.mirrors
+    }
+
+    /// The primary URL followed by each mirror, the source list a transfer rotates through.
+    #[allow(dead_code)] // consumed by the segmented engine's mirror rotation
+    pub(crate) fn sources(&self) -> Vec<Url> {
+        let mut sources = Vec::with_capacity(1 + self.mirrors.len());
+        sources.push(self.url.clone());
+        sources.extend(self.mirrors.iter().cloned());
+        sources
+    }
+
+    /// The per-request header policy, if any.
+    #[must_use]
+    pub fn header_policy(&self) -> Option<&HeaderPolicy> {
+        self.header_policy.as_ref()
     }
 
     /// The final path the verified file lands at.
@@ -83,12 +110,14 @@ impl DownloadSpec {
 #[derive(Debug)]
 pub struct DownloadSpecBuilder {
     url: Url,
+    mirrors: Vec<Url>,
     dest: PathBuf,
     expected_len: Option<u64>,
     validator: Validator,
     resume: bool,
     priority: Priority,
     allow_unverified: bool,
+    header_policy: Option<HeaderPolicy>,
 }
 
 impl DownloadSpecBuilder {
@@ -115,6 +144,27 @@ impl DownloadSpecBuilder {
         self
     }
 
+    /// Add one alternate source URL, tried after the primary when a block repeatedly fails.
+    #[must_use]
+    pub fn mirror(mut self, url: Url) -> Self {
+        self.mirrors.push(url);
+        self
+    }
+
+    /// Add alternate source URLs, tried in order after the primary when a block repeatedly fails.
+    #[must_use]
+    pub fn mirrors(mut self, urls: impl IntoIterator<Item = Url>) -> Self {
+        self.mirrors.extend(urls);
+        self
+    }
+
+    /// Set the per-request header policy (defaults to none).
+    #[must_use]
+    pub fn header_policy(mut self, policy: HeaderPolicy) -> Self {
+        self.header_policy = Some(policy);
+        self
+    }
+
     /// Acknowledge that `Validator::None` leaves the bytes unverified. Required for an unverified
     /// download, and still rejected over plain HTTP.
     #[must_use]
@@ -123,19 +173,23 @@ impl DownloadSpecBuilder {
         self
     }
 
-    /// Finish the spec, enforcing the source-safety rules.
+    /// Finish the spec, enforcing the source-safety and block-layout rules.
     ///
     /// # Errors
-    /// [`SpecError::UnsupportedScheme`] for a non-http(s) URL; [`SpecError::UnverifiedOverPlainHttp`]
-    /// for `Validator::None` over `http://`; [`SpecError::UnverifiedNotAcknowledged`] for
-    /// `Validator::None` over `https://` without [`allow_unverified`](Self::allow_unverified).
+    /// [`SpecError::UnsupportedScheme`] for a non-http(s) primary or mirror URL;
+    /// [`SpecError::UnverifiedOverPlainHttp`] for `Validator::None` over `http://`;
+    /// [`SpecError::UnverifiedNotAcknowledged`] for `Validator::None` over `https://` without
+    /// [`allow_unverified`](Self::allow_unverified); [`SpecError::BlockLayout`] for a
+    /// `Validator::BlockSha1` whose block map is inconsistent with the declared length.
     pub fn build(self) -> Result<DownloadSpec, SpecError> {
-        match self.url.scheme() {
-            "http" | "https" => {}
-            other => {
-                return Err(SpecError::UnsupportedScheme {
-                    scheme: other.to_owned(),
-                });
+        for url in std::iter::once(&self.url).chain(self.mirrors.iter()) {
+            match url.scheme() {
+                "http" | "https" => {}
+                other => {
+                    return Err(SpecError::UnsupportedScheme {
+                        scheme: other.to_owned(),
+                    });
+                }
             }
         }
         if matches!(self.validator, Validator::None) {
@@ -147,13 +201,38 @@ impl DownloadSpecBuilder {
                 return Err(SpecError::UnverifiedNotAcknowledged);
             }
         }
+        if let Validator::BlockSha1 { block_size, hashes } = &self.validator {
+            // A block map that disagrees with the length would mis-address a block on verify.
+            if *block_size == 0 {
+                return Err(SpecError::BlockLayout {
+                    reason: "block size is zero",
+                });
+            }
+            if hashes.is_empty() {
+                return Err(SpecError::BlockLayout {
+                    reason: "hash list is empty",
+                });
+            }
+            let Some(len) = self.expected_len else {
+                return Err(SpecError::BlockLayout {
+                    reason: "block-hash validation requires a declared length",
+                });
+            };
+            if hashes.len() as u64 != len.div_ceil(u64::from(*block_size)) {
+                return Err(SpecError::BlockLayout {
+                    reason: "hash count does not match the length and block size",
+                });
+            }
+        }
         Ok(DownloadSpec {
             url: self.url,
+            mirrors: self.mirrors,
             dest: self.dest,
             expected_len: self.expected_len,
             validator: self.validator,
             resume: self.resume,
             priority: self.priority,
+            header_policy: self.header_policy,
         })
     }
 }
@@ -212,6 +291,77 @@ mod tests {
             "/tmp/f",
             Validator::Sha256([0; 32]),
         )
+        .build()
+        .unwrap_err();
+        assert!(matches!(err, SpecError::UnsupportedScheme { scheme } if scheme == "ftp"));
+    }
+
+    fn block_validator(blocks: usize) -> Validator {
+        Validator::BlockSha1 {
+            block_size: 16,
+            hashes: vec![[0u8; 20]; blocks],
+        }
+    }
+
+    #[test]
+    fn a_well_formed_block_download_builds_with_mirrors() {
+        let spec = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(3))
+            .expected_len(40) // 40.div_ceil(16) == 3 blocks
+            .mirror(url("http://mirror.invalid/f"))
+            .build()
+            .unwrap();
+        assert_eq!(spec.mirrors().len(), 1);
+        assert_eq!(spec.sources().len(), 2);
+        assert_eq!(spec.sources()[0], *spec.url());
+    }
+
+    #[test]
+    fn block_validation_requires_a_declared_length() {
+        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(3))
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, SpecError::BlockLayout { .. }));
+    }
+
+    #[test]
+    fn a_hash_count_that_disagrees_with_the_length_is_refused() {
+        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(2))
+            .expected_len(40) // needs 3 blocks, not 2
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, SpecError::BlockLayout { .. }));
+    }
+
+    #[test]
+    fn an_empty_block_hash_list_is_refused() {
+        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(0))
+            .expected_len(0)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, SpecError::BlockLayout { .. }));
+    }
+
+    #[test]
+    fn a_zero_block_size_is_refused() {
+        let v = Validator::BlockSha1 {
+            block_size: 0,
+            hashes: vec![[0u8; 20]],
+        };
+        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", v)
+            .expected_len(10)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, SpecError::BlockLayout { .. }));
+    }
+
+    #[test]
+    fn a_mirror_with_a_bad_scheme_is_refused() {
+        let err = DownloadSpec::builder(
+            url("https://host.invalid/f"),
+            "/tmp/f",
+            Validator::Sha256([0; 32]),
+        )
+        .mirror(url("ftp://mirror.invalid/f"))
         .build()
         .unwrap_err();
         assert!(matches!(err, SpecError::UnsupportedScheme { scheme } if scheme == "ftp"));
