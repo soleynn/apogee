@@ -18,7 +18,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -45,6 +45,15 @@ const RETRY_BUDGET: u32 = 5;
 /// How many times one block may be re-fetched after a failed hash before the file fails. A separate
 /// budget from [`RETRY_BUDGET`]: a corrupt block and a stalled connection are different failure modes.
 const BLOCK_RETRY_BUDGET: u32 = 5;
+
+/// How many block hashes may run on the shared blocking pool at once. Bounded to the host's parallelism
+/// (capped) so a burst of newly-durable blocks never starves the transfer's own disk I/O.
+fn hash_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 16)
+}
 
 /// One unit of transfer work: a byte range and which source to fetch it from (`0` is the primary,
 /// higher indices are mirrors). Re-queues carry their source; a dirty block's re-fetch may rotate it.
@@ -212,6 +221,10 @@ struct TransferState {
     journal: tokio::sync::Mutex<Option<Journal>>,
     /// Present only in block mode: the per-block verification state and its wake channel.
     verify: Option<Arc<BlockVerify>>,
+    /// Caps how many block hashes run on the shared blocking pool at once, so a burst of newly-durable
+    /// blocks (e.g. resuming a fully-durable multi-thousand-block patch) cannot starve the transfer's
+    /// own disk I/O, which shares that pool.
+    hash_limit: Arc<Semaphore>,
     done: CancellationToken,
     end: Mutex<Option<Result<(), FetchError>>>,
 }
@@ -301,7 +314,6 @@ async fn transfer(
     let apdl = download::sidecar(dest, ".apdl");
     let block_verify = verify
         .blocks
-        .clone()
         .map(|plan| Arc::new(BlockVerify::new(plan)));
 
     // A fresh transfer records the probe's validators so a later resume can revalidate with `If-Range`.
@@ -401,6 +413,7 @@ async fn transfer(
             attempts: Mutex::new(HashMap::new()),
             journal: tokio::sync::Mutex::new(journal),
             verify: block_verify,
+            hash_limit: Arc::new(Semaphore::new(hash_concurrency())),
             done: CancellationToken::new(),
             end: Mutex::new(None),
         });
@@ -531,10 +544,10 @@ async fn block_verifier(state: Arc<TransferState>, cancel: CancellationToken) {
         return;
     };
     loop {
-        // Snapshot coverage once, then dispatch every block it newly completes. Process-first, so a
-        // resume with everything already durable still hashes every loaded block on the first pass.
-        let covered = lock(&state.covered).clone();
-        for i in verify.take_ready(&covered) {
+        // Claim and dispatch every block whose bytes are now durable. take_ready reads coverage live, so
+        // this is process-first: a resume with everything already durable still hashes every loaded
+        // block on the first pass.
+        for i in verify.take_ready(&state.covered) {
             spawn_hash(state.clone(), verify.clone(), i, cancel.clone());
         }
         tokio::select! {
@@ -557,7 +570,12 @@ fn spawn_hash(
     let part = state.part.clone();
     let range = verify.block_range(i);
     let want = verify.expected(i);
+    let limit = state.hash_limit.clone();
     tokio::spawn(async move {
+        // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also uses.
+        let Ok(_permit) = limit.acquire_owned().await else {
+            return; // the semaphore is never closed; this only guards a shutdown race
+        };
         let hashed = tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await;
         match hashed {
             Ok(Ok(got)) if got == want => on_verified(&state, &verify, i, &cancel),
@@ -601,12 +619,12 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
         }));
         return;
     }
-    // Clear the block before resetting it, so a verifier wake cannot re-dispatch it on stale coverage.
-    lock(&state.covered).remove(range.start, range.end);
+    // Clear the block's coverage and reset it to pending atomically, so a concurrent verifier pass
+    // cannot re-dispatch it against stale coverage before its bytes are re-fetched.
+    verify.clear_and_reset(i, &state.covered, range.clone());
     state
         .durable
         .fetch_sub(range.end - range.start, Ordering::SeqCst);
-    verify.reset_pending(i);
     let source = mirror_source(state, attempts);
     state.push_task(Task { range, source });
 }
@@ -723,6 +741,18 @@ async fn stream_segment(
         };
         let bytes: &[u8] = chunk.as_ref();
         state.limiter.acquire(bytes.len() as u64).await;
+        // Clamp to the requested range. All Square Enix input is hostile: a server may answer a closed
+        // range with an over-long body, and writing past range.end would overwrite a neighboring block
+        // that is already verified and never re-hashed. Keep only up to range.end, commit, and finish
+        // the segment; the extra bytes are dropped with the dropped stream.
+        let room = range.end.saturating_sub(committed + batch.len() as u64);
+        if bytes.len() as u64 > room {
+            batch.extend_from_slice(&bytes[..room as usize]);
+            if let Err(err) = commit_batch(&mut file, &mut batch, &mut committed, state).await {
+                return SegmentResult::Fatal(err);
+            }
+            break;
+        }
         batch.extend_from_slice(bytes);
         if batch.len() as u64 >= BATCH
             && let Err(err) = commit_batch(&mut file, &mut batch, &mut committed, state).await
@@ -829,9 +859,14 @@ async fn verify_and_publish(
             });
         }
     }
-    // No single write handle survived the workers, so re-open to make the assembled data durable,
-    // then hand off to the shared publish tail.
-    if let Ok(file) = tokio::fs::File::open(part).await {
+    // No single write handle survived the workers, so re-open to make the assembled data durable. Also
+    // truncate to `len`: preallocation extends but never shrinks, so a `.part` left longer by a prior
+    // interrupted download to the same destination would otherwise keep a stale, unverified tail past
+    // `len` (block mode does no whole-file hash to catch it). Every byte in [0, len) is verified.
+    if let Ok(file) = tokio::fs::OpenOptions::new().write(true).open(part).await {
+        file.set_len(len)
+            .await
+            .map_err(|e| FetchError::io(part, e))?;
         let _ = file.sync_all().await;
     }
     download::publish(dest, part, apdl, len, Some(len), progress).await
