@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use apogee_fetch::{DownloadSpec, Fetcher, Progress, Validator};
+use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Progress, Validator};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, sha256_of};
 use tokio_util::sync::CancellationToken;
 
@@ -84,5 +84,75 @@ async fn resumes_a_segmented_download_across_a_new_fetcher() {
     assert!(
         resumed < len,
         "the resume fetched only the gaps, not the whole file ({resumed} of {len})",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_source_that_changed_since_the_journal_is_caught_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 24 * MIB;
+    // ETag is "v1" for the first request (the fresh run's probe), then "v2" for everything after, so
+    // the resume's If-Range: "v1" no longer matches and the server answers a full 200.
+    let server = ChaosServer::builder(10, len)
+        .etag("\"v1\"")
+        .change_etag_after(1, "\"v2\"")
+        .throttle(Duration::from_millis(1))
+        .chunk(256 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("f.bin"),
+        &dest,
+        Validator::Sha256(body_sha256(10, len)),
+    )
+    .expected_len(len)
+    .build()
+    .unwrap();
+
+    // Fresh run: cancel after some progress, leaving a journal that recorded ETag "v1".
+    {
+        let fetcher = Fetcher::builder()
+            .max_connections_per_file(4)
+            .build()
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        let watcher = tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                if p.bytes_done >= 4 * MIB {
+                    trigger.cancel();
+                    break;
+                }
+            }
+        });
+        let _ = fetcher.download(&spec, Some(tx), cancel).await;
+        watcher.abort();
+        let _ = watcher.await;
+    }
+    assert!(
+        sidecar(&dest, ".apdl").exists(),
+        "the journal survives the cancel"
+    );
+
+    // Resume against the now-changed source: If-Range invalidation surfaces as a changed source, and
+    // the stale journal is dropped so a retry restarts clean.
+    let fetcher2 = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
+    let err = fetcher2
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FetchError::ServerFileChanged { .. }),
+        "a changed source on resume must be caught, got {err:?}",
+    );
+    assert!(
+        !sidecar(&dest, ".apdl").exists(),
+        "the stale journal is dropped so a retry restarts clean",
     );
 }
