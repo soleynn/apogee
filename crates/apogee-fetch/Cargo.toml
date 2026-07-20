@@ -18,7 +18,7 @@ sha1.workspace = true
 sha2.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
-# Implements zipatch's RangeSource (HttpRangeSource); wired later.
+# HttpRangeSource implements zipatch's RangeSource seam (the only in-workspace edge).
 apogee-zipatch = { path = "../apogee-zipatch" }
 
 # safe fallocate wrapper for eager preallocation (Unix only); keeps #![forbid(unsafe_code)] intact.
@@ -35,6 +35,9 @@ fuzzing = []
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
+# The repair-over-HTTP e2e drives real apply/index/repair; test-fixtures exposes the synthetic patch
+# builders. Enabled only for this crate's tests, never in the lib build.
+apogee-zipatch = { path = "../apogee-zipatch", features = ["test-fixtures"] }
 tempfile.workspace = true
 proptest.workspace = true
 trybuild.workspace = true
