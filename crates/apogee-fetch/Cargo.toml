@@ -11,6 +11,7 @@ url.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-stream.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
 sha2.workspace = true

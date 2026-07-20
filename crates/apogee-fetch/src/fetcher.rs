@@ -1,11 +1,13 @@
 //! The download engine handle.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::FetchError;
+use crate::job::Job;
 use crate::limiter::LimitHandle;
 use crate::probe::CapabilityCache;
 use crate::progress::Progress;
@@ -13,18 +15,19 @@ use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
 use crate::validator::VerifiedFile;
 
-/// State shared by every clone of a [`Fetcher`]: the job/connection scheduler, the speed limiter, and
-/// the per-host capability cache. Cloning the fetcher is cheap and shares all of it, so the caps and
-/// the cache hold across concurrently submitted jobs.
+/// The default connection-inactivity timeout before a segment is re-queued.
+const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// State shared by every clone of a [`Fetcher`]: the job/connection scheduler, the speed limiter, the
+/// per-host capability cache, and the segmentation config. Cloning the fetcher is cheap and shares all
+/// of it, so the caps and the cache hold across concurrently submitted jobs.
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) scheduler: Arc<Scheduler>,
     pub(crate) limiter: LimitHandle,
-    // Consulted by the segmented dispatch once the engine lands.
-    #[allow(dead_code)]
     pub(crate) capabilities: CapabilityCache,
-    #[allow(dead_code)]
     pub(crate) max_connections_per_file: usize,
+    pub(crate) stall_timeout: Duration,
 }
 
 /// A resumable, verified downloader. A cheap handle over a pooled HTTP client and the shared
@@ -70,15 +73,24 @@ impl Fetcher {
         cancel: CancellationToken,
     ) -> Result<VerifiedFile, FetchError> {
         let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
-        crate::download::run(
-            &self.client,
-            spec,
-            progress,
-            cancel,
-            &self.shared.limiter,
-            &self.shared.scheduler,
-        )
-        .await
+        crate::segmented::dispatch(&self.client, spec, progress, cancel, &self.shared).await
+    }
+
+    /// Submit `spec` to run on the scheduler, returning a [`Job`] handle to watch its progress, cancel
+    /// it, and await its verified result. Unlike [`download`](Self::download), the transfer runs on a
+    /// spawned task, so several jobs can be submitted and awaited concurrently under the shared caps.
+    #[must_use]
+    pub fn submit(&self, spec: DownloadSpec) -> Job {
+        let cancel = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = self.client.clone();
+        let shared = Arc::clone(&self.shared);
+        let job_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let _job = shared.scheduler.acquire_job(spec.priority()).await;
+            crate::segmented::dispatch(&client, &spec, Some(tx), job_cancel, &shared).await
+        });
+        Job::new(handle, rx, cancel)
     }
 }
 
@@ -91,6 +103,7 @@ pub struct FetcherBuilder {
     max_connections_per_file: usize,
     max_connections_total: usize,
     speed_limit: Option<LimitHandle>,
+    stall_timeout: Duration,
 }
 
 impl Default for FetcherBuilder {
@@ -100,6 +113,7 @@ impl Default for FetcherBuilder {
             max_connections_per_file: 8,
             max_connections_total: 24,
             speed_limit: None,
+            stall_timeout: DEFAULT_STALL_TIMEOUT,
         }
     }
 }
@@ -133,13 +147,25 @@ impl FetcherBuilder {
         self
     }
 
+    /// How long a segment connection may make no progress before it is killed and re-queued
+    /// (default 15 s). A dead CDN node is detected by this inactivity timeout.
+    #[must_use]
+    pub fn stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = timeout;
+        self
+    }
+
     /// Assemble the shared scheduler/limiter/cache from the configured caps.
     fn shared(&self) -> Arc<Shared> {
         Arc::new(Shared {
             scheduler: Arc::new(Scheduler::new(self.max_files, self.max_connections_total)),
-            limiter: self.speed_limit.clone().unwrap_or_else(LimitHandle::uncapped),
+            limiter: self
+                .speed_limit
+                .clone()
+                .unwrap_or_else(LimitHandle::uncapped),
             capabilities: CapabilityCache::default(),
             max_connections_per_file: self.max_connections_per_file.max(1),
+            stall_timeout: self.stall_timeout,
         })
     }
 

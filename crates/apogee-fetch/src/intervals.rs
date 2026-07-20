@@ -14,9 +14,6 @@ pub(crate) struct IntervalSet {
     runs: Vec<Range<u64>>,
 }
 
-// The journal (this phase) uses `from_runs`/`leading_end`/`len`; the rest of the contract lands its
-// consumers with the segmented transfer engine.
-#[allow(dead_code)]
 impl IntervalSet {
     /// An empty set.
     pub(crate) fn new() -> Self {
@@ -32,7 +29,9 @@ impl IntervalSet {
     }
 
     /// Insert `[start, end)`, coalescing with any overlapping or adjacent runs. An empty or reversed
-    /// range (`start >= end`) is ignored.
+    /// range (`start >= end`) is ignored. (The set is otherwise built in bulk via [`from_runs`]; this
+    /// incremental form backs the tests and the set's contract.)
+    #[allow(dead_code)]
     pub(crate) fn insert(&mut self, start: u64, end: u64) {
         if start >= end {
             return;

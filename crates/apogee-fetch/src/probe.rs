@@ -13,7 +13,6 @@ use url::Url;
 
 /// Whether a host serves byte ranges (segmentable) or ignores them (single connection).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consulted by the segmented dispatch once the engine lands.
 pub(crate) enum Capability {
     /// The host answered a ranged request with `206`; the transfer can segment.
     Segmentable,
@@ -24,7 +23,6 @@ pub(crate) enum Capability {
 /// Classify a ranged probe response. Only `200`/`206` are expected here; any other status is a
 /// transport error handled before classification. A `206` proves the server served the requested
 /// range, so ranges are usable; anything else is treated as an ignored range.
-#[allow(dead_code)] // called by the probe path in the segmented engine.
 pub(crate) fn classify(resp: &reqwest::Response) -> Capability {
     if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         Capability::Segmentable
@@ -35,12 +33,10 @@ pub(crate) fn classify(resp: &reqwest::Response) -> Capability {
 
 /// A session cache of per-host range capability, keyed on `host:port`.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // held by the Fetcher's shared state once the scheduler lands.
 pub(crate) struct CapabilityCache {
     map: Mutex<HashMap<String, Capability>>,
 }
 
-#[allow(dead_code)] // consulted/populated by the segmented dispatch once the engine lands.
 impl CapabilityCache {
     /// The cached verdict for `url`'s host, if one was recorded this session.
     pub(crate) fn get(&self, url: &Url) -> Option<Capability> {
@@ -56,7 +52,9 @@ impl CapabilityCache {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Capability>> {
-        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
