@@ -41,12 +41,21 @@ use url::Url;
 /// response early to simulate a dropped connection.
 type ChaosBody = StreamBody<ReceiverStream<Result<Frame<Bytes>, std::io::Error>>>;
 
+/// The request headers a test asserts against, captured per request so a header policy (the patch
+/// client `User-Agent`, an optional `X-Patch-Unique-Id`) can be checked end to end.
+#[derive(Debug, Clone, Default)]
+struct RequestHeaders {
+    user_agent: Option<String>,
+    patch_unique_id: Option<String>,
+}
+
 /// Counters a test asserts against, updated as the server works.
 #[derive(Debug, Default)]
 pub struct Stats {
     requests: AtomicU64,
     bytes_served: AtomicU64,
     served_ranges: Mutex<Vec<Range<u64>>>,
+    request_headers: Mutex<Vec<RequestHeaders>>,
     active: AtomicU64,
     peak_concurrency: AtomicU64,
 }
@@ -92,6 +101,45 @@ impl Stats {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(range);
+    }
+
+    /// The `User-Agent` sent on each request, in request order. `None` where the request carried none.
+    #[must_use]
+    pub fn user_agents(&self) -> Vec<Option<String>> {
+        self.request_headers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|h| h.user_agent.clone())
+            .collect()
+    }
+
+    /// The `X-Patch-Unique-Id` sent on each request, in request order. `None` where absent.
+    #[must_use]
+    pub fn patch_unique_ids(&self) -> Vec<Option<String>> {
+        self.request_headers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|h| h.patch_unique_id.clone())
+            .collect()
+    }
+
+    /// Capture the headers a policy test cares about from one request.
+    fn record_request_headers(&self, headers: &hyper::HeaderMap) {
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        self.request_headers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(RequestHeaders {
+                user_agent: get("user-agent"),
+                patch_unique_id: get("x-patch-unique-id"),
+            });
     }
 }
 
@@ -148,6 +196,12 @@ struct Config {
     /// Byte ranges whose bytes are flipped (`^= 0xFF`) as they are served, so those blocks fail
     /// verification while the rest is pristine.
     corrupt: Vec<Range<u64>>,
+    /// Byte ranges corrupted only on their first serve (keyed on range start via `corrupt_fired`),
+    /// then served clean: the block fails once, then its re-fetch verifies.
+    corrupt_once: Vec<Range<u64>>,
+    /// Range starts whose one-shot corruption has already fired, shared across connections. Separate
+    /// from `fired` so a corrupt block's start cannot collide with a segment's drop/stall key.
+    corrupt_fired: Arc<Mutex<HashSet<u64>>>,
     /// Drop the segment whose range starts at this offset after serving N bytes; fires once per start
     /// (via `fired`) so a re-queued retry of that segment can complete.
     drop_ranges: Vec<(u64, u64)>,
@@ -200,6 +254,8 @@ impl ChaosServer {
                 stall_after: None,
                 max_header_bytes: None,
                 corrupt: Vec::new(),
+                corrupt_once: Vec::new(),
+                corrupt_fired: Arc::new(Mutex::new(HashSet::new())),
                 drop_ranges: Vec::new(),
                 stall_ranges: Vec::new(),
                 slow_ranges: Vec::new(),
@@ -399,6 +455,16 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Serve `range` corrupted (`^= 0xFF`) on its first serve only, then clean on every serve after:
+    /// the block fails its hash once and its targeted re-fetch verifies. Fires once per range start.
+    /// Combined with `served_ranges`, this drives the "repair re-fetches only the dirty block, and
+    /// then succeeds" assertion.
+    #[must_use]
+    pub fn corrupt_range_once(mut self, range: Range<u64>) -> Self {
+        self.cfg.corrupt_once.push(range);
+        self
+    }
+
     /// Drop the connection serving the segment whose `Range` starts at `start`, after that segment has
     /// sent `after` bytes. Unlike [`drop_after`](Self::drop_after) (keyed on the global first request),
     /// this targets one segment under concurrency; it fires once, so the re-queued retry completes.
@@ -483,6 +549,7 @@ async fn handle(
     stats: Arc<Stats>,
 ) -> Result<Response<ChaosBody>, Infallible> {
     let request_index = stats.requests.fetch_add(1, Ordering::SeqCst) + 1;
+    stats.record_request_headers(req.headers());
 
     if req.method() != Method::GET {
         return Ok(status_only(StatusCode::METHOD_NOT_ALLOWED));
@@ -605,6 +672,20 @@ async fn handle(
             }
         }
     }
+    // Corruption for this response: the always-on ranges, plus any one-shot range still armed that
+    // overlaps the served span. A one-shot range corrupts its first serve (failing that block's hash)
+    // and is clean on the re-fetch, so a block-granular repair can succeed.
+    let mut effective_corrupt = cfg.corrupt.clone();
+    if !cfg.corrupt_once.is_empty() {
+        let mut fired = cfg.corrupt_fired.lock().unwrap_or_else(PoisonError::into_inner);
+        for range in &cfg.corrupt_once {
+            let overlaps = range.start < end && range.end > start;
+            if overlaps && fired.insert(range.start) {
+                effective_corrupt.push(range.clone());
+            }
+        }
+    }
+
     let body_cfg = cfg.clone();
     let body_stats = stats.clone();
     let body_end = end;
@@ -644,7 +725,7 @@ async fn handle(
                 }
                 None => generate_into(body_cfg.seed, off, &mut buf[..this]),
             }
-            corrupt_into(&body_cfg.corrupt, off, &mut buf[..this]);
+            corrupt_into(&effective_corrupt, off, &mut buf[..this]);
             if let Some(delay) = throttle {
                 tokio::time::sleep(delay).await;
             }
@@ -1244,6 +1325,54 @@ mod tests {
             }
         }
         assert_eq!(server.stats().served_ranges(), vec![0..4096]);
+    }
+
+    #[tokio::test]
+    async fn corrupt_range_once_is_dirty_first_then_clean() {
+        let server = ChaosServer::builder(8, 4096)
+            .corrupt_range_once(100..110)
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let fetch = || async {
+            client
+                .get(server.url("f.bin"))
+                .header("range", "bytes=100-109")
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+        };
+        let pristine = &generated_vec(8, 0, 4096)[100..110];
+        // First serve of the range is corrupt; the second (the re-fetch) is clean.
+        assert_ne!(&fetch().await[..], pristine, "first serve is corrupt");
+        assert_eq!(&fetch().await[..], pristine, "re-fetch is clean");
+    }
+
+    #[tokio::test]
+    async fn request_headers_are_captured() {
+        let server = ChaosServer::builder(8, 64).start().await.unwrap();
+        reqwest::Client::new()
+            .get(server.url("f.bin"))
+            .header("user-agent", "FFXIV PATCH CLIENT")
+            .header("x-patch-unique-id", "abc123")
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(
+            server.stats().user_agents(),
+            vec![Some("FFXIV PATCH CLIENT".to_owned())]
+        );
+        assert_eq!(
+            server.stats().patch_unique_ids(),
+            vec![Some("abc123".to_owned())]
+        );
     }
 
     #[test]
