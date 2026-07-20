@@ -34,6 +34,14 @@ is tagged with its change type. Versioning aims to follow
 - Review cleanups and a shared block-hash test helper _(changed)_
 - Cover the block-verification gaps found by review _(testing)_
 - Rustfmt and sync the lockfile _(styling)_
+- Incremental multipart/byteranges parser _(added)_
+- Fetch_ranges over 206, multipart, and 200 _(added)_
+- HttpRangeSource implementing zipatch RangeSource _(added)_
+- Corrupt-verify-repair over HTTP end to end _(testing)_
+- Fetch_multipart fuzz target _(added)_
+- Reject a range response that under-delivers _(fixed)_
+- Cover the multi-range error and rejection paths _(testing)_
+- Share one Content-Range parser _(changed)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
@@ -72,6 +80,8 @@ is tagged with its change type. Versioning aims to follow
 - Make the .apzi decode total and bounded on hostile input _(fixed)_
 - Cover empty-block splits and the refine-vanished path _(testing)_
 - Drop the always-zero empty-block write offset _(changed)_
+- Feature-gated synthetic patch fixtures _(added)_
+- Rustfmt the fixtures module _(styling)_
 
 ### ci
 - Stop the changelog render crashing on a non-conventional commit _(fixed)_
