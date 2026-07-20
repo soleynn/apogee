@@ -8,7 +8,7 @@ use std::error::Error;
 use std::ops::Range;
 
 use apogee_fetch::{Fetcher, HttpRangeSource, HttpSource};
-use apogee_test_support::chaos::{ChaosServer, generated_vec};
+use apogee_test_support::chaos::{ChaosServer, RetryAfter, generated_vec};
 use apogee_zipatch::{PatchId, RangeSource};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -70,5 +70,76 @@ async fn an_unknown_patch_id_is_a_corrupt_error() -> Result<(), Box<dyn Error>> 
     .await?
     .expect_err("patch id out of range");
     assert!(matches!(err, apogee_zipatch::Error::Corrupt { .. }));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transport_failure_maps_to_a_zipatch_io_error() -> Result<(), Box<dyn Error>> {
+    // The server 503s and the fetch does not retry, so the transport failure must surface through the
+    // seam as apogee_zipatch::Error::Io { during: Op::Read }, the taxonomy repair's retry keys on.
+    let server = ChaosServer::builder(2, 100)
+        .service_unavailable(1, RetryAfter::Seconds(1))
+        .start()
+        .await?;
+    let fetcher = Fetcher::builder().build()?;
+    let handle = tokio::runtime::Handle::current();
+    let sources = vec![HttpSource {
+        url: server.url("p0.patch"),
+        expected_len: 100,
+        policy: None,
+    }];
+    let mut src = HttpRangeSource::new(fetcher, handle, sources);
+
+    let ranges: Vec<Range<u64>> = std::iter::once(0u64..10).collect();
+    let err = tokio::task::spawn_blocking(move || {
+        let mut out = |_off: u64, _bytes: &[u8]| -> apogee_zipatch::Result<()> { Ok(()) };
+        src.read_ranges(PatchId(0), &ranges, &mut out)
+    })
+    .await?
+    .expect_err("transport failure");
+    assert!(
+        matches!(
+            err,
+            apogee_zipatch::Error::Io {
+                during: apogee_zipatch::Op::Read,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_callback_error_is_resurfaced_verbatim() -> Result<(), Box<dyn Error>> {
+    // The planner's `out` callback rejects the first delivered span; read_ranges must re-surface that
+    // exact zipatch error, not the throwaway sentinel the async fetch aborts with.
+    let server = ChaosServer::builder(3, 4096).start().await?;
+    let fetcher = Fetcher::builder().build()?;
+    let handle = tokio::runtime::Handle::current();
+    let sources = vec![HttpSource {
+        url: server.url("p0.patch"),
+        expected_len: 4096,
+        policy: None,
+    }];
+    let mut src = HttpRangeSource::new(fetcher, handle, sources);
+
+    let ranges: Vec<Range<u64>> = std::iter::once(0u64..100).collect();
+    let err = tokio::task::spawn_blocking(move || {
+        // A distinctive offset marks this as the callback's own error, not the id-out-of-range Corrupt.
+        let mut out = |_off: u64, _bytes: &[u8]| -> apogee_zipatch::Result<()> {
+            Err(apogee_zipatch::Error::Corrupt {
+                offset: 4242,
+                detail: "callback rejected",
+            })
+        };
+        src.read_ranges(PatchId(0), &ranges, &mut out)
+    })
+    .await?
+    .expect_err("callback error");
+    assert!(
+        matches!(err, apogee_zipatch::Error::Corrupt { offset: 4242, .. }),
+        "{err:?}"
+    );
     Ok(())
 }

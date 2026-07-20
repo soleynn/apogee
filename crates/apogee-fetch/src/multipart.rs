@@ -599,4 +599,56 @@ mod tests {
         let err = parser.feed(&body, &mut sink).expect_err("sink error");
         assert!(matches!(err, MultipartError::Sink(FetchError::Cancelled)));
     }
+
+    #[test]
+    fn garbage_after_a_boundary_is_a_framing_error() {
+        // After the boundary, the next byte must be `-` (close) or CRLF (part); anything else is framing.
+        let expect = RangeExpect {
+            start: 0,
+            end: 9,
+            total: 9,
+        };
+        assert!(matches!(
+            run(b"SEP", expect, b"--SEPx", 2),
+            Err(MultipartError::Framing)
+        ));
+    }
+
+    #[test]
+    fn a_part_without_a_content_range_is_rejected() {
+        // A well-formed header block that carries no Content-Range line.
+        let expect = RangeExpect {
+            start: 0,
+            end: 9,
+            total: 9,
+        };
+        let body = b"--SEP\r\nContent-Type: application/octet-stream\r\n\r\n";
+        assert!(matches!(
+            run(b"SEP", expect, body, 5),
+            Err(MultipartError::MissingContentRange)
+        ));
+    }
+
+    #[test]
+    fn more_parts_than_the_cap_is_rejected() {
+        // One valid 1-byte part past MAX_PARTS trips the cap.
+        let mut body = Vec::new();
+        for i in 0..=MAX_PARTS {
+            let lead = if i == 0 { "" } else { "\r\n" };
+            body.extend_from_slice(
+                format!("{lead}--SEP\r\nContent-Range: bytes {i}-{i}/100000\r\n\r\n").as_bytes(),
+            );
+            body.push(b'x');
+        }
+        body.extend_from_slice(b"\r\n--SEP--\r\n");
+        let expect = RangeExpect {
+            start: 0,
+            end: 100_000,
+            total: 100_000,
+        };
+        assert!(matches!(
+            run(b"SEP", expect, &body, 64),
+            Err(MultipartError::TooManyParts)
+        ));
+    }
 }
