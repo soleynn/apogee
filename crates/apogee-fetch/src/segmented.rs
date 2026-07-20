@@ -161,7 +161,8 @@ async fn probe(
     spec: &DownloadSpec,
     cancel: &CancellationToken,
 ) -> Result<Probe, FetchError> {
-    let request = client.get(spec.url().clone()).header(RANGE, "bytes=0-0");
+    let request = apply_headers(client.get(spec.url().clone()), spec.header_policy())
+        .header(RANGE, "bytes=0-0");
     let resp = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(FetchError::Cancelled),
