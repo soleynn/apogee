@@ -66,25 +66,28 @@ impl Scheduler {
 
     /// Admit a job of `priority`, waiting for a slot if the gate is full. Higher-priority waiters are
     /// admitted first when a slot frees. The returned guard holds the slot until dropped.
+    ///
+    /// A freed slot is returned to the pool (never handed directly to a waiter), and a woken waiter
+    /// re-checks it under the lock, so a waiter whose future is cancelled cannot lose the slot.
     pub(crate) async fn acquire_job(self: &Arc<Self>, priority: Priority) -> AdmissionGuard {
-        let waiter = {
-            let mut a = self.lock();
-            if a.available > 0 {
-                a.available -= 1;
-                None
-            } else {
+        loop {
+            let rx = {
+                let mut a = self.lock();
+                if a.available > 0 {
+                    a.available -= 1;
+                    return AdmissionGuard {
+                        scheduler: Arc::clone(self),
+                    };
+                }
                 let (tx, rx) = oneshot::channel();
                 a.tiers[priority.rank()].push_back(tx);
-                Some(rx)
-            }
-        };
-        if let Some(rx) = waiter {
-            // A slot is handed over by `release`; if the sender is somehow dropped, proceed rather
-            // than hang (the count self-heals on the guard drop).
+                rx
+            };
+            // If this future is cancelled while parked, pass our wakeup on so a freed slot is not
+            // swallowed; a normal wakeup disarms the poke and loops to claim the slot itself.
+            let mut poke = PokeOnDrop(Some(Arc::clone(self)));
             let _ = rx.await;
-        }
-        AdmissionGuard {
-            scheduler: Arc::clone(self),
+            poke.0 = None;
         }
     }
 
@@ -94,19 +97,21 @@ impl Scheduler {
         Arc::clone(&self.connections).acquire_owned().await.ok()
     }
 
-    /// Return a freed job slot to the highest-priority waiter, else to the free pool.
+    /// Return a freed slot to the pool and wake the highest-priority live waiter to claim it. The slot
+    /// is counted in `available` first, so a woken waiter that is then cancelled cannot lose it.
     fn release_job(&self) {
         let mut a = self.lock();
-        for tier in &mut a.tiers {
-            while let Some(tx) = tier.pop_front() {
-                // A live receiver takes the slot directly (available stays put); a cancelled waiter
-                // (dropped receiver) is skipped.
-                if tx.send(()).is_ok() {
-                    return;
-                }
-            }
-        }
         a.available += 1;
+        wake_next(&mut a.tiers);
+    }
+
+    /// Wake a live waiter if a slot is free, so a cancelled acquire that consumed a wakeup does not
+    /// leave a peer parked next to an idle slot.
+    fn wake_one(&self) {
+        let mut a = self.lock();
+        if a.available > 0 {
+            wake_next(&mut a.tiers);
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Admission> {
@@ -131,6 +136,30 @@ pub(crate) struct AdmissionGuard {
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
         self.scheduler.release_job();
+    }
+}
+
+/// Wake the highest-priority live waiter, skipping cancelled ones (whose receiver has been dropped).
+fn wake_next(tiers: &mut [VecDeque<oneshot::Sender<()>>]) {
+    for tier in tiers {
+        while let Some(tx) = tier.pop_front() {
+            if tx.send(()).is_ok() {
+                return;
+            }
+        }
+    }
+}
+
+/// Held by a parked `acquire_job`. If that future is dropped while waiting (a cancelled acquire), it
+/// wakes another waiter so a freed slot the drop might have consumed is not left stranded. Disarmed
+/// (`None`) on a normal wakeup, where the waiter loops to claim the slot itself.
+struct PokeOnDrop(Option<Arc<Scheduler>>);
+
+impl Drop for PokeOnDrop {
+    fn drop(&mut self) {
+        if let Some(scheduler) = self.0.take() {
+            scheduler.wake_one();
+        }
     }
 }
 
@@ -180,6 +209,29 @@ mod tests {
 
         normal.abort();
         boot.abort();
+    }
+
+    #[test]
+    fn a_released_slot_survives_a_waiter_that_never_claims() {
+        // Reproduces the slot-leak race deterministically: a freed slot must land in the pool, not be
+        // handed to a waiter that is then cancelled before building a guard.
+        let sched = Arc::new(Scheduler::new(1, 8));
+        // Take the only slot, then park a live waiter (its receiver still alive).
+        let rx = {
+            let mut a = sched.lock();
+            a.available = 0;
+            let (tx, rx) = oneshot::channel();
+            a.tiers[Priority::Normal.rank()].push_back(tx);
+            rx
+        };
+        sched.release_job();
+        // The waiter received its wakeup but is cancelled before claiming (its future is dropped).
+        drop(rx);
+        assert_eq!(
+            sched.lock().available,
+            1,
+            "a freed slot must return to the pool, not vanish with a cancelled waiter",
+        );
     }
 
     #[tokio::test]
