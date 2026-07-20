@@ -11,6 +11,7 @@
 //! The body bytes come from [`generate_into`]: a test computes the same bytes (and their hash) with
 //! that function, so a ranged response and a full response reproduce identical content.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::Range;
@@ -46,6 +47,8 @@ pub struct Stats {
     requests: AtomicU64,
     bytes_served: AtomicU64,
     served_ranges: Mutex<Vec<Range<u64>>>,
+    active: AtomicU64,
+    peak_concurrency: AtomicU64,
 }
 
 impl Stats {
@@ -53,6 +56,14 @@ impl Stats {
     #[must_use]
     pub fn requests(&self) -> u64 {
         self.requests.load(Ordering::SeqCst)
+    }
+
+    /// The high-water mark of response bodies streaming at once, i.e. the peak number of concurrent
+    /// connections the client opened. A segmented download drives this above 1; a demoted one holds
+    /// it at 1, and it never exceeds the connection cap.
+    #[must_use]
+    pub fn peak_concurrency(&self) -> u64 {
+        self.peak_concurrency.load(Ordering::SeqCst)
     }
 
     /// How many body bytes the server has written across all responses. The waste-budget assertion:
@@ -81,6 +92,24 @@ impl Stats {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(range);
+    }
+}
+
+/// Counts one streaming response body as active for its lifetime, updating the peak-concurrency
+/// high-water mark on creation and decrementing on drop (every return path).
+struct ActiveGuard(Arc<Stats>);
+
+impl ActiveGuard {
+    fn new(stats: Arc<Stats>) -> Self {
+        let now = stats.active.fetch_add(1, Ordering::SeqCst) + 1;
+        stats.peak_concurrency.fetch_max(now, Ordering::SeqCst);
+        Self(stats)
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -119,6 +148,16 @@ struct Config {
     /// Byte ranges whose bytes are flipped (`^= 0xFF`) as they are served, so those blocks fail
     /// verification while the rest is pristine.
     corrupt: Vec<Range<u64>>,
+    /// Drop the segment whose range starts at this offset after serving N bytes; fires once per start
+    /// (via `fired`) so a re-queued retry of that segment can complete.
+    drop_ranges: Vec<(u64, u64)>,
+    /// Stall (hang, no EOF) the segment starting at this offset after N bytes; also one-shot.
+    stall_ranges: Vec<(u64, u64)>,
+    /// Throttle the segment starting at this offset by this inter-chunk delay, every attempt (not
+    /// one-shot), so one connection can be held slow to trip stall detection.
+    slow_ranges: Vec<(u64, Duration)>,
+    /// Segment starts whose one-shot drop/stall has already fired, shared across connections.
+    fired: Arc<Mutex<HashSet<u64>>>,
     /// The boundary string for a `multipart/byteranges` response (a request with several ranges).
     boundary: String,
     throttle: Option<Duration>,
@@ -157,6 +196,10 @@ impl ChaosServer {
                 stall_after: None,
                 max_header_bytes: None,
                 corrupt: Vec::new(),
+                drop_ranges: Vec::new(),
+                stall_ranges: Vec::new(),
+                slow_ranges: Vec::new(),
+                fired: Arc::new(Mutex::new(HashSet::new())),
                 boundary: "chaos_boundary".to_string(),
                 throttle: None,
                 chunk: 64 * 1024,
@@ -351,6 +394,33 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Drop the connection serving the segment whose `Range` starts at `start`, after that segment has
+    /// sent `after` bytes. Unlike [`drop_after`](Self::drop_after) (keyed on the global first request),
+    /// this targets one segment under concurrency; it fires once, so the re-queued retry completes.
+    #[must_use]
+    pub fn drop_range_at(mut self, start: u64, after: u64) -> Self {
+        self.cfg.drop_ranges.push((start, after));
+        self
+    }
+
+    /// Stall (hang with no EOF) the connection serving the segment whose `Range` starts at `start`,
+    /// after that segment has sent `after` bytes. One-shot, so a re-queued retry can finish. Drives
+    /// stall-detection-then-recovery under concurrency.
+    #[must_use]
+    pub fn stall_range_at(mut self, start: u64, after: u64) -> Self {
+        self.cfg.stall_ranges.push((start, after));
+        self
+    }
+
+    /// Throttle the segment whose `Range` starts at `start` by sleeping `delay` between its chunks,
+    /// on every attempt (not one-shot). A `delay` beyond the client's stall window keeps that segment
+    /// perpetually slow, so its retry budget is exhausted and the job fails as stalled.
+    #[must_use]
+    pub fn slow_range(mut self, start: u64, delay: Duration) -> Self {
+        self.cfg.slow_ranges.push((start, delay));
+        self
+    }
+
     /// The boundary string used in a `multipart/byteranges` response (served when a request carries
     /// more than one range). A *hostile* boundary is one that also occurs inside a part's body: pair
     /// this with [`ChaosServer::serving`] over bytes that embed `\r\n--<boundary>\r\n` so a parser
@@ -440,6 +510,11 @@ async fn handle(
     } else {
         None
     };
+    let range_end = if cfg.accept_ranges {
+        parse_range_end(req.headers().get(RANGE))
+    } else {
+        None
+    };
     let if_range_matches = match req.headers().get(IF_RANGE) {
         Some(sent) => {
             let sent = sent.as_bytes();
@@ -464,8 +539,14 @@ async fn handle(
         Some(s) if if_range_matches && s <= cfg.len => (s, StatusCode::PARTIAL_CONTENT),
         _ => (0, StatusCode::OK),
     };
+    // A closed range `bytes=start-(end-1)` stops at its declared end; an open range or a demoted 200
+    // runs to EOF.
+    let end = match range_end {
+        Some(e) if status == StatusCode::PARTIAL_CONTENT => e.min(cfg.len),
+        _ => cfg.len,
+    };
 
-    let body_len = cfg.len - start;
+    let body_len = end - start;
     let mut builder = Response::builder()
         .status(status)
         .header(CONTENT_LENGTH, body_len);
@@ -475,7 +556,7 @@ async fn handle(
     if status == StatusCode::PARTIAL_CONTENT {
         builder = builder.header(
             CONTENT_RANGE,
-            format!("bytes {}-{}/{}", start, cfg.len - 1, cfg.len),
+            format!("bytes {}-{}/{}", start, end - 1, cfg.len),
         );
     }
     if let Some(tag) = &current_etag {
@@ -486,19 +567,39 @@ async fn handle(
     }
 
     let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(4);
-    // Only the first request drops or stalls; a resume must be able to finish.
-    let (drop_after, stall_after) = if request_index == 1 {
+    // Only the first request drops or stalls globally; a resume must be able to finish.
+    let (mut drop_after, mut stall_after) = if request_index == 1 {
         (cfg.drop_after, cfg.stall_after)
     } else {
         (None, None)
     };
+    // Per-segment hostility, keyed on the range start. Drop/stall fire once per start (via `fired`),
+    // so a re-queued retry completes; `slow_range` throttles every attempt so a segment stays slow.
+    let mut throttle = cfg.throttle;
+    if status == StatusCode::PARTIAL_CONTENT {
+        if let Some(&(_, delay)) = cfg.slow_ranges.iter().find(|(s, _)| *s == start) {
+            throttle = Some(delay);
+        }
+        let mut fired = cfg.fired.lock().unwrap_or_else(PoisonError::into_inner);
+        if !fired.contains(&start) {
+            if let Some(&(_, after)) = cfg.drop_ranges.iter().find(|(s, _)| *s == start) {
+                drop_after = Some(after);
+                fired.insert(start);
+            } else if let Some(&(_, after)) = cfg.stall_ranges.iter().find(|(s, _)| *s == start) {
+                stall_after = Some(after);
+                fired.insert(start);
+            }
+        }
+    }
     let body_cfg = cfg.clone();
     let body_stats = stats.clone();
+    let body_end = end;
     tokio::spawn(async move {
+        let _active = ActiveGuard::new(body_stats.clone());
         let mut off = start;
         let mut served = 0u64;
         let mut buf = vec![0u8; body_cfg.chunk];
-        while off < body_cfg.len {
+        while off < body_end {
             if let Some(limit) = stall_after
                 && served >= limit
             {
@@ -520,7 +621,7 @@ async fn handle(
                 body_stats.record_range(start..off);
                 return;
             }
-            let this = usize::try_from((body_cfg.len - off).min(body_cfg.chunk as u64))
+            let this = usize::try_from((body_end - off).min(body_cfg.chunk as u64))
                 .unwrap_or(body_cfg.chunk);
             match &body_cfg.body {
                 Some(bytes) => {
@@ -530,7 +631,7 @@ async fn handle(
                 None => generate_into(body_cfg.seed, off, &mut buf[..this]),
             }
             corrupt_into(&body_cfg.corrupt, off, &mut buf[..this]);
-            if let Some(delay) = body_cfg.throttle {
+            if let Some(delay) = throttle {
                 tokio::time::sleep(delay).await;
             }
             if tx
@@ -636,13 +737,29 @@ fn request_header_bytes(req: &Request<Incoming>) -> usize {
     total
 }
 
-/// Parse the start offset of an open-ended `bytes=START-` range, ignoring any end. Returns `None`
-/// for anything else. This drives the single-stream path; multiple ranges take [`parse_ranges`].
+/// Parse the start offset of a single `bytes=START-` or `bytes=START-END` range. Returns `None` for
+/// anything else. This drives the single-stream path; multiple ranges take [`parse_ranges`].
 fn parse_range_start(header: Option<&HeaderValue>) -> Option<u64> {
     let raw = header?.to_str().ok()?;
     let spec = raw.strip_prefix("bytes=")?;
     let (start, _end) = spec.split_once('-')?;
     start.parse::<u64>().ok()
+}
+
+/// The exclusive end of a single closed `bytes=START-END` range (inclusive `END` + 1), or `None` for
+/// an open `bytes=START-` (which runs to EOF) or a multi-range header. Only the single-range forms
+/// reach the single-stream path, so a segment request `bytes=start-(end-1)` is served as `[start, end)`.
+fn parse_range_end(header: Option<&HeaderValue>) -> Option<u64> {
+    let raw = header?.to_str().ok()?;
+    let spec = raw.strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (_start, end) = spec.split_once('-')?;
+    if end.is_empty() {
+        return None;
+    }
+    end.parse::<u64>().ok().map(|e| e.saturating_add(1))
 }
 
 /// A unit of a multipart body: framing bytes served verbatim, or a generated content range (the only
@@ -756,6 +873,7 @@ fn multipart_response(
     let body_cfg = cfg.clone();
     let body_stats = stats.clone();
     tokio::spawn(async move {
+        let _active = ActiveGuard::new(body_stats.clone());
         let mut buf = vec![0u8; body_cfg.chunk];
         for segment in &plan {
             match segment {
@@ -901,6 +1019,96 @@ mod tests {
         let body = resp.bytes().await.unwrap();
         assert_eq!(body.len(), 4096 - 1000);
         assert_eq!(&body[..], &generated_vec(3, 1000, 4096 - 1000)[..]);
+    }
+
+    #[tokio::test]
+    async fn a_closed_range_is_served_to_its_declared_end() {
+        // A segment request `bytes=start-(end-1)` must serve exactly [start, end), not run to EOF.
+        let server = ChaosServer::builder(4, 4096).start().await.unwrap();
+        let resp = reqwest::Client::new()
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=1000-1999")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 206);
+        assert_eq!(
+            resp.headers().get("content-range").unwrap(),
+            "bytes 1000-1999/4096"
+        );
+        let body = resp.bytes().await.unwrap();
+        assert_eq!(body.len(), 1000);
+        assert_eq!(&body[..], &generated_vec(4, 1000, 1000)[..]);
+    }
+
+    #[tokio::test]
+    async fn a_targeted_range_drops_once_then_the_retry_completes() {
+        let server = ChaosServer::builder(5, 4096)
+            .drop_range_at(1000, 128)
+            .chunk(64)
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        // The segment at 1000 drops after 128 bytes on its first serve...
+        let dropped = client
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=1000-1999")
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await;
+        assert!(dropped.is_err() || dropped.unwrap().len() < 1000);
+        // ...but the re-queued retry of the same segment completes.
+        let retry = client
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=1000-1999")
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(retry.len(), 1000);
+        // A different segment is untouched by the target.
+        let other = client
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=2000-2999")
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(other.len(), 1000);
+    }
+
+    #[tokio::test]
+    async fn peak_concurrency_tracks_simultaneous_bodies() {
+        let server = ChaosServer::builder(6, 1 << 20)
+            .throttle(Duration::from_millis(5))
+            .chunk(4096)
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        // Two overlapping ranged reads: both bodies stream at once.
+        let a = client
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=0-524287")
+            .send();
+        let b = client
+            .get(server.url("f.bin"))
+            .header("Range", "bytes=524288-1048575")
+            .send();
+        let (ra, rb) = tokio::join!(a, b);
+        let (_ba, _bb) = tokio::join!(ra.unwrap().bytes(), rb.unwrap().bytes());
+        assert!(
+            server.stats().peak_concurrency() >= 2,
+            "two concurrent reads must register concurrent bodies, saw {}",
+            server.stats().peak_concurrency(),
+        );
     }
 
     #[tokio::test]
