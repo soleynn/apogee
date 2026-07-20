@@ -50,36 +50,16 @@ pub(crate) async fn run(
     limiter: &LimitHandle,
     scheduler: &Arc<Scheduler>,
 ) -> Result<VerifiedFile, FetchError> {
-    let expected_sha = match spec.validator() {
-        Validator::Sha256(digest) => Some(*digest),
-        Validator::None => None,
-        Validator::BlockSha1 { .. } => {
-            return Err(FetchError::Unsupported {
-                what: "block-hash validation",
-            });
-        }
-    };
+    let expected_sha = expected_sha(spec.validator())?;
 
     let dest = spec.dest();
     let part = sidecar(dest, ".part");
     let apdl = sidecar(dest, ".apdl");
 
-    // Idempotent skip: return an existing destination only if it still satisfies the validator, so a
-    // VerifiedFile is never minted over unverified or stale bytes. The re-hash reads local disk only,
-    // never the network, so an unchanged file is not re-downloaded.
-    if let Ok(meta) = tokio::fs::metadata(dest).await
-        && meta.is_file()
-        && dest_satisfies(dest, meta.len(), expected_sha, spec.expected_len()).await?
+    if let Some(verified) =
+        check_existing_dest(dest, expected_sha, spec.expected_len(), &progress).await?
     {
-        emit(
-            &progress,
-            Progress {
-                bytes_done: meta.len(),
-                total: spec.expected_len(),
-                phase: Phase::Complete,
-            },
-        );
-        return Ok(VerifiedFile::mint(dest));
+        return Ok(verified);
     }
 
     // Hold one global connection slot for the transfer, so a single-connection download counts against
@@ -447,6 +427,48 @@ async fn flush_and_commit(
     Ok(())
 }
 
+/// The whole-file SHA256 a validator expects: `Some` for [`Validator::Sha256`], `None` for
+/// [`Validator::None`]. Block-hash validation is not implemented on this path yet.
+///
+/// # Errors
+/// [`FetchError::Unsupported`] for [`Validator::BlockSha1`].
+pub(crate) fn expected_sha(validator: &Validator) -> Result<Option<[u8; 32]>, FetchError> {
+    match validator {
+        Validator::Sha256(digest) => Ok(Some(*digest)),
+        Validator::None => Ok(None),
+        Validator::BlockSha1 { .. } => Err(FetchError::Unsupported {
+            what: "block-hash validation",
+        }),
+    }
+}
+
+/// Idempotent skip: return an existing destination only if it still satisfies the validator, so a
+/// `VerifiedFile` is never minted over unverified or stale bytes. The re-hash reads local disk only,
+/// never the network, so an unchanged file is not re-downloaded. `Ok(None)` means "not satisfied,
+/// proceed with the download".
+pub(crate) async fn check_existing_dest(
+    dest: &Path,
+    expected_sha: Option<[u8; 32]>,
+    expected_len: Option<u64>,
+    progress: &Option<mpsc::UnboundedSender<Progress>>,
+) -> Result<Option<VerifiedFile>, FetchError> {
+    if let Ok(meta) = tokio::fs::metadata(dest).await
+        && meta.is_file()
+        && dest_satisfies(dest, meta.len(), expected_sha, expected_len).await?
+    {
+        emit(
+            progress,
+            Progress {
+                bytes_done: meta.len(),
+                total: expected_len,
+                phase: Phase::Complete,
+            },
+        );
+        return Ok(Some(VerifiedFile::mint(dest)));
+    }
+    Ok(None)
+}
+
 /// Whether an existing destination already satisfies the request: the declared length (if any) and,
 /// for a hashing validator, the whole-file digest. The digest is recomputed from disk so the skip
 /// never trusts a file's path as proof.
@@ -466,7 +488,7 @@ async fn dest_satisfies(
 }
 
 /// SHA256 a file on disk in bounded memory.
-async fn hash_file(path: &Path) -> Result<[u8; 32], FetchError> {
+pub(crate) async fn hash_file(path: &Path) -> Result<[u8; 32], FetchError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| FetchError::io(path, e))?;
@@ -519,7 +541,7 @@ fn header_bytes(resp: &reqwest::Response, name: &reqwest::header::HeaderName) ->
     resp.headers().get(name).map(|v| v.as_bytes().to_vec())
 }
 
-async fn sync_parent_dir(path: &Path) {
+pub(crate) async fn sync_parent_dir(path: &Path) {
     if let Some(parent) = path.parent()
         && let Ok(dir) = tokio::fs::File::open(parent).await
     {
@@ -528,7 +550,7 @@ async fn sync_parent_dir(path: &Path) {
 }
 
 /// A failure establishing the connection.
-fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
+pub(crate) fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
     FetchError::Connect {
         host: url.host_str().unwrap_or_default().to_owned(),
         source: std::io::Error::other(source),
@@ -536,26 +558,26 @@ fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
 }
 
 /// A failure after the connection was established (a mid-stream body error).
-fn transport_error(url: &Url, source: reqwest::Error) -> FetchError {
+pub(crate) fn transport_error(url: &Url, source: reqwest::Error) -> FetchError {
     FetchError::Transport {
         url: url.clone(),
         source: std::io::Error::other(source),
     }
 }
 
-fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name: OsString = dest.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
 }
 
-fn emit(progress: &Option<mpsc::UnboundedSender<Progress>>, event: Progress) {
+pub(crate) fn emit(progress: &Option<mpsc::UnboundedSender<Progress>>, event: Progress) {
     if let Some(tx) = progress {
         let _ = tx.send(event);
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         let _ = write!(out, "{b:02x}");
