@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use apogee_fetch::{DownloadSpec, Fetcher, Validator};
+use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Validator};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, sha256_of};
 use tokio_util::sync::CancellationToken;
 
@@ -123,5 +123,45 @@ async fn demotes_to_single_connection_and_caches_the_verdict() {
     assert_eq!(
         sha256_of(&tokio::fs::read(&dest).await.unwrap()),
         body_sha256(4, len),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_server_length_that_disagrees_fails_before_publishing() {
+    // The origin serves 24 MiB but the spec expects 20 MiB. The segment's Content-Range total exposes
+    // the disagreement, so the transfer fails with LengthMismatch instead of minting a truncated file.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let server_len = 24 * MIB;
+    let expected = 20 * MIB;
+    let server = ChaosServer::builder(9, server_len)
+        .chunk(256 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("f.bin"),
+        &dest,
+        Validator::Sha256(body_sha256(9, expected)),
+    )
+    .expected_len(expected)
+    .build()
+    .unwrap();
+
+    let err = fetcher
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FetchError::LengthMismatch { expected: e, got: g } if e == expected && g == server_len),
+        "expected LengthMismatch, got {err:?}",
+    );
+    assert!(
+        !dest.exists(),
+        "a length-mismatched download never publishes"
     );
 }
