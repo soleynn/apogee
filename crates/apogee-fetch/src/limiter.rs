@@ -95,11 +95,8 @@ impl LimitHandle {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Bucket> {
-        // The bucket mutex is only ever held for the O(1) refill math, never across an await, so a
-        // poisoned lock cannot happen from a panic mid-await; recover the guard rather than propagate.
-        self.bucket
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        // The bucket mutex is only ever held for the O(1) refill math, never across an await.
+        crate::util::lock(&self.bucket)
     }
 }
 
