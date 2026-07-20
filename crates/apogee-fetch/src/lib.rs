@@ -10,6 +10,7 @@
 mod download;
 mod error;
 mod fetcher;
+mod headers;
 mod intervals;
 mod job;
 mod journal;
@@ -25,6 +26,7 @@ mod validator;
 
 pub use error::{FetchError, SpecError};
 pub use fetcher::{Fetcher, FetcherBuilder};
+pub use headers::HeaderPolicy;
 pub use job::Job;
 pub use limiter::LimitHandle;
 pub use progress::{Phase, Progress};
