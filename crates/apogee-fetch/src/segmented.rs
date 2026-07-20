@@ -312,9 +312,7 @@ async fn transfer(
     let dest = spec.dest();
     let part = download::sidecar(dest, ".part");
     let apdl = download::sidecar(dest, ".apdl");
-    let block_verify = verify
-        .blocks
-        .map(|plan| Arc::new(BlockVerify::new(plan)));
+    let block_verify = verify.blocks.map(|plan| Arc::new(BlockVerify::new(plan)));
 
     // A fresh transfer records the probe's validators so a later resume can revalidate with `If-Range`.
     let identity = Identity {
