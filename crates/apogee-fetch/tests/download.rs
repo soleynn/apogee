@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apogee_fetch::{DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, Validator};
-use apogee_test_support::chaos::{ChaosServer, block_hashes, body_sha256, generated_vec, sha256_of};
+use apogee_test_support::chaos::{
+    ChaosServer, block_hashes, body_sha256, generated_vec, sha256_of,
+};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
