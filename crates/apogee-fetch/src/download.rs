@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
@@ -23,7 +24,9 @@ use url::Url;
 
 use crate::error::FetchError;
 use crate::journal::{self, Identity, Journal};
+use crate::limiter::LimitHandle;
 use crate::progress::{Phase, Progress};
+use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
@@ -34,12 +37,18 @@ const BATCH: u64 = 1024 * 1024;
 /// The buffer size for reading a file back to hash it (resume re-seed, existing-dest verification).
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Run one download to completion.
+/// Run one single-connection download to completion.
+///
+/// The transfer draws `limiter` tokens on the bytes it reads off the socket and holds one connection
+/// slot from `scheduler` for its lifetime, so it counts against the global connection cap the same as
+/// a segment does.
 pub(crate) async fn run(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     progress: Option<mpsc::UnboundedSender<Progress>>,
     cancel: CancellationToken,
+    limiter: &LimitHandle,
+    scheduler: &Arc<Scheduler>,
 ) -> Result<VerifiedFile, FetchError> {
     let expected_sha = match spec.validator() {
         Validator::Sha256(digest) => Some(*digest),
@@ -72,6 +81,10 @@ pub(crate) async fn run(
         );
         return Ok(VerifiedFile::mint(dest));
     }
+
+    // Hold one global connection slot for the transfer, so a single-connection download counts against
+    // the same cap as a segment. Released when this scope ends.
+    let _conn = scheduler.acquire_connection().await;
 
     let core_identity = Identity {
         url: spec.url().as_str().to_owned(),
@@ -189,6 +202,8 @@ pub(crate) async fn run(
         let Some(chunk) = item else { break };
         let chunk = chunk.map_err(|e| transport_error(spec.url(), e))?;
         let bytes: &[u8] = chunk.as_ref();
+        // Throttle on the bytes just read off the socket, before consuming more.
+        limiter.acquire(bytes.len() as u64).await;
         if let Some(h) = hasher.as_mut() {
             h.update(bytes);
         }

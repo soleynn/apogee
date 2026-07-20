@@ -67,7 +67,6 @@ impl LimitHandle {
     /// Wait until `n` bytes' worth of tokens are available, then consume them. Returns immediately when
     /// uncapped. A request larger than the burst ceiling is still served (the ceiling stretches to it
     /// for that draw), so a large chunk cannot deadlock.
-    #[allow(dead_code)] // drawn per chunk by the transfer paths once they are wired to the limiter.
     pub(crate) async fn acquire(&self, n: u64) {
         if n == 0 {
             return;
