@@ -126,7 +126,7 @@ async fn probe(
 }
 
 /// Shared state for one segmented transfer: the work queue, the durable-byte counter, the journal, and
-/// the terminal outcome. One `Arc` is held by every worker plus the aggregator and cancel watcher.
+/// the terminal outcome. One `Arc` is held by every worker plus the progress aggregator.
 struct TransferState {
     client: reqwest::Client,
     url: Url,
@@ -316,33 +316,28 @@ async fn transfer(
         });
 
         let aggregate = tokio::spawn(aggregator(state.clone(), progress.clone(), len));
-        let watch = tokio::spawn({
-            let (state, cancel) = (state.clone(), cancel.clone());
-            async move {
-                tokio::select! {
-                    () = cancel.cancelled() => state.finish(Err(FetchError::Cancelled)),
-                    () = state.done.cancelled() => {}
-                }
-            }
-        });
         let workers: Vec<_> = (0..worker_count)
             .map(|_| tokio::spawn(worker(state.clone(), cancel.clone())))
             .collect();
         for handle in workers {
             let _ = handle.await;
         }
-        // All workers have exited; make sure the aggregator and watcher wind down too.
+        // All workers have exited; wind the aggregator down. Workers record the outcome in `end`:
+        // `Some(Ok)` on completion, `Some(Err)` on failure. A pure external cancel exits every worker
+        // without a finish, so `end` stays `None` - read authoritatively here rather than racing a
+        // watcher task against the `done` token.
         state.done.cancel();
         let _ = aggregate.await;
-        let _ = watch.await;
 
-        if let Some(Err(err)) = state
+        match state
             .end
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
         {
-            return Err(err);
+            Some(Ok(())) => {} // completed: fall through to verify + publish
+            Some(Err(err)) => return Err(err),
+            None => return Err(FetchError::Cancelled), // cancelled before completion; part + journal kept
         }
     }
 
@@ -392,11 +387,7 @@ enum SegmentResult {
 async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
     while let Some(range) = state.pop_or_wait(&cancel).await {
         match stream_segment(&state, range.clone(), &cancel).await {
-            SegmentResult::Done => {
-                if state.durable.load(Ordering::SeqCst) >= state.len {
-                    state.finish(Ok(()));
-                }
-            }
+            SegmentResult::Done => {}
             SegmentResult::Requeue(remaining) => {
                 if state.bump_attempt(remaining.start) > RETRY_BUDGET {
                     state.finish(Err(FetchError::Stalled {
@@ -408,16 +399,21 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
                 }
             }
             SegmentResult::SourceChanged => {
-                // A changed source restarts clean: drop the stale journal and surface a transient
-                // error so a retry re-downloads from scratch.
+                // A changed source restarts clean: drop the stale journal and surface the typed
+                // changed-source error so a retry re-downloads from scratch.
                 let _ = tokio::fs::remove_file(&state.apdl).await;
-                state.finish(Err(FetchError::Transport {
-                    url: state.url.clone(),
-                    source: std::io::Error::other("range ignored mid-transfer; source changed"),
+                state.finish(Err(FetchError::ServerFileChanged {
+                    validator: "range ignored mid-transfer".to_owned(),
                 }));
             }
             SegmentResult::Stop => return,
             SegmentResult::Fatal(err) => state.finish(Err(err)),
+        }
+        // Completion is checked on every path, not just `Done`: a stall or drop can flush the file's
+        // final bytes and return an empty `Requeue`, which `push_range` drops, so the `Done` arm would
+        // never see it. `finish` is first-writer-wins, so a redundant call is harmless.
+        if state.durable.load(Ordering::SeqCst) >= state.len {
+            state.finish(Ok(()));
         }
         if state.done.is_cancelled() {
             return;

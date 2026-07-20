@@ -158,6 +158,10 @@ struct Config {
     slow_ranges: Vec<(u64, Duration)>,
     /// Segment starts whose one-shot drop/stall has already fired, shared across connections.
     fired: Arc<Mutex<HashSet<u64>>>,
+    /// After serving a range in full, end with a connection reset instead of a clean EOF (a real
+    /// server RST after the last byte), so the client commits every byte and then sees an error - the
+    /// empty-remainder path that must still complete the download.
+    reset_after_range: bool,
     /// The boundary string for a `multipart/byteranges` response (a request with several ranges).
     boundary: String,
     throttle: Option<Duration>,
@@ -200,6 +204,7 @@ impl ChaosServer {
                 stall_ranges: Vec::new(),
                 slow_ranges: Vec::new(),
                 fired: Arc::new(Mutex::new(HashSet::new())),
+                reset_after_range: false,
                 boundary: "chaos_boundary".to_string(),
                 throttle: None,
                 chunk: 64 * 1024,
@@ -418,6 +423,15 @@ impl ChaosServerBuilder {
     #[must_use]
     pub fn slow_range(mut self, start: u64, delay: Duration) -> Self {
         self.cfg.slow_ranges.push((start, delay));
+        self
+    }
+
+    /// End every fully-served range with a connection reset instead of a clean EOF, so the client
+    /// commits all the range's bytes and then sees an error. Exercises the segmented engine's
+    /// completion check on the empty-remainder path (a real server RST after the last byte).
+    #[must_use]
+    pub fn reset_after_range(mut self) -> Self {
+        self.cfg.reset_after_range = true;
         self
     }
 
@@ -649,6 +663,16 @@ async fn handle(
             served += this as u64;
         }
         body_stats.record_range(start..off);
+        // A full range served, then a reset instead of a clean EOF: the client has every byte but its
+        // stream ends with an error, so its remaining range is empty.
+        if body_cfg.reset_after_range {
+            let _ = tx
+                .send(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "chaos: reset after full range",
+                )))
+                .await;
+        }
     });
 
     let body = StreamBody::new(ReceiverStream::new(rx));
