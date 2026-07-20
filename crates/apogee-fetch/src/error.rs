@@ -112,6 +112,12 @@ pub enum FetchError {
         source: std::io::Error,
     },
 
+    /// A multi-range response could not be parsed or did not answer what was asked: a malformed
+    /// `multipart/byteranges` body, a part whose `Content-Range` fell outside the requested ranges, or
+    /// a boundary the `Content-Type` never declared.
+    #[error("malformed range response for {url}: {detail}")]
+    MalformedRangeResponse { url: Url, detail: &'static str },
+
     /// A source shape the streaming path cannot handle: the multi-range transport, and the defensive
     /// guard for a block validator that somehow reached the engine without a declared length (the spec
     /// builder normally rejects that first).
