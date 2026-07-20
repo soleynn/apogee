@@ -16,6 +16,7 @@ mod limiter;
 mod prealloc;
 mod probe;
 mod progress;
+mod scheduler;
 mod spec;
 mod validator;
 
@@ -23,6 +24,7 @@ pub use error::{FetchError, SpecError};
 pub use fetcher::{Fetcher, FetcherBuilder};
 pub use limiter::LimitHandle;
 pub use progress::{Phase, Progress};
+pub use scheduler::Priority;
 pub use spec::{DownloadSpec, DownloadSpecBuilder};
 pub use validator::{Validator, VerifiedFile};
 

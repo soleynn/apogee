@@ -1,18 +1,38 @@
 //! The download engine handle.
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::FetchError;
+use crate::limiter::LimitHandle;
+use crate::probe::CapabilityCache;
 use crate::progress::Progress;
+use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
 use crate::validator::VerifiedFile;
 
-/// A resumable, verified downloader. A cheap handle over a pooled HTTP client: clone it to hand to
-/// several consumers.
+/// State shared by every clone of a [`Fetcher`]: the job/connection scheduler, the speed limiter, and
+/// the per-host capability cache. Cloning the fetcher is cheap and shares all of it, so the caps and
+/// the cache hold across concurrently submitted jobs.
+#[derive(Debug)]
+pub(crate) struct Shared {
+    pub(crate) scheduler: Arc<Scheduler>,
+    pub(crate) limiter: LimitHandle,
+    // Consulted by the segmented dispatch once the engine lands.
+    #[allow(dead_code)]
+    pub(crate) capabilities: CapabilityCache,
+    #[allow(dead_code)]
+    pub(crate) max_connections_per_file: usize,
+}
+
+/// A resumable, verified downloader. A cheap handle over a pooled HTTP client and the shared
+/// scheduler/limiter: clone it to hand to several consumers.
 #[derive(Debug, Clone)]
 pub struct Fetcher {
     client: reqwest::Client,
+    shared: Arc<Shared>,
 }
 
 impl Fetcher {
@@ -28,14 +48,18 @@ impl Fetcher {
     #[cfg(feature = "testing")]
     #[must_use]
     pub fn from_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            shared: FetcherBuilder::default().shared(),
+        }
     }
 
     /// Download `spec`'s source to its destination, returning proof it verified.
     ///
     /// Progress snapshots are sent on `progress` when provided; the sender is dropped when the
     /// download ends, closing a consumer's stream. `cancel` aborts the transfer, leaving the partial
-    /// file and its journal for a later resume.
+    /// file and its journal for a later resume. The job is admitted through the shared scheduler at
+    /// `spec`'s priority, so it waits its turn when the fetcher is already at its concurrency cap.
     ///
     /// # Errors
     /// A [`FetchError`] for any transport, length, verification, i/o, or cancellation failure.
@@ -45,16 +69,80 @@ impl Fetcher {
         progress: Option<mpsc::UnboundedSender<Progress>>,
         cancel: CancellationToken,
     ) -> Result<VerifiedFile, FetchError> {
-        crate::download::run(&self.client, spec, progress, cancel).await
+        let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
+        crate::download::run(
+            &self.client,
+            spec,
+            progress,
+            cancel,
+            &self.shared.limiter,
+            &self.shared.scheduler,
+        )
+        .await
     }
 }
 
-/// Builder for a [`Fetcher`]. Scheduling and rate-limiting knobs return with the multi-connection
-/// scheduler; a single-connection downloader has nothing to tune yet.
-#[derive(Debug, Default)]
-pub struct FetcherBuilder {}
+/// Builder for a [`Fetcher`]: the concurrency caps and the shared speed limit. `build()` with no
+/// knobs set produces the reference-parity defaults (4 files, 8 connections per file, 24 total,
+/// uncapped).
+#[derive(Debug)]
+pub struct FetcherBuilder {
+    max_files: usize,
+    max_connections_per_file: usize,
+    max_connections_total: usize,
+    speed_limit: Option<LimitHandle>,
+}
+
+impl Default for FetcherBuilder {
+    fn default() -> Self {
+        Self {
+            max_files: 4,
+            max_connections_per_file: 8,
+            max_connections_total: 24,
+            speed_limit: None,
+        }
+    }
+}
 
 impl FetcherBuilder {
+    /// The number of jobs downloaded concurrently (default 4).
+    #[must_use]
+    pub fn max_files(mut self, n: usize) -> Self {
+        self.max_files = n;
+        self
+    }
+
+    /// The number of connections a single segmented file may open (default 8).
+    #[must_use]
+    pub fn max_connections_per_file(mut self, n: usize) -> Self {
+        self.max_connections_per_file = n;
+        self
+    }
+
+    /// The global cap on open connections across all jobs (default 24).
+    #[must_use]
+    pub fn max_connections_total(mut self, n: usize) -> Self {
+        self.max_connections_total = n;
+        self
+    }
+
+    /// Share a live-adjustable speed limit across this fetcher's transfers. Absent means uncapped.
+    #[must_use]
+    pub fn speed_limit(mut self, limit: LimitHandle) -> Self {
+        self.speed_limit = Some(limit);
+        self
+    }
+
+    /// Assemble the shared scheduler/limiter/cache from the configured caps.
+    fn shared(&self) -> Arc<Shared> {
+        Arc::new(Shared {
+            scheduler: Arc::new(Scheduler::new(self.max_files, self.max_connections_total)),
+            limiter: self.speed_limit.clone().unwrap_or_else(LimitHandle::uncapped),
+            capabilities: CapabilityCache::default(),
+            max_connections_per_file: self.max_connections_per_file.max(1),
+        })
+    }
+
     /// Build the configured [`Fetcher`].
     ///
     /// # Errors
@@ -65,10 +153,13 @@ impl FetcherBuilder {
             // cross-check must see exactly what the server sent, never a transparently decoded stream.
             .gzip(false)
             .deflate(false)
+            // Keep enough idle connections alive to reuse across a file's segments.
+            .pool_max_idle_per_host(self.max_connections_per_file)
             .build()
             .map_err(|e| FetchError::Client {
                 source: std::io::Error::other(e),
             })?;
-        Ok(Fetcher { client })
+        let shared = self.shared();
+        Ok(Fetcher { client, shared })
     }
 }
