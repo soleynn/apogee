@@ -51,3 +51,50 @@ pub(crate) fn apply_headers(
     }
     req
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::HeaderMap;
+
+    /// The headers `apply_headers` would put on a request under `policy`.
+    fn applied(policy: Option<&HeaderPolicy>) -> HeaderMap {
+        let req = apply_headers(reqwest::Client::new().get("http://host.invalid/f"), policy)
+            .build()
+            .unwrap();
+        req.headers().clone()
+    }
+
+    #[test]
+    fn se_patch_sets_the_patch_client_ua_and_optional_unique_id() {
+        let with_id = applied(Some(&HeaderPolicy::SePatch {
+            unique_id: Some("abc".to_owned()),
+        }));
+        assert_eq!(with_id.get(USER_AGENT).unwrap(), SE_PATCH_USER_AGENT);
+        assert_eq!(with_id.get(X_PATCH_UNIQUE_ID).unwrap(), "abc");
+
+        let no_id = applied(Some(&HeaderPolicy::SePatch { unique_id: None }));
+        assert_eq!(no_id.get(USER_AGENT).unwrap(), SE_PATCH_USER_AGENT);
+        assert!(no_id.get(X_PATCH_UNIQUE_ID).is_none());
+    }
+
+    #[test]
+    fn custom_applies_each_pair_verbatim() {
+        let headers = applied(Some(&HeaderPolicy::Custom(vec![
+            ("X-A".to_owned(), "1".to_owned()),
+            ("X-B".to_owned(), "2".to_owned()),
+        ])));
+        assert_eq!(headers.get("x-a").unwrap(), "1");
+        assert_eq!(headers.get("x-b").unwrap(), "2");
+    }
+
+    #[test]
+    fn manifest_and_none_add_no_user_agent() {
+        assert!(
+            applied(Some(&HeaderPolicy::Manifest))
+                .get(USER_AGENT)
+                .is_none()
+        );
+        assert!(applied(None).get(USER_AGENT).is_none());
+    }
+}
