@@ -3,7 +3,12 @@
 /// A snapshot of a download's progress, relayed over a channel the caller owns. A plain, clockless
 /// data struct: the consumer derives rate and ETA from successive `bytes_done`, so the same event
 /// serves the shell, the CLI, and tests identically.
+///
+/// `#[non_exhaustive]`: consumers read these fields but never construct the struct (it is minted by
+/// the engine and relayed verbatim, e.g. through `apogee-runtime`'s event enum), so a future field
+/// can be added without breaking them.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Progress {
     /// Bytes durably written and hashed so far. Monotonic within a run.
     pub bytes_done: u64,
