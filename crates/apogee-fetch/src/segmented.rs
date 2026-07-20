@@ -12,7 +12,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -31,6 +31,7 @@ use crate::prealloc::preallocate;
 use crate::probe::{Capability, classify};
 use crate::progress::{Phase, Progress};
 use crate::spec::DownloadSpec;
+use crate::util::lock;
 use crate::validator::VerifiedFile;
 
 /// Bytes streamed between `fsync` + journal-commit points within a segment (the resume granularity).
@@ -171,7 +172,7 @@ struct TransferState {
 impl TransferState {
     /// Record the terminal outcome (first writer wins) and wake every task by firing `done`.
     fn finish(&self, result: Result<(), FetchError>) {
-        let mut end = self.end.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut end = lock(&self.end);
         if end.is_none() {
             *end = Some(result);
             self.done.cancel();
@@ -183,10 +184,7 @@ impl TransferState {
         if range.start >= range.end {
             return;
         }
-        self.queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_back(range);
+        lock(&self.queue).push_back(range);
         self.notify.notify_one();
     }
 
@@ -194,22 +192,12 @@ impl TransferState {
     /// cancelled (never inferred from an empty queue, so a mid-re-queue gap cannot end the job early).
     async fn pop_or_wait(&self, cancel: &CancellationToken) -> Option<Range<u64>> {
         loop {
-            if let Some(range) = self
-                .queue
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .pop_front()
-            {
+            if let Some(range) = lock(&self.queue).pop_front() {
                 return Some(range);
             }
             // Register interest before the final re-check so a push between the two cannot be lost.
             let notified = self.notify.notified();
-            if let Some(range) = self
-                .queue
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .pop_front()
-            {
+            if let Some(range) = lock(&self.queue).pop_front() {
                 return Some(range);
             }
             tokio::select! {
@@ -223,7 +211,7 @@ impl TransferState {
 
     /// Increment and return the attempt count for a stuck offset.
     fn bump_attempt(&self, start: u64) -> u32 {
-        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut attempts = lock(&self.attempts);
         let counter = attempts.entry(start).or_insert(0);
         *counter += 1;
         *counter
@@ -262,11 +250,9 @@ async fn transfer(
 
     // A fresh transfer records the probe's validators so a later resume can revalidate with `If-Range`.
     let identity = Identity {
-        url: spec.url().as_str().to_owned(),
-        expected_len: Some(len),
-        validator_digest: spec.validator().config_digest(),
         etag,
         last_modified,
+        ..download::base_identity(spec, Some(len))
     };
 
     // Resume: trust the journaled intervals only when the identity matches and the `.part` is fully
@@ -362,12 +348,7 @@ async fn transfer(
         state.done.cancel();
         let _ = aggregate.await;
 
-        match state
-            .end
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
+        match lock(&state.end).take() {
             Some(Ok(())) => {} // completed: fall through to verify + publish
             Some(Err(err)) => return Err(err),
             None => return Err(FetchError::Cancelled), // cancelled before completion; part + journal kept
@@ -659,21 +640,10 @@ async fn verify_and_publish(
             });
         }
     }
+    // No single write handle survived the workers, so re-open to make the assembled data durable,
+    // then hand off to the shared publish tail.
     if let Ok(file) = tokio::fs::File::open(part).await {
         let _ = file.sync_all().await;
     }
-    tokio::fs::rename(part, dest)
-        .await
-        .map_err(|e| FetchError::io(dest, e))?;
-    download::sync_parent_dir(dest).await;
-    let _ = tokio::fs::remove_file(apdl).await;
-    download::emit(
-        progress,
-        Progress {
-            bytes_done: len,
-            total: Some(len),
-            phase: Phase::Complete,
-        },
-    );
-    Ok(VerifiedFile::mint(dest))
+    download::publish(dest, part, apdl, len, Some(len), progress).await
 }

@@ -20,6 +20,7 @@ mod progress;
 mod scheduler;
 mod segmented;
 mod spec;
+mod util;
 mod validator;
 
 pub use error::{FetchError, SpecError};

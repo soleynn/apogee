@@ -115,9 +115,7 @@ impl Scheduler {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Admission> {
-        self.admission
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::util::lock(&self.admission)
     }
 
     /// The number of jobs currently waiting for a slot (test-only observability).

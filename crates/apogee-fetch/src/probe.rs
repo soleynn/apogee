@@ -52,9 +52,7 @@ impl CapabilityCache {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Capability>> {
-        self.map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::util::lock(&self.map)
     }
 }
 
