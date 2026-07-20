@@ -673,14 +673,15 @@ async fn handle(
         }
     }
     // Corruption for this response: the always-on ranges, plus any one-shot range still armed that
-    // overlaps the served span. A one-shot range corrupts its first serve (failing that block's hash)
-    // and is clean on the re-fetch, so a block-granular repair can succeed.
+    // this response fully covers. A one-shot range corrupts its first full serve (failing that block's
+    // hash) and is clean on the re-fetch, so a block-granular repair can succeed. Requiring full
+    // containment means a `bytes=0-0` capability probe never trips a range that starts at 0.
     let mut effective_corrupt = cfg.corrupt.clone();
     if !cfg.corrupt_once.is_empty() {
         let mut fired = cfg.corrupt_fired.lock().unwrap_or_else(PoisonError::into_inner);
         for range in &cfg.corrupt_once {
-            let overlaps = range.start < end && range.end > start;
-            if overlaps && fired.insert(range.start) {
+            let contains = range.start >= start && range.end <= end;
+            if contains && fired.insert(range.start) {
                 effective_corrupt.push(range.clone());
             }
         }

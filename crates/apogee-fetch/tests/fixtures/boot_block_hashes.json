@@ -1,0 +1,16 @@
+{
+  "name": "boot-2013.06.18.0000.0000",
+  "url": "http://patch-dl.ffxiv.com/boot/2b5cbc63/D2013.06.18.0000.0000.patch",
+  "sha256": "920d740280f1eebb3a0f5433f69dab5b4e2231df0ed1c6504b70d9571fbc6b36",
+  "len": 1742552,
+  "block_size": 262144,
+  "block_hashes": [
+    "14c44eff4b40e90c700e5cc62bdf50f76e2a70aa",
+    "04c04dceb17ea33defd5dfd45bd78a15ad1daf83",
+    "536ee5dc9b57b70243a417b1c5a0f055de70972d",
+    "1c4f1d5ed4b5eb9ab706ac6d5e11f6af56d0c7e2",
+    "8f24ab7770e824a3a561a9ce971ad8d47f780b69",
+    "1caee5f0c291d375f2f6397fc10b341b4a85d6bb",
+    "c33292197150f07a0b2ca7e8725744a3b1827672"
+  ]
+}
