@@ -6,6 +6,22 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-fetch
+- Mark Progress non_exhaustive _(changed)_
+- Record completed intervals in the resume journal _(added)_
+- Eager file preallocation via fallocate _(added)_
+- Shared token-bucket speed limiter _(added)_
+- Per-host range capability probe and cache _(added)_
+- Job scheduler, priorities, and shared limiter wiring _(added)_
+- Segmented multi-connection transfer engine _(added)_
+- Rustfmt line wrapping in limiter and scheduler _(styling)_
+- Gate fallocate preallocation to Unix _(fixed)_
+- Segmented completion + cancel terminal-state bugs _(fixed)_
+- Bound the coalesced interval set, not raw journal records _(fixed)_
+- Segmented length cross-check and If-Range revalidation _(fixed)_
+- Scheduler cannot leak an admission slot to a cancelled waiter _(fixed)_
+- Share identity/publish helpers and a lock helper _(changed)_
+
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
 - Read the common header and enumerate an install _(added)_
@@ -23,6 +39,7 @@ is tagged with its change type. Versioning aims to follow
 - Fetch a verified corpus into a content-addressed cache _(added)_
 - Add an example to author an oracle tree manifest _(added)_
 - Pin the real boot-patch corpus and its oracle tree _(testing)_
+- Per-segment chaos knobs and concurrency counter _(testing)_
 
 ### apogee-zipatch
 - Read the ZiPatch container into a typed chunk stream _(added)_
@@ -42,9 +59,16 @@ is tagged with its change type. Versioning aims to follow
 - Cover empty-block splits and the refine-vanished path _(testing)_
 - Drop the always-zero empty-block write offset _(changed)_
 
+### ci
+- Stop the changelog render crashing on a non-conventional commit _(fixed)_
+
+### fuzz
+- Add the fetch_journal target for the resume journal decoder _(testing)_
+
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
 - Extend the byte-order audit to apogee-zipatch _(build)_
+- Repair broken ranges through a RangeSource planner (#42) _(changed)_
 ## [0.2.0] - 2026-07-18
 
 ### apogee-cli
