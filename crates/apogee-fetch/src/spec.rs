@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 use crate::error::SpecError;
+use crate::scheduler::Priority;
 use crate::validator::Validator;
 
-/// A single download: where to fetch, where to land it, how to verify it, and whether to resume.
-/// Built through [`DownloadSpec::builder`], whose [`build`](DownloadSpecBuilder::build) is the one
-/// place the source-safety rules are enforced, so an unsafe request cannot be represented.
+/// A single download: where to fetch, where to land it, how to verify it, whether to resume, and its
+/// scheduling priority. Built through [`DownloadSpec::builder`], whose
+/// [`build`](DownloadSpecBuilder::build) is the one place the source-safety rules are enforced, so an
+/// unsafe request cannot be represented.
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
     url: Url,
@@ -17,6 +19,7 @@ pub struct DownloadSpec {
     expected_len: Option<u64>,
     validator: Validator,
     resume: bool,
+    priority: Priority,
 }
 
 impl DownloadSpec {
@@ -34,6 +37,7 @@ impl DownloadSpec {
             expected_len: None,
             validator,
             resume: true,
+            priority: Priority::default(),
             allow_unverified: false,
         }
     }
@@ -67,6 +71,12 @@ impl DownloadSpec {
     pub fn resume(&self) -> bool {
         self.resume
     }
+
+    /// The scheduling priority: how this job is admitted relative to others in flight.
+    #[must_use]
+    pub fn priority(&self) -> Priority {
+        self.priority
+    }
 }
 
 /// Builds a [`DownloadSpec`], enforcing the source-safety rules in [`build`](Self::build).
@@ -77,6 +87,7 @@ pub struct DownloadSpecBuilder {
     expected_len: Option<u64>,
     validator: Validator,
     resume: bool,
+    priority: Priority,
     allow_unverified: bool,
 }
 
@@ -93,6 +104,14 @@ impl DownloadSpecBuilder {
     #[must_use]
     pub fn resume(mut self, on: bool) -> Self {
         self.resume = on;
+        self
+    }
+
+    /// Set the scheduling priority (defaults to [`Priority::Normal`]). Boot patches are admitted
+    /// ahead of game data, which is admitted ahead of optional assets.
+    #[must_use]
+    pub fn priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
         self
     }
 
@@ -134,6 +153,7 @@ impl DownloadSpecBuilder {
             expected_len: self.expected_len,
             validator: self.validator,
             resume: self.resume,
+            priority: self.priority,
         })
     }
 }
