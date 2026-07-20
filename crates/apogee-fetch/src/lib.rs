@@ -14,6 +14,7 @@ mod intervals;
 mod journal;
 mod limiter;
 mod prealloc;
+mod probe;
 mod progress;
 mod spec;
 mod validator;
