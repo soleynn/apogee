@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use apogee_fetch::{DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, Validator};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, generated_vec, sha256_of};
+use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
@@ -18,6 +19,18 @@ fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// The per-block SHA1s of the generated body: one hash per `block_size` bytes, the last block short.
+fn block_hashes(seed: u64, len: u64, block_size: u32) -> Vec<[u8; 20]> {
+    generated_vec(seed, 0, len as usize)
+        .chunks(block_size as usize)
+        .map(|chunk| {
+            let mut hasher = Sha1::new();
+            hasher.update(chunk);
+            hasher.finalize().into()
+        })
+        .collect()
 }
 
 /// A verified-Sha256 spec builder for `len` bytes from `seed`, served by `server`.
@@ -275,18 +288,60 @@ async fn an_existing_destination_is_returned_without_a_request() {
 }
 
 #[tokio::test]
-async fn block_hash_validation_is_rejected_before_any_request() {
+async fn a_block_hashed_download_verifies_and_publishes() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.bin");
-    let server = ChaosServer::builder(1, 1000).start().await.unwrap();
+    let len = 300_000u64;
+    let block_size = 100_000u32; // three blocks
+    let server = ChaosServer::builder(3, len).start().await.unwrap();
     let spec = DownloadSpec::builder(
         server.url("file.bin"),
         &dest,
         Validator::BlockSha1 {
-            block_size: 256,
-            hashes: vec![[0; 20]],
+            block_size,
+            hashes: block_hashes(3, len, block_size),
         },
     )
+    .expected_len(len)
+    .build()
+    .unwrap();
+
+    let verified = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(verified.path(), dest);
+    assert_eq!(
+        tokio::fs::read(&dest).await.unwrap(),
+        generated_vec(3, 0, len as usize)
+    );
+    assert!(!sidecar(&dest, ".part").exists(), "the part file is gone");
+    assert!(!sidecar(&dest, ".apdl").exists(), "the journal is gone");
+}
+
+#[tokio::test]
+async fn a_persistently_corrupt_block_fails_after_exhausting_its_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 300_000u64;
+    let block_size = 100_000u32; // three blocks; the middle one is always corrupt
+    let server = ChaosServer::builder(5, len)
+        .corrupt_range(100_000..200_000)
+        .start()
+        .await
+        .unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("file.bin"),
+        &dest,
+        Validator::BlockSha1 {
+            block_size,
+            hashes: block_hashes(5, len, block_size),
+        },
+    )
+    .expected_len(len)
     .build()
     .unwrap();
 
@@ -297,8 +352,12 @@ async fn block_hash_validation_is_rejected_before_any_request() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, FetchError::Unsupported { .. }));
-    assert_eq!(server.stats().requests(), 0);
+    assert!(
+        matches!(err, FetchError::BlockVerifyFailed { block: 1, offset: 100_000, .. }),
+        "got {err:?}"
+    );
+    assert!(!dest.exists(), "no verified file is published");
+    assert!(!sidecar(&dest, ".apdl").exists(), "the journal is dropped on failure");
 }
 
 #[tokio::test]

@@ -31,7 +31,6 @@ pub enum HeaderPolicy {
 
 /// Apply `policy` to a request builder. Header names here never collide with the `Range`/`If-Range`
 /// the transfer sets, so ordering against those is irrelevant.
-#[allow(dead_code)] // wired at the request-construction sites with the engine changes
 pub(crate) fn apply_headers(mut req: RequestBuilder, policy: Option<&HeaderPolicy>) -> RequestBuilder {
     match policy {
         Some(HeaderPolicy::SePatch { unique_id }) => {

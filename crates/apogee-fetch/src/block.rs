@@ -9,20 +9,22 @@ use std::ops::Range;
 use std::path::Path;
 
 use sha1::{Digest, Sha1};
+use tokio::sync::Notify;
+
+use crate::intervals::IntervalSet;
+use crate::util::lock;
 
 /// The buffer size for reading a block back off disk to hash it.
 const READ_CHUNK: usize = 64 * 1024;
 
 /// The block layout of a file: a SHA1 per fixed-size block over `[0, len)`. The last block is short
 /// when `len` is not a multiple of the block size.
-#[allow(dead_code)] // consumed by the segmented engine's block verifier
 pub(crate) struct BlockPlan {
     block_size: u64,
     len: u64,
     hashes: Vec<[u8; 20]>,
 }
 
-#[allow(dead_code)] // consumed by the segmented engine's block verifier
 impl BlockPlan {
     /// Build a plan from a validator's `block_size`/`hashes` and the file's total length. The spec
     /// builder has already checked `hashes.len() == len.div_ceil(block_size)` and `block_size > 0`.
@@ -53,10 +55,118 @@ impl BlockPlan {
     }
 }
 
+/// Where a block sits in its verification lifecycle. `Pending` blocks whose bytes are durable become
+/// `Hashing`; a hash either confirms them (`Verified`) or, on a mismatch, resets them to `Pending` for
+/// a re-fetch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Pending,
+    Hashing,
+    Verified,
+}
+
+/// One block's verification state: where it is in the lifecycle and how many times it has failed.
+#[derive(Clone, Copy)]
+struct BlockState {
+    status: Status,
+    attempts: u32,
+}
+
+/// Everything under one lock, so a block's status and the verified tally never disagree.
+struct States {
+    blocks: Vec<BlockState>,
+    verified: u32,
+}
+
+/// The shared, concurrent verification state for one block-hashed transfer. The transfer engine
+/// notifies [`notify`](Self::notify) as bytes become durable; a verifier task reads coverage, claims
+/// newly-ready blocks, hashes them off-thread, and reports the result back here.
+pub(crate) struct BlockVerify {
+    plan: std::sync::Arc<BlockPlan>,
+    states: std::sync::Mutex<States>,
+    /// Woken by the transfer engine whenever the durable set grows.
+    pub(crate) notify: Notify,
+}
+
+impl BlockVerify {
+    pub(crate) fn new(plan: std::sync::Arc<BlockPlan>) -> Self {
+        let count = plan.count() as usize;
+        Self {
+            plan,
+            states: std::sync::Mutex::new(States {
+                blocks: vec![
+                    BlockState {
+                        status: Status::Pending,
+                        attempts: 0,
+                    };
+                    count
+                ],
+                verified: 0,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    /// The number of blocks.
+    pub(crate) fn count(&self) -> u32 {
+        self.plan.count()
+    }
+
+    /// Block `i`'s byte range.
+    pub(crate) fn block_range(&self, i: u32) -> Range<u64> {
+        self.plan.block_range(i)
+    }
+
+    /// Block `i`'s expected SHA1.
+    pub(crate) fn expected(&self, i: u32) -> [u8; 20] {
+        self.plan.expected(i)
+    }
+
+    /// Claim every `Pending` block now fully covered by `covered`, marking each `Hashing`, and return
+    /// their indices. A block is claimed once (it leaves `Pending`), so a hash is never dispatched twice
+    /// for the same coverage.
+    pub(crate) fn take_ready(&self, covered: &IntervalSet) -> Vec<u32> {
+        let mut states = lock(&self.states);
+        let mut ready = Vec::new();
+        for i in 0..self.plan.count() {
+            if states.blocks[i as usize].status == Status::Pending
+                && covered.covers(&self.plan.block_range(i))
+            {
+                states.blocks[i as usize].status = Status::Hashing;
+                ready.push(i);
+            }
+        }
+        ready
+    }
+
+    /// Mark block `i` verified and return the running verified count.
+    pub(crate) fn mark_verified(&self, i: u32) -> u32 {
+        let mut states = lock(&self.states);
+        states.blocks[i as usize].status = Status::Verified;
+        states.verified += 1;
+        states.verified
+    }
+
+    /// Record a failed hash: bump block `i`'s attempt count and return it. Status is left `Hashing`
+    /// until the caller decides between a re-fetch ([`reset_pending`](Self::reset_pending)) and giving
+    /// up, so a spent budget never leaves the block re-dispatchable.
+    pub(crate) fn bump_attempt(&self, i: u32) -> u32 {
+        let mut states = lock(&self.states);
+        let block = &mut states.blocks[i as usize];
+        block.attempts += 1;
+        block.attempts
+    }
+
+    /// Reset block `i` to `Pending` so its re-fetched bytes will be re-hashed. The caller clears the
+    /// block's coverage first, so this cannot be re-dispatched until the re-fetch lands.
+    pub(crate) fn reset_pending(&self, i: u32) {
+        lock(&self.states).blocks[i as usize].status = Status::Pending;
+    }
+}
+
 /// SHA1 the byte range `range` of the file at `part`, reading in bounded memory. Meant to run on a
 /// blocking worker (`spawn_blocking`): it uses positioned reads on a fresh handle, so it never touches
 /// the async transfer path and never contends with a worker writing a different block.
-#[allow(dead_code)] // consumed by the segmented engine's block verifier
 pub(crate) fn hash_block(part: &Path, range: Range<u64>) -> std::io::Result<[u8; 20]> {
     let mut file = std::fs::File::open(part)?;
     file.seek(SeekFrom::Start(range.start))?;
