@@ -77,7 +77,11 @@ pub(crate) async fn fetch_ranges<F>(
 where
     F: FnMut(u64, &[u8]) -> Result<(), FetchError>,
 {
-    for group in pack_ranges(ranges, &packing) {
+    // A zero-length range requests nothing; drop it so packing and header building never see an empty
+    // span (which would otherwise underflow `end - 1`). The repair planner never emits one; this keeps
+    // the public entry point total for a degenerate caller.
+    let ranges: Vec<Range<u64>> = ranges.iter().filter(|r| r.start < r.end).cloned().collect();
+    for group in pack_ranges(&ranges, &packing) {
         fetch_group(engine, url, expected_len, group, policy, &mut sink).await?;
     }
     Ok(())
@@ -137,22 +141,54 @@ where
         apply_headers(engine.client.get(url.clone()), policy).header(RANGE, range_header(group));
     let resp = req.send().await.map_err(|e| connect_error(url, e))?;
     let shared = engine.shared;
-    match resp.status().as_u16() {
-        // Range honored: one part, or a multipart body of many.
-        206 => {
-            if let Some(boundary) = multipart_boundary(&resp) {
-                stream_multipart(shared, url, expected_len, group, &boundary, resp, sink).await
-            } else {
-                stream_single_206(shared, url, expected_len, group, resp, sink).await
+
+    // Tally the requested bytes actually delivered: a server that answers fewer ranges than asked (a
+    // single 206 covering only the first range, or a multipart body missing parts) is a detectable
+    // transport fault, so it must error rather than silently under-deliver and leave the omission for
+    // the consumer's CRC to notice later. Over-delivery (a part that spans a gap) is harmless and
+    // allowed. Every delivered span sits inside a requested range, so the byte count is the check.
+    let needed: u64 = group.iter().map(|r| r.end - r.start).sum();
+    let mut delivered: u64 = 0;
+    // Scope the counting wrapper so its borrow of `delivered` ends before the coverage check reads it.
+    let outcome = {
+        let mut counting = |off: u64, bytes: &[u8]| -> Result<(), FetchError> {
+            delivered += bytes.len() as u64;
+            sink(off, bytes)
+        };
+        match resp.status().as_u16() {
+            // Range honored: one part, or a multipart body of many.
+            206 => {
+                if let Some(boundary) = multipart_boundary(&resp) {
+                    stream_multipart(
+                        shared,
+                        url,
+                        expected_len,
+                        group,
+                        &boundary,
+                        resp,
+                        &mut counting,
+                    )
+                    .await
+                } else {
+                    stream_single_206(shared, url, expected_len, group, resp, &mut counting).await
+                }
             }
+            // Range ignored: the whole body arrived. Stream it and slice out the requested ranges.
+            200 => stream_and_slice(shared, url, group, 0, resp, &mut counting).await,
+            status => Err(FetchError::Http {
+                status,
+                url: url.clone(),
+            }),
         }
-        // Range ignored: the whole body arrived. Stream it and slice out the requested ranges.
-        200 => stream_and_slice(shared, url, group, 0, resp, sink).await,
-        status => Err(FetchError::Http {
-            status,
+    };
+    outcome?;
+    if delivered < needed {
+        return Err(FetchError::MalformedRangeResponse {
             url: url.clone(),
-        }),
+            detail: "range response did not cover every requested range",
+        });
     }
+    Ok(())
 }
 
 /// The `bytes=a-b,c-d,…` header value for a group (inclusive `-b`).
@@ -164,7 +200,7 @@ fn range_header(group: &[Range<u64>]) -> String {
         }
         out.push_str(&r.start.to_string());
         out.push('-');
-        out.push_str(&(r.end - 1).to_string());
+        out.push_str(&r.end.saturating_sub(1).to_string());
     }
     out
 }
