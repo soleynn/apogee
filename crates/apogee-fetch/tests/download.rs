@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apogee_fetch::{DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, Validator};
-use apogee_test_support::chaos::{ChaosServer, body_sha256, generated_vec, sha256_of};
-use sha1::{Digest, Sha1};
+use apogee_test_support::chaos::{ChaosServer, block_hashes, body_sha256, generated_vec, sha256_of};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
@@ -19,18 +18,6 @@ fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
-}
-
-/// The per-block SHA1s of the generated body: one hash per `block_size` bytes, the last block short.
-fn block_hashes(seed: u64, len: u64, block_size: u32) -> Vec<[u8; 20]> {
-    generated_vec(seed, 0, len as usize)
-        .chunks(block_size as usize)
-        .map(|chunk| {
-            let mut hasher = Sha1::new();
-            hasher.update(chunk);
-            hasher.finalize().into()
-        })
-        .collect()
 }
 
 /// A verified-Sha256 spec builder for `len` bytes from `seed`, served by `server`.

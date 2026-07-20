@@ -29,6 +29,7 @@ use hyper::header::{
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -1095,6 +1096,21 @@ pub fn sha256_of(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
+}
+
+/// The per-block SHA1 digests of the deterministic body `[0, len)` from `seed`: one hash per
+/// `block_size` bytes, the last block short. The block-hash analogue of [`body_sha256`], for building a
+/// `Validator::BlockSha1` in a test.
+#[must_use]
+pub fn block_hashes(seed: u64, len: u64, block_size: u32) -> Vec<[u8; 20]> {
+    generated_vec(seed, 0, len as usize)
+        .chunks(block_size as usize)
+        .map(|chunk| {
+            let mut hasher = Sha1::new();
+            hasher.update(chunk);
+            hasher.finalize().into()
+        })
+        .collect()
 }
 
 #[cfg(test)]

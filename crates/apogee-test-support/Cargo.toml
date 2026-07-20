@@ -19,6 +19,7 @@ http-body-util.workspace = true
 bytes.workspace = true
 http.workspace = true
 url.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 # Recorded-fact tree manifests (relative path, length, sha256) serialize as reviewable JSON.
 serde.workspace = true
