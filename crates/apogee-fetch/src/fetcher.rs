@@ -92,6 +92,39 @@ impl Fetcher {
         });
         Job::new(handle, rx, cancel)
     }
+
+    /// Fetch a set of byte `ranges` (sorted, non-overlapping) of one `url`, delivering each fetched
+    /// span to `sink` as `(absolute_offset, bytes)`. `expected_len` is the source file's length,
+    /// cross-checked against each response's `Content-Range` total. This is the low-level scatter-
+    /// gather primitive behind repair; [`HttpRangeSource`](crate::HttpRangeSource) wraps it to
+    /// implement `apogee-zipatch`'s range seam.
+    ///
+    /// Ranges are packed into requests under `packing` (a count cap and a `Range` header byte budget),
+    /// and each response is handled whether it is a single `206`, a `multipart/byteranges` body, or a
+    /// range-ignoring `200`. A single attempt against one URL: mirror rotation and retry live in the
+    /// caller.
+    ///
+    /// # Errors
+    /// A [`FetchError`] for any transport, HTTP-status, length, or malformed-response fault, or the
+    /// sink's own error propagated verbatim.
+    pub async fn fetch_ranges<F>(
+        &self,
+        url: &url::Url,
+        expected_len: u64,
+        ranges: &[std::ops::Range<u64>],
+        policy: Option<&crate::HeaderPolicy>,
+        packing: crate::RangePacking,
+        sink: F,
+    ) -> Result<(), FetchError>
+    where
+        F: FnMut(u64, &[u8]) -> Result<(), FetchError>,
+    {
+        let engine = crate::ranges::Engine {
+            client: &self.client,
+            shared: &self.shared,
+        };
+        crate::ranges::fetch_ranges(&engine, url, expected_len, ranges, policy, packing, sink).await
+    }
 }
 
 /// Builder for a [`Fetcher`]: the concurrency caps and the shared speed limit. `build()` with no

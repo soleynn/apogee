@@ -16,9 +16,6 @@
 //! are emitted in bulk, so the per-byte cost falls only on the tiny framing fraction. All input is
 //! hostile: every field is a checked parse, header blocks are size-capped, the boundary and part
 //! count are bounded, and there is no panic path (the `fetch_multipart` fuzz target pins this).
-// The multi-range engine (`Fetcher::fetch_ranges`) is the only consumer; until it lands the parser is
-// exercised only by this module's tests, so the non-test lib build would see it as unused.
-#![allow(dead_code)]
 
 use crate::error::FetchError;
 
