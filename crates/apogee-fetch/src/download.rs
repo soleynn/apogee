@@ -91,12 +91,12 @@ pub(crate) async fn run(
             .await
             .map_err(|e| FetchError::io(&apdl, e))?
         && loaded.identity.matches(&core_identity)
-        && loaded.watermark > 0
+        && loaded.watermark() > 0
         && let Ok(meta) = tokio::fs::metadata(&part).await
         && meta.is_file()
-        && meta.len() >= loaded.watermark
+        && meta.len() >= loaded.watermark()
     {
-        start = loaded.watermark;
+        start = loaded.watermark();
         if_range = loaded
             .identity
             .etag
@@ -423,7 +423,9 @@ async fn flush_and_commit(
         .await
         .map_err(|e| FetchError::io(part, e))?;
     if let Some(j) = journal.as_mut() {
-        j.commit(watermark)
+        // The single-connection path always holds the contiguous prefix, so it commits `[0, watermark)`;
+        // coalescing collapses the successive prefixes back to one interval.
+        j.commit_interval(0, watermark)
             .await
             .map_err(|e| FetchError::io(apdl, e))?;
     }

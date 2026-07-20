@@ -23,6 +23,8 @@ apogee-zipatch = { path = "../apogee-zipatch" }
 # Test-only: exposes Fetcher::from_client so a TLS test can inject a client that trusts a loopback
 # test certificate. Never enabled in a release build.
 testing = []
+# Exposes the journal decoder to the out-of-workspace fuzz target. Never enabled in a release build.
+fuzzing = []
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
