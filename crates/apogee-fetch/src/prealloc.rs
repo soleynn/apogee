@@ -8,8 +8,6 @@
 
 use std::path::Path;
 
-use rustix::fs::{FallocateFlags, fallocate};
-
 use crate::error::FetchError;
 
 /// Preallocate `path` to `len` bytes, reserving the blocks. Idempotent: an existing shorter file is
@@ -29,7 +27,12 @@ pub(crate) async fn preallocate(path: &Path, len: u64) -> Result<(), FetchError>
     }
 }
 
+/// Unix: reserve blocks with `fallocate`, so a full disk fails here. Falls back to a length set on a
+/// filesystem that does not support it.
+#[cfg(unix)]
 fn preallocate_blocking(path: &Path, len: u64) -> std::io::Result<()> {
+    use rustix::fs::{FallocateFlags, fallocate};
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -45,6 +48,18 @@ fn preallocate_blocking(path: &Path, len: u64) -> std::io::Result<()> {
         Err(rustix::io::Errno::OPNOTSUPP | rustix::io::Errno::NOSYS) => file.set_len(len),
         Err(e) => Err(std::io::Error::from(e)),
     }
+}
+
+/// Off Unix (the Windows cross-build): no portable eager reservation, so set the length. The file is
+/// sparse, trading eager disk-full detection for portability; the patch path itself runs on Linux.
+#[cfg(not(unix))]
+fn preallocate_blocking(path: &Path, len: u64) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    file.set_len(len)
 }
 
 #[cfg(test)]
