@@ -18,6 +18,7 @@ sqex-crypto = { path = "../crates/sqex-crypto" }
 apogee-runtime = { path = "../crates/apogee-runtime" }
 apogee-sqpack = { path = "../crates/apogee-sqpack" }
 apogee-zipatch = { path = "../crates/apogee-zipatch" }
+apogee-fetch = { path = "../crates/apogee-fetch", features = ["fuzzing"] }
 
 [[bin]]
 name = "patchlist"
@@ -85,6 +86,13 @@ bench = false
 [[bin]]
 name = "apzi_index"
 path = "fuzz_targets/apzi_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fetch_journal"
+path = "fuzz_targets/fetch_journal.rs"
 test = false
 doc = false
 bench = false
