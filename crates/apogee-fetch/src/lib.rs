@@ -45,4 +45,5 @@ pub use validator::{Validator, VerifiedFile};
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing {
     pub use crate::journal::fuzz_decode;
+    pub use crate::multipart::fuzz_multipart;
 }

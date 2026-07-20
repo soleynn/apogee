@@ -97,5 +97,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fetch_multipart"
+path = "fuzz_targets/fetch_multipart.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
