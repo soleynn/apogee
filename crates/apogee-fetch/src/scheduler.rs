@@ -198,10 +198,15 @@ mod tests {
         let first = sched.acquire_connection().await;
         assert!(first.is_some());
         // The single connection slot is taken; a second acquire cannot resolve yet.
-        let pending =
-            tokio::time::timeout(std::time::Duration::from_millis(20), sched.acquire_connection())
-                .await;
-        assert!(pending.is_err(), "a second connection must wait for the first to release");
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            sched.acquire_connection(),
+        )
+        .await;
+        assert!(
+            pending.is_err(),
+            "a second connection must wait for the first to release"
+        );
         drop(first);
         assert!(sched.acquire_connection().await.is_some());
     }
