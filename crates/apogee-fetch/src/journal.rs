@@ -232,12 +232,13 @@ fn decode(bytes: &[u8]) -> Option<Loaded> {
         if start >= end || identity.expected_len.is_some_and(|len| end > len) {
             break;
         }
-        if runs.len() >= MAX_INTERVALS {
-            return None;
-        }
         runs.push(start..end);
         rest = tail;
     }
+    // Bound the COALESCED set, not the raw record stream. Both engines append one record per batch and
+    // never compact, so a healthy large download holds many records that fold to a handful of intervals
+    // (the single-connection path's growing `[0, watermark)` records fold to one). The raw count is
+    // already bounded by MAX_JOURNAL_LEN; only a genuinely fragmented set is rejected here.
     let intervals = IntervalSet::from_runs(runs);
     if intervals.len() > MAX_INTERVALS {
         return None;
@@ -374,6 +375,19 @@ mod tests {
     fn a_header_with_no_records_resumes_from_zero() {
         let decoded = decode(&image(&identity(), &[])).unwrap();
         assert_eq!(decoded.watermark(), 0);
+    }
+
+    #[test]
+    fn many_growing_prefix_records_survive_coalescing() {
+        // The append-only journal never compacts, so a large single-connection download accrues one
+        // `[0, watermark)` record per batch - far more than MAX_INTERVALS, all coalescing to one run.
+        // Decode must bound the coalesced set, not the raw record count, or resume breaks past ~8 GiB.
+        let mut id = identity();
+        id.expected_len = None; // no per-record length ceiling for this synthetic image
+        let records: Vec<(u64, u64)> = (1..=10_000u64).map(|k| (0, k * 4096)).collect();
+        let decoded = decode(&image(&id, &records)).unwrap();
+        assert_eq!(decoded.intervals.len(), 1);
+        assert_eq!(decoded.watermark(), 10_000 * 4096);
     }
 
     #[test]
