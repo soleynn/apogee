@@ -112,8 +112,9 @@ pub enum FetchError {
         source: std::io::Error,
     },
 
-    /// A validator or source shape the streaming path does not implement (block-hash validation and
-    /// the multi-range transport arrive with the repair work).
+    /// A source shape the streaming path cannot handle: the multi-range transport, and the defensive
+    /// guard for a block validator that somehow reached the engine without a declared length (the spec
+    /// builder normally rejects that first).
     #[error("unsupported: {what}")]
     Unsupported { what: &'static str },
 

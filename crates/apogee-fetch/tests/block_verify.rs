@@ -7,25 +7,12 @@ use std::time::Duration;
 use apogee_fetch::{
     DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, HeaderPolicy, Validator,
 };
-use apogee_test_support::chaos::{ChaosServer, generated_vec};
-use sha1::{Digest, Sha1};
+use apogee_test_support::chaos::{ChaosServer, block_hashes, generated_vec};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
 /// The one byte a `bytes=0-0` range-capability probe serves before the transfer starts.
 const PROBE: u64 = 1;
-
-/// The per-block SHA1s of the generated body: one hash per `block_size` bytes, the last block short.
-fn block_hashes(seed: u64, len: u64, block_size: u32) -> Vec<[u8; 20]> {
-    generated_vec(seed, 0, len as usize)
-        .chunks(block_size as usize)
-        .map(|chunk| {
-            let mut hasher = Sha1::new();
-            hasher.update(chunk);
-            hasher.finalize().into()
-        })
-        .collect()
-}
 
 /// A `BlockSha1` spec builder for `len` bytes from `seed`, verified at `block_size`, served by
 /// `server`. Returns the builder (unbuilt) so a caller stays clear of `unwrap` outside a test body.
@@ -288,20 +275,12 @@ async fn the_se_patch_header_policy_is_sent_on_every_request() {
     let dest = dir.path().join("out.bin");
     let (len, block_size) = (48 * MIB, 4 * MIB as u32);
     let server = ChaosServer::builder(29, len).start().await.unwrap();
-    let spec = DownloadSpec::builder(
-        server.url("f.bin"),
-        &dest,
-        Validator::BlockSha1 {
-            block_size,
-            hashes: block_hashes(29, len, block_size),
-        },
-    )
-    .expected_len(len)
-    .header_policy(HeaderPolicy::SePatch {
-        unique_id: Some("unique-123".to_owned()),
-    })
-    .build()
-    .unwrap();
+    let spec = block_spec(&server, &dest, 29, len, block_size)
+        .header_policy(HeaderPolicy::SePatch {
+            unique_id: Some("unique-123".to_owned()),
+        })
+        .build()
+        .unwrap();
     let fetcher = Fetcher::builder()
         .max_connections_per_file(4)
         .build()
@@ -342,18 +321,10 @@ async fn a_dirty_block_rotates_to_a_mirror_and_verifies() {
         .await
         .unwrap();
     let mirror = ChaosServer::builder(30, len).start().await.unwrap();
-    let spec = DownloadSpec::builder(
-        primary.url("f.bin"),
-        &dest,
-        Validator::BlockSha1 {
-            block_size,
-            hashes: block_hashes(30, len, block_size),
-        },
-    )
-    .expected_len(len)
-    .mirror(mirror.url("f.bin"))
-    .build()
-    .unwrap();
+    let spec = block_spec(&primary, &dest, 30, len, block_size)
+        .mirror(mirror.url("f.bin"))
+        .build()
+        .unwrap();
     let fetcher = Fetcher::builder()
         .max_connections_per_file(4)
         .build()

@@ -2,9 +2,8 @@
 //! still verifies byte-for-byte, with no other range re-served.
 
 use apogee_fetch::{DownloadSpec, Fetcher, Validator};
-use apogee_test_support::chaos::{ChaosServer, generated_vec};
+use apogee_test_support::chaos::{ChaosServer, block_hashes, generated_vec};
 use proptest::prelude::*;
-use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
@@ -13,17 +12,6 @@ const BLOCK_SIZE: u32 = 2 * MIB as u32; // six blocks across two segments
 const BLOCKS: u32 = 6;
 /// The one byte a `bytes=0-0` range-capability probe serves before the transfer starts.
 const PROBE: u64 = 1;
-
-fn block_hashes(seed: u64) -> Vec<[u8; 20]> {
-    generated_vec(seed, 0, LEN as usize)
-        .chunks(BLOCK_SIZE as usize)
-        .map(|chunk| {
-            let mut hasher = Sha1::new();
-            hasher.update(chunk);
-            hasher.finalize().into()
-        })
-        .collect()
-}
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
@@ -52,7 +40,7 @@ proptest! {
             let spec = DownloadSpec::builder(
                 server.url("f.bin"),
                 &dest,
-                Validator::BlockSha1 { block_size: BLOCK_SIZE, hashes: block_hashes(seed) },
+                Validator::BlockSha1 { block_size: BLOCK_SIZE, hashes: block_hashes(seed, LEN, BLOCK_SIZE) },
             )
             .expected_len(LEN)
             .build()

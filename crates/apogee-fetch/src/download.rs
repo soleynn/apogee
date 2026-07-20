@@ -35,7 +35,6 @@ use crate::validator::{Validator, VerifiedFile};
 /// What a download must prove before it publishes: a whole-file SHA256, a per-block SHA1 map, or
 /// nothing. Derived from the [`Validator`] once via [`plan`] and threaded through both engines so the
 /// two never disagree about what "verified" means.
-#[derive(Clone)]
 pub(crate) struct Verify {
     pub(crate) sha: Option<[u8; 32]>,
     pub(crate) blocks: Option<Arc<BlockPlan>>,
