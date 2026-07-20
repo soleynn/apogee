@@ -17,10 +17,13 @@ bytes.workspace = true
 sha2.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
-# safe fallocate wrapper for eager preallocation; keeps #![forbid(unsafe_code)] intact.
-rustix = { workspace = true, features = ["fs"] }
 # Implements zipatch's RangeSource (HttpRangeSource); wired later.
 apogee-zipatch = { path = "../apogee-zipatch" }
+
+# safe fallocate wrapper for eager preallocation (Unix only); keeps #![forbid(unsafe_code)] intact.
+# Off Unix the preallocation falls back to a plain length set, so rustix is not needed there.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [features]
 # Test-only: exposes Fetcher::from_client so a TLS test can inject a client that trusts a loopback
