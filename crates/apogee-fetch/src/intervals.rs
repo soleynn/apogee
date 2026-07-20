@@ -40,6 +40,44 @@ impl IntervalSet {
         self.coalesce();
     }
 
+    /// Remove `[start, end)` from the set: split a straddling run into up to two, trim a partial
+    /// overlap, and drop a fully-covered run. An empty or reversed range is ignored. Backs a dirty
+    /// block's clear-and-re-fetch, so `covered_len` drops by exactly the removed coverage. The runs
+    /// stay sorted, disjoint, and non-adjacent (each remainder lies within its original run's bounds).
+    #[allow(dead_code)]
+    pub(crate) fn remove(&mut self, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        let mut result: Vec<Range<u64>> = Vec::with_capacity(self.runs.len() + 1);
+        for run in self.runs.drain(..) {
+            if run.end <= start || run.start >= end {
+                result.push(run); // no overlap: keep whole
+                continue;
+            }
+            if run.start < start {
+                result.push(run.start..start); // left remainder
+            }
+            if run.end > end {
+                result.push(end..run.end); // right remainder
+            }
+            // A run fully inside [start, end) contributes no remainder: dropped.
+        }
+        self.runs = result;
+    }
+
+    /// Whether `[range.start, range.end)` is fully covered. Since runs are coalesced (disjoint and
+    /// non-adjacent), a covered range lies within one single run. An empty range is trivially covered.
+    #[allow(dead_code)]
+    pub(crate) fn covers(&self, range: &Range<u64>) -> bool {
+        if range.start >= range.end {
+            return true;
+        }
+        self.runs
+            .iter()
+            .any(|r| r.start <= range.start && r.end >= range.end)
+    }
+
     /// The gaps in `[0, total)` this set does not cover, in ascending order: the ranges a resume must
     /// still fetch. Runs past `total` are clamped.
     pub(crate) fn complement(&self, total: u64) -> Vec<Range<u64>> {
@@ -187,5 +225,77 @@ mod tests {
         let s = IntervalSet::from_runs(vec![20..30, 0..10, 5..25, 40..40]);
         assert_eq!(s.len(), 1);
         assert_eq!(s.covered_len(), 30);
+    }
+
+    #[test]
+    fn remove_splits_a_straddling_run_in_two() {
+        let mut s = IntervalSet::new();
+        s.insert(0, 100);
+        s.remove(40, 60);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.complement(100), vec![40..60]);
+        assert_eq!(s.covered_len(), 80);
+    }
+
+    #[test]
+    fn remove_trims_a_partial_overlap_on_either_side() {
+        let mut s = IntervalSet::new();
+        s.insert(10, 50);
+        s.remove(0, 20); // trims the left edge
+        s.remove(40, 100); // trims the right edge
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.complement(60), vec![0..20, 40..60]);
+        assert_eq!(s.covered_len(), 20);
+    }
+
+    #[test]
+    fn remove_drops_a_fully_covered_run_and_spans_several() {
+        let mut s = IntervalSet::from_runs(vec![0..10, 20..30, 40..50]);
+        s.remove(5, 45); // drops the middle run, trims the outer two
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.covered_len(), 10); // 0..5 and 45..50
+        assert_eq!(s.complement(50), vec![5..45]);
+    }
+
+    #[test]
+    fn remove_of_a_disjoint_range_is_a_no_op() {
+        let mut s = IntervalSet::new();
+        s.insert(0, 10);
+        s.remove(20, 30);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.covered_len(), 10);
+    }
+
+    #[test]
+    fn insert_then_remove_the_same_range_restores_the_set() {
+        let mut s = IntervalSet::new();
+        s.insert(0, 30);
+        s.insert(50, 80);
+        let before = s.clone();
+        s.insert(30, 50); // bridge into one run
+        s.remove(30, 50); // and clear it again
+        assert_eq!(s, before);
+    }
+
+    #[test]
+    fn empty_or_reversed_removes_are_ignored() {
+        let mut s = IntervalSet::new();
+        s.insert(0, 20);
+        s.remove(5, 5);
+        s.remove(9, 4);
+        assert_eq!(s.covered_len(), 20);
+    }
+
+    #[test]
+    fn covers_is_true_only_within_a_single_run() {
+        let mut s = IntervalSet::new();
+        s.insert(0, 40);
+        s.insert(60, 100);
+        assert!(s.covers(&(0..40)));
+        assert!(s.covers(&(10..30)));
+        assert!(s.covers(&(60..100)));
+        assert!(!s.covers(&(30..70))); // spans the gap
+        assert!(!s.covers(&(20..50))); // partial
+        assert!(s.covers(&(20..20))); // empty is trivially covered
     }
 }
