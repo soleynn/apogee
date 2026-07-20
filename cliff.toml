@@ -69,6 +69,10 @@ commit_parsers = [
   { message = "^chore: regenerate changelog", skip = true },
   { message = "^chore", group = "Miscellaneous" },
   { body = ".*[Ss]ecurity", group = "Security" },
+  # Catch-all so a non-conventional subject (e.g. a squash-merged PR title) still gets a group and the
+  # template's `group | lower` never renders against null. Keeps such commits in the changelog rather
+  # than crashing the whole regeneration.
+  { message = ".*", group = "Changed" },
 ]
 protect_breaking_commits = false
 filter_commits = false
