@@ -304,11 +304,12 @@ mod tests {
 
     #[test]
     fn a_well_formed_block_download_builds_with_mirrors() {
-        let spec = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(3))
-            .expected_len(40) // 40.div_ceil(16) == 3 blocks
-            .mirror(url("http://mirror.invalid/f"))
-            .build()
-            .unwrap();
+        let spec =
+            DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(3))
+                .expected_len(40) // 40.div_ceil(16) == 3 blocks
+                .mirror(url("http://mirror.invalid/f"))
+                .build()
+                .unwrap();
         assert_eq!(spec.mirrors().len(), 1);
         assert_eq!(spec.sources().len(), 2);
         assert_eq!(spec.sources()[0], *spec.url());
@@ -316,27 +317,30 @@ mod tests {
 
     #[test]
     fn block_validation_requires_a_declared_length() {
-        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(3))
-            .build()
-            .unwrap_err();
+        let err =
+            DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(3))
+                .build()
+                .unwrap_err();
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 
     #[test]
     fn a_hash_count_that_disagrees_with_the_length_is_refused() {
-        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(2))
-            .expected_len(40) // needs 3 blocks, not 2
-            .build()
-            .unwrap_err();
+        let err =
+            DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(2))
+                .expected_len(40) // needs 3 blocks, not 2
+                .build()
+                .unwrap_err();
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 
     #[test]
     fn an_empty_block_hash_list_is_refused() {
-        let err = DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(0))
-            .expected_len(0)
-            .build()
-            .unwrap_err();
+        let err =
+            DownloadSpec::builder(url("http://patch.invalid/f"), "/tmp/f", block_validator(0))
+                .expected_len(0)
+                .build()
+                .unwrap_err();
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 

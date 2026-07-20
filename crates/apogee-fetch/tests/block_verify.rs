@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use apogee_fetch::{DownloadSpec, FetchError, Fetcher, HeaderPolicy, Validator};
+use apogee_fetch::{
+    DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, HeaderPolicy, Validator,
+};
 use apogee_test_support::chaos::{ChaosServer, generated_vec};
 use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
@@ -25,14 +27,15 @@ fn block_hashes(seed: u64, len: u64, block_size: u32) -> Vec<[u8; 20]> {
         .collect()
 }
 
-/// A `BlockSha1` spec for `len` bytes from `seed`, verified at `block_size`, served by `server`.
+/// A `BlockSha1` spec builder for `len` bytes from `seed`, verified at `block_size`, served by
+/// `server`. Returns the builder (unbuilt) so a caller stays clear of `unwrap` outside a test body.
 fn block_spec(
     server: &ChaosServer,
     dest: &std::path::Path,
     seed: u64,
     len: u64,
     block_size: u32,
-) -> DownloadSpec {
+) -> DownloadSpecBuilder {
     DownloadSpec::builder(
         server.url("f.bin"),
         dest,
@@ -42,8 +45,6 @@ fn block_spec(
         },
     )
     .expected_len(len)
-    .build()
-    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -52,8 +53,13 @@ async fn a_multi_block_multi_segment_download_verifies_and_publishes() {
     let dest = dir.path().join("out.bin");
     let (len, block_size) = (48 * MIB, 4 * MIB as u32); // twelve blocks across four segments
     let server = ChaosServer::builder(21, len).start().await.unwrap();
-    let spec = block_spec(&server, &dest, 21, len, block_size);
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let spec = block_spec(&server, &dest, 21, len, block_size)
+        .build()
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     let verified = fetcher
         .download(&spec, None, CancellationToken::new())
@@ -80,8 +86,13 @@ async fn only_the_dirty_block_is_re_fetched_then_verifies() {
         .start()
         .await
         .unwrap();
-    let spec = block_spec(&server, &dest, 22, len, block_size);
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let spec = block_spec(&server, &dest, 22, len, block_size)
+        .build()
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     let verified = fetcher
         .download(&spec, None, CancellationToken::new())
@@ -108,8 +119,13 @@ async fn a_block_that_spans_two_segments_verifies() {
     // block_size (24 MiB) larger than seg_size (48/4 = 12 MiB): each block spans two segments.
     let (len, block_size) = (48 * MIB, 24 * MIB as u32);
     let server = ChaosServer::builder(23, len).start().await.unwrap();
-    let spec = block_spec(&server, &dest, 23, len, block_size);
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let spec = block_spec(&server, &dest, 23, len, block_size)
+        .build()
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     let verified = fetcher
         .download(&spec, None, CancellationToken::new())
@@ -128,8 +144,13 @@ async fn a_short_final_block_verifies() {
     // 50 MiB at a 16 MiB block: three full blocks and a 2 MiB tail.
     let (len, block_size) = (50 * MIB, 16 * MIB as u32);
     let server = ChaosServer::builder(24, len).start().await.unwrap();
-    let spec = block_spec(&server, &dest, 24, len, block_size);
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let spec = block_spec(&server, &dest, 24, len, block_size)
+        .build()
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     let verified = fetcher
         .download(&spec, None, CancellationToken::new())
@@ -148,7 +169,9 @@ async fn a_single_block_file_verifies() {
     let len = 40_000u64; // smaller than one block
     let block_size = 64 * 1024u32;
     let server = ChaosServer::builder(25, len).start().await.unwrap();
-    let spec = block_spec(&server, &dest, 25, len, block_size);
+    let spec = block_spec(&server, &dest, 25, len, block_size)
+        .build()
+        .unwrap();
 
     let verified = Fetcher::builder()
         .build()
@@ -174,8 +197,13 @@ async fn a_killed_block_download_resumes_and_verifies() {
         .start()
         .await
         .unwrap();
-    let spec = block_spec(&server, &dest, 26, len, block_size);
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let spec = block_spec(&server, &dest, 26, len, block_size)
+        .build()
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     // Cancel mid-download, so some blocks are durable but the file is not yet complete.
     let cancel = CancellationToken::new();
@@ -209,7 +237,9 @@ async fn a_range_ignoring_host_verifies_blocks_from_disk() {
         .start()
         .await
         .unwrap();
-    let spec = block_spec(&server, &dest, 27, len, block_size);
+    let spec = block_spec(&server, &dest, 27, len, block_size)
+        .build()
+        .unwrap();
 
     let verified = Fetcher::builder()
         .build()
@@ -235,7 +265,9 @@ async fn a_range_ignoring_host_rejects_a_corrupt_block() {
         .start()
         .await
         .unwrap();
-    let spec = block_spec(&server, &dest, 28, len, block_size);
+    let spec = block_spec(&server, &dest, 28, len, block_size)
+        .build()
+        .unwrap();
 
     let err = Fetcher::builder()
         .build()
@@ -270,7 +302,10 @@ async fn the_se_patch_header_policy_is_sent_on_every_request() {
     })
     .build()
     .unwrap();
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     fetcher
         .download(&spec, None, CancellationToken::new())
@@ -319,7 +354,10 @@ async fn a_dirty_block_rotates_to_a_mirror_and_verifies() {
     .mirror(mirror.url("f.bin"))
     .build()
     .unwrap();
-    let fetcher = Fetcher::builder().max_connections_per_file(4).build().unwrap();
+    let fetcher = Fetcher::builder()
+        .max_connections_per_file(4)
+        .build()
+        .unwrap();
 
     let verified = fetcher
         .download(&spec, None, CancellationToken::new())

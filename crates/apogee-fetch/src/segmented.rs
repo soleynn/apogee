@@ -299,7 +299,10 @@ async fn transfer(
     let dest = spec.dest();
     let part = download::sidecar(dest, ".part");
     let apdl = download::sidecar(dest, ".apdl");
-    let block_verify = verify.blocks.clone().map(|plan| Arc::new(BlockVerify::new(plan)));
+    let block_verify = verify
+        .blocks
+        .clone()
+        .map(|plan| Arc::new(BlockVerify::new(plan)));
 
     // A fresh transfer records the probe's validators so a later resume can revalidate with `If-Range`.
     let identity = Identity {
@@ -545,7 +548,12 @@ async fn block_verifier(state: Arc<TransferState>, cancel: CancellationToken) {
 
 /// Hash one claimed block on a blocking worker, then report the verdict. Kept off the transfer path:
 /// the block is fully durable and out of the work queue, so this read never races a worker's write.
-fn spawn_hash(state: Arc<TransferState>, verify: Arc<BlockVerify>, i: u32, cancel: CancellationToken) {
+fn spawn_hash(
+    state: Arc<TransferState>,
+    verify: Arc<BlockVerify>,
+    i: u32,
+    cancel: CancellationToken,
+) {
     let part = state.part.clone();
     let range = verify.block_range(i);
     let want = verify.expected(i);
@@ -595,7 +603,9 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
     }
     // Clear the block before resetting it, so a verifier wake cannot re-dispatch it on stale coverage.
     lock(&state.covered).remove(range.start, range.end);
-    state.durable.fetch_sub(range.end - range.start, Ordering::SeqCst);
+    state
+        .durable
+        .fetch_sub(range.end - range.start, Ordering::SeqCst);
     verify.reset_pending(i);
     let source = mirror_source(state, attempts);
     state.push_task(Task { range, source });

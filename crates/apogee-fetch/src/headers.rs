@@ -31,7 +31,10 @@ pub enum HeaderPolicy {
 
 /// Apply `policy` to a request builder. Header names here never collide with the `Range`/`If-Range`
 /// the transfer sets, so ordering against those is irrelevant.
-pub(crate) fn apply_headers(mut req: RequestBuilder, policy: Option<&HeaderPolicy>) -> RequestBuilder {
+pub(crate) fn apply_headers(
+    mut req: RequestBuilder,
+    policy: Option<&HeaderPolicy>,
+) -> RequestBuilder {
     match policy {
         Some(HeaderPolicy::SePatch { unique_id }) => {
             req = req.header(USER_AGENT, SE_PATCH_USER_AGENT);
