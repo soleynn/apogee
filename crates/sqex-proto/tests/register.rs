@@ -12,9 +12,9 @@ use apogee_test_support::sandbox::build_game_install;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use http::{HeaderName, HeaderValue};
 use sqex_proto::{
-    Authenticated, ClientContext, ComputerId, Credentials, InstallPaths, LauncherTime, LoginKind,
-    OauthContext, ProtoError, ProtoResponse, Registration, SanityKind, Step, VersionRepo,
-    VersionReport, begin_login, register_session,
+    Authenticated, BASE_GAME_VERSION, ClientContext, ComputerId, Credentials, InstallPaths,
+    LauncherTime, LoginKind, OauthContext, ProtoError, ProtoResponse, Registration, SanityKind,
+    Step, VersionRepo, VersionReport, begin_login, register_session,
 };
 
 const BOOT_VER: &str = "2024.02.01.0000.0000";
@@ -60,6 +60,15 @@ fn success_body(session_id: &str) -> String {
 /// hashed, not sanity-checked (`sha1("") = da39a3ee…`).
 fn exes() -> [&'static [u8]; 4] {
     [b"boot" as &[u8], b"boot64", b"launcher64", b""]
+}
+
+/// Remove the game tree (its `.ver` and the whole `sqpack` subtree) from an install, leaving the boot
+/// component present. This is the state install-from-nothing reaches once the boot component is brought
+/// up but before the game is. `?`-based (no unwrap) so it satisfies the integration-test helper lint.
+fn strip_game_tree(root: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_file(root.join("game/ffxivgame.ver"))?;
+    std::fs::remove_dir_all(root.join("game/sqpack"))?;
+    Ok(())
 }
 
 /// A version report built purely (no filesystem), used for the request golden and the disposition
@@ -549,4 +558,168 @@ fn a_sanity_violation_stops_before_registration() {
 
     assert!(matches!(err, ProtoError::InvalidVersionFiles { .. }));
     assert_eq!(transport.recorded().len(), 2);
+}
+
+#[test]
+fn install_mode_reports_base_for_absent_game_and_expansions() {
+    // Install-from-nothing after the boot component is up: the game and expansion `.ver` files are
+    // absent, so the report carries BASE_GAME_VERSION for the game version (the URL segment) and every
+    // expansion line, while the boot line still names the installed boot version and the four EXEs. The
+    // bytes are byte-identical to what the reference launcher's non-forced register sends for this
+    // state, its per-repo Repository.GetVer base-fallback (Repository.cs:67-76).
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    strip_game_tree(dir.path()).expect("strip game tree");
+    let report =
+        VersionReport::from_install_or_base(&InstallPaths::new(dir.path()), 2).expect("report");
+
+    assert_eq!(report.game_version(), BASE_GAME_VERSION);
+    assert_golden_bytes(
+        report.body().as_bytes(),
+        concat!(
+            "2024.02.01.0000.0000=",
+            "ffxivboot.exe/4/5c73b0c6f476ded38de389f894770f06f4d02b2f,",
+            "ffxivboot64.exe/6/40154fb132681be4f678662604e05aac4a090bf2,",
+            "ffxivlauncher64.exe/10/c2259ffc29178a21729049759f7a790d542f9d40,",
+            "ffxivupdater64.exe/0/da39a3ee5e6b4b0d3255bfef95601890afd80709\n",
+            "ex1\t2012.01.01.0000.0000\n",
+            "ex2\t2012.01.01.0000.0000\n",
+        )
+        .as_bytes(),
+    );
+}
+
+#[test]
+fn install_mode_reads_a_present_version_verbatim() {
+    // Base-fallback is per-repository, not a blanket base report: a repository whose `.ver` is present
+    // is reported as-is. On a complete install, install-mode and the strict path produce the same game
+    // and expansion versions; they differ only in how they treat an absent or corrupt file.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    let report =
+        VersionReport::from_install_or_base(&InstallPaths::new(dir.path()), 1).expect("report");
+
+    assert_eq!(report.game_version(), GAME_VER);
+    assert!(report.body().contains(&format!("ex1\t{EX1}\n")));
+    assert!(!report.body().contains(BASE_GAME_VERSION));
+}
+
+#[test]
+fn install_mode_still_requires_the_boot_exes() {
+    // The boot line is never base-filled: the four boot EXEs must be present to be hashed, matching the
+    // reference launcher (which throws on a missing boot EXE even when forcing the base version).
+    // Install-from-nothing brings up the boot component first, so this holds by the time the game is
+    // reported at the sentinel.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    strip_game_tree(dir.path()).expect("strip game tree");
+    std::fs::remove_file(dir.path().join("boot/ffxivboot64.exe")).expect("remove a boot exe");
+    let err = VersionReport::from_install_or_base(&InstallPaths::new(dir.path()), 1)
+        .expect_err("missing boot exe");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Boot,
+            kind: SanityKind::Missing,
+        }
+    ));
+}
+
+#[test]
+fn install_mode_accepts_what_the_strict_path_rejects() {
+    // The one behavioral divergence, pinned as opt-in: an absent game `.ver` is a repairable fault to
+    // the strict path but the sentinel to install-mode. Same install, two constructors, two outcomes.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    strip_game_tree(dir.path()).expect("strip game tree");
+    let paths = InstallPaths::new(dir.path());
+
+    let strict =
+        VersionReport::from_install(&paths, 1).expect_err("strict rejects a missing game ver");
+    assert!(matches!(
+        strict,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Game,
+            kind: SanityKind::Missing,
+        }
+    ));
+
+    let install = VersionReport::from_install_or_base(&paths, 1).expect("install-mode base-fills");
+    assert_eq!(install.game_version(), BASE_GAME_VERSION);
+}
+
+#[test]
+fn install_mode_ignores_the_bck_gate() {
+    // Install-mode consults no `.bck`: a corrupt backup that the strict path rejects is invisible here
+    // (the strict path's tamper posture does not apply to an install being brought up from nothing).
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::write(dir.path().join("boot/ffxivboot.bck"), [0u8, 0]).expect("nul bck");
+    assert!(VersionReport::from_install_or_base(&InstallPaths::new(dir.path()), 1).is_ok());
+}
+
+#[test]
+fn boot_version_or_sentinel_reports_base_when_absent() {
+    // The boot-check counterpart: an absent boot `.ver` reports the sentinel so the server returns the
+    // full boot chain into an empty install.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::remove_file(dir.path().join("boot/ffxivboot.ver")).expect("remove boot ver");
+    let version = InstallPaths::new(dir.path())
+        .boot_version_or_sentinel()
+        .expect("boot version");
+    assert_eq!(version, BASE_GAME_VERSION);
+}
+
+#[test]
+fn boot_version_or_sentinel_reads_a_present_version() {
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    let version = InstallPaths::new(dir.path())
+        .boot_version_or_sentinel()
+        .expect("boot version");
+    assert_eq!(version, BOOT_VER);
+}
+
+#[test]
+fn boot_version_or_sentinel_treats_whitespace_as_base() {
+    // A whitespace-only boot `.ver` is the sentinel, mirroring the reference launcher's GetVer.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::write(dir.path().join("boot/ffxivboot.ver"), "  \r\n\t").expect("whitespace boot ver");
+    let version = InstallPaths::new(dir.path())
+        .boot_version_or_sentinel()
+        .expect("boot version");
+    assert_eq!(version, BASE_GAME_VERSION);
+}
+
+#[test]
+fn boot_version_is_strict_about_a_missing_repo() {
+    // The default boot-version read keeps the strict posture: an absent boot repository is a repairable
+    // fault, never a silent base-version substitution.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::remove_file(dir.path().join("boot/ffxivboot.ver")).expect("remove boot ver");
+    let err = InstallPaths::new(dir.path())
+        .boot_version()
+        .expect_err("missing boot ver");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Boot,
+            kind: SanityKind::Missing,
+        }
+    ));
+}
+
+#[test]
+fn boot_version_or_sentinel_surfaces_an_unreadable_file() {
+    // A present-but-unreadable boot `.ver` is not silently base-versioned: even install-mode reports it
+    // as a repairable fault (only an absent or whitespace file is the sentinel). A directory in place of
+    // the file makes the read fail with a non-not-found error and stays reliable when CI runs as root.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    let ver = dir.path().join("boot/ffxivboot.ver");
+    std::fs::remove_file(&ver).expect("remove boot ver");
+    std::fs::create_dir(&ver).expect("dir in place of boot ver");
+    let err = InstallPaths::new(dir.path())
+        .boot_version_or_sentinel()
+        .expect_err("unreadable boot ver");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Boot,
+            kind: SanityKind::Unreadable,
+        }
+    ));
 }
