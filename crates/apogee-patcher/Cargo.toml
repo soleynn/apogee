@@ -8,10 +8,34 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde = { workspace = true }
+# Async orchestration: the spawned install task, the progress channels, and the cancel token/stream.
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+# Parse a patchlist URL into the fetch request and mirror its path under the patch store.
+url.workspace = true
 apogee-fetch = { path = "../apogee-fetch" }
 apogee-zipatch = { path = "../apogee-zipatch" }
-# Composition edge for the version cross-check; unused for now.
+# Patchlist entries (and, later, the version cross-check) cross this seam.
 sqex-proto = { path = "../sqex-proto" }
+
+# Disk-space preflight reads free space via a safe statvfs wrapper (Unix only); off Unix the pool is
+# not blocked on and fetch's disk-full detection is the backstop. Keeps #![forbid(unsafe_code)].
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+# The install e2e serves synthetic patches over the chaos server, applies them, and diffs the tree.
+apogee-test-support = { path = "../apogee-test-support" }
+# test-fixtures exposes the synthetic patch builders shared with zipatch's own tests; test-only.
+apogee-zipatch = { path = "../apogee-zipatch", features = ["test-fixtures"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-util.workspace = true
+tokio-stream.workspace = true
+url.workspace = true
+# Compute per-block SHA1 over the synthetic patches to stand in for a game patchlist's hashes.
+sha1.workspace = true
 
 [lints]
 workspace = true

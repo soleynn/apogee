@@ -154,13 +154,12 @@ impl Core {
         );
         let launch: Arc<dyn LaunchBackend> =
             Arc::new(RuntimeLauncher::new(runtime.clone(), runners_dir));
-        // A patch operation's game root is known only once a profile is chosen; a baseline empty root
-        // lets the subsystem graph construct, and a flow supplies the real paths later.
+        // A patch operation's game root is known only once a profile is chosen, so it travels with
+        // each request rather than the construction config.
         let patcher = Patcher::new(
             fetcher.clone(),
             PatcherConfig {
                 patch_store,
-                game_root: PathBuf::new(),
                 keep_patches: false,
                 ignore_space: false,
             },
