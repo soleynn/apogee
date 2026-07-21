@@ -489,7 +489,10 @@ pub(crate) fn plan(validator: &Validator, expected_len: Option<u64>) -> Result<V
             sha: Some(*digest),
             blocks: None,
         }),
-        Validator::None => Ok(Verify {
+        // No fetch-side hash: length is checked during the transfer, and a downstream gate
+        // authenticates the bytes. Reached only via `download_external`, which returns a plain path
+        // rather than a `VerifiedFile`.
+        Validator::None | Validator::External => Ok(Verify {
             sha: None,
             blocks: None,
         }),
