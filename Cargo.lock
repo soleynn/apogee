@@ -168,10 +168,18 @@ name = "apogee-patcher"
 version = "0.0.0"
 dependencies = [
  "apogee-fetch",
+ "apogee-test-support",
  "apogee-zipatch",
+ "rustix",
  "serde",
+ "sha1",
  "sqex-proto",
+ "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]
