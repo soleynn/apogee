@@ -178,7 +178,8 @@ impl DownloadSpecBuilder {
     /// [`SpecError::UnsupportedScheme`] for a non-http(s) primary or mirror URL;
     /// [`SpecError::UnverifiedOverPlainHttp`] for `Validator::None` over `http://`;
     /// [`SpecError::UnverifiedNotAcknowledged`] for `Validator::None` over `https://` without
-    /// [`allow_unverified`](Self::allow_unverified); [`SpecError::BlockLayout`] for a
+    /// [`allow_unverified`](Self::allow_unverified); [`SpecError::ExternalRequiresLength`] for a
+    /// `Validator::External` with no declared length; [`SpecError::BlockLayout`] for a
     /// `Validator::BlockSha1` whose block map is inconsistent with the declared length.
     pub fn build(self) -> Result<DownloadSpec, SpecError> {
         for url in std::iter::once(&self.url).chain(self.mirrors.iter()) {
@@ -199,6 +200,11 @@ impl DownloadSpecBuilder {
             if !self.allow_unverified {
                 return Err(SpecError::UnverifiedNotAcknowledged);
             }
+        }
+        // `External` is allowed over plain HTTP (it names a downstream gate), but the length check is
+        // then the sole fetch-side guarantee, so a declared length is mandatory.
+        if matches!(self.validator, Validator::External) && self.expected_len.is_none() {
+            return Err(SpecError::ExternalRequiresLength);
         }
         if let Validator::BlockSha1 { block_size, hashes } = &self.validator {
             // A block map that disagrees with the length would mis-address a block on verify.
@@ -281,6 +287,33 @@ mod tests {
             .allow_unverified()
             .build()
             .unwrap();
+    }
+
+    #[test]
+    fn external_over_plain_http_builds_with_a_declared_length() {
+        // The boot-patch shape: no fetch-side hash, plain HTTP, length-checked, downstream-verified.
+        let spec = DownloadSpec::builder(
+            url("http://patch.invalid/boot.patch"),
+            "/tmp/b",
+            Validator::External,
+        )
+        .expected_len(300)
+        .build()
+        .unwrap();
+        assert!(matches!(spec.validator(), Validator::External));
+        assert_eq!(spec.expected_len(), Some(300));
+    }
+
+    #[test]
+    fn external_without_a_declared_length_is_refused() {
+        let err = DownloadSpec::builder(
+            url("http://patch.invalid/boot.patch"),
+            "/tmp/b",
+            Validator::External,
+        )
+        .build()
+        .unwrap_err();
+        assert!(matches!(err, SpecError::ExternalRequiresLength));
     }
 
     #[test]

@@ -22,6 +22,14 @@ pub enum Validator {
     Sha256([u8; 32]),
     /// No verification (refused unless explicitly opted into, never over plain HTTP).
     None,
+    /// The bytes are length-checked here and authenticated by a named out-of-band gate downstream:
+    /// the marker a boot patch rides, whose integrity is the patcher's ZiPatch chunk-CRC scan
+    /// (boot patchlists carry no per-block hashes). Unlike [`None`](Validator::None) it is allowed
+    /// over plain `http://`, because it documents a real downstream check rather than skipping one;
+    /// it requires a declared length and is served only through
+    /// [`Fetcher::download_external`](crate::Fetcher::download_external), which hands back a plain
+    /// path, never a [`VerifiedFile`].
+    External,
 }
 
 impl Validator {
@@ -44,6 +52,7 @@ impl Validator {
                 hasher.update(digest);
             }
             Validator::None => hasher.update([0x00]),
+            Validator::External => hasher.update([0x03]),
         }
         hasher.finalize().into()
     }

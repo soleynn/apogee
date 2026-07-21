@@ -31,6 +31,11 @@ pub enum SpecError {
     #[error("unsupported url scheme: {scheme}")]
     UnsupportedScheme { scheme: String },
 
+    /// A `Validator::External` download without a declared length. The length check is the only
+    /// fetch-side guarantee for externally-verified bytes, so it is required rather than optional.
+    #[error("externally-verified downloads require a declared length")]
+    ExternalRequiresLength,
+
     /// A `Validator::BlockSha1` whose block layout is inconsistent: no declared length, a zero block
     /// size, an empty hash list, or a hash count that disagrees with the block count the length and
     /// block size imply. Caught before any request so a mis-specified block map cannot start a transfer.

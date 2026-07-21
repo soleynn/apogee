@@ -1,5 +1,6 @@
 //! The download engine handle.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use crate::probe::CapabilityCache;
 use crate::progress::Progress;
 use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
-use crate::validator::VerifiedFile;
+use crate::validator::{Validator, VerifiedFile};
 
 /// The default connection-inactivity timeout before a segment is re-queued.
 const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -65,15 +66,53 @@ impl Fetcher {
     /// `spec`'s priority, so it waits its turn when the fetcher is already at its concurrency cap.
     ///
     /// # Errors
-    /// A [`FetchError`] for any transport, length, verification, i/o, or cancellation failure.
+    /// A [`FetchError`] for any transport, length, verification, i/o, or cancellation failure, or
+    /// [`FetchError::Unsupported`] if `spec` carries [`Validator::External`] (that marker never yields
+    /// a [`VerifiedFile`]; use [`download_external`](Self::download_external)).
     pub async fn download(
         &self,
         spec: &DownloadSpec,
         progress: Option<mpsc::UnboundedSender<Progress>>,
         cancel: CancellationToken,
     ) -> Result<VerifiedFile, FetchError> {
+        if matches!(spec.validator(), Validator::External) {
+            return Err(FetchError::Unsupported {
+                what: "Validator::External must be fetched through download_external",
+            });
+        }
         let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
         crate::segmented::dispatch(&self.client, spec, progress, cancel, &self.shared).await
+    }
+
+    /// Download `spec`'s externally-verified source and hand back the landed path, never a
+    /// [`VerifiedFile`]. The bytes are length-checked during the transfer; a named downstream gate
+    /// authenticates them (a boot patch's ZiPatch chunk-CRC scan, run by `apogee-patcher`). This is
+    /// the one sanctioned way to fetch plain-HTTP bytes with no fetch-side hash: `spec` must carry
+    /// [`Validator::External`], whose spec-build rules already require a declared length.
+    ///
+    /// Progress and cancellation behave exactly as in [`download`](Self::download).
+    ///
+    /// # Errors
+    /// [`FetchError::Unsupported`] if `spec`'s validator is not [`Validator::External`]; otherwise any
+    /// transport, length, i/o, or cancellation [`FetchError`].
+    pub async fn download_external(
+        &self,
+        spec: &DownloadSpec,
+        progress: Option<mpsc::UnboundedSender<Progress>>,
+        cancel: CancellationToken,
+    ) -> Result<PathBuf, FetchError> {
+        if !matches!(spec.validator(), Validator::External) {
+            return Err(FetchError::Unsupported {
+                what: "download_external requires Validator::External",
+            });
+        }
+        let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
+        // The `External` plan verifies nothing beyond length, so the proof `dispatch` mints is over
+        // length-checked bytes only; it is unwrapped to a bare path here and never handed out, so no
+        // consumer receives a `VerifiedFile` the bytes did not earn.
+        let landed =
+            crate::segmented::dispatch(&self.client, spec, progress, cancel, &self.shared).await?;
+        Ok(landed.path().to_path_buf())
     }
 
     /// Submit `spec` to run on the scheduler, returning a [`Job`] handle to watch its progress, cancel
@@ -83,6 +122,17 @@ impl Fetcher {
     pub fn submit(&self, spec: DownloadSpec) -> Job {
         let cancel = CancellationToken::new();
         let (tx, rx) = mpsc::unbounded_channel();
+        // `External` never yields a `VerifiedFile`, and a `Job` resolves to one, so refuse it here
+        // (as `download` does) rather than mint a proof the bytes did not earn.
+        if matches!(spec.validator(), Validator::External) {
+            drop(tx);
+            let handle = tokio::spawn(async move {
+                Err(FetchError::Unsupported {
+                    what: "Validator::External must be fetched through download_external",
+                })
+            });
+            return Job::new(handle, rx, cancel);
+        }
         let client = self.client.clone();
         let shared = Arc::clone(&self.shared);
         let job_cancel = cancel.clone();
@@ -220,5 +270,54 @@ impl FetcherBuilder {
             })?;
         let shared = self.shared();
         Ok(Fetcher { client, shared })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validator::Validator;
+    use url::Url;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    // Both guards fire before any scheduler or network contact, so these need no server.
+
+    #[tokio::test]
+    async fn download_refuses_external_and_points_at_download_external() {
+        let fetcher = Fetcher::builder().build().unwrap();
+        let spec = DownloadSpec::builder(
+            url("http://patch.invalid/boot.patch"),
+            "/tmp/b",
+            Validator::External,
+        )
+        .expected_len(10)
+        .build()
+        .unwrap();
+        let err = fetcher
+            .download(&spec, None, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Unsupported { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn download_external_requires_the_external_marker() {
+        let fetcher = Fetcher::builder().build().unwrap();
+        let spec = DownloadSpec::builder(
+            url("https://host.invalid/f"),
+            "/tmp/f",
+            Validator::Sha256([0; 32]),
+        )
+        .expected_len(10)
+        .build()
+        .unwrap();
+        let err = fetcher
+            .download_external(&spec, None, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Unsupported { .. }), "got {err:?}");
     }
 }
