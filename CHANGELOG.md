@@ -43,6 +43,10 @@ is tagged with its change type. Versioning aims to follow
 - Cover the multi-range error and rejection paths _(testing)_
 - Share one Content-Range parser _(changed)_
 
+### apogee-patcher
+- Install pipeline over fetch and zipatch _(added)_
+- End-to-end install, ordering, cancel, rejection _(testing)_
+
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
 - Read the common header and enumerate an install _(added)_
