@@ -93,6 +93,10 @@ is tagged with its change type. Versioning aims to follow
 ### fuzz
 - Add the fetch_journal target for the resume journal decoder _(testing)_
 
+### sqex-proto
+- Report the base-version sentinel for a missing repository _(added)_
+- Cover the install-mode sentinel report _(testing)_
+
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
 - Extend the byte-order audit to apogee-zipatch _(build)_
