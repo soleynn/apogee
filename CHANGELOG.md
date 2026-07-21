@@ -42,10 +42,12 @@ is tagged with its change type. Versioning aims to follow
 - Reject a range response that under-delivers _(fixed)_
 - Cover the multi-range error and rejection paths _(testing)_
 - Share one Content-Range parser _(changed)_
+- External-verification marker for unhashed sources _(added)_
 
 ### apogee-patcher
 - Install pipeline over fetch and zipatch _(added)_
 - End-to-end install, ordering, cancel, rejection _(testing)_
+- Boot chunk-CRC admission and install-from-nothing _(added)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
