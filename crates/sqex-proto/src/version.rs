@@ -28,6 +28,13 @@ const BOOT_EXES: [&str; 4] = [
 /// The highest expansion index a version report carries.
 const MAX_EXPANSION: u8 = 5;
 
+/// The base-game version string (`YYYY.MM.DD.PPPP.RRRR` at all zeros): the sentinel a repository
+/// reports when it is not installed, so the server returns the full patch chain for
+/// install-from-nothing. It is substituted only through the opt-in install-mode paths
+/// ([`VersionReport::from_install_or_base`], [`InstallPaths::boot_version_or_sentinel`]); the strict
+/// paths reject a missing repository instead of silently base-versioning it.
+pub const BASE_GAME_VERSION: &str = "2012.01.01.0000.0000";
+
 /// Which repository a bad version file belongs to, for triage. `Boot` covers `ffxivboot.ver` and the
 /// four boot EXEs (the boot directory is the unit of repair).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +111,22 @@ impl InstallPaths {
 
     fn ex_bck(&self, n: u8) -> PathBuf {
         self.ex_dir(n).join(format!("ex{n}.bck"))
+    }
+
+    /// Read the boot repository's version for the boot-version check, using the strict posture: a
+    /// missing or corrupt `ffxivboot.ver` is a repairable [`ProtoError::InvalidVersionFiles`], never a
+    /// silent base-version fallback. This is the default; [`InstallPaths::boot_version_or_sentinel`] is
+    /// the opt-in install-from-nothing variant.
+    pub fn boot_version(&self) -> Result<String, ProtoError> {
+        read_sane_ver(&self.boot_ver(), VersionRepo::Boot)
+    }
+
+    /// Read the boot version for the boot-version check, substituting [`BASE_GAME_VERSION`] when
+    /// `ffxivboot.ver` is absent or whitespace-only. Opt-in, for install-from-nothing: an absent boot
+    /// repository must report the base sentinel so the server returns the full boot chain. A present but
+    /// unreadable file is still a repairable fault.
+    pub fn boot_version_or_sentinel(&self) -> Result<String, ProtoError> {
+        read_ver_or_sentinel(&self.boot_ver(), VersionRepo::Boot)
     }
 }
 
@@ -194,6 +217,47 @@ impl VersionReport {
             &expansion_vers,
         ))
     }
+
+    /// Read `paths` into a report for install-from-nothing, reporting [`BASE_GAME_VERSION`] for any
+    /// repository whose `.ver` is absent or whitespace-only, so the server returns the full patch chain
+    /// into an empty install.
+    ///
+    /// Opt-in and deliberately unlike [`VersionReport::from_install`]: a missing game or expansion
+    /// `.ver` is the expected state here, not a fault, so no sanity gate runs and no `.bck` is consulted;
+    /// a present `.ver` is reported as-is. The boot line still names the installed boot version
+    /// (base-fallback when absent) and the four boot EXEs, which must be present: install-from-nothing
+    /// brings up the boot component first, then reports the game at the sentinel.
+    ///
+    /// This is *per-repository* base-fallback, mirroring the reference launcher's ordinary
+    /// `Repository.GetVer` (`Repository.cs:67-76`: absent/whitespace → base, present → verbatim), which
+    /// is the semantics its non-forced register uses. For install-from-nothing (the game and every
+    /// expansion repo absent) the bytes are byte-identical to what the reference registers. It is
+    /// **not** the reference's blanket `forceBaseVersion` Repair report (`Launcher.cs:271-283,402`),
+    /// which forces base even for a present `.ver`; Apogee's repair is block-level over the index, not a
+    /// base re-registration, so do not reuse this for repair.
+    pub fn from_install_or_base(
+        paths: &InstallPaths,
+        max_expansion: u8,
+    ) -> Result<Self, ProtoError> {
+        let expansions = max_expansion.min(MAX_EXPANSION);
+
+        let game_version = read_ver_or_sentinel(&paths.game_ver(), VersionRepo::Game)?;
+        let boot_ver = read_ver_or_sentinel(&paths.boot_ver(), VersionRepo::Boot)?;
+
+        let mut expansion_vers = Vec::with_capacity(expansions as usize);
+        for n in 1..=expansions {
+            expansion_vers.push(read_ver_or_sentinel(&paths.ex_ver(n), VersionRepo::Ex(n))?);
+        }
+
+        let exe_hashes = hash_boot_exes(paths)?;
+
+        Ok(Self::from_parts(
+            game_version,
+            &boot_ver,
+            exe_hashes,
+            &expansion_vers,
+        ))
+    }
 }
 
 /// Read a required `.ver` file, gate it on sanity, and return its decoded contents (embedded into the
@@ -202,6 +266,29 @@ fn read_sane_ver(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
     let text = decode_ver(&read_file(path, repo)?);
     check_sanity(&text).map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind })?;
     Ok(text)
+}
+
+/// Read a `.ver` the way the install-from-nothing report does, mirroring the reference launcher's
+/// `Repository.GetVer` (`Repository.cs:67-76`): an absent or whitespace-only file reports
+/// [`BASE_GAME_VERSION`]; a present file's decoded content is used verbatim (no sanity gate — the
+/// install-mode paths substitute base for a missing repository, they never reject one). A present but
+/// unreadable file is still a repairable [`ProtoError::InvalidVersionFiles`].
+fn read_ver_or_sentinel(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = decode_ver(&bytes);
+            Ok(if text.trim().is_empty() {
+                BASE_GAME_VERSION.to_owned()
+            } else {
+                text
+            })
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(BASE_GAME_VERSION.to_owned()),
+        Err(_) => Err(ProtoError::InvalidVersionFiles {
+            repo,
+            kind: SanityKind::Unreadable,
+        }),
+    }
 }
 
 /// Sanity-check a `.bck` backup only when it is present; an absent backup is the normal healthy state.
