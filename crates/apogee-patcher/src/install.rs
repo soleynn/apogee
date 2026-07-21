@@ -1,10 +1,12 @@
 //! The install pipeline: acquire ahead through fetch, apply strictly in list order.
 //!
 //! Fetch's scheduler runs the downloads (bounded concurrency); the apply loop consumes their
-//! verified results in SE order so patch `k` applies only after `0..k`, even when `k` downloaded
-//! first. Only a `VerifiedFile` reaches apply. `.ver` advances per clean patch, `.ver`→`.bck` after
+//! results in SE order so patch `k` applies only after `0..k`, even when `k` downloaded first. Only
+//! an [`Admitted`] patch reaches apply: a game patch is proven by fetch's per-block SHA1, a boot
+//! patch by the patcher's own chunk-CRC scan. `.ver` advances per clean patch, `.ver`→`.bck` after
 //! the whole set, and a torn apply leaves the old `.ver`, so an interrupted install re-runs cleanly.
 
+use std::future::Future;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use apogee_fetch::{
     DownloadSpec, FetchError, Fetcher, HeaderPolicy, Priority, Progress, Validator, VerifiedFile,
 };
-use apogee_zipatch::{ApplyOptions, ApplyProgress, DiskSink, PatchReader, apply};
+use apogee_zipatch::{ApplyOptions, ApplyProgress, DiskSink, PatchReader, apply, scan_crc};
 use sqex_proto::PatchListEntry;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -31,6 +33,44 @@ impl Drop for AbortOnDrop {
         for handle in &self.0 {
             handle.abort();
         }
+    }
+}
+
+/// Proof a patch may be applied. A game patch arrives already verified by fetch (per-block SHA1); a
+/// boot patch, which carries no patchlist hashes, is admitted by the patcher's own ZiPatch chunk-CRC
+/// scan. Sealed with private construction: the only ways to make one are those two verification
+/// paths, so an unadmitted patch cannot reach [`apply_one`].
+struct Admitted {
+    path: PathBuf,
+}
+
+impl Admitted {
+    /// Wrap a game patch fetch already verified per block; its `VerifiedFile` is the proof.
+    fn from_verified(verified: VerifiedFile) -> Self {
+        Self {
+            path: verified.path().to_path_buf(),
+        }
+    }
+
+    /// Admit a boot patch by scanning every chunk CRC, its only integrity proof. Runs the whole file
+    /// through the parser with CRC verification on; a parse or CRC fault rejects the patch here as
+    /// [`PatchError::BootAdmission`], before any byte is applied. Synchronous and CPU/IO-bound: call
+    /// it on a blocking worker.
+    fn scan_boot(path: PathBuf, index: u32) -> Result<Self, PatchError> {
+        let file = std::fs::File::open(&path).map_err(|source| PatchError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let mut reader = PatchReader::open(BufReader::new(file))
+            .map_err(|source| PatchError::BootAdmission { index, source })?
+            .verify_crc(true);
+        scan_crc(&mut reader).map_err(|source| PatchError::BootAdmission { index, source })?;
+        Ok(Self { path })
+    }
+
+    /// The admitted patch on disk.
+    fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -66,12 +106,6 @@ pub(crate) async fn run(
         preflight::check(&config, &game_root, &patches)?;
     }
 
-    let priority = if matches!(repo, Repo::Boot) {
-        Priority::Boot
-    } else {
-        Priority::Normal
-    };
-
     // Build every download request first: a malformed entry fails the whole install before any task
     // is spawned, so an early return cannot leave a download running past it (spawning is done under
     // the abort guard below, after the last fallible step).
@@ -81,7 +115,7 @@ pub(crate) async fn run(
             &config.patch_store,
             entry,
             i as u32,
-            priority,
+            repo,
             &headers,
         )?);
     }
@@ -99,7 +133,7 @@ pub(crate) async fn run(
         let progress = progress.clone();
         let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
-            let result = download_one(&fetcher, &spec, repo, index, &progress, cancel).await;
+            let result = acquire_one(&fetcher, &spec, repo, index, &progress, cancel).await;
             let _ = tx.send(result);
         }));
     }
@@ -109,10 +143,10 @@ pub(crate) async fn run(
     let mut last_bare = String::new();
     for (i, (result, entry)) in results.into_iter().zip(patches.iter()).enumerate() {
         let index = i as u32;
-        let verified = match result.await {
-            Ok(Ok(file)) => file,
-            Ok(Err(FetchError::Cancelled)) => return Err(PatchError::Cancelled),
-            Ok(Err(err)) => return Err(PatchError::Acquire(err)),
+        let admitted = match result.await {
+            // `acquire_one` already mapped any fetch/admission failure into the patcher taxonomy
+            // (including `Cancelled`), so propagate it verbatim.
+            Ok(inner) => inner?,
             // The task always sends a result and is only aborted after this loop exits (on run's
             // return, via the guard), so a missing result here means the task panicked. Surface it
             // as an i/o fault with context, matching Job's panic handling, not a false Cancelled.
@@ -120,7 +154,7 @@ pub(crate) async fn run(
                 return Err(PatchError::Io {
                     path: PathBuf::new(),
                     source: std::io::Error::other(format!(
-                        "download task for patch {index} ended without a result"
+                        "acquire task for patch {index} ended without a result"
                     )),
                 });
             }
@@ -129,7 +163,7 @@ pub(crate) async fn run(
             return Err(PatchError::Cancelled);
         }
 
-        apply_one(&verified, &game_root, repo, index, &progress, &cancel).await?;
+        apply_one(&admitted, &game_root, repo, index, &progress, &cancel).await?;
 
         last_bare = store::bare_version(&entry.version_id);
         store::write_ver(&game_root, repo, &last_bare)?;
@@ -140,7 +174,7 @@ pub(crate) async fn run(
         });
 
         if !config.keep_patches {
-            let _ = std::fs::remove_file(verified.path());
+            let _ = std::fs::remove_file(admitted.path());
         }
     }
 
@@ -151,12 +185,21 @@ pub(crate) async fn run(
     })
 }
 
-/// Turn one patchlist entry into a verified download request.
+/// Scheduling priority for a repo's downloads: boot data is admitted ahead of game data.
+fn priority_for(repo: Repo) -> Priority {
+    if matches!(repo, Repo::Boot) {
+        Priority::Boot
+    } else {
+        Priority::Normal
+    }
+}
+
+/// Turn one patchlist entry into an admissible download request.
 fn build_spec(
     patch_store: &Path,
     entry: &PatchListEntry,
     index: u32,
-    priority: Priority,
+    repo: Repo,
     headers: &SePatch,
 ) -> Result<DownloadSpec, PatchError> {
     let bad = |detail: String| PatchError::Patchlist { index, detail };
@@ -177,12 +220,18 @@ fn build_spec(
             source,
         })?;
     }
-    let validator = block_sha1_validator(entry, index)?;
+    // Boot patches carry no per-block hashes: fetch delivers their length-checked bytes under the
+    // external-verification marker and the patcher's chunk-CRC scan admits them (`acquire_one`).
+    // Game and expansion patches verify per block during download.
+    let validator = match repo {
+        Repo::Boot => Validator::External,
+        Repo::Game | Repo::Expansion(_) => block_sha1_validator(entry, index)?,
+    };
     DownloadSpec::builder(url, dest, validator)
         .expected_len(entry.length)
-        .priority(priority)
+        .priority(priority_for(repo))
         .header_policy(HeaderPolicy::SePatch {
-            unique_id: Some(headers.unique_id.clone()),
+            unique_id: headers.unique_id.clone(),
         })
         .build()
         .map_err(|e| bad(format!("cannot build download: {e}")))
@@ -222,19 +271,75 @@ fn decode_sha1_hex(hex: &str) -> Option<[u8; 20]> {
     Some(out)
 }
 
-/// Download one patch, forwarding its progress onto the aggregate stream.
-///
-/// The forwarding is inline (not a detached task): this future resolves exactly when the transfer
-/// settles, and dropping it (on cancel/abort) drops the progress sender with it, so no relay task can
-/// outlive the download holding a stream handle open.
-async fn download_one(
+/// Acquire one patch and admit it: fetch its bytes, then prove them. A game patch comes back as a
+/// fetch [`VerifiedFile`] (per-block SHA1 checked during download); a boot patch, which carries no
+/// hashes, is fetched under the external-verification marker and admitted by a chunk-CRC scan on a
+/// blocking worker. Either way the result is an [`Admitted`] token the apply loop consumes in order.
+async fn acquire_one(
     fetcher: &Fetcher,
     spec: &DownloadSpec,
     repo: Repo,
     index: u32,
     progress: &mpsc::UnboundedSender<PatchProgress>,
     cancel: CancellationToken,
-) -> Result<VerifiedFile, FetchError> {
+) -> Result<Admitted, PatchError> {
+    match repo {
+        Repo::Boot => {
+            let path = with_progress_relay(
+                |tx| fetcher.download_external(spec, Some(tx), cancel.clone()),
+                repo,
+                index,
+                progress,
+            )
+            .await
+            .map_err(acquire_err)?;
+            // Chunk-CRC admission reads the whole patch: run it off the async runtime.
+            tokio::task::spawn_blocking(move || Admitted::scan_boot(path, index))
+                .await
+                .map_err(|join| PatchError::Io {
+                    path: PathBuf::new(),
+                    source: std::io::Error::other(join),
+                })?
+        }
+        Repo::Game | Repo::Expansion(_) => {
+            let verified = with_progress_relay(
+                |tx| fetcher.download(spec, Some(tx), cancel.clone()),
+                repo,
+                index,
+                progress,
+            )
+            .await
+            .map_err(acquire_err)?;
+            Ok(Admitted::from_verified(verified))
+        }
+    }
+}
+
+/// Map a fetch failure into the patcher taxonomy: a cancellation stays [`PatchError::Cancelled`],
+/// everything else is an [`PatchError::Acquire`] carrying fetch's block/offset/attempt context.
+fn acquire_err(err: FetchError) -> PatchError {
+    match err {
+        FetchError::Cancelled => PatchError::Cancelled,
+        other => PatchError::Acquire(other),
+    }
+}
+
+/// Drive a fetch transfer while forwarding its progress onto the aggregate stream.
+///
+/// The forwarding is inline (not a detached task): the returned future resolves exactly when the
+/// transfer settles, and dropping it (on cancel/abort) drops the fetch progress sender with it, so no
+/// relay task can outlive the download holding a stream handle open. `make` is handed the fetch
+/// progress sender and returns the transfer future, so this works for both the verified
+/// (`download`) and externally-verified (`download_external`) paths.
+async fn with_progress_relay<T, Fut>(
+    make: impl FnOnce(mpsc::UnboundedSender<Progress>) -> Fut,
+    repo: Repo,
+    index: u32,
+    progress: &mpsc::UnboundedSender<PatchProgress>,
+) -> T
+where
+    Fut: Future<Output = T>,
+{
     let relay = |p: Progress| {
         let _ = progress.send(PatchProgress::Downloading {
             repo,
@@ -244,12 +349,12 @@ async fn download_one(
         });
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();
-    let download = fetcher.download(spec, Some(tx), cancel);
-    tokio::pin!(download);
+    let transfer = make(tx);
+    tokio::pin!(transfer);
     loop {
         tokio::select! {
             biased;
-            result = &mut download => {
+            result = &mut transfer => {
                 // Relay any progress buffered before the transfer settled, then finish.
                 while let Ok(p) = rx.try_recv() {
                     relay(p);
@@ -261,12 +366,12 @@ async fn download_one(
     }
 }
 
-/// Apply one verified patch on a blocking thread, relaying its progress and honoring cancellation.
+/// Apply one admitted patch on a blocking thread, relaying its progress and honoring cancellation.
 ///
-/// Takes the [`VerifiedFile`] by reference, not a bare path, so the verified-before-apply invariant
+/// Takes the [`Admitted`] token by reference, not a bare path, so the verified-before-apply invariant
 /// is carried by the type into the one place that writes bytes, not just by the call site.
 async fn apply_one(
-    verified: &VerifiedFile,
+    admitted: &Admitted,
     game_root: &Path,
     repo: Repo,
     index: u32,
@@ -274,7 +379,7 @@ async fn apply_one(
     cancel: &CancellationToken,
 ) -> Result<(), PatchError> {
     let apply_root = store::repo_root(game_root, repo);
-    let patch_path = verified.path().to_path_buf();
+    let patch_path = admitted.path().to_path_buf();
 
     // Bridge the async cancel token to zipatch's between-commands AtomicBool flag.
     let flag = Arc::new(AtomicBool::new(cancel.is_cancelled()));
@@ -367,7 +472,7 @@ mod tests {
             std::path::Path::new("/nonexistent-store"),
             &entry,
             3,
-            Priority::Normal,
+            Repo::Game,
             &SePatch::new("s"),
         )
         .unwrap_err();

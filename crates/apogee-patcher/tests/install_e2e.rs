@@ -63,6 +63,29 @@ fn request(game_root: &Path, patches: Vec<PatchListEntry>) -> InstallRequest {
     }
 }
 
+/// A boot patchlist entry pointing at `url`, targeting `version_id`. Boot patchlists carry no
+/// per-block hashes (`hashes: None`): fetch length-checks the bytes and the patcher's chunk-CRC scan
+/// admits them.
+fn boot_entry(url: Url, bytes: &[u8], version_id: &str) -> PatchListEntry {
+    PatchListEntry {
+        length: bytes.len() as u64,
+        version_id: version_id.to_owned(),
+        url: url.to_string(),
+        hashes: None,
+    }
+}
+
+/// A single-repo boot install request into `game_root` (patch-client user-agent only, no session
+/// credential, as boot patching runs before login).
+fn boot_request(game_root: &Path, patches: Vec<PatchListEntry>) -> InstallRequest {
+    InstallRequest {
+        repo: Repo::Boot,
+        game_root: game_root.to_path_buf(),
+        patches,
+        headers: SePatch::boot(),
+    }
+}
+
 /// Excuse the patcher-written `.ver`/`.bck` when diffing against a hash-only baseline apply.
 fn is_ver_or_bck(path: &Path) -> bool {
     matches!(
@@ -317,6 +340,117 @@ async fn a_corrupt_patch_is_rejected_before_apply() -> Result<(), Box<dyn Error>
     assert!(
         !game_root.path().join("game").exists(),
         "no bytes should reach disk when verification fails",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_install_admits_via_chunk_crc_and_applies_from_nothing() -> Result<(), Box<dyn Error>>
+{
+    let chain = fixtures::chain();
+    // Boot versions carry no list-prefix letter; the bare form is written verbatim.
+    let versions = ["2024.03.27.0000.0000", "2024.03.28.0000.0000"];
+
+    // Baseline: the same chain applied directly by zipatch, no orchestration.
+    let scratch = tempfile::tempdir()?;
+    fixtures::apply_chain(scratch.path(), &chain)?;
+    let baseline = tree_manifest::author(scratch.path())?;
+
+    // Boot patches are served over plain HTTP with no per-block hashes: fetch delivers length-checked
+    // bytes under the external-verification marker and the patcher's chunk-CRC scan admits them.
+    let s0 = ChaosServer::serving(chain[0].clone()).start().await?;
+    let s1 = ChaosServer::serving(chain[1].clone()).start().await?;
+    let patches = vec![
+        boot_entry(s0.url("p0.patch"), &chain[0], versions[0]),
+        boot_entry(s1.url("p1.patch"), &chain[1], versions[1]),
+    ];
+
+    let store = tempfile::tempdir()?;
+    let game_root = tempfile::tempdir()?; // empty: install from nothing.
+    let patcher = patcher(store.path(), false)?;
+
+    let installed = patcher
+        .install(boot_request(game_root.path(), patches))
+        .await?;
+    assert_eq!(
+        installed,
+        Installed {
+            repo: Repo::Boot,
+            new_version: "2024.03.28.0000.0000".to_owned(),
+        }
+    );
+
+    // The applied boot subtree matches the direct apply (ignoring the patcher-written .ver/.bck).
+    let boot_dir = game_root.path().join("boot");
+    tree_manifest::assert_tree_matches(
+        &boot_dir,
+        &baseline,
+        Some(&is_ver_or_bck as &dyn Fn(&Path) -> bool),
+    );
+
+    // .ver / .bck advanced to the last patch, bare and newline-free.
+    assert_eq!(
+        std::fs::read_to_string(boot_dir.join("ffxivboot.ver"))?,
+        "2024.03.28.0000.0000"
+    );
+    assert_eq!(
+        std::fs::read_to_string(boot_dir.join("ffxivboot.bck"))?,
+        "2024.03.28.0000.0000"
+    );
+
+    // The boot header contract: every request carried the patch-client user-agent and none carried a
+    // session credential (boot patching precedes login). Proves `SePatch::boot()` leaks no unique-id.
+    let uas = s0.stats().user_agents();
+    assert!(!uas.is_empty(), "the boot patch was requested");
+    assert!(
+        uas.iter()
+            .all(|ua| ua.as_deref() == Some("FFXIV PATCH CLIENT")),
+        "boot downloads must carry the patch-client user-agent, got {uas:?}",
+    );
+    assert!(
+        s0.stats().patch_unique_ids().iter().all(Option::is_none),
+        "boot downloads must not carry a session unique-id, got {:?}",
+        s0.stats().patch_unique_ids(),
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_corrupt_boot_patch_is_rejected_by_the_crc_gate() -> Result<(), Box<dyn Error>> {
+    let chain = fixtures::chain();
+    let versions = ["2024.03.27.0000.0000", "2024.03.28.0000.0000"];
+
+    // Flip one byte deep in patch 0's body. Its length is unchanged, so fetch's length check passes
+    // and the bytes are admitted for scanning, but a chunk CRC no longer matches, so the patcher's
+    // admission scan rejects it. Boot carries no per-block hashes for fetch to catch this itself.
+    let len0 = chain[0].len() as u64;
+    let mid = len0 / 2;
+    let s0 = ChaosServer::serving(chain[0].clone())
+        .corrupt_range(mid..mid + 1)
+        .start()
+        .await?;
+    let s1 = ChaosServer::serving(chain[1].clone()).start().await?;
+    let patches = vec![
+        boot_entry(s0.url("p0.patch"), &chain[0], versions[0]),
+        boot_entry(s1.url("p1.patch"), &chain[1], versions[1]),
+    ];
+
+    let store = tempfile::tempdir()?;
+    let game_root = tempfile::tempdir()?;
+    let patcher = patcher(store.path(), true)?;
+
+    let result = patcher
+        .install(boot_request(game_root.path(), patches))
+        .await;
+    assert!(
+        matches!(result, Err(PatchError::BootAdmission { index: 0, .. })),
+        "a corrupt boot patch must be rejected by the chunk-crc gate, got {result:?}",
+    );
+
+    // Rejected at admission, before apply: no boot subtree was ever created.
+    assert!(
+        !game_root.path().join("boot").exists(),
+        "no bytes should be applied when boot admission fails",
     );
     Ok(())
 }

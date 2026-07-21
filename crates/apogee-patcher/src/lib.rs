@@ -4,8 +4,15 @@
 //! [`Patcher`] composes [`apogee_fetch`] (acquire) and [`apogee_zipatch`] (apply) into an install
 //! pipeline: it turns the ordered pending patches `sqex-proto` reports into a verified, up-to-date
 //! install. It holds no format or transport knowledge, only the sequencing between them: acquire
-//! runs ahead through fetch's scheduler while apply consumes strictly in SE list order, only a
-//! `VerifiedFile` ever reaches the apply queue, and `.ver`/`.bck` advance only after a clean apply.
+//! runs ahead through fetch's scheduler while apply consumes strictly in SE list order, nothing
+//! unverified reaches the apply queue, and `.ver`/`.bck` advance only after a clean apply.
+//!
+//! Admission has two shapes because Square Enix hashes the two repo families differently. A game
+//! patch carries per-block SHA1 in the patchlist, so fetch verifies it and returns a `VerifiedFile`.
+//! A boot patch carries no hashes; fetch delivers its length-checked bytes under
+//! [`apogee_fetch::Validator::External`], and the patcher's own ZiPatch chunk-CRC scan mints the
+//! admission token before the file may join the apply queue. Either way, an unadmitted patch cannot
+//! be applied.
 //!
 //! Repair and the Windows elevated-worker protocol (the [`WorkerRequest`]/[`WorkerResponse`]/
 //! [`WorkerProgress`] messages and the [`PatchError::Worker`] arm) are declared here but not yet
@@ -95,6 +102,12 @@ pub enum PatchError {
     },
     #[error("apply failed")]
     Apply(#[from] apogee_zipatch::Error),
+    #[error("boot patch {index} failed chunk-crc admission")]
+    BootAdmission {
+        index: u32,
+        #[source]
+        source: apogee_zipatch::Error,
+    },
     #[error("i/o error on {path}")]
     Io {
         path: PathBuf,
