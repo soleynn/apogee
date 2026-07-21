@@ -1,10 +1,15 @@
 #![forbid(unsafe_code)]
 //! Patch orchestration across download, apply, and repair.
 //!
-//! STUB: public shape only (error taxonomy, the elevated-worker stdio protocol messages this
-//! crate owns, and the [`Patcher`] handle the composition root constructs); orchestration is not
-//! yet built. The `sqex-proto` edge is the future version-cross-check composition edge, unused for
-//! now.
+//! [`Patcher`] composes [`apogee_fetch`] (acquire) and [`apogee_zipatch`] (apply) into an install
+//! pipeline: it turns the ordered pending patches `sqex-proto` reports into a verified, up-to-date
+//! install. It holds no format or transport knowledge, only the sequencing between them: acquire
+//! runs ahead through fetch's scheduler while apply consumes strictly in SE list order, only a
+//! `VerifiedFile` ever reaches the apply queue, and `.ver`/`.bck` advance only after a clean apply.
+//!
+//! Repair and the Windows elevated-worker protocol (the [`WorkerRequest`]/[`WorkerResponse`]/
+//! [`WorkerProgress`] messages and the [`PatchError::Worker`] arm) are declared here but not yet
+//! driven.
 
 use std::path::PathBuf;
 
@@ -12,6 +17,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use apogee_fetch::{FetchError, Fetcher};
+
+mod install;
+mod job;
+mod preflight;
+mod progress;
+mod request;
+mod store;
+
+pub use job::Job;
+pub use progress::PatchProgress;
+pub use request::{InstallRequest, Installed, SePatch};
 
 /// Which game repository a patch operation targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +83,8 @@ pub enum WorkerErrorKind {
 pub enum PatchError {
     #[error("preflight failed")]
     Preflight(#[from] PreflightError),
+    #[error("patchlist entry {index}: {detail}")]
+    Patchlist { index: u32, detail: String },
     #[error("acquire failed")]
     Acquire(#[from] FetchError),
     #[error("{broken} broken part(s) in {repo:?}")]
@@ -77,6 +95,12 @@ pub enum PatchError {
     },
     #[error("apply failed")]
     Apply(#[from] apogee_zipatch::Error),
+    #[error("i/o error on {path}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("elevated worker failed: {kind:?}")]
     Worker {
         kind: WorkerErrorKind,
@@ -125,22 +149,40 @@ pub enum WorkerProgress {
     File(PathBuf),
 }
 
-/// Runtime configuration for a [`Patcher`].
+/// Runtime configuration for a [`Patcher`]: the profile-independent settings the composition root
+/// knows once. The per-profile game root travels with each [`InstallRequest`] instead.
 #[derive(Debug, Clone)]
 pub struct PatcherConfig {
+    /// Where downloaded `.patch` files live (resumable, keepable); the patchlist URL path is
+    /// mirrored beneath it.
     pub patch_store: PathBuf,
-    pub game_root: PathBuf,
+    /// Keep downloaded patches after a clean apply instead of removing them.
     pub keep_patches: bool,
+    /// Skip the disk-space preflight (the escape hatch for a caller that knows better).
     pub ignore_space: bool,
 }
 
-/// Orchestrates download to verify to apply across repos.
-#[derive(Debug)]
-pub struct Patcher;
+/// Orchestrates download to verify to apply across a repo's ordered patch set.
+#[derive(Debug, Clone)]
+pub struct Patcher {
+    fetcher: Fetcher,
+    config: PatcherConfig,
+}
 
 impl Patcher {
     /// Construct over a `fetcher` and `config` (called by the composition root).
-    pub fn new(_fetcher: Fetcher, _config: PatcherConfig) -> Self {
-        Self
+    #[must_use]
+    pub fn new(fetcher: Fetcher, config: PatcherConfig) -> Self {
+        Self { fetcher, config }
+    }
+
+    /// Install one repo's ordered pending patch set: acquire through fetch, admit only verified
+    /// bytes, apply in strict list order, and advance `.ver`/`.bck`.
+    ///
+    /// Returns a [`Job`] whose progress stream carries [`PatchProgress`] and whose result is the
+    /// per-repo [`Installed`] version. Runs on a spawned task, so a `tokio` runtime must be active.
+    #[must_use]
+    pub fn install(&self, request: InstallRequest) -> Job {
+        job::spawn(self.fetcher.clone(), self.config.clone(), request)
     }
 }
