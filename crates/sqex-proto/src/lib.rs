@@ -35,4 +35,4 @@ pub use transport::{
     ProtoRequest, ProtoResponse, RequestBody, Transport, TransportError,
     debug_assert_header_fidelity,
 };
-pub use version::{InstallPaths, SanityKind, VersionRepo, VersionReport};
+pub use version::{BASE_GAME_VERSION, InstallPaths, SanityKind, VersionRepo, VersionReport};
