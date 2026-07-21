@@ -6,23 +6,31 @@ use sqex_proto::PatchListEntry;
 
 use crate::Repo;
 
-/// The per-download SE request headers. For a game patch this is the session's patch-download
-/// credential; boot patches carry none. `#[non_exhaustive]` so later phases can add header inputs
-/// without a breaking change.
+/// The per-download SE request headers. Every patch request carries the `FFXIV PATCH CLIENT`
+/// user-agent; a game patch additionally carries the session's `X-Patch-Unique-Id` credential, while
+/// a boot patch (fetched before login) carries none. `#[non_exhaustive]` so later phases can add
+/// header inputs without a breaking change.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SePatch {
-    /// The `X-Patch-Unique-Id` credential from session registration.
-    pub unique_id: String,
+    /// The `X-Patch-Unique-Id` credential from session registration, absent for boot patches.
+    pub unique_id: Option<String>,
 }
 
 impl SePatch {
-    /// Headers carrying the given patch-download credential.
+    /// Game-patch headers carrying the given session patch-download credential.
     #[must_use]
     pub fn new(unique_id: impl Into<String>) -> Self {
         Self {
-            unique_id: unique_id.into(),
+            unique_id: Some(unique_id.into()),
         }
+    }
+
+    /// Boot-patch headers: the patch-client user-agent only, no session credential (boot patching
+    /// runs before there is a session).
+    #[must_use]
+    pub fn boot() -> Self {
+        Self { unique_id: None }
     }
 }
 
