@@ -8,6 +8,10 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde = { workspace = true }
+# The signed index catalog: parse its JSON manifest and verify the Ed25519 signature against the
+# compiled-in key before any sha256 pin inside is trusted.
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
 # Async orchestration: the spawned install task, the progress channels, and the cancel token/stream.
 tokio.workspace = true
 tokio-util.workspace = true

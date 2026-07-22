@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "indexes": [
+    {
+      "repo": "game",
+      "version": "2024.03.28.0000.0000",
+      "url": "https://soleynn.github.io/apogee/indexes/artifacts/game-2024.03.28.0000.0000.apzi",
+      "sha256": "ce5f80d437b0ab7747dbaa3407bb4ce803e1cca9ffb9766750259fd08885d904"
+    }
+  ]
+}

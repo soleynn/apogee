@@ -27,6 +27,7 @@ use thiserror::Error;
 
 use apogee_fetch::{FetchError, Fetcher};
 
+mod catalog;
 mod install;
 mod job;
 mod preflight;
@@ -36,6 +37,10 @@ mod repair;
 mod request;
 mod store;
 
+pub use catalog::{
+    INDEX_CATALOG_MANIFEST_VERSION, INDEX_CATALOG_PUBLIC_KEY, IndexCatalog, IndexCatalogError,
+    IndexEntry,
+};
 pub use job::Job;
 pub use progress::PatchProgress;
 pub use repair::{RepairOutcome, RepairedRepo};
