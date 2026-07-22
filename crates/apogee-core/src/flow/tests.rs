@@ -14,12 +14,16 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{FlowContext, drive, language_id, launch_arguments};
+use apogee_patcher::{PatchProgress, Repo};
+
+use super::{FlowContext, drive, language_id, launch_arguments, read_repo_ver};
 use crate::command::{Command, Event, FlowState};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
 use crate::model::{Account, AccountKind, Profile, Settings};
+use crate::patch::PatchBackend;
+use crate::patch::fake::FakePatchBackend;
 use crate::store::{Store, UidCacheEntry};
 
 use fx::{BOOT_VERSION, GAME_VERSION, SESSION_ID, UNIQUE_ID};
@@ -91,8 +95,20 @@ fn context(
     launch: Arc<dyn LaunchBackend>,
     now: u64,
 ) -> FlowContext {
+    context_with(h, transport, Arc::new(FakePatchBackend::new()), launch, now)
+}
+
+/// Like [`context`], but with an explicit patch backend the caller can inspect after the flow runs.
+fn context_with(
+    h: &Harness,
+    transport: Arc<dyn Transport>,
+    patch: Arc<dyn PatchBackend>,
+    launch: Arc<dyn LaunchBackend>,
+    now: u64,
+) -> FlowContext {
     FlowContext {
         transport,
+        patch,
         launch,
         store: h.store.clone(),
         clock: Arc::new(move || now),
@@ -133,6 +149,43 @@ fn errors(events: &[Event]) -> Vec<String> {
 
 fn secret(password: &str) -> Secret {
     Secret::new(password.as_bytes().to_vec())
+}
+
+/// The `PatchProgress` frames relayed onto the event stream.
+fn patch_frames(events: &[Event]) -> Vec<PatchProgress> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Patch(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A nine-field game patch entry with a caller-chosen URL, so a test can steer its repo (the base
+/// game vs. an `ex{n}` expansion) through the classifier.
+fn game_entry(length: u64, version: &str, url: &str) -> String {
+    let h1 = "a".repeat(40);
+    let h2 = "b".repeat(40);
+    format!("{length}\t0\t0\t0\tD{version}\tsha1\t52428800\t{h1},{h2}\t{url}")
+}
+
+/// A patch command that applies pending patches without launching.
+fn patch_cmd(profile: Uuid) -> Command {
+    Command::Patch {
+        profile,
+        password: secret("pw"),
+        otp: OtpSource::Manual(String::new()),
+    }
+}
+
+/// An install-from-nothing command.
+fn install_cmd(profile: Uuid) -> Command {
+    Command::Install {
+        profile,
+        password: secret("pw"),
+        otp: OtpSource::Manual(String::new()),
+    }
 }
 
 /// The four scripted responses of a successful login → current-game registration.
@@ -616,6 +669,33 @@ async fn a_corrupt_cache_falls_back_to_a_full_login_on_play() {
 }
 
 #[test]
+fn read_repo_ver_canonicalizes_so_it_matches_the_catalog_key() {
+    let dir = TempDir::new().unwrap();
+    let game = dir.path().join("game");
+    std::fs::create_dir_all(&game).unwrap();
+
+    // A UTF-8 BOM-prefixed `.ver` (EF BB BF …): a plain read_to_string + trim would keep the
+    // zero-width BOM (U+FEFF is not whitespace), and the catalog's exact-match lookup would miss.
+    std::fs::write(
+        game.join("ffxivgame.ver"),
+        b"\xEF\xBB\xBF2024.03.28.0000.0000",
+    )
+    .unwrap();
+    assert_eq!(
+        read_repo_ver(dir.path(), Repo::Game).as_deref(),
+        Some("2024.03.28.0000.0000"),
+        "the BOM must be stripped to match the registration/catalog version"
+    );
+
+    // Absent and empty repos are `None` (not part of a repair plan).
+    assert_eq!(read_repo_ver(dir.path(), Repo::Boot), None);
+    let boot = dir.path().join("boot");
+    std::fs::create_dir_all(&boot).unwrap();
+    std::fs::write(boot.join("ffxivboot.ver"), b"   ").unwrap();
+    assert_eq!(read_repo_ver(dir.path(), Repo::Boot), None);
+}
+
+#[test]
 fn language_id_maps_client_languages() {
     assert_eq!(language_id("ja"), 0);
     assert_eq!(language_id("en"), 1);
@@ -626,6 +706,239 @@ fn language_id_maps_client_languages() {
         1,
         "an unknown language defaults to English"
     );
+}
+
+#[tokio::test]
+async fn patches_pending_continue_to_launch() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_with_patches(
+            UNIQUE_ID,
+            &[
+                &game_entry(
+                    1_000,
+                    "2024.03.28.0001.0000",
+                    "http://patch-dl.example.invalid/game/4e9a232b/D2024.03.28.0001.0000.patch",
+                ),
+                &game_entry(
+                    2_000,
+                    "2024.03.28.0001.0000",
+                    "http://patch-dl.example.invalid/game/ex1/6b936f08/D2024.03.28.0001.0000.patch",
+                ),
+            ],
+        ),
+        fx::register_current(UNIQUE_ID),
+    ]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport.clone(), patch.clone(), launch, NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+
+    assert!(
+        errors(&events).is_empty(),
+        "patch-then-play should succeed: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::Patching,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
+    );
+    // The game patchlist split into a base-game set and an ex1 set, base first.
+    assert_eq!(patch.installed_repos(), [Repo::Game, Repo::Expansion(1)]);
+    // Auth (3) + register-pending + re-register-current = 5 requests, then launch.
+    assert_eq!(transport.recorded().len(), 5);
+    assert!(
+        patch_frames(&events)
+            .iter()
+            .any(|p| matches!(p, PatchProgress::Applied { .. })),
+        "an apply frame reached the stream"
+    );
+}
+
+#[tokio::test]
+async fn a_boot_patch_re_registers_then_launches() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_needs_boot(),
+        fx::boot_patchlist(&[&fx::synthetic_boot_entry(4_096, "2024.02.01.0000.0001")]),
+        fx::register_current(UNIQUE_ID),
+    ]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport.clone(), patch.clone(), launch, NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+
+    assert!(
+        errors(&events).is_empty(),
+        "the boot re-register loop should reach launch: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::Patching,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
+    );
+    assert_eq!(patch.installed_repos(), [Repo::Boot]);
+    // Auth (3), register (409), boot check, re-register (current) = 6.
+    assert_eq!(transport.recorded().len(), 6);
+}
+
+#[tokio::test]
+async fn install_from_nothing_reaches_launch() {
+    // An empty target directory: no boot EXEs, no `.ver` files.
+    let empty = TempDir::new().unwrap();
+    let path = empty.path().to_path_buf();
+    let h = harness_customized(false, move |p| p.game_path = path);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        // Boot is brought up first (from the sentinel), so the game report can hash its EXEs.
+        fx::boot_patchlist(&[&fx::synthetic_boot_entry(4_096, "2024.02.01.0000.0000")]),
+        fx::register_with_patches(
+            UNIQUE_ID,
+            &[&game_entry(
+                5_000,
+                "2024.03.28.0000.0000",
+                "http://patch-dl.example.invalid/game/4e9a232b/D2024.03.28.0000.0000.patch",
+            )],
+        ),
+        fx::register_current(UNIQUE_ID),
+    ]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport.clone(), patch.clone(), launch, NOW);
+
+    let events = run(ctx, install_cmd(h.profile)).await;
+
+    assert!(
+        errors(&events).is_empty(),
+        "install-from-nothing should reach launch: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::Patching,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
+    );
+    // Boot brought up before the base game.
+    assert_eq!(patch.installed_repos(), [Repo::Boot, Repo::Game]);
+    // The previously-empty directory now carries the materialized version files.
+    assert!(empty.path().join("boot/ffxivboot.ver").is_file());
+    assert!(empty.path().join("game/ffxivgame.ver").is_file());
+}
+
+#[tokio::test]
+async fn patch_applies_pending_without_launching() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_with_patches(
+            UNIQUE_ID,
+            &[&game_entry(
+                1_000,
+                "2024.03.28.0001.0000",
+                "http://patch-dl.example.invalid/game/4e9a232b/D2024.03.28.0001.0000.patch",
+            )],
+        ),
+        fx::register_current(UNIQUE_ID),
+    ]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport.clone(), patch.clone(), launch.clone(), NOW);
+
+    let events = run(ctx, patch_cmd(h.profile)).await;
+
+    assert!(errors(&events).is_empty());
+    assert_eq!(
+        states(&events),
+        [FlowState::Patching],
+        "patch applies pending but never launches"
+    );
+    assert_eq!(patch.installed_repos(), [Repo::Game]);
+    assert_eq!(launch.launch_count(), 0, "patch does not launch");
+}
+
+#[tokio::test]
+async fn repair_plans_every_installed_repo_and_streams_progress() {
+    let h = harness(false); // the install carries boot, game, and ex1..ex4
+    let transport = Arc::new(FixtureTransport::new([]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport.clone(), patch.clone(), launch, NOW);
+
+    let events = run(ctx, Command::Repair { profile: h.profile }).await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(states(&events), [FlowState::Repairing]);
+    assert_eq!(transport.recorded().len(), 0, "repair does not log in");
+
+    let plans = patch.repairs();
+    assert_eq!(plans.len(), 1);
+    let repos: Vec<Repo> = plans[0].repos.iter().map(|r| r.repo).collect();
+    assert_eq!(
+        repos,
+        [
+            Repo::Boot,
+            Repo::Game,
+            Repo::Expansion(1),
+            Repo::Expansion(2),
+            Repo::Expansion(3),
+            Repo::Expansion(4),
+        ]
+    );
+    let frames = patch_frames(&events);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|p| matches!(p, PatchProgress::Verifying { .. }))
+            .count(),
+        6
+    );
+    assert!(frames.iter().any(|p| matches!(
+        p,
+        PatchProgress::Repaired {
+            repo: Repo::Boot,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn repair_of_an_empty_install_is_a_typed_error() {
+    let empty = TempDir::new().unwrap();
+    let path = empty.path().to_path_buf();
+    let h = harness_customized(false, move |p| p.game_path = path);
+    let transport = Arc::new(FixtureTransport::new([]));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch, NOW);
+
+    let events = run(ctx, Command::Repair { profile: h.profile }).await;
+    assert!(states(&events).is_empty());
+    assert_eq!(errors(&events).len(), 1, "nothing installed to verify");
 }
 
 #[test]
