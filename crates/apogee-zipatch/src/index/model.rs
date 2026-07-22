@@ -289,6 +289,21 @@ pub struct Index {
     pub(crate) targets: Vec<TargetFile>,
 }
 
+impl Index {
+    /// The repo version this index describes, as the builder labeled it. A repair cross-checks it
+    /// against the version it means to heal to, so a wrong-version index is caught before any write.
+    #[must_use]
+    pub fn repo_version(&self) -> &str {
+        &self.repo_version
+    }
+
+    /// The platform this index describes.
+    #[must_use]
+    pub fn platform(&self) -> Platform {
+        self.platform
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
