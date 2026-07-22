@@ -121,6 +121,10 @@ pub enum Region {
 pub struct Settings {
     pub language: String,
     pub close_after_launch: bool,
+    /// Keep downloaded patches after a clean apply instead of removing them. Costs disk, but lets a
+    /// later repair re-fetch broken ranges from the local patch files first (and a re-apply skip the
+    /// download). Read once at construction, so a change takes effect on the next launch.
+    pub keep_patches: bool,
 }
 
 impl Default for Settings {
@@ -128,6 +132,7 @@ impl Default for Settings {
         Self {
             language: "en".to_string(),
             close_after_launch: false,
+            keep_patches: false,
         }
     }
 }

@@ -106,20 +106,25 @@ impl Migrate for UidCacheEntry {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 2;
+    const CURRENT_VERSION: u32 = 3;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| "settings payload is not a json object".to_string())?;
         match from {
             // Gained the "close after launch" preference, defaulting off.
             1 => {
-                let obj = value
-                    .as_object_mut()
-                    .ok_or_else(|| "settings payload is not a json object".to_string())?;
                 obj.entry("close_after_launch")
                     .or_insert(serde_json::Value::Bool(false));
-                Ok(value)
             }
-            other => Err(format!("no migration from schema version {other}")),
+            // Gained the "keep patches" preference, defaulting off.
+            2 => {
+                obj.entry("keep_patches")
+                    .or_insert(serde_json::Value::Bool(false));
+            }
+            other => return Err(format!("no migration from schema version {other}")),
         }
+        Ok(value)
     }
 }
 
