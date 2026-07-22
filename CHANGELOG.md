@@ -49,6 +49,7 @@ is tagged with its change type. Versioning aims to follow
 - End-to-end install, ordering, cancel, rejection _(testing)_
 - Boot chunk-CRC admission and install-from-nothing _(added)_
 - Block-level repair with local-first-then-HTTP refetch _(added)_
+- Signed index catalog with a compiled-in key _(added)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
@@ -91,12 +92,14 @@ is tagged with its change type. Versioning aims to follow
 - Rustfmt the fixtures module _(styling)_
 - Expose the index repo version and platform _(added)_
 - Confine the verify stray sweep to indexed directories _(fixed)_
+- Label the generated index with its repo version _(added)_
 
 ### ci
 - Stop the changelog render crashing on a non-conventional commit _(fixed)_
 
 ### fuzz
 - Add the fetch_journal target for the resume journal decoder _(testing)_
+- Fuzz the index-catalog manifest parser _(testing)_
 
 ### sqex-proto
 - Report the base-version sentinel for a missing repository _(added)_
