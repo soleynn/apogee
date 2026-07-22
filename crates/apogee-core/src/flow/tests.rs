@@ -586,6 +586,7 @@ async fn close_after_launch_detaches_without_supervising() {
         .save_settings(&Settings {
             language: "en".to_string(),
             close_after_launch: true,
+            keep_patches: false,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
