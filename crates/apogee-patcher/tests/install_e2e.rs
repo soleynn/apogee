@@ -113,6 +113,7 @@ fn patcher(store: &Path, keep_patches: bool) -> Result<Patcher, Box<dyn Error>> 
             patch_store: store.to_path_buf(),
             keep_patches,
             ignore_space: false,
+            ..PatcherConfig::default()
         },
     ))
 }
