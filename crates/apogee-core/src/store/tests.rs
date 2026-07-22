@@ -31,6 +31,7 @@ fn settings_round_trips_at_the_current_version() {
     let settings = Settings {
         language: "ja".to_string(),
         close_after_launch: true,
+        keep_patches: true,
     };
     store.save_settings(&settings).unwrap();
     assert_eq!(store.load_settings().unwrap(), settings);
@@ -45,13 +46,16 @@ fn missing_settings_loads_the_default() {
 #[rstest]
 #[case(1)]
 #[case(2)]
+#[case(3)]
 fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) {
     let (dir, store) = store();
-    let data = if version == 1 {
-        // The historical shape, before the "close after launch" preference existed.
-        serde_json::json!({ "language": "fr" })
-    } else {
-        serde_json::json!({ "language": "fr", "close_after_launch": false })
+    // Each historical shape carries only the fields that existed at that version.
+    let data = match version {
+        1 => serde_json::json!({ "language": "fr" }),
+        2 => serde_json::json!({ "language": "fr", "close_after_launch": false }),
+        _ => serde_json::json!({
+            "language": "fr", "close_after_launch": false, "keep_patches": false
+        }),
     };
     let envelope = serde_json::json!({ "schema_version": version, "data": data });
     let path = dir.path().join("settings.json");
@@ -60,6 +64,7 @@ fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) 
     let loaded = store.load_settings().unwrap();
     assert_eq!(loaded.language, "fr");
     assert!(!loaded.close_after_launch);
+    assert!(!loaded.keep_patches);
 
     // A re-save rewrites the envelope at the current schema version.
     store.save_settings(&loaded).unwrap();
@@ -226,9 +231,13 @@ fn a_corrupt_session_cache_entry_is_preserved_not_deleted() {
 
 proptest::proptest! {
     #[test]
-    fn settings_survive_a_save_load_cycle(language in ".*", close in proptest::bool::ANY) {
+    fn settings_survive_a_save_load_cycle(
+        language in ".*",
+        close in proptest::bool::ANY,
+        keep in proptest::bool::ANY,
+    ) {
         let (_dir, store) = store();
-        let settings = Settings { language, close_after_launch: close };
+        let settings = Settings { language, close_after_launch: close, keep_patches: keep };
         store.save_settings(&settings).unwrap();
         proptest::prop_assert_eq!(store.load_settings().unwrap(), settings);
     }

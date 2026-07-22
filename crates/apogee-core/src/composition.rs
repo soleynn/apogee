@@ -147,6 +147,12 @@ impl Core {
             patch_store,
         } = config;
         let store = Store::new(store_dir);
+        // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
+        // corruption surfaces when the shell reads settings). Changing it takes effect next launch.
+        let keep_patches = store
+            .load_settings()
+            .map(|s| s.keep_patches)
+            .unwrap_or(false);
 
         let fetcher = Fetcher::builder().build()?;
         let runtime = Runtime::new(
@@ -164,7 +170,7 @@ impl Core {
             fetcher.clone(),
             PatcherConfig {
                 patch_store: patch_store.clone(),
-                keep_patches: false,
+                keep_patches,
                 ignore_space: false,
                 ..PatcherConfig::default()
             },
