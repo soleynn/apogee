@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run -p apogee-zipatch --example zipatch_tool -- dump <file.patch>
-//! cargo run -p apogee-zipatch --example zipatch_tool -- index <out.apzi> <patch>...
+//! cargo run -p apogee-zipatch --example zipatch_tool -- index <out.apzi> <repo-version> <patch>...
 //! cargo run -p apogee-zipatch --example zipatch_tool -- verify <game-root> <index.apzi>
 //! cargo run -p apogee-zipatch --example zipatch_tool -- repair <game-root> <index.apzi> <patch>...
 //! ```
@@ -25,14 +25,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.split_first() {
         Some((verb, rest)) if verb == "dump" && rest.len() == 1 => dump(Path::new(&rest[0])),
-        Some((verb, rest)) if verb == "index" && rest.len() >= 2 => index(rest),
+        Some((verb, rest)) if verb == "index" && rest.len() >= 3 => index(rest),
         Some((verb, rest)) if verb == "verify" && rest.len() == 2 => {
             verify(Path::new(&rest[0]), Path::new(&rest[1]))
         }
         Some((verb, rest)) if verb == "repair" && rest.len() >= 3 => repair(rest),
         _ => {
             eprintln!(
-                "usage:\n  zipatch_tool dump <file.patch>\n  zipatch_tool index <out.apzi> <patch>...\n  zipatch_tool verify <game-root> <index.apzi>\n  zipatch_tool repair <game-root> <index.apzi> <patch>..."
+                "usage:\n  zipatch_tool dump <file.patch>\n  zipatch_tool index <out.apzi> <repo-version> <patch>...\n  zipatch_tool verify <game-root> <index.apzi>\n  zipatch_tool repair <game-root> <index.apzi> <patch>..."
             );
             return ExitCode::FAILURE;
         }
@@ -68,9 +68,12 @@ fn dump(path: &Path) -> Result<bool, Box<dyn Error>> {
     Ok(true)
 }
 
-/// Build an index over `out, patch...` and write it to the `.apzi` path. Always "clean".
+/// Build an index for `repo-version` over `patch...` and write it to the `out.apzi` path.
+/// `args` is `out.apzi, repo-version, patch...`. The version labels the index for the repair
+/// cross-check, so it must be the version the chain brings the repo to. Always "clean".
 fn index(args: &[String]) -> Result<bool, Box<dyn Error>> {
-    let (out, patches) = args.split_first().ok_or("index needs an output path")?;
+    let (out, rest) = args.split_first().ok_or("index needs an output path")?;
+    let (version, patches) = rest.split_first().ok_or("index needs a repo version")?;
     let mut inputs = Vec::new();
     for patch in patches {
         let path = PathBuf::from(patch);
@@ -81,9 +84,9 @@ fn index(args: &[String]) -> Result<bool, Box<dyn Error>> {
             .to_owned();
         inputs.push((name, File::open(&path)?));
     }
-    let index = build_index(inputs, Platform::Win32, "")?;
+    let index = build_index(inputs, Platform::Win32, version.as_str())?;
     index.write_apzi(BufWriter::new(File::create(out)?))?;
-    println!("wrote {out}");
+    println!("wrote {out} for version {version}");
     Ok(true)
 }
 
