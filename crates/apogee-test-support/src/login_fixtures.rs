@@ -119,13 +119,42 @@ pub fn register_current(unique_id: &str) -> ProtoResponse {
 /// patch list built from `entries` (each a nine-field patch line, e.g. [`synthetic_patch_entry`]).
 #[must_use]
 pub fn register_with_patches(unique_id: &str, entries: &[&str]) -> ProtoResponse {
-    with_uid(ProtoResponse::new(200, game_patchlist(entries)), unique_id)
+    with_uid(
+        ProtoResponse::new(200, multipart_envelope(entries)),
+        unique_id,
+    )
 }
 
 /// A registration response requiring a boot patch first (`409 Conflict`).
 #[must_use]
 pub fn register_needs_boot() -> ProtoResponse {
     ProtoResponse::new(409, Vec::new())
+}
+
+/// The boot-version check response for a pending boot patch: a `200` body wrapping `entries` (each a
+/// six-field boot patch line, e.g. [`synthetic_boot_entry`]) in the multipart envelope the patch-list
+/// parser expects. Boot entries carry no per-block hashes.
+#[must_use]
+pub fn boot_patchlist(entries: &[&str]) -> ProtoResponse {
+    ProtoResponse::new(200, multipart_envelope(entries))
+}
+
+/// The boot-version check response for a current boot component: an empty `200` body (the shape
+/// `check_boot_version` reads as "no pending boot patches").
+#[must_use]
+pub fn boot_current() -> ProtoResponse {
+    ProtoResponse::new(200, Vec::new())
+}
+
+/// A six-field boot patch entry of `length` bytes at `version_id`, for building [`boot_patchlist`]
+/// bodies. Boot entries carry no hashes; the URL sits in field 5 (boot integrity rides on ZiPatch
+/// chunk CRCs, not per-block SHA1s).
+#[must_use]
+pub fn synthetic_boot_entry(length: u64, version_id: &str) -> String {
+    format!(
+        "{length}\t0\t0\t0\tD{version_id}\t\
+         http://patch-dl.example.invalid/boot/2b5cbc63/D{version_id}.patch"
+    )
 }
 
 /// A registration response for a version Square Enix no longer services (`410 Gone`).
@@ -146,8 +175,8 @@ pub fn synthetic_patch_entry(length: u64, version_id: &str) -> String {
     )
 }
 
-/// Wrap nine-field game patch entries in the multipart envelope the patch-list parser expects.
-fn game_patchlist(entries: &[&str]) -> Vec<u8> {
+/// Wrap patchlist entries (game or boot) in the multipart envelope the patch-list parser expects.
+fn multipart_envelope(entries: &[&str]) -> Vec<u8> {
     let boundary = "--SYNTHETIC_BOUNDARY_APOGEE";
     let mut body = String::new();
     for header in [
@@ -189,6 +218,27 @@ mod tests {
         assert_eq!(entries[0].length, 52_430_000);
         assert_eq!(entries[1].length, 10);
         assert!(entries[0].hashes.is_some());
+    }
+
+    #[test]
+    fn boot_patchlist_body_parses_as_hashless_boot_entries() {
+        let response = boot_patchlist(&[
+            &synthetic_boot_entry(1_024, "2024.02.01.0000.0001"),
+            &synthetic_boot_entry(2_048, "2024.02.01.0000.0002"),
+        ]);
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).unwrap();
+        let entries = parse_patch_list(&body).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].length, 1_024);
+        assert!(entries[0].hashes.is_none(), "boot entries carry no hashes");
+        assert!(entries[1].url.contains("/boot/"));
+    }
+
+    #[test]
+    fn boot_current_reports_no_pending_patches() {
+        assert_eq!(boot_current().status, 200);
+        assert!(boot_current().body.is_empty());
     }
 
     #[test]
