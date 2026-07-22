@@ -15,10 +15,12 @@ mod flow;
 mod host;
 mod launch;
 mod model;
+mod patch;
 mod store;
 mod transport;
 
 pub use apogee_otp::OtpSource;
+pub use apogee_patcher::PatchProgress;
 pub use apogee_secrets::Secret;
 pub use command::{Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Progress};
 pub use composition::{Core, CoreConfig};

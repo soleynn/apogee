@@ -23,6 +23,8 @@ use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
 use crate::model::{Account, Profile, Settings};
+use crate::patch::PatchBackend;
+use crate::patch::patcher_backend::PatcherBackend;
 use crate::store::{Store, StoreError};
 use crate::transport::HttpTransport;
 
@@ -88,7 +90,8 @@ pub struct Core {
     /// concrete transport; tests inject a scripted double through [`Core::with_transport`].
     transport: Arc<dyn Transport>,
     fetcher: Fetcher,
-    patcher: Patcher,
+    /// The patch/repair seam over `apogee-patcher`. Held as a trait object so a test can inject a fake.
+    patch: Arc<dyn PatchBackend>,
     runtime: Runtime,
     /// The launch seam over the runner. Held as a trait object so a test can inject a fake.
     launch: Arc<dyn LaunchBackend>,
@@ -113,8 +116,9 @@ impl Core {
     pub fn new(config: CoreConfig) -> Result<Self, CoreError> {
         // The one concrete transport. gzip/deflate are enabled so reqwest negotiates and decompresses
         // the login pages automatically (the request path forwards no accept-encoding of its own).
-        // HTTP-version tuning (1.1 for the plain-HTTP patch CDN, 2 for HTTPS hosts) lands with the
-        // patch flow; the dual-stack default already applies.
+        // HTTP-version tuning is the reqwest default and is what we want: HTTP/1.1 over the plain-HTTP
+        // patch/boot-check CDN, HTTP/2 negotiated via ALPN over the TLS artifact/login hosts. Dual-stack
+        // Happy-Eyeballs connect applies throughout.
         let client = reqwest::Client::builder()
             .gzip(true)
             .deflate(true)
@@ -159,12 +163,23 @@ impl Core {
         let patcher = Patcher::new(
             fetcher.clone(),
             PatcherConfig {
-                patch_store,
+                patch_store: patch_store.clone(),
                 keep_patches: false,
                 ignore_space: false,
                 ..PatcherConfig::default()
             },
         );
+        // The catalog-fetch client for repair: separate from the injected `transport` (which serves
+        // the login/register/boot-check protocol) and from fetch's download client, it pulls the
+        // small signed index manifest. reqwest's default already serves HTTP/1.1 over plain HTTP and
+        // negotiates HTTP/2 via ALPN over TLS, which is the patch-CDN-vs-artifact-host split we want.
+        let http = reqwest::Client::builder()
+            .build()
+            .map_err(|e| CoreError::Init {
+                detail: e.to_string(),
+            })?;
+        let patch: Arc<dyn PatchBackend> =
+            Arc::new(PatcherBackend::new(patcher, http, patch_store));
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),
@@ -176,7 +191,7 @@ impl Core {
         Ok(Self {
             transport,
             fetcher,
-            patcher,
+            patch,
             runtime,
             launch,
             addons,
@@ -307,6 +322,7 @@ impl Core {
     fn flow_context(&self) -> FlowContext {
         FlowContext {
             transport: self.transport.clone(),
+            patch: self.patch.clone(),
             launch: self.launch.clone(),
             store: self.store.clone(),
             clock: self.clock.clone(),

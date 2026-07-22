@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use apogee_otp::OtpSource;
+use apogee_patcher::PatchProgress;
 use apogee_secrets::Secret;
 use uuid::Uuid;
 
@@ -35,12 +36,31 @@ pub enum Command {
     Launch {
         profile: Uuid,
     },
-    /// Authenticate (or reuse a cached session), register, and launch the game in one flow.
+    /// Authenticate (or reuse a cached session), register, apply any pending patches, and launch the
+    /// game in one flow.
     PatchAndPlay {
         profile: Uuid,
         password: Secret,
         otp: OtpSource,
     },
+    /// Authenticate, register, and apply any pending boot and game patches, bringing the install
+    /// current. Does not launch. The credential-bearing sibling of [`Command::PatchAndPlay`] without
+    /// the final launch.
+    Patch {
+        profile: Uuid,
+        password: Secret,
+        otp: OtpSource,
+    },
+    /// Install the game from nothing into the profile's (empty) game directory: register at the base
+    /// sentinel so Square Enix returns the full boot and game chain, apply it, then launch. The same
+    /// patch flow as [`Command::PatchAndPlay`], started from the sentinel version.
+    Install {
+        profile: Uuid,
+        password: Secret,
+        otp: OtpSource,
+    },
+    /// Verify the profile's install against its signed block indexes and re-fetch only the broken
+    /// byte ranges, quarantining strays. Does not launch.
     Repair {
         profile: Uuid,
     },
@@ -65,6 +85,18 @@ impl fmt::Debug for Command {
             }
             Command::PatchAndPlay { profile, otp, .. } => f
                 .debug_struct("PatchAndPlay")
+                .field("profile", profile)
+                .field("password", &"<redacted>")
+                .field("otp", &otp_label(otp))
+                .finish(),
+            Command::Patch { profile, otp, .. } => f
+                .debug_struct("Patch")
+                .field("profile", profile)
+                .field("password", &"<redacted>")
+                .field("otp", &otp_label(otp))
+                .finish(),
+            Command::Install { profile, otp, .. } => f
+                .debug_struct("Install")
                 .field("profile", profile)
                 .field("password", &"<redacted>")
                 .field("otp", &otp_label(otp))
@@ -97,6 +129,9 @@ fn otp_label(otp: &OtpSource) -> &'static str {
 pub enum Event {
     State(FlowState),
     Progress(Progress),
+    /// A patch or repair progress frame relayed verbatim from `apogee-patcher` (download slots, apply
+    /// progress, repair phases). The shell renders it; tests consume it identically.
+    Patch(PatchProgress),
     Frontier(FrontierData),
     Error(CoreError),
 }
@@ -121,6 +156,8 @@ pub enum FlowState {
     VersionNotServiced,
     /// Patches are being applied.
     Patching,
+    /// The install is being verified and repaired against its block index.
+    Repairing,
     /// The game is being prepared and spawned.
     Launching,
     /// The game process is running.
