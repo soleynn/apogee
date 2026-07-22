@@ -26,10 +26,20 @@ wine-integration = ["fixtures"]
 # Sends SIGINT to the CLI child in the e2e test so it shuts the game down cleanly.
 rustix = { workspace = true, features = ["process"] }
 tempfile.workspace = true
+# The hermetic patch e2e: a chaos server serves a real patch chain the CLI downloads and applies.
+apogee-test-support = { path = "../../crates/apogee-test-support" }
+apogee-zipatch = { path = "../../crates/apogee-zipatch", features = ["test-fixtures"] }
+sha1.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }
 
 [[test]]
 name = "e2e"
 required-features = ["wine-integration"]
+
+[[test]]
+name = "patch_e2e"
+required-features = ["fixtures"]
 
 [lints]
 workspace = true
