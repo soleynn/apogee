@@ -93,6 +93,24 @@ impl IndexCatalog {
         Self::from_json_bytes(manifest_json)
     }
 
+    /// Verify and parse a hosted catalog against the compiled-in [`INDEX_CATALOG_PUBLIC_KEY`]. The
+    /// convenience the composition root calls so it never handles the key or the `ed25519` type: it
+    /// fetches the manifest and signature bytes (transport is its job) and hands them here for the
+    /// crypto (the patcher's job).
+    ///
+    /// # Errors
+    /// [`IndexCatalogError::BadSignature`] if the compiled-in key is unbuildable, or the signature is
+    /// absent, malformed, or does not verify; otherwise any parse error from
+    /// [`from_json_bytes`](Self::from_json_bytes).
+    pub fn verify_default(
+        manifest_json: &[u8],
+        signature: &[u8],
+    ) -> Result<Self, IndexCatalogError> {
+        let key = VerifyingKey::from_bytes(&INDEX_CATALOG_PUBLIC_KEY)
+            .map_err(|_| IndexCatalogError::BadSignature)?;
+        Self::parse_and_verify(manifest_json, signature, &key)
+    }
+
     /// Resolve the index entry for `repo` at `version`, or `None` when the catalog has no such row.
     #[must_use]
     pub fn resolve(&self, repo: Repo, version: &str) -> Option<&IndexEntry> {
@@ -344,6 +362,26 @@ mod tests {
     #[test]
     fn the_compiled_in_key_parses() {
         assert!(VerifyingKey::from_bytes(&INDEX_CATALOG_PUBLIC_KEY).is_ok());
+    }
+
+    #[test]
+    fn verify_default_uses_the_compiled_in_key() {
+        let manifest = include_bytes!("../../../site/indexes/manifest.json");
+        let signature = include_bytes!("../../../site/indexes/manifest.json.sig");
+        let catalog = IndexCatalog::verify_default(manifest, signature)
+            .expect("hosted manifest verifies against the compiled-in key");
+        assert!(
+            catalog
+                .resolve(Repo::Game, "2024.03.28.0000.0000")
+                .is_some()
+        );
+        // A one-byte flip breaks the signature under the same key.
+        let mut tampered = manifest.to_vec();
+        tampered[40] ^= 0x01;
+        assert!(matches!(
+            IndexCatalog::verify_default(&tampered, signature),
+            Err(IndexCatalogError::BadSignature)
+        ));
     }
 
     /// The hosted staging manifest and its detached signature, embedded at build time, must verify
