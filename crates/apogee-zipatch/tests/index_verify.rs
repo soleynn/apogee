@@ -171,6 +171,52 @@ fn an_unindexed_file_is_a_stray_unless_ignored() {
 }
 
 #[test]
+fn a_file_in_an_unindexed_sibling_directory_is_not_a_stray() {
+    // A per-repo index shares its on-disk tree with sibling repos: the game index populates
+    // `sqpack/ffxiv/…` but the expansions live beside it under `sqpack/ex{n}/…`. A file in a directory
+    // the index has no files in must never be flagged as a stray, or a repair would quarantine a
+    // sibling repo's data. A genuine stray *inside* an indexed directory is still flagged.
+    let chain = chain();
+    let applied = tempfile::tempdir().expect("tempdir");
+    apply_chain(applied.path(), &chain).expect("apply chain");
+    let index = build_from(&chain).expect("build index");
+
+    // An expansion-style file in a directory the index does not populate.
+    std::fs::create_dir_all(applied.path().join("sqpack/ex1")).expect("mkdir");
+    std::fs::write(
+        applied.path().join("sqpack/ex1/2b0000.win32.dat0"),
+        b"expansion data the game index knows nothing about",
+    )
+    .expect("write sibling");
+    // A genuine stray sitting right beside the indexed dat.
+    std::fs::write(
+        applied.path().join("sqpack/ffxiv/leftover.dat"),
+        b"real stray",
+    )
+    .expect("write stray");
+
+    let report = index
+        .verify(applied.path(), &VerifyOptions::default())
+        .expect("verify");
+    assert!(
+        report
+            .stray_files
+            .iter()
+            .all(|s| !s.path.starts_with("sqpack/ex1")),
+        "a sibling repo's file must not be a stray, got {:?}",
+        report.stray_files
+    );
+    assert!(
+        report
+            .stray_files
+            .iter()
+            .any(|s| s.path == Path::new("sqpack/ffxiv/leftover.dat")),
+        "a stray inside an indexed directory must still be flagged, got {:?}",
+        report.stray_files
+    );
+}
+
+#[test]
 fn refine_rechecks_only_the_given_parts() {
     let chain = chain();
     let applied = tempfile::tempdir().expect("tempdir");

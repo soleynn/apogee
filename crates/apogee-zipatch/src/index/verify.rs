@@ -152,8 +152,34 @@ impl Index {
     }
 
     /// Files under `root` that no indexed target claims and no ignore rule excuses.
+    ///
+    /// The sweep is confined to the directories the index actually populates. A stray is reported only
+    /// when it sits *directly inside* a directory that holds an indexed file, and the walk never
+    /// descends into a directory that leads to no indexed file at all. This is what makes a per-repo
+    /// index safe over a tree it shares with a sibling repo: the FFXIV game and its expansions both
+    /// live under one `game/` tree (`sqpack/ffxiv/…` vs. `sqpack/ex{n}/…`), so a whole-tree sweep would
+    /// wrongly flag every expansion file as a stray of the game index. For a whole-tree index (every
+    /// populated directory is claimed) the result is unchanged.
     fn strays(&self, root: &Path) -> Result<Vec<StrayFile>> {
         let indexed: HashSet<&Path> = self.targets.iter().map(|t| t.path.as_path()).collect();
+        // `claimed`: directories that directly hold an indexed file (a stray there is genuine).
+        // `descend`: those plus every ancestor, so the walk reaches claimed directories but prunes
+        // sibling subtrees the index has no files in.
+        let mut claimed: HashSet<PathBuf> = HashSet::new();
+        let mut descend: HashSet<PathBuf> = HashSet::new();
+        for target in &self.targets {
+            let parent = target.path.parent().unwrap_or_else(|| Path::new(""));
+            claimed.insert(parent.to_path_buf());
+            let mut dir = parent;
+            loop {
+                descend.insert(dir.to_path_buf());
+                match dir.parent() {
+                    Some(up) => dir = up,
+                    None => break,
+                }
+            }
+        }
+
         let mut strays = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
@@ -167,11 +193,15 @@ impl Index {
                 let path = entry.path();
                 let meta = std::fs::symlink_metadata(&path).map_err(|e| Error::io(e, Op::Read))?;
                 let ty = meta.file_type();
+                let rel = path.strip_prefix(root).unwrap_or(&path);
                 if ty.is_dir() {
-                    stack.push(path);
+                    // Only walk into a directory on the path to some indexed file.
+                    if descend.contains(rel) {
+                        stack.push(path);
+                    }
                 } else if ty.is_file() {
-                    let rel = path.strip_prefix(root).unwrap_or(&path);
-                    if !indexed.contains(rel) && !is_ignored(rel) {
+                    let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+                    if claimed.contains(parent) && !indexed.contains(rel) && !is_ignored(rel) {
                         strays.push(StrayFile {
                             path: rel.to_path_buf(),
                         });
