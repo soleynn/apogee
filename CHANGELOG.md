@@ -48,6 +48,7 @@ is tagged with its change type. Versioning aims to follow
 - Install pipeline over fetch and zipatch _(added)_
 - End-to-end install, ordering, cancel, rejection _(testing)_
 - Boot chunk-CRC admission and install-from-nothing _(added)_
+- Block-level repair with local-first-then-HTTP refetch _(added)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
@@ -88,6 +89,8 @@ is tagged with its change type. Versioning aims to follow
 - Drop the always-zero empty-block write offset _(changed)_
 - Feature-gated synthetic patch fixtures _(added)_
 - Rustfmt the fixtures module _(styling)_
+- Expose the index repo version and platform _(added)_
+- Confine the verify stray sweep to indexed directories _(fixed)_
 
 ### ci
 - Stop the changelog render crashing on a non-conventional commit _(fixed)_
