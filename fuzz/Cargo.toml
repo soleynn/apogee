@@ -19,6 +19,7 @@ apogee-runtime = { path = "../crates/apogee-runtime" }
 apogee-sqpack = { path = "../crates/apogee-sqpack" }
 apogee-zipatch = { path = "../crates/apogee-zipatch" }
 apogee-fetch = { path = "../crates/apogee-fetch", features = ["fuzzing"] }
+apogee-patcher = { path = "../crates/apogee-patcher" }
 
 [[bin]]
 name = "patchlist"
@@ -100,6 +101,13 @@ bench = false
 [[bin]]
 name = "fetch_multipart"
 path = "fuzz_targets/fetch_multipart.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_manifest"
+path = "fuzz_targets/index_manifest.rs"
 test = false
 doc = false
 bench = false
