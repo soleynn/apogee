@@ -14,9 +14,11 @@
 //! admission token before the file may join the apply queue. Either way, an unadmitted patch cannot
 //! be applied.
 //!
-//! Repair and the Windows elevated-worker protocol (the [`WorkerRequest`]/[`WorkerResponse`]/
-//! [`WorkerProgress`] messages and the [`PatchError::Worker`] arm) are declared here but not yet
-//! driven.
+//! Repair verifies an install against its block index and re-fetches only the broken byte ranges,
+//! pulling from local patch files on the first (trusted) attempt and over HTTP after, reconstructing
+//! zero/empty regions with no fetch, and quarantining strays to a recycler rather than deleting them.
+//! The Windows elevated-worker protocol (the [`WorkerRequest`]/[`WorkerResponse`]/[`WorkerProgress`]
+//! messages and the [`PatchError::Worker`] arm) is declared here but not yet driven.
 
 use std::path::PathBuf;
 
@@ -29,12 +31,17 @@ mod install;
 mod job;
 mod preflight;
 mod progress;
+mod recycler;
+mod repair;
 mod request;
 mod store;
 
 pub use job::Job;
 pub use progress::PatchProgress;
-pub use request::{InstallRequest, Installed, SePatch};
+pub use repair::{RepairOutcome, RepairedRepo};
+pub use request::{
+    IndexSource, InstallRequest, Installed, RepairPatchSource, RepairRepo, RepairRequest, SePatch,
+};
 
 /// Which game repository a patch operation targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,11 +52,13 @@ pub enum Repo {
     Expansion(u8),
 }
 
-/// Identifies one part-file within a repo (for repair reporting).
+/// Names one broken part for repair reporting: the repo-relative file and the byte offset of the run
+/// that failed verification.
 #[derive(Debug, Clone)]
 pub struct PartRef {
     pub repo: Repo,
-    pub index: u32,
+    pub path: PathBuf,
+    pub offset: u64,
 }
 
 /// A disk pool checked during preflight.
@@ -173,6 +182,26 @@ pub struct PatcherConfig {
     pub keep_patches: bool,
     /// Skip the disk-space preflight (the escape hatch for a caller that knows better).
     pub ignore_space: bool,
+    /// How many repair passes to attempt before giving up on a still-broken part (the reference's
+    /// reattempt budget; clamped to at least one). The first pass may trust local patch files; every
+    /// pass after re-fetches over HTTP.
+    pub repair_reattempts: usize,
+}
+
+/// The reference launcher's reattempt budget, adopted as the default repair pass count.
+pub const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
+
+impl Default for PatcherConfig {
+    /// A config with no patch store set (the caller must fill [`patch_store`](Self::patch_store)):
+    /// patches removed after apply, the disk preflight on, and the reference reattempt budget.
+    fn default() -> Self {
+        Self {
+            patch_store: PathBuf::new(),
+            keep_patches: false,
+            ignore_space: false,
+            repair_reattempts: DEFAULT_REPAIR_REATTEMPTS,
+        }
+    }
 }
 
 /// Orchestrates download to verify to apply across a repo's ordered patch set.
@@ -195,7 +224,22 @@ impl Patcher {
     /// Returns a [`Job`] whose progress stream carries [`PatchProgress`] and whose result is the
     /// per-repo [`Installed`] version. Runs on a spawned task, so a `tokio` runtime must be active.
     #[must_use]
-    pub fn install(&self, request: InstallRequest) -> Job {
-        job::spawn(self.fetcher.clone(), self.config.clone(), request)
+    pub fn install(&self, request: InstallRequest) -> Job<Installed> {
+        let fetcher = self.fetcher.clone();
+        let config = self.config.clone();
+        job::spawn(move |progress, cancel| install::run(fetcher, config, request, progress, cancel))
+    }
+
+    /// Repair one or more repos: verify each against its block index and re-fetch only the broken
+    /// byte ranges (local patch files first, HTTP after), reconstruct zero/empty regions locally, and
+    /// quarantine strays to the recycler without deleting them.
+    ///
+    /// Returns a [`Job`] whose progress stream carries [`PatchProgress`] repair phases and whose
+    /// result is the [`RepairOutcome`]. Runs on a spawned task, so a `tokio` runtime must be active.
+    #[must_use]
+    pub fn repair(&self, request: RepairRequest) -> Job<RepairOutcome> {
+        let fetcher = self.fetcher.clone();
+        let config = self.config.clone();
+        job::spawn(move |progress, cancel| repair::run(fetcher, config, request, progress, cancel))
     }
 }
