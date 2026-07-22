@@ -38,6 +38,14 @@ impl<T> Job<T> {
         self.cancel.cancel();
     }
 
+    /// A clone of this job's cancellation token, so a driver can bridge an external cancel signal to
+    /// the job (cancelling the token stops the run) while still holding the job by value for
+    /// [`wait`](Self::wait), which consumes it.
+    #[must_use]
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
     /// Await the operation result.
     ///
     /// # Errors
