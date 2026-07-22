@@ -81,6 +81,10 @@ jobs:
       # The corpus fetcher lives behind the `corpus` feature (off by default so it stays out of the
       # plain and cross builds); its self-test is hermetic (chaos-server-backed, no network).
       - run: cargo test -p apogee-test-support --features corpus corpus
+      # The CLI patch e2e drives a real chaos-served patch download-and-apply through the built binary;
+      # it needs the test-only `fixtures` feature (scripted transport), so it runs as its own step. No
+      # wine (the patch command never launches), so it belongs in the hermetic job, not the wine one.
+      - run: cargo test -p apogee-cli --features fixtures --test patch_e2e
 
   # Process supervision on stock wine: launches a stub PE and proves the /proc scanner resolves it,
   # kills it targeted, and that wineserver -k is the separate broad stop. A required gate: the
