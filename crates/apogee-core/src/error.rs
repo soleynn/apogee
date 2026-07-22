@@ -43,4 +43,8 @@ pub enum CoreError {
     Init { detail: String },
     #[error("preparing the launch failed: {detail}")]
     Launch { detail: String },
+    #[error("the patch flow could not bring the install current: {detail}")]
+    PatchIncomplete { detail: String },
+    #[error("preparing the repair failed: {detail}")]
+    Repair { detail: String },
 }
