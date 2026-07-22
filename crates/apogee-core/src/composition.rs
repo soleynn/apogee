@@ -162,6 +162,7 @@ impl Core {
                 patch_store,
                 keep_patches: false,
                 ignore_space: false,
+                ..PatcherConfig::default()
             },
         );
         let addons = Addons::new(

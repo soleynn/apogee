@@ -30,4 +30,17 @@ pub enum PatchProgress {
         index: u32,
         version: String,
     },
+    /// A repo is being verified against its block index (the CRC sweep), on repair attempt `attempt`
+    /// (0 for the initial full pass, then once per re-fetch round).
+    Verifying { repo: Repo, attempt: u32 },
+    /// A repair pass pulled `bytes` of broken ranges for `repo` this attempt.
+    Refetching {
+        repo: Repo,
+        attempt: u32,
+        bytes: u64,
+    },
+    /// Stray files under `repo` are being moved to the recycler (`count` in this batch).
+    Quarantining { repo: Repo, count: usize },
+    /// A repo verified clean after repair and its `.ver` advanced to `version`.
+    Repaired { repo: Repo, version: String },
 }

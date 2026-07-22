@@ -1,8 +1,9 @@
-//! The install request and its result.
+//! The install request and its result, and the repair request and its inputs.
 
 use std::path::PathBuf;
 
 use sqex_proto::PatchListEntry;
+use url::Url;
 
 use crate::Repo;
 
@@ -57,4 +58,66 @@ pub struct Installed {
     pub repo: Repo,
     /// The version written to the repo's `.ver` (the last applied patch, prefix-stripped).
     pub new_version: String,
+}
+
+/// How a repair obtains a repo's `.apzi` block index.
+///
+/// The index is derived (reproducible from the same patch chain), so its authenticity rests on a
+/// `sha256` pin: [`Pinned`](Self::Pinned) fetches it over HTTP(S) under that pin, and
+/// [`LocalFile`](Self::LocalFile) reads one already on disk (a local regeneration, or a cached
+/// download). The `sha256`-pinned rows come from a signed index catalog the caller resolves; the
+/// catalog's Ed25519 authenticity check and hosting are the adjacent index-infrastructure, not this
+/// crate's runtime path (it consumes a resolved pin).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum IndexSource {
+    /// Read the `.apzi` from a local path (a regeneration, or a prior download).
+    LocalFile(PathBuf),
+    /// Fetch the `.apzi` over HTTP(S), authenticated by its whole-file `sha256` pin.
+    Pinned {
+        /// Where the `.apzi` is served.
+        url: Url,
+        /// The pin the fetched bytes must hash to.
+        sha256: [u8; 32],
+    },
+}
+
+/// One source patch a repair can pull broken ranges from, named as the index records it. The patcher
+/// resolves each of the index's source patches to one of these by name and pulls only the broken
+/// ranges: from [`local`](Self::local) on the first (trusted) attempt when the whole chain is present,
+/// then from [`url`](Self::url) over HTTP after.
+#[derive(Debug, Clone)]
+pub struct RepairPatchSource {
+    /// The source patch file name, matching the index's recorded name for it.
+    pub name: String,
+    /// Where the patch file is served, for the HTTP range fetches.
+    pub url: Url,
+    /// A local copy of the patch file to trust on the first attempt, if one is cached.
+    pub local: Option<PathBuf>,
+}
+
+/// One repo to repair: how to get its index, the version that index must describe, the source patches
+/// its ranges come from, and the SE headers for the HTTP range fetches.
+#[derive(Debug, Clone)]
+pub struct RepairRepo {
+    /// Which repo to verify and heal.
+    pub repo: Repo,
+    /// The version the install should be at; cross-checked against the index's own version.
+    pub target_version: String,
+    /// How to obtain the repo's block index.
+    pub index: IndexSource,
+    /// The source patches the index references, by name (order irrelevant; matched by name).
+    pub patch_sources: Vec<RepairPatchSource>,
+    /// The SE request headers for the HTTP range fetches (`FFXIV PATCH CLIENT`, optional unique id).
+    pub headers: SePatch,
+}
+
+/// A repair across one or more repos: verify each against its block index and re-fetch only the broken
+/// byte ranges. The game root travels with the request, as for [`InstallRequest`].
+#[derive(Debug, Clone)]
+pub struct RepairRequest {
+    /// The install root holding `boot/` and `game/`; each repo is verified in its subtree beneath.
+    pub game_root: PathBuf,
+    /// The repos to check, each with its index and source patches.
+    pub repos: Vec<RepairRepo>,
 }

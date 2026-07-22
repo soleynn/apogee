@@ -45,9 +45,15 @@ pub(crate) fn patch_dest(patch_store: &Path, url: &Url, index: u32) -> Result<Pa
 /// The apply root for `repo` beneath the install `game_root`: boot patches target `boot/`, game and
 /// expansion patches target `game/` (expansion data lives under `game/sqpack/ex{n}`).
 pub(crate) fn repo_root(game_root: &Path, repo: Repo) -> PathBuf {
+    game_root.join(repo_subdir(repo))
+}
+
+/// The install-root-relative subtree name for `repo`: `boot` for the boot repo, `game` for the game
+/// and every expansion repo (expansion data lives beneath `game/sqpack/ex{n}`).
+pub(crate) fn repo_subdir(repo: Repo) -> &'static str {
     match repo {
-        Repo::Boot => game_root.join("boot"),
-        Repo::Game | Repo::Expansion(_) => game_root.join("game"),
+        Repo::Boot => "boot",
+        Repo::Game | Repo::Expansion(_) => "game",
     }
 }
 
