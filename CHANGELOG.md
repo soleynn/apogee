@@ -6,6 +6,12 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-cli
+- Add patch, install, and repair commands _(added)_
+
+### apogee-core
+- Drive patch, repair, and install flows _(added)_
+
 ### apogee-fetch
 - Mark Progress non_exhaustive _(changed)_
 - Record completed intervals in the resume journal _(added)_
@@ -50,6 +56,7 @@ is tagged with its change type. Versioning aims to follow
 - Boot chunk-CRC admission and install-from-nothing _(added)_
 - Block-level repair with local-first-then-HTTP refetch _(added)_
 - Signed index catalog with a compiled-in key _(added)_
+- Add Job::cancel_token and IndexCatalog::verify_default _(added)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
@@ -70,6 +77,7 @@ is tagged with its change type. Versioning aims to follow
 - Pin the real boot-patch corpus and its oracle tree _(testing)_
 - Per-segment chaos knobs and concurrency counter _(testing)_
 - One-shot block corruption and request-header capture _(testing)_
+- Add boot patchlist fixtures _(testing)_
 
 ### apogee-zipatch
 - Read the ZiPatch container into a typed chunk stream _(added)_
@@ -104,6 +112,7 @@ is tagged with its change type. Versioning aims to follow
 ### sqex-proto
 - Report the base-version sentinel for a missing repository _(added)_
 - Cover the install-mode sentinel report _(testing)_
+- Expose decode_ver for canonical .ver decoding _(added)_
 
 ### workspace
 - Extend the byte-order audit to apogee-sqpack _(build)_
