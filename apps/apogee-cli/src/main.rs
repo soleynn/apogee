@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, Command, Core, CoreConfig, Event, OtpSource, Profile, Region,
-    RunnerSelection, Secret, Uuid,
+    Account, AccountKind, Command, Core, CoreConfig, Event, OtpSource, PatchProgress, Profile,
+    Region, RunnerSelection, Secret, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -40,8 +40,14 @@ enum Commands {
     Login(PlayArgs),
     /// Launch the game from a still-valid cached session.
     Launch(TargetArgs),
-    /// Authenticate (or reuse a cached session) and launch the game.
+    /// Authenticate (or reuse a cached session), apply any pending patches, and launch the game.
     Play(PlayArgs),
+    /// Apply any pending boot and game patches, bringing the install current (does not launch).
+    Patch(PlayArgs),
+    /// Install the game from nothing into the profile's (empty) game directory, then launch.
+    Install(PlayArgs),
+    /// Verify the install against its signed block indexes and re-fetch only what is broken.
+    Repair(TargetArgs),
 }
 
 #[derive(Subcommand)]
@@ -138,6 +144,34 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 },
             )
             .await)
+        }
+        Commands::Patch(args) => {
+            let (profile, password, otp) = gather(&core, &args)?;
+            Ok(drive(
+                &core,
+                Command::Patch {
+                    profile,
+                    password,
+                    otp,
+                },
+            )
+            .await)
+        }
+        Commands::Install(args) => {
+            let (profile, password, otp) = gather(&core, &args)?;
+            Ok(drive(
+                &core,
+                Command::Install {
+                    profile,
+                    password,
+                    otp,
+                },
+            )
+            .await)
+        }
+        Commands::Repair(args) => {
+            let profile = resolve_profile(&core, &args.profile)?.id;
+            Ok(drive(&core, Command::Repair { profile }).await)
         }
     }
 }
@@ -315,8 +349,54 @@ fn render(event: &Event) -> String {
     match event {
         Event::State(state) => format!("state: {state:?}"),
         Event::Progress(progress) => format!("progress: {}/{}", progress.completed, progress.total),
+        Event::Patch(patch) => render_patch(patch),
         Event::Frontier(_) => "frontier data received".to_owned(),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+/// Render one patch/repair progress frame as a plain line. Byte counts and versions only: no secret
+/// (the session credential never appears in a `PatchProgress`).
+fn render_patch(patch: &PatchProgress) -> String {
+    match patch {
+        PatchProgress::Downloading {
+            repo,
+            index,
+            bytes_done,
+            total,
+        } => format!(
+            "patch: {repo:?} #{index} downloading {bytes_done}/{}",
+            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
+        ),
+        PatchProgress::Applying {
+            repo,
+            index,
+            bytes_done,
+            total,
+        } => format!(
+            "patch: {repo:?} #{index} applying {bytes_done}/{}",
+            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
+        ),
+        PatchProgress::Applied {
+            repo,
+            index,
+            version,
+        } => format!("patch: {repo:?} #{index} applied -> {version}"),
+        PatchProgress::Verifying { repo, attempt } => {
+            format!("repair: {repo:?} verifying (attempt {attempt})")
+        }
+        PatchProgress::Refetching {
+            repo,
+            attempt,
+            bytes,
+        } => format!("repair: {repo:?} refetched {bytes} bytes (attempt {attempt})"),
+        PatchProgress::Quarantining { repo, count } => {
+            format!("repair: {repo:?} quarantining {count} stray file(s)")
+        }
+        PatchProgress::Repaired { repo, version } => {
+            format!("repair: {repo:?} repaired -> {version}")
+        }
+        _ => "patch: progress".to_owned(),
     }
 }
