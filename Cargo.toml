@@ -34,7 +34,7 @@ totp-rs          = "5"
 flate2           = "1"
 # Ed25519 verification for signed manifests (runner/component catalogs), checked against a
 # compiled-in key before any sha256 pin is trusted.
-ed25519-dalek    = "2"
+ed25519-dalek    = "3"
 # safe syscall wrappers (monotonic clock now; /proc + signals later), keeping #![forbid(unsafe_code)]
 rustix           = "1"
 # in-process, pure-Rust streaming archive decoders for runner tarballs (no system tar, no C linkage)
