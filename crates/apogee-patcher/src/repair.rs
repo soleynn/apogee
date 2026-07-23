@@ -320,9 +320,11 @@ fn compose_source(
 }
 
 /// Resolve the index's source patches, in its chain order, to an HTTP source per patch and (when the
-/// whole chain is cached locally) a local file per patch. A patch the index references but the request
-/// does not name is a hard [`PatchError::IndexUnavailable`]: a repair cannot proceed missing a source
-/// the index depends on.
+/// whole chain is cached locally) a local file per patch. A source the index references is taken from
+/// the request's explicit [`patch_sources`](RepairRepo::patch_sources) when listed there, else formed
+/// as `{source_base_url}/{name}` when a base is set (an HTTP-only source, no local copy). A source that
+/// neither supplies is a hard [`PatchError::IndexUnavailable`]: a repair cannot proceed missing a
+/// source the index depends on.
 type ResolvedSources = (Option<Vec<PathBuf>>, Vec<HttpSource>);
 
 fn resolve_sources(index: &Index, repo_req: &RepairRepo) -> Result<ResolvedSources, PatchError> {
@@ -338,17 +340,36 @@ fn resolve_sources(index: &Index, repo_req: &RepairRepo) -> Result<ResolvedSourc
     let mut locals = Vec::with_capacity(refs.len());
     let mut whole_chain_local = true;
     for sref in &refs {
-        let src = by_name.get(sref.name).ok_or_else(|| {
-            index_unavailable(
-                repo,
-                std::io::Error::other(format!(
-                    "index references source patch {:?} the repair did not provide",
-                    sref.name
-                )),
-            )
-        })?;
+        // An explicit source (with an optional local copy) wins; otherwise derive the URL from the base
+        // (index-only heal, no local). A source the request cannot form at all is a hard error.
+        let (url, local) = match by_name.get(sref.name) {
+            Some(src) => (src.url.clone(), src.local.clone()),
+            None => match &repo_req.source_base_url {
+                Some(base) => {
+                    let url = base.join(sref.name).map_err(|e| {
+                        index_unavailable(
+                            repo,
+                            std::io::Error::other(format!(
+                                "cannot form a source url for {:?} under {base}: {e}",
+                                sref.name
+                            )),
+                        )
+                    })?;
+                    (url, None)
+                }
+                None => {
+                    return Err(index_unavailable(
+                        repo,
+                        std::io::Error::other(format!(
+                            "index references source patch {:?} the repair did not provide",
+                            sref.name
+                        )),
+                    ));
+                }
+            },
+        };
         http.push(HttpSource {
-            url: src.url.clone(),
+            url,
             // The index's own length is authoritative; each HTTP response's `Content-Range` total is
             // cross-checked against it by the fetcher.
             expected_len: sref.expected_len,
@@ -361,7 +382,7 @@ fn resolve_sources(index: &Index, repo_req: &RepairRepo) -> Result<ResolvedSourc
         // fail its range reads. A same-length-but-corrupt copy still slips through here, but its bytes
         // fail their CRC on the first attempt and the HTTP passes heal it (the reattempt loop treats a
         // hard local fault as retryable), so it never corrupts the tree.
-        match &src.local {
+        match &local {
             Some(path) if local_len_matches(path, sref.expected_len) => locals.push(path.clone()),
             _ => whole_chain_local = false,
         }
