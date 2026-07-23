@@ -106,8 +106,16 @@ pub struct RepairRepo {
     pub target_version: String,
     /// How to obtain the repo's block index.
     pub index: IndexSource,
-    /// The source patches the index references, by name (order irrelevant; matched by name).
+    /// Explicit sources for the patches the index references, matched by name (order irrelevant). Use
+    /// this to supply a local copy for a first-attempt local heal, or a per-patch URL. A source the
+    /// index references that is not listed here is served from [`source_base_url`](Self::source_base_url)
+    /// instead; if neither supplies it, the repair fails with [`IndexUnavailable`](crate::PatchError::IndexUnavailable).
     pub patch_sources: Vec<RepairPatchSource>,
+    /// The base URL under which every source patch this index references is served, so a source not in
+    /// [`patch_sources`](Self::patch_sources) is fetched from `{base}/{name}` over HTTP (no local copy).
+    /// This lets a repair heal from the index alone, without a populated patch cache. `None` requires
+    /// every source to be listed explicitly.
+    pub source_base_url: Option<Url>,
     /// The SE request headers for the HTTP range fetches (`FFXIV PATCH CLIENT`, optional unique id).
     pub headers: SePatch,
 }
