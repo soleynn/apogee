@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Entries are grouped by 
 is tagged with its change type. Versioning aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-23
 
 ### apogee-cli
 - Add patch, install, and repair commands _(added)_
