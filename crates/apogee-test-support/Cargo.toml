@@ -43,5 +43,10 @@ corpus = ["dep:apogee-fetch", "dep:thiserror"]
 # Drives the chaos server in its own self-test.
 reqwest.workspace = true
 
+# Primes the boot corpus cache for the nightly differential-apply gate (network; corpus feature only).
+[[example]]
+name = "prime_corpus"
+required-features = ["corpus"]
+
 [lints]
 workspace = true
