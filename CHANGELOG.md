@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Entries are grouped by 
 is tagged with its change type. Versioning aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### workspace
+- Fix changelog and release-notes generation for stable releases _(ci)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
