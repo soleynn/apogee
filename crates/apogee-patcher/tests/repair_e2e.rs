@@ -114,6 +114,7 @@ fn request(game_root: &Path, index: IndexSource, sources: Vec<RepairPatchSource>
             target_version: VERSION.to_owned(),
             index,
             patch_sources: sources,
+            source_base_url: None,
             headers: SePatch::new("test-session"),
         }],
     }
@@ -186,6 +187,89 @@ async fn repair_over_http_heals_and_pulls_only_broken_ranges() -> Result<(), Box
     assert_eq!(outcome.repos.len(), 1);
     assert_eq!(outcome.repos[0].version, VERSION);
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_derives_source_urls_from_the_base_url_with_no_explicit_sources()
+-> Result<(), Box<dyn Error>> {
+    // A single-patch chain, so one base URL covers every source the index references (the chaos server
+    // serves its blob at any path, so the derived name `p0.patch` resolves against the server root).
+    let chain = vec![fixtures::patch_a()];
+    let game_root = tempfile::tempdir()?;
+    let baseline = install_game(&chain, game_root.path())?;
+    let repo = game_root.path().join("game");
+
+    let store = tempfile::tempdir()?;
+    let index_path = store.path().join("game.apzi");
+    write_index_file(&chain, VERSION, &index_path)?;
+
+    corrupt_byte(&repo.join(fixtures::DAT0_PATH), 0)?;
+
+    let servers = serve(&chain).await?;
+    let base = servers[0].base_url().clone();
+
+    // No explicit `patch_sources`: the source URL must be derived from the base alone (the index-only,
+    // cache-independent heal path).
+    let req = RepairRequest {
+        game_root: game_root.path().to_path_buf(),
+        repos: vec![RepairRepo {
+            repo: Repo::Game,
+            target_version: VERSION.to_owned(),
+            index: IndexSource::LocalFile(index_path),
+            patch_sources: Vec::new(),
+            source_base_url: Some(base),
+            headers: SePatch::new("s"),
+        }],
+    };
+    let outcome = patcher(store.path())?.repair(req).await?;
+
+    // Healed byte-identically over HTTP, pulling only the broken range from the derived URL.
+    tree_manifest::assert_tree_matches(
+        &repo,
+        &baseline,
+        Some(&is_ver_or_bck as &dyn Fn(&Path) -> bool),
+    );
+    assert!(
+        outcome.bytes_refetched > 0,
+        "the broken range must be pulled over HTTP"
+    );
+    assert!(
+        outcome.bytes_refetched < chain[0].len() as u64,
+        "pulled the whole patch, not a broken range"
+    );
+    assert_eq!(outcome.bytes_refetched, servers[0].stats().bytes_served());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_without_a_source_or_a_base_url_is_index_unavailable() -> Result<(), Box<dyn Error>>
+{
+    let chain = vec![fixtures::patch_a()];
+    let game_root = tempfile::tempdir()?;
+    install_game(&chain, game_root.path())?;
+    let repo = game_root.path().join("game");
+
+    let store = tempfile::tempdir()?;
+    let index_path = store.path().join("game.apzi");
+    write_index_file(&chain, VERSION, &index_path)?;
+    corrupt_byte(&repo.join(fixtures::DAT0_PATH), 0)?;
+
+    // Neither an explicit source nor a base URL: the index references a patch the repair cannot form.
+    let req = RepairRequest {
+        game_root: game_root.path().to_path_buf(),
+        repos: vec![RepairRepo {
+            repo: Repo::Game,
+            target_version: VERSION.to_owned(),
+            index: IndexSource::LocalFile(index_path),
+            patch_sources: Vec::new(),
+            source_base_url: None,
+            headers: SePatch::new("s"),
+        }],
+    };
+    match patcher(store.path())?.repair(req).await {
+        Err(PatchError::IndexUnavailable { .. }) => Ok(()),
+        other => panic!("expected IndexUnavailable, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -621,6 +705,7 @@ async fn a_multi_repo_request_repairs_each_and_shares_the_recycler_batch()
                 target_version: VERSION.to_owned(),
                 index: IndexSource::LocalFile(index_path.clone()),
                 patch_sources: patch_sources(&boot_servers, &[]),
+                source_base_url: None,
                 headers: SePatch::boot(),
             },
             RepairRepo {
@@ -628,6 +713,7 @@ async fn a_multi_repo_request_repairs_each_and_shares_the_recycler_batch()
                 target_version: VERSION.to_owned(),
                 index: IndexSource::LocalFile(index_path),
                 patch_sources: patch_sources(&game_servers, &[]),
+                source_base_url: None,
                 headers: SePatch::new("s"),
             },
         ],
