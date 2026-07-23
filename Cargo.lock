@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "apogee-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "apogee-core",
  "apogee-test-support",
