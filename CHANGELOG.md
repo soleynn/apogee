@@ -12,6 +12,7 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-core
 - Drive patch, repair, and install flows _(added)_
 - Add a keep-patches setting _(added)_
+- Derive repair CDN source URLs from the repo _(added)_
 
 ### apogee-fetch
 - Mark Progress non_exhaustive _(changed)_
@@ -58,6 +59,7 @@ is tagged with its change type. Versioning aims to follow
 - Block-level repair with local-first-then-HTTP refetch _(added)_
 - Signed index catalog with a compiled-in key _(added)_
 - Add Job::cancel_token and IndexCatalog::verify_default _(added)_
+- Derive repair source URLs from a base URL _(added)_
 
 ### apogee-sqpack
 - Decode stored and compressed blocks _(added)_
