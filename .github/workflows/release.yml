@@ -28,8 +28,17 @@ jobs:
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
             echo "cliff_args=--unreleased --strip all" >> "$GITHUB_OUTPUT"
           else
+            # A stable release rolls up every commit since the previous STABLE tag, including the
+            # -pre.N checkpoints in between (cliff.toml ignore_tags drops those as section boundaries).
+            # --latest/--current do not honor ignore_tags for range computation, so they would emit
+            # only the commits since the last -pre tag; pass an explicit prev-stable..this range instead.
+            prev=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -v '[-]' | grep -vFx "$REF_NAME" | head -n1)
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "cliff_args=--latest --strip all" >> "$GITHUB_OUTPUT"
+            if [ -n "$prev" ]; then
+              echo "cliff_args=--strip all ${prev}..${REF_NAME}" >> "$GITHUB_OUTPUT"
+            else
+              echo "cliff_args=--strip all ${REF_NAME}" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - name: Generate release notes
         id: git-cliff

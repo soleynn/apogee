@@ -1,15 +1,21 @@
 name: Changelog
 
-# After each merge to main, regenerate CHANGELOG.md and push it back to main. main is ruleset-protected
-# (changes via PR only), so the push uses a GitHub App token whose app is on the ruleset bypass list,
-# not the default GITHUB_TOKEN. The bot commit changes only CHANGELOG.md and carries [skip ci]; that,
-# paths-ignore, and cliff.toml's skip of "chore: regenerate changelog" each independently keep it from
-# looping. Until the APP_ID / APP_PRIVATE_KEY secrets exist the job skips with a warning.
+# After each merge to main AND each release tag, regenerate CHANGELOG.md and push it back to main. main
+# is ruleset-protected (changes via PR only), so the push uses a GitHub App token whose app is on the
+# ruleset bypass list, not the default GITHUB_TOKEN. The tag trigger is what versions a release section:
+# a tag is created after the release commit's own push, so without it the just-tagged version would sit
+# under [Unreleased] until the next unrelated merge.
+#
+# Loop prevention: the bot commit carries [skip ci] (GitHub skips its push) and the job's own
+# "already current" diff-check no-ops when nothing changed; cliff.toml also skips "chore: regenerate
+# changelog" so a stray run stays idempotent. (paths-ignore is intentionally not used: it does not
+# apply cleanly to tag pushes, and the guards above already prevent looping.) Until the
+# APP_ID / APP_PRIVATE_KEY secrets exist the job skips with a warning.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - CHANGELOG.md
+    tags:
+      - "v[0-9]*"
 
 permissions:
   contents: read
