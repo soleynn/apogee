@@ -6,6 +6,10 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### workspace
+- Fix changelog and release-notes generation for stable releases _(ci)_
+## [0.3.0] - 2026-07-23
+
 ### apogee-cli
 - Add patch, install, and repair commands _(added)_
 

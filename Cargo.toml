@@ -54,7 +54,7 @@ tokio-rustls     = { version = "0.26", default-features = false, features = ["ri
 rcgen            = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 # dev / test
 insta            = "1"
-rstest           = "0.23"
+rstest           = "0.26"
 proptest         = "1"
 tempfile         = "3"
 serial_test      = "3"
