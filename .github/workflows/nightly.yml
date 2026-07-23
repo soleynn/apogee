@@ -1,0 +1,93 @@
+name: Nightly
+
+# The soak tier: work too slow for every push. A longer fuzz run across every target on hostile input,
+# the full-corpus differential apply against the recorded oracle tree (which the every-push run skips
+# for lack of a primed corpus), and an informational coverage summary. Runs daily and on demand.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-soak:
+    name: fuzz-soak (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - patchlist
+          - oauth_stored
+          - oauth_launch_params
+          - sqex_base64
+          - runner_manifest
+          - sqpack_codec
+          - zipatch_chunk
+          - zipatch_sqpk
+          - zipatch_apply
+          - apzi_index
+          - fetch_multipart
+          - fetch_journal
+          - index_manifest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: nightly
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-fuzz
+      # A five-minute soak per target (the every-push smoke is 30 s). The gnu target is pinned:
+      # cargo-fuzz's default picks musl here, whose static libc is incompatible with the sanitizer.
+      - run: cargo +nightly fuzz build ${{ matrix.target }} --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300 -rss_limit_mb=2048
+
+  differential-apply:
+    name: differential-apply
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Fetch the committed boot corpus (URL + SHA256) into the cache; the pin covers the on-wire bytes.
+      - run: cargo run -p apogee-test-support --features corpus --example prime_corpus
+      # Apply the real boot chain and rebuild its index; both compare byte-for-byte against the recorded
+      # oracle tree. These skip when the corpus is unprimed (every-push), so they run here.
+      - run: cargo test -p apogee-zipatch --test apply_boot --test index_corpus
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    # Informational only: a coverage regression is a signal, never a gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --no-fail-fast --summary-only
