@@ -91,6 +91,12 @@ impl PatcherBackend {
                 target_version: version,
                 index: entry.source(),
                 patch_sources,
+                // The CDN base lets the repair form each index source-ref's URL without a populated
+                // cache, so a repair works even with keep-patches off. Boot heals fully this way; a game
+                // repo's HTTP range fetch additionally needs the session's patch-download credential
+                // (this repair is credential-free), so game heals only zero/empty and locally-cached
+                // ranges until that is wired.
+                source_base_url: cdn_base_for(repo),
                 // A game repo's HTTP range fetch needs the session's patch-download credential; this
                 // credential-free repair heals boot, zero/empty, and locally-cached ranges. A live
                 // game HTTP repair carrying a real session credential is not wired yet.
@@ -176,6 +182,21 @@ fn parse_url(raw: &str) -> Result<Url, CoreError> {
     Url::parse(raw).map_err(|e| CoreError::Repair {
         detail: format!("index catalog url {raw:?}: {e}"),
     })
+}
+
+/// The base URL under which `repo`'s source patches are served on the SE patch CDN, so a repair forms
+/// each index source-ref's URL as `{base}/{name}` without needing the patch cache. The repo path ids
+/// are the fixed SE CDN ids: boot `2b5cbc63` and base game `4e9a232b` (both observed from the live CDN,
+/// e.g. during the install-from-nothing run). Expansion ids are not fixed constants (the launcher reads
+/// them from the game patchlist URLs), and a game-repo HTTP repair also needs the session credential
+/// this credential-free repair lacks, so expansions return `None` and heal only from the cache for now.
+fn cdn_base_for(repo: Repo) -> Option<Url> {
+    let path = match repo {
+        Repo::Boot => "boot/2b5cbc63/",
+        Repo::Game => "game/4e9a232b/",
+        _ => return None,
+    };
+    Url::parse(&format!("http://patch-dl.ffxiv.com/{path}")).ok()
 }
 
 /// Scan the patch cache for `.patch` files and group them into per-repo repair sources, keyed by the
