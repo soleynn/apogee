@@ -121,6 +121,7 @@ is tagged with its change type. Versioning aims to follow
 - Extend the byte-order audit to apogee-sqpack _(build)_
 - Extend the byte-order audit to apogee-zipatch _(build)_
 - Repair broken ranges through a RangeSource planner (#42) _(changed)_
+- Add the nightly soak workflow and corpus priming _(ci)_
 ## [0.2.0] - 2026-07-18
 
 ### apogee-cli
