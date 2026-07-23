@@ -11,6 +11,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-core
 - Drive patch, repair, and install flows _(added)_
+- Add a keep-patches setting _(added)_
 
 ### apogee-fetch
 - Mark Progress non_exhaustive _(changed)_
