@@ -176,8 +176,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
         with:
           # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
-          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). Restore
-          # floating `nightly` once the upstream regression clears.
+          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). The
+          # `cargo +nightly-2026-07-23` steps below must use the same string. Restore floating
+          # `nightly` (here and in those steps) once the upstream regression clears.
           toolchain: nightly-2026-07-23
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -190,32 +191,32 @@ jobs:
       # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
       # allocation-safe on any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose
       # static libc is incompatible with the address sanitizer.
-      - run: cargo +nightly fuzz build patchlist --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run patchlist --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build oauth_stored --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build runner_manifest --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build sqpack_codec --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run sqpack_codec --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build zipatch_chunk --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run zipatch_chunk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build zipatch_sqpk --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run zipatch_sqpk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build zipatch_apply --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run zipatch_apply --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build apzi_index --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run apzi_index --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build fetch_multipart --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run fetch_multipart --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build fetch_journal --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run fetch_journal --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly fuzz build index_manifest --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run index_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build patchlist --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run patchlist --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build oauth_stored --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build runner_manifest --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_codec --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_codec --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build zipatch_chunk --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run zipatch_chunk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build zipatch_sqpk --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run zipatch_sqpk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build zipatch_apply --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run zipatch_apply --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build apzi_index --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run apzi_index --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build fetch_multipart --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run fetch_multipart --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build fetch_journal --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run fetch_journal --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build index_manifest --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run index_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
 
   # The one live call: an unauthenticated GET to SE's boot endpoint, confirming the patchlist parser
   # handles genuinely-current output. An amber canary (continue-on-error) with one retry, so an SE CDN

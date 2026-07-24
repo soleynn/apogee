@@ -39,8 +39,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
         with:
           # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
-          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). Restore
-          # floating `nightly` once the upstream regression clears.
+          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). The
+          # `cargo +nightly-2026-07-23` steps below must use the same string. Restore floating
+          # `nightly` (here and in those steps) once the upstream regression clears.
           toolchain: nightly-2026-07-23
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -52,8 +53,8 @@ jobs:
           tool: cargo-fuzz
       # A five-minute soak per target (the every-push smoke is 30 s). The gnu target is pinned:
       # cargo-fuzz's default picks musl here, whose static libc is incompatible with the sanitizer.
-      - run: cargo +nightly fuzz build ${{ matrix.target }} --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build ${{ matrix.target }} --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300 -rss_limit_mb=2048
 
   differential-apply:
     name: differential-apply
