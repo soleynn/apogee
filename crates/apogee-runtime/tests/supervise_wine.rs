@@ -83,7 +83,14 @@ async fn launch_sleeper(
 
     let prefix_dir = root.join(format!("prefix-{tag}"));
     let prefix = runtime
-        .prepare_custom(&runner_dir, RunnerKind::Wine, "wine", &prefix_dir)
+        .prepare_custom(
+            &runner_dir,
+            RunnerKind::Wine,
+            "wine",
+            &prefix_dir,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
         .await?;
     let plan = LaunchPlan::new(
         exe.to_string_lossy().into_owned(),

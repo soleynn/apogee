@@ -3,9 +3,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use apogee_fetch::FetchError;
+
+use crate::metadata::RunnerRef;
 
 /// Runner / prefix / launch failures.
 #[derive(Debug, Error)]
@@ -37,8 +40,12 @@ pub enum RuntimeError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("prefix is unhealthy ({} issue(s))", issues.len())]
-    PrefixUnhealthy { issues: Vec<HealthIssue> },
+    #[error("prefix metadata at {path:?} is unreadable or corrupt")]
+    PrefixJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("spawn of {runner} failed")]
     Spawn {
         runner: String,
@@ -78,21 +85,60 @@ pub enum CatalogError {
     BadUrl { name: String, version: String },
 }
 
-/// A step in prefix initialization (for [`RuntimeError::PrefixInit`]).
-#[derive(Debug, Clone, Copy)]
+/// A prefix setup step, recorded in `prefix.json`'s history and named in [`RuntimeError::PrefixInit`].
+/// Serializes as its snake_case name (`wineboot_init`, `dxvk_install`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SetupStep {
-    CreatePrefix,
-    InstallDxvk,
+    /// `wineboot -i` (or umu `createprefix`) on a brand-new prefix.
+    WinebootInit,
+    /// `wineboot -u`: a non-destructive update that regenerates missing prefix structure.
+    WinebootUpdate,
+    /// A DXVK install into the prefix (recorded once the environment matrix owns it).
+    DxvkInstall,
+    /// A registry or configuration tweak.
     ApplyTweaks,
 }
 
-/// A prefix health problem (for [`RuntimeError::PrefixUnhealthy`]).
+/// A prefix health problem found by [`Runtime::check_prefix`](crate::Runtime::check_prefix). Each
+/// variant carries what a targeted fix needs; [`Runtime::repair_prefix`](crate::Runtime::repair_prefix)
+/// resolves the fixable ones without ever recreating the prefix.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HealthIssue {
-    MissingFile(PathBuf),
-    WrongArch,
+    /// A core wine-prefix file or directory is missing (`drive_c`, `dosdevices`, `system.reg`). The
+    /// fix re-runs `wineboot` to regenerate the skeleton, keeping user data.
+    MissingSkeleton { path: PathBuf },
+    /// A DOS drive symlink is absent or points at the wrong target. `expected` is the link target to
+    /// restore; `found` is what it currently resolves to (or `None` if missing). The fix rewrites the
+    /// single symlink.
+    DriveMapping {
+        letter: char,
+        expected: PathBuf,
+        found: Option<PathBuf>,
+    },
+    /// The prefix was built with a different runner than the profile now selects. Reconciling this is
+    /// an explicit [`recreate`](crate::Runtime::recreate_prefix), not an in-place fix.
+    RunnerMismatch {
+        recorded: RunnerRef,
+        expected: RunnerRef,
+    },
+}
+
+/// The outcome of a prefix health check: the drift found, if any.
+#[derive(Debug, Clone, Default)]
+pub struct PrefixHealth {
+    /// Every detected problem, in check order. Empty means the prefix is healthy.
+    pub issues: Vec<HealthIssue>,
+}
+
+impl PrefixHealth {
+    /// Whether the prefix has no detected problems.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.issues.is_empty()
+    }
 }
 
 /// A required host-side tool (for [`RuntimeError::MissingHostTool`]).

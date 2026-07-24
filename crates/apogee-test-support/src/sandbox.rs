@@ -1,5 +1,7 @@
-//! Throwaway on-disk sandboxes: a temp settings store and a temp game root, each auto-removed when
-//! the returned handle drops. Minimal for now; grows a real prefix layout later.
+//! Throwaway on-disk sandboxes: a temp settings store, a temp game root, and a minimal wine prefix,
+//! each auto-removed when the returned handle drops.
+
+use std::path::Path;
 
 use tempfile::{Builder, TempDir};
 
@@ -11,6 +13,31 @@ pub fn temp_store() -> std::io::Result<TempDir> {
 /// A temp directory standing in for the game installation root.
 pub fn temp_game_root() -> std::io::Result<TempDir> {
     Builder::new().prefix("apogee-game-").tempdir()
+}
+
+/// Lay down a minimal healthy wine prefix under a fresh temp dir: `drive_c/windows`, a `dosdevices/`
+/// with `c:` → `../drive_c` and `z:` → `/`, and a placeholder `system.reg`. Enough for the drive-map
+/// and health-check paths without a real `wineboot`. Tests that need drift mutate the returned tree.
+#[cfg(unix)]
+pub fn build_minimal_prefix() -> std::io::Result<TempDir> {
+    let dir = Builder::new().prefix("apogee-prefix-").tempdir()?;
+    write_prefix_skeleton(dir.path())?;
+    Ok(dir)
+}
+
+/// Write the minimal wine skeleton into an existing prefix directory (used by [`build_minimal_prefix`]
+/// and by tests that own the directory's lifetime).
+#[cfg(unix)]
+pub fn write_prefix_skeleton(root: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    std::fs::create_dir_all(root.join("drive_c/windows"))?;
+    let dosdevices = root.join("dosdevices");
+    std::fs::create_dir_all(&dosdevices)?;
+    symlink("../drive_c", dosdevices.join("c:"))?;
+    symlink("/", dosdevices.join("z:"))?;
+    std::fs::write(root.join("system.reg"), b"WINE REGISTRY Version 2\n")?;
+    Ok(())
 }
 
 /// The four boot EXE names, in the order the version report hashes them.
@@ -69,6 +96,23 @@ mod tests {
         assert!(store.path().is_dir());
         assert!(game.path().is_dir());
         assert_ne!(store.path(), game.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn minimal_prefix_has_a_drive_map_and_skeleton() {
+        let prefix = build_minimal_prefix().expect("prefix");
+        let root = prefix.path();
+        assert!(root.join("drive_c/windows").is_dir());
+        assert!(root.join("system.reg").is_file());
+        assert_eq!(
+            std::fs::read_link(root.join("dosdevices/z:")).expect("z:"),
+            std::path::PathBuf::from("/")
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("dosdevices/c:")).expect("c:"),
+            std::path::PathBuf::from("../drive_c")
+        );
     }
 
     #[test]
