@@ -47,7 +47,14 @@ impl RuntimeLauncher {
                 let dir = synthesize_system_wine(&self.runners_dir)?;
                 Ok(self
                     .runtime
-                    .prepare_custom(&dir, RunnerKind::Wine, "system-wine", prefix_dir)
+                    .prepare_custom(
+                        &dir,
+                        RunnerKind::Wine,
+                        "system-wine",
+                        prefix_dir,
+                        cancel,
+                        progress,
+                    )
                     .await?)
             }
             RunnerSelection::Managed { name, version } => {
