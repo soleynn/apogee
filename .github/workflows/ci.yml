@@ -175,7 +175,10 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
         with:
-          toolchain: nightly
+          # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
+          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). Restore
+          # floating `nightly` once the upstream regression clears.
+          toolchain: nightly-2026-07-23
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
