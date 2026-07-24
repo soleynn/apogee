@@ -8,6 +8,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### workspace
 - Fix changelog and release-notes generation for stable releases _(ci)_
+- Pin the fuzz nightly to dodge a rustc ICE (#63) _(ci)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
