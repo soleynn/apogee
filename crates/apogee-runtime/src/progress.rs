@@ -53,6 +53,10 @@ pub enum RuntimeEvent {
     PrefixRepairing { issues: usize },
     /// A prefix is being destructively recreated.
     PrefixRecreating,
+    /// DXVK is being installed into a prefix.
+    DxvkInstalling { version: String, nvapi: bool },
+    /// DXVK finished installing into a prefix.
+    DxvkReady { version: String },
     /// The game is being spawned through the runner.
     Spawning { runner: String },
     /// The `/proc` scan resolved the real game process.
