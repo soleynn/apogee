@@ -13,6 +13,7 @@ url = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 apogee-fetch = { path = "../apogee-fetch" }
 
 # Linux-first: runner download/extract and /proc supervision use unix-only filesystem and syscall
@@ -47,6 +48,10 @@ ruzstd = { workspace = true }
 
 [[test]]
 name = "supervise_wine"
+required-features = ["wine-integration"]
+
+[[test]]
+name = "prefix_wine"
 required-features = ["wine-integration"]
 
 [lints]

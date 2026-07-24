@@ -10,11 +10,16 @@
 //! [`RuntimeError::Unsupported`].
 
 mod catalog;
+#[cfg(target_os = "linux")]
+mod dosdevices;
 mod error;
 #[cfg(target_os = "linux")]
 mod extract;
 #[cfg(target_os = "linux")]
 mod install;
+#[cfg(target_os = "linux")]
+mod lifecycle;
+mod metadata;
 mod plan;
 mod progress;
 #[cfg(target_os = "linux")]
@@ -33,9 +38,12 @@ pub use catalog::{
     ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEY, Catalog, DxvkEntry,
     Runner, RunnerKind, ToolEntry,
 };
-pub use error::{CatalogError, HealthIssue, HostTool, RuntimeError, SetupStep};
+#[cfg(target_os = "linux")]
+pub use dosdevices::DriveMap;
+pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
+pub use metadata::{DxvkRef, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord};
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{GameExit, GameSession};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
@@ -83,6 +91,15 @@ impl Runtime {
             .unwrap_or_else(|| self.inner.paths.runners.join(".tools"))
     }
 
+    /// The resolved `umu-run` for a Proton runner, or `None` for plain wine (which needs no umu).
+    fn umu_for(&self, kind: RunnerKind) -> Option<PathBuf> {
+        if kind == RunnerKind::ProtonUmu {
+            spawn::resolve_umu(&self.tools_dir())
+        } else {
+            None
+        }
+    }
+
     /// Fetch the signed runner catalog and verify it against the compiled-in key.
     pub async fn fetch_catalog(
         &self,
@@ -101,8 +118,9 @@ impl Runtime {
         .await
     }
 
-    /// Ensure `runner` is installed and `prefix_dir` exists, returning the prepared prefix. The
-    /// prefix is umu/wine auto-initialized on first launch; no `wineboot` at this phase.
+    /// Ensure `runner` is installed and the prefix at `prefix_dir` is initialized, returning the
+    /// prepared prefix. Downloads the runner if absent, runs `wineboot -i` and records `prefix.json`
+    /// if the prefix is new, and is a no-op on a prefix that is already set up.
     pub async fn prepare(
         &self,
         runner: &Runner,
@@ -118,18 +136,14 @@ impl Runtime {
             progress,
         )
         .await?;
-        tokio::fs::create_dir_all(prefix_dir)
-            .await
-            .map_err(|e| RuntimeError::Io {
-                path: prefix_dir.to_path_buf(),
-                source: e,
-            })?;
-        let handle = crate::plan::RunnerHandle {
-            dir: runner_dir,
-            kind: runner.kind,
-            name: runner.name.clone(),
-        };
-        Ok(Prefix::new(prefix_dir.to_path_buf(), handle))
+        let handle = crate::plan::RunnerHandle::new(
+            runner_dir,
+            runner.kind,
+            runner.name.clone(),
+            runner.version.clone(),
+        );
+        let umu = self.umu_for(runner.kind);
+        lifecycle::ensure_ready(handle, prefix_dir, umu.as_deref(), cancel, progress).await
     }
 
     /// Ensure a supporting tool (e.g. `umu-launcher`) is installed, returning its directory.
@@ -144,13 +158,16 @@ impl Runtime {
     }
 
     /// Adopt an existing runner directory (bring-your-own wine/Proton) as a prepared prefix, with no
-    /// download. The runner directory must already exist.
+    /// download. The runner directory must already exist. Initializes the prefix (`wineboot -i` +
+    /// `prefix.json`) if it is new, exactly like [`prepare`](Self::prepare).
     pub async fn prepare_custom(
         &self,
         runner_dir: &std::path::Path,
         kind: RunnerKind,
         name: impl Into<String>,
         prefix_dir: &std::path::Path,
+        cancel: &tokio_util::sync::CancellationToken,
+        progress: &Progress,
     ) -> Result<Prefix, RuntimeError> {
         let name = name.into();
         if !runner_dir.is_dir() {
@@ -159,18 +176,41 @@ impl Runtime {
                 version: "custom".to_owned(),
             });
         }
-        tokio::fs::create_dir_all(prefix_dir)
-            .await
-            .map_err(|source| RuntimeError::Io {
-                path: prefix_dir.to_path_buf(),
-                source,
-            })?;
-        let handle = crate::plan::RunnerHandle {
-            dir: runner_dir.to_path_buf(),
-            kind,
-            name,
-        };
-        Ok(Prefix::new(prefix_dir.to_path_buf(), handle))
+        let handle = crate::plan::RunnerHandle::new(runner_dir.to_path_buf(), kind, name, "custom");
+        let umu = self.umu_for(kind);
+        lifecycle::ensure_ready(handle, prefix_dir, umu.as_deref(), cancel, progress).await
+    }
+
+    /// Diagnose a prefix against its `prefix.json` and the wine skeleton, returning every drift found
+    /// (drive-map breakage, a missing skeleton file, a runner change) without touching it.
+    pub async fn check_prefix(&self, prefix: &Prefix) -> Result<PrefixHealth, RuntimeError> {
+        lifecycle::check(prefix).await
+    }
+
+    /// Apply targeted fixes for the given `issues` and return the residual health. Rewrites a broken
+    /// drive symlink in place and regenerates a missing skeleton with `wineboot -u`; never deletes the
+    /// prefix. A runner mismatch is left for an explicit [`recreate_prefix`](Self::recreate_prefix).
+    pub async fn repair_prefix(
+        &self,
+        prefix: &Prefix,
+        issues: &[HealthIssue],
+        cancel: &tokio_util::sync::CancellationToken,
+        progress: &Progress,
+    ) -> Result<PrefixHealth, RuntimeError> {
+        let umu = self.umu_for(prefix.runner().kind());
+        lifecycle::repair(prefix, issues, umu.as_deref(), cancel, progress).await
+    }
+
+    /// Destructively recreate a prefix: delete it and reinitialize from scratch. Explicit and
+    /// user-initiated — never the automatic response to a health problem.
+    pub async fn recreate_prefix(
+        &self,
+        prefix: &Prefix,
+        cancel: &tokio_util::sync::CancellationToken,
+        progress: &Progress,
+    ) -> Result<Prefix, RuntimeError> {
+        let umu = self.umu_for(prefix.runner().kind());
+        lifecycle::recreate(prefix, umu.as_deref(), cancel, progress).await
     }
 
     /// Spawn the game through the runner and supervise it, resolving once the real game process
@@ -279,6 +319,40 @@ impl Runtime {
         _kind: RunnerKind,
         _name: impl Into<String>,
         _prefix_dir: &std::path::Path,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _progress: &Progress,
+    ) -> Result<Prefix, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn check_prefix(&self, _prefix: &Prefix) -> Result<PrefixHealth, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn repair_prefix(
+        &self,
+        _prefix: &Prefix,
+        _issues: &[HealthIssue],
+        _cancel: &tokio_util::sync::CancellationToken,
+        _progress: &Progress,
+    ) -> Result<PrefixHealth, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn recreate_prefix(
+        &self,
+        _prefix: &Prefix,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _progress: &Progress,
     ) -> Result<Prefix, RuntimeError> {
         Err(RuntimeError::Unsupported {
             what: "runner management is Linux-only at this phase",

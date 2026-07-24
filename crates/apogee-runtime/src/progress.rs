@@ -45,6 +45,14 @@ pub enum RuntimeEvent {
     RunnerReady { name: String, version: String },
     /// A supporting tool (e.g. `umu-launcher`) finished downloading and extracting.
     ToolReady { name: String, version: String },
+    /// A prefix is being initialized through `wineboot`. `fresh` is a first-time init vs an update.
+    PrefixInitializing { fresh: bool },
+    /// A prefix finished initialization and its `prefix.json` was written.
+    PrefixReady,
+    /// A prefix repair is running over `issues` detected problems.
+    PrefixRepairing { issues: usize },
+    /// A prefix is being destructively recreated.
+    PrefixRecreating,
     /// The game is being spawned through the runner.
     Spawning { runner: String },
     /// The `/proc` scan resolved the real game process.

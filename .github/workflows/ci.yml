@@ -116,6 +116,12 @@ jobs:
         env:
           WINEDEBUG: "-all"
         run: cargo test -p apogee-runtime --features wine-integration --test supervise_wine -- --test-threads=1
+      # Prefix lifecycle on stock wine: wineboot -i is recorded, a broken prefix is targeted-fixed
+      # without a delete, and in-process path translation round-trips against the winepath oracle.
+      - name: Prefix lifecycle under stock wine
+        env:
+          WINEDEBUG: "-all"
+        run: cargo test -p apogee-runtime --features wine-integration --test prefix_wine -- --test-threads=1
       # End-to-end: the CLI logs in against scripted fixtures and launches a stub game through system
       # wine, resolving the real process and killing it. This is the login → register → launch proof
       # and the output leak detector.

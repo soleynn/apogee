@@ -9,7 +9,7 @@ use crate::error::{HostTool, RuntimeError};
 use crate::plan::{LaunchPlan, Prefix};
 
 /// A generic umu `GAMEID`: the Steam Linux Runtime environment with no per-title protonfix.
-const DEFAULT_GAMEID: &str = "0";
+pub(crate) const DEFAULT_GAMEID: &str = "0";
 
 /// Candidate relative paths to a runner's `wine` binary, most-specific first.
 const WINE_CANDIDATES: &[&str] = &[
@@ -20,6 +20,11 @@ const WINE_CANDIDATES: &[&str] = &[
 ];
 /// Candidate relative paths to a runner's `wineserver`.
 const WINESERVER_CANDIDATES: &[&str] = &["bin/wineserver", "files/bin/wineserver"];
+
+/// The runner's `wine` binary, or `None` if the layout has none where expected.
+pub(crate) fn find_wine(runner_dir: &Path) -> Option<PathBuf> {
+    find_binary(runner_dir, WINE_CANDIDATES)
+}
 
 /// Build the process command for `plan` (which must carry a prefix). `umu_run` is the resolved
 /// umu-run path (managed or on `PATH`) for Proton runners.
@@ -184,11 +189,7 @@ mod tests {
         let working = tmp.path().join("game");
         std::fs::create_dir_all(&working).unwrap();
 
-        let runner = RunnerHandle {
-            dir: runner_dir,
-            kind: RunnerKind::Custom,
-            name: "test".to_owned(),
-        };
+        let runner = RunnerHandle::new(runner_dir, RunnerKind::Custom, "test", "custom");
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
         let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new())
             .prefix(&prefix)
@@ -207,11 +208,7 @@ mod tests {
         std::fs::write(&wine, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let runner = RunnerHandle {
-            dir: runner_dir,
-            kind: RunnerKind::Custom,
-            name: "test".to_owned(),
-        };
+        let runner = RunnerHandle::new(runner_dir, RunnerKind::Custom, "test", "custom");
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
         let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
 
