@@ -12,9 +12,25 @@ pub struct RunnerHandle {
     pub(crate) dir: PathBuf,
     pub(crate) kind: RunnerKind,
     pub(crate) name: String,
+    pub(crate) version: String,
 }
 
 impl RunnerHandle {
+    /// Assemble a handle for an installed runner. Called by the runtime once the runner is on disk.
+    pub(crate) fn new(
+        dir: PathBuf,
+        kind: RunnerKind,
+        name: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Self {
+        Self {
+            dir,
+            kind,
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+
     /// The installed runner directory.
     #[must_use]
     pub fn dir(&self) -> &Path {
@@ -32,12 +48,26 @@ impl RunnerHandle {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// The runner version (`"custom"` for a bring-your-own runner).
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// A handle over an arbitrary directory, for in-crate tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(dir: PathBuf, kind: RunnerKind, name: &str, version: &str) -> Self {
+        Self::new(dir, kind, name, version)
+    }
 }
 
 /// A prepared prefix: the `WINEPREFIX` handed to the runner, plus the runner to launch through.
 ///
-/// At this phase the prefix is only a directory the runner (umu/wine) auto-initializes on first
-/// launch; real `wineboot` setup and health checks come later.
+/// Once [`Runtime::prepare`](crate::Runtime::prepare) returns, the prefix is `wineboot`-initialized
+/// and self-describing (its `prefix.json` records the runner, DXVK, components, and setup history).
+/// [`metadata`](Self::metadata) reads that record and [`drive_map`](Self::drive_map) parses its
+/// `dosdevices/` for in-process path translation.
 #[derive(Debug, Clone)]
 pub struct Prefix {
     pub(crate) path: PathBuf,
@@ -59,6 +89,36 @@ impl Prefix {
     #[must_use]
     pub fn runner(&self) -> &RunnerHandle {
         &self.runner
+    }
+
+    /// The directory holding the live wine files. For plain wine this is the prefix itself; Proton
+    /// via umu relocates them to `<prefix>/pfx`, so the skeleton, `dosdevices`, and registry live
+    /// there.
+    #[must_use]
+    pub(crate) fn wine_root(&self) -> PathBuf {
+        if self.runner.kind == RunnerKind::ProtonUmu {
+            self.path.join("pfx")
+        } else {
+            self.path.clone()
+        }
+    }
+
+    /// The path to this prefix's `prefix.json` record.
+    #[must_use]
+    pub fn metadata_path(&self) -> PathBuf {
+        self.path.join(crate::metadata::PREFIX_JSON)
+    }
+
+    /// The recorded `prefix.json`, or `None` if the prefix has not been initialized yet.
+    pub fn metadata(&self) -> Result<Option<crate::metadata::PrefixMetadata>, crate::RuntimeError> {
+        crate::metadata::PrefixMetadata::load(&self.metadata_path())
+    }
+
+    /// Parse the DOS drive map for in-process unix ↔ windows path translation. Reads the prefix's
+    /// `dosdevices/` directory each call; callers that translate many paths should cache the result.
+    #[cfg(target_os = "linux")]
+    pub fn drive_map(&self) -> Result<crate::dosdevices::DriveMap, crate::RuntimeError> {
+        crate::dosdevices::DriveMap::from_prefix(&self.wine_root())
     }
 }
 

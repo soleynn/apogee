@@ -247,11 +247,13 @@ mod tests {
     use apogee_test_support::chaos::{ChaosServer, generated_vec, sha256_of};
     use tokio_util::sync::CancellationToken;
 
+    use super::install_runner;
     use crate::catalog::{ArchiveFormat, ArchiveLayout, Runner, RunnerKind};
     use crate::progress::Progress;
-    use crate::{Runtime, RuntimePaths};
 
-    /// A gzip'd tar with one executable under `top/files/bin/`, carrying `payload`.
+    /// A gzip'd tar with one file under `top/files/bin/`, carrying `payload`. These tests exercise the
+    /// download/extract path directly (not the full `prepare`, which would go on to `wineboot` a fake
+    /// runner), so the payload is an opaque blob, not a real wine binary.
     fn runner_targz(top: &str, payload: &[u8]) -> std::io::Result<Vec<u8>> {
         let mut builder = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
@@ -265,22 +267,8 @@ mod tests {
         encoder.finish()
     }
 
-    fn runtime_over(root: &std::path::Path) -> (Runtime, std::path::PathBuf) {
-        let runners = root.join("runners");
-        let prefixes = root.join("prefixes");
-        let fetcher = apogee_fetch::Fetcher::builder().build().expect("fetcher");
-        let runtime = Runtime::new(
-            fetcher,
-            RuntimePaths {
-                runners,
-                prefixes: prefixes.clone(),
-            },
-        );
-        (runtime, prefixes.join("default"))
-    }
-
     #[tokio::test]
-    async fn prepare_downloads_resumes_and_extracts_a_runner() {
+    async fn install_downloads_resumes_and_extracts_a_runner() {
         // An incompressible payload keeps the gz sizable, so a mid-stream drop is meaningful.
         let payload = generated_vec(42, 0, 256 * 1024);
         let tar = runner_targz("runner-1.0", &payload).expect("build archive");
@@ -296,7 +284,8 @@ mod tests {
             .expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
-        let (runtime, prefix_dir) = runtime_over(root.path());
+        let runners_root = root.path().join("runners");
+        let fetcher = apogee_fetch::Fetcher::builder().build().expect("fetcher");
         let runner = Runner {
             name: "runner".to_owned(),
             version: "1.0".to_owned(),
@@ -309,24 +298,22 @@ mod tests {
             },
         };
 
-        let prefix = runtime
-            .prepare(
-                &runner,
-                &prefix_dir,
-                &CancellationToken::new(),
-                &Progress::none(),
-            )
-            .await
-            .expect("prepare");
+        let runner_dir = install_runner(
+            &fetcher,
+            &runner,
+            &runners_root,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await
+        .expect("install");
 
-        let runner_dir = root.path().join("runners").join("runner-1.0");
+        assert_eq!(runner_dir, runners_root.join("runner-1.0"));
         assert!(runner_dir.join("files/bin/wine").is_file());
         assert_eq!(
             std::fs::read(runner_dir.join("files/bin/wine")).expect("payload"),
             payload
         );
-        assert_eq!(prefix.path(), prefix_dir);
-        assert!(prefix_dir.is_dir());
         assert!(
             server.stats().bytes_served() < 2 * len,
             "resume must not refetch the whole file"
@@ -345,7 +332,8 @@ mod tests {
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
-        let (runtime, prefix_dir) = runtime_over(root.path());
+        let runners_root = root.path().join("runners");
+        let fetcher = apogee_fetch::Fetcher::builder().build().expect("fetcher");
         let runner = Runner {
             name: "r".to_owned(),
             version: "2".to_owned(),
@@ -358,25 +346,25 @@ mod tests {
             },
         };
 
-        runtime
-            .prepare(
-                &runner,
-                &prefix_dir,
-                &CancellationToken::new(),
-                &Progress::none(),
-            )
-            .await
-            .expect("first install");
+        install_runner(
+            &fetcher,
+            &runner,
+            &runners_root,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await
+        .expect("first install");
         let after_first = server.stats().requests();
-        runtime
-            .prepare(
-                &runner,
-                &prefix_dir,
-                &CancellationToken::new(),
-                &Progress::none(),
-            )
-            .await
-            .expect("second install");
+        install_runner(
+            &fetcher,
+            &runner,
+            &runners_root,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await
+        .expect("second install");
 
         assert_eq!(
             server.stats().requests(),

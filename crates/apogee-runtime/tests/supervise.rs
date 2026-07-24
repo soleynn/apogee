@@ -49,13 +49,25 @@ fn build_sleeper(dir: &Path, seconds: u32) -> Result<PathBuf, Box<dyn Error>> {
     Ok(exe)
 }
 
-/// A custom runner directory whose `bin/wine` runs its argument (forking it as a child, so the game
-/// is a grandchild of the launcher — as under real Proton).
+/// A custom runner directory whose `bin/wine` mimics `wineboot` (laying down a prefix skeleton) and
+/// otherwise runs its argument (forking it as a child, so the game is a grandchild of the launcher —
+/// as under real Proton).
 fn custom_runner(dir: &Path) -> io::Result<()> {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin)?;
     let wine = bin.join("wine");
-    std::fs::write(&wine, b"#!/bin/sh\n\"$@\"\n")?;
+    std::fs::write(
+        &wine,
+        b"#!/bin/sh\n\
+          if [ \"$1\" = wineboot ]; then\n\
+          \x20 mkdir -p \"$WINEPREFIX/drive_c\" \"$WINEPREFIX/dosdevices\"\n\
+          \x20 ln -sfn ../drive_c \"$WINEPREFIX/dosdevices/c:\"\n\
+          \x20 ln -sfn / \"$WINEPREFIX/dosdevices/z:\"\n\
+          \x20 printf 'WINE REGISTRY Version 2\\n' > \"$WINEPREFIX/system.reg\"\n\
+          \x20 exit 0\n\
+          fi\n\
+          \"$@\"\n",
+    )?;
     std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
@@ -74,7 +86,14 @@ async fn launch_stub(
 
     let prefix_dir = root.join(format!("prefix-{tag}"));
     let prefix = runtime
-        .prepare_custom(&runner_dir, RunnerKind::Custom, "stub", &prefix_dir)
+        .prepare_custom(
+            &runner_dir,
+            RunnerKind::Custom,
+            "stub",
+            &prefix_dir,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
         .await?;
     let plan = LaunchPlan::new(
         stub.to_string_lossy().into_owned(),
