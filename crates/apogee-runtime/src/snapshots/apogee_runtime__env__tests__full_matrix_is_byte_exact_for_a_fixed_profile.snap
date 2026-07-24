@@ -1,0 +1,26 @@
+---
+source: crates/apogee-runtime/src/env.rs
+expression: out
+---
+Environment {
+    vars: {
+        "DXVK_STATE_CACHE_PATH": "/prefix/dxvk_cache",
+        "MANGOHUD": "1",
+        "MANGOHUD_CONFIG": "cpu_temp",
+        "WINEDLLOVERRIDES": "d3d10core,d3d11,d3d9,dxgi,nvapi,nvapi64=native",
+        "__GLX_VENDOR_LIBRARY_NAME": "nvidia",
+        "__NV_PRIME_RENDER_OFFLOAD": "1",
+        "__VK_LAYER_NV_optimus": "NVIDIA_only",
+    },
+    wrappers: [
+        "gamescope",
+        "-W",
+        "1920",
+        "-H",
+        "1080",
+        "-f",
+        "--",
+        "gamemoderun",
+    ],
+    sync: Ntsync,
+}

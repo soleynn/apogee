@@ -12,6 +12,9 @@
 mod catalog;
 #[cfg(target_os = "linux")]
 mod dosdevices;
+#[cfg(target_os = "linux")]
+mod dxvk;
+mod env;
 mod error;
 #[cfg(target_os = "linux")]
 mod extract;
@@ -36,10 +39,14 @@ use apogee_fetch::Fetcher;
 
 pub use catalog::{
     ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEY, Catalog, DxvkEntry,
-    Runner, RunnerKind, ToolEntry,
+    NvapiRef, Runner, RunnerKind, ToolEntry,
 };
 #[cfg(target_os = "linux")]
 pub use dosdevices::DriveMap;
+pub use env::{
+    DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, SyncChoice, SyncStatus,
+    compute_environment,
+};
 pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
@@ -213,6 +220,20 @@ impl Runtime {
         lifecycle::recreate(prefix, umu.as_deref(), cancel, progress).await
     }
 
+    /// Install `dxvk` into `prefix` (its DLLs into `system32`/`syswow64`) and record it in
+    /// `prefix.json`. `nvapi` additionally installs `dxvk-nvapi`, if the catalog entry pins one. The
+    /// environment matrix ([`compute_environment`]) is what activates the DLLs at launch.
+    pub async fn install_dxvk(
+        &self,
+        dxvk: &DxvkEntry,
+        prefix: &Prefix,
+        nvapi: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+        progress: &Progress,
+    ) -> Result<(), RuntimeError> {
+        dxvk::install(&self.inner.fetcher, dxvk, prefix, nvapi, cancel, progress).await
+    }
+
     /// Spawn the game through the runner and supervise it, resolving once the real game process
     /// appears in `/proc`. The returned session tracks the game, not the wrapper.
     pub async fn launch(
@@ -354,6 +375,20 @@ impl Runtime {
         _cancel: &tokio_util::sync::CancellationToken,
         _progress: &Progress,
     ) -> Result<Prefix, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    pub async fn install_dxvk(
+        &self,
+        _dxvk: &DxvkEntry,
+        _prefix: &Prefix,
+        _nvapi: bool,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _progress: &Progress,
+    ) -> Result<(), RuntimeError> {
         Err(RuntimeError::Unsupported {
             what: "runner management is Linux-only at this phase",
         })

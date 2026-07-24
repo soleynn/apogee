@@ -71,13 +71,24 @@ pub struct ToolEntry {
     pub archive: ArchiveLayout,
 }
 
-/// A DXVK build. Parsed here but not yet installed; installation lands with the environment matrix.
+/// A DXVK build: the pinned tarball plus an optional, equally-pinned `dxvk-nvapi` companion.
 #[derive(Debug, Clone)]
 pub struct DxvkEntry {
     pub version: String,
     pub url: Url,
     pub sha256: [u8; 32],
-    pub nvapi_url: Option<Url>,
+    /// The container format (`tar.gz` by default); data-driven like a runner's, not hardcoded.
+    pub format: ArchiveFormat,
+    /// `dxvk-nvapi`, present only when both its URL and sha256 pin are in the manifest.
+    pub nvapi: Option<NvapiRef>,
+}
+
+/// A pinned `dxvk-nvapi` artifact (its own url + sha256 + format), installed alongside a [`DxvkEntry`].
+#[derive(Debug, Clone)]
+pub struct NvapiRef {
+    pub url: Url,
+    pub sha256: [u8; 32],
+    pub format: ArchiveFormat,
 }
 
 /// A verified runner catalog.
@@ -168,7 +179,13 @@ struct RawDxvk {
     url: String,
     sha256: String,
     #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
     nvapi_url: Option<String>,
+    #[serde(default)]
+    nvapi_sha256: Option<String>,
+    #[serde(default)]
+    nvapi_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -266,32 +283,60 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
         name: "dxvk".to_owned(),
         version: d.version.clone(),
     })?;
-    let nvapi_url = match d.nvapi_url {
-        Some(u) => Some(Url::parse(&u).map_err(|_| CatalogError::BadUrl {
-            name: "dxvk-nvapi".to_owned(),
-            version: d.version.clone(),
-        })?),
-        None => None,
+    let format = parse_format(d.format.as_deref())?;
+    // dxvk-nvapi is all-or-nothing: both its URL and its pin, or neither. A lone URL or lone pin is a
+    // malformed row (an unpinned download would violate the sha256-before-trust rule).
+    let nvapi = match (d.nvapi_url, d.nvapi_sha256) {
+        (None, None) => None,
+        (Some(nvapi_url), Some(nvapi_sha)) => {
+            let url = Url::parse(&nvapi_url).map_err(|_| CatalogError::BadUrl {
+                name: "dxvk-nvapi".to_owned(),
+                version: d.version.clone(),
+            })?;
+            let sha256 = decode_sha256_hex(&nvapi_sha).ok_or_else(|| CatalogError::BadPin {
+                name: "dxvk-nvapi".to_owned(),
+                version: d.version.clone(),
+            })?;
+            Some(NvapiRef {
+                url,
+                sha256,
+                format: parse_format(d.nvapi_format.as_deref())?,
+            })
+        }
+        _ => {
+            return Err(CatalogError::BadPin {
+                name: "dxvk-nvapi".to_owned(),
+                version: d.version.clone(),
+            });
+        }
     };
     Ok(DxvkEntry {
         version: d.version,
         url,
         sha256,
-        nvapi_url,
+        format,
+        nvapi,
     })
 }
 
 fn build_archive(a: RawArchive) -> Result<ArchiveLayout, CatalogError> {
-    let format = match a.format.as_str() {
-        "tar.gz" => ArchiveFormat::TarGz,
-        "tar.xz" => ArchiveFormat::TarXz,
-        "tar.zst" => ArchiveFormat::TarZst,
-        _ => return Err(CatalogError::UnknownArchiveFormat { format: a.format }),
-    };
     Ok(ArchiveLayout {
-        format,
+        format: parse_format(Some(&a.format))?,
         strip_prefix: a.strip_prefix,
     })
+}
+
+/// Map an archive-format string to [`ArchiveFormat`]. `None` defaults to `tar.gz` (the DXVK/nvapi
+/// convention, so a manifest row can omit it); an unrecognized value is a typed error.
+fn parse_format(format: Option<&str>) -> Result<ArchiveFormat, CatalogError> {
+    match format.unwrap_or("tar.gz") {
+        "tar.gz" => Ok(ArchiveFormat::TarGz),
+        "tar.xz" => Ok(ArchiveFormat::TarXz),
+        "tar.zst" => Ok(ArchiveFormat::TarZst),
+        other => Err(CatalogError::UnknownArchiveFormat {
+            format: other.to_owned(),
+        }),
+    }
 }
 
 /// Decode exactly 64 lowercase/uppercase hex digits into 32 bytes; any other length or a non-hex
@@ -403,6 +448,56 @@ mod tests {
     #[test]
     fn schema_rejects_a_bad_pin() {
         let err = Catalog::from_json_bytes(manifest("not-hex").as_bytes()).expect_err("bad pin");
+        assert!(matches!(err, CatalogError::BadPin { .. }));
+    }
+
+    /// A DXVK row, with `extra` raw JSON fields appended (an nvapi pair, a `format`, …).
+    fn dxvk_manifest(extra: &str) -> String {
+        format!(
+            r#"{{ "version": 1, "dxvk": [
+                {{ "version": "2.4.1", "url": "https://example.invalid/dxvk-2.4.1.tar.gz",
+                   "sha256": "{GOOD_PIN}"{extra} }} ] }}"#
+        )
+    }
+
+    #[test]
+    fn dxvk_parses_a_pinned_nvapi_pair() {
+        let nvapi = format!(
+            r#", "nvapi_url": "https://example.invalid/nvapi.tar.gz", "nvapi_sha256": "{GOOD_PIN}""#
+        );
+        let cat = Catalog::from_json_bytes(dxvk_manifest(&nvapi).as_bytes()).expect("parse");
+        let entry = cat.dxvk.first().expect("dxvk row");
+        assert_eq!(entry.version, "2.4.1");
+        assert!(entry.nvapi.is_some(), "nvapi companion parsed");
+    }
+
+    #[test]
+    fn dxvk_without_nvapi_parses_and_has_none() {
+        let cat = Catalog::from_json_bytes(dxvk_manifest("").as_bytes()).expect("parse");
+        assert!(cat.dxvk.first().expect("dxvk row").nvapi.is_none());
+    }
+
+    #[test]
+    fn dxvk_format_defaults_to_tar_gz_and_honors_an_override() {
+        let default = Catalog::from_json_bytes(dxvk_manifest("").as_bytes()).expect("parse");
+        assert_eq!(default.dxvk[0].format, ArchiveFormat::TarGz);
+        let xz = Catalog::from_json_bytes(dxvk_manifest(r#", "format": "tar.xz""#).as_bytes())
+            .expect("parse xz");
+        assert_eq!(xz.dxvk[0].format, ArchiveFormat::TarXz);
+    }
+
+    #[test]
+    fn dxvk_rejects_an_unknown_format() {
+        let err = Catalog::from_json_bytes(dxvk_manifest(r#", "format": "tar.brotli""#).as_bytes())
+            .expect_err("bad format");
+        assert!(matches!(err, CatalogError::UnknownArchiveFormat { .. }));
+    }
+
+    #[test]
+    fn dxvk_rejects_an_unpinned_nvapi_url() {
+        // An nvapi URL without its sha256 pin would be an unauthenticated download.
+        let nvapi = r#", "nvapi_url": "https://example.invalid/nvapi.tar.gz""#;
+        let err = Catalog::from_json_bytes(dxvk_manifest(nvapi).as_bytes()).expect_err("unpinned");
         assert!(matches!(err, CatalogError::BadPin { .. }));
     }
 
