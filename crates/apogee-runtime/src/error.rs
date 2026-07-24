@@ -124,6 +124,9 @@ pub enum HealthIssue {
         recorded: RunnerRef,
         expected: RunnerRef,
     },
+    /// A DXVK DLL `prefix.json` records as installed is missing from the prefix. Reinstalling it needs
+    /// the catalog, so the fix is to re-run the DXVK install, not an in-place repair.
+    MissingDxvkDll { dll: String, path: PathBuf },
 }
 
 /// The outcome of a prefix health check: the drift found, if any.

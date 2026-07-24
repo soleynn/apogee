@@ -36,6 +36,7 @@ apogee-test-support = { path = "../apogee-test-support" }
 apogee-fetch = { path = "../apogee-fetch" }
 tempfile = { workspace = true }
 serial_test = { workspace = true }
+insta = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 

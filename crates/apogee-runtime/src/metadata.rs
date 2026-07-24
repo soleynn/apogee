@@ -59,6 +59,16 @@ impl SetupRecord {
             detail: None,
         }
     }
+
+    /// A successful step carrying a detail (e.g. the installed DXVK version).
+    pub(crate) fn ok_with(step: SetupStep, detail: impl Into<String>) -> Self {
+        Self {
+            step,
+            at: now_rfc3339(),
+            ok: true,
+            detail: Some(detail.into()),
+        }
+    }
 }
 
 /// A prefix's `prefix.json` contents: the source of truth for what the prefix is.
