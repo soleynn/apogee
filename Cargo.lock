@@ -195,6 +195,7 @@ dependencies = [
  "apogee-test-support",
  "ed25519-dalek",
  "flate2",
+ "insta",
  "lzma-rs",
  "rustix",
  "ruzstd",

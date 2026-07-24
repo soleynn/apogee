@@ -125,29 +125,35 @@ pub(crate) async fn check(prefix: &Prefix) -> Result<PrefixHealth, RuntimeError>
         }
     }
 
-    // A runner change is drift; a corrupt `prefix.json` is treated as "unknown recorded runner"
-    // (a warning, not a hard error) so `check` stays total over a broken-but-present prefix — the
-    // same tolerance `is_initialized` applies before reinitializing.
-    if let Some(recorded) = recorded_runner(prefix)? {
+    // A runner change is drift, and any DXVK the record claims must be on disk. A corrupt
+    // `prefix.json` is treated as "no record" (a warning, not a hard error) so `check` stays total
+    // over a broken-but-present prefix — the same tolerance `is_initialized` applies before reinit.
+    if let Some(meta) = recorded_metadata(prefix)? {
         let current = RunnerRef::from(prefix.runner());
-        if recorded != current {
+        if meta.runner != current {
             issues.push(HealthIssue::RunnerMismatch {
-                recorded,
+                recorded: meta.runner,
                 expected: current,
             });
+        }
+        if let Some(dxvk) = &meta.dxvk {
+            crate::dxvk::check(&wine_root, dxvk, &mut issues);
         }
     }
 
     Ok(PrefixHealth { issues })
 }
 
-/// The runner recorded in `prefix.json`, `None` if the prefix has no record or the record is corrupt
-/// (logged), so the health check never aborts on unreadable metadata. Only a hard IO error propagates.
-fn recorded_runner(prefix: &Prefix) -> Result<Option<RunnerRef>, RuntimeError> {
+/// The recorded `prefix.json`, `None` if the prefix has no record or the record is corrupt (logged),
+/// so the health check never aborts on unreadable metadata. Only a hard IO error propagates.
+fn recorded_metadata(prefix: &Prefix) -> Result<Option<PrefixMetadata>, RuntimeError> {
     match PrefixMetadata::load(&prefix.metadata_path()) {
-        Ok(meta) => Ok(meta.map(|m| m.runner)),
+        Ok(meta) => Ok(meta),
         Err(RuntimeError::PrefixJson { path, .. }) => {
-            tracing::warn!(?path, "prefix.json is corrupt; skipping the runner check");
+            tracing::warn!(
+                ?path,
+                "prefix.json is corrupt; skipping metadata-based checks"
+            );
             Ok(None)
         }
         Err(other) => Err(other),
@@ -184,7 +190,9 @@ pub(crate) async fn repair(
                 }
             }
             HealthIssue::MissingSkeleton { .. } => regenerate_skeleton = true,
-            HealthIssue::RunnerMismatch { .. } => {} // explicit recreate only
+            // Both need an action the local repair cannot take (a recreate; a DXVK reinstall via the
+            // catalog), so they are left to reappear in the residual health.
+            HealthIssue::RunnerMismatch { .. } | HealthIssue::MissingDxvkDll { .. } => {}
         }
     }
 
