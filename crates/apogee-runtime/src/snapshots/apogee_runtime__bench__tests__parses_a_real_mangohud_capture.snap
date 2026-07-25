@@ -1,0 +1,5 @@
+---
+source: crates/apogee-runtime/src/bench.rs
+expression: "format!(\"frames={} duration_s={:.3} avg_fps={:.3} low_1pct={:.3} low_0_1pct={:.3} \\\n             frametime_mean_ms={:.3} frametime_stddev_ms={:.3}\",\nstats.frame_count, stats.duration_s, stats.average_fps, stats.low_1pct,\nstats.low_0_1pct, stats.frametime_mean_ms, stats.frametime_stddev_ms,)"
+---
+frames=200 duration_s=1.666 avg_fps=120.051 low_1pct=107.197 low_0_1pct=107.172 frametime_mean_ms=8.330 frametime_stddev_ms=0.382
