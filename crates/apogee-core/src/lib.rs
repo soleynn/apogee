@@ -21,6 +21,7 @@ mod transport;
 
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
+pub use apogee_runtime::{BenchError, BenchStats, FrameLog};
 pub use apogee_secrets::Secret;
 pub use command::{Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Progress};
 pub use composition::{Core, CoreConfig};
