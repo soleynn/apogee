@@ -26,6 +26,38 @@ pub(crate) fn find_wine(runner_dir: &Path) -> Option<PathBuf> {
     find_binary(runner_dir, WINE_CANDIDATES)
 }
 
+/// The binary that runs a program inside `prefix`: `umu-run` for a Proton runner, the runner's own
+/// `wine` otherwise. `umu_run` is the resolved umu-run path (managed or on `PATH`).
+pub(crate) fn prefix_launcher(
+    prefix: &Prefix,
+    umu_run: Option<&Path>,
+) -> Result<PathBuf, RuntimeError> {
+    let runner = prefix.runner();
+    match runner.kind() {
+        RunnerKind::ProtonUmu => {
+            umu_run
+                .map(Path::to_path_buf)
+                .ok_or(RuntimeError::MissingHostTool {
+                    tool: HostTool::Umu,
+                })
+        }
+        RunnerKind::Wine | RunnerKind::Custom => {
+            find_binary(runner.dir(), WINE_CANDIDATES).ok_or(RuntimeError::MissingHostTool {
+                tool: HostTool::Wine,
+            })
+        }
+    }
+}
+
+/// Set the variables that place a program in `prefix`.
+pub(crate) fn prefix_env(cmd: &mut Command, prefix: &Prefix) {
+    cmd.env("WINEPREFIX", prefix.path());
+    if prefix.runner().kind() == RunnerKind::ProtonUmu {
+        cmd.env("GAMEID", DEFAULT_GAMEID);
+        cmd.env("PROTONPATH", prefix.runner().dir());
+    }
+}
+
 /// Build the process command for `plan` (which must carry a prefix). `umu_run` is the resolved
 /// umu-run path (managed or on `PATH`) for Proton runners.
 pub(crate) fn build_command(
@@ -35,26 +67,13 @@ pub(crate) fn build_command(
     let prefix = plan.prefix_ref().ok_or(RuntimeError::InvalidLaunchPlan {
         reason: "launch plan has no prefix",
     })?;
-    let runner = prefix.runner();
-
     // The runner invocation: the launcher binary, then the program, then the opaque args.
     let mut invocation: Vec<String> = Vec::new();
-    match runner.kind() {
-        RunnerKind::ProtonUmu => {
-            let umu = umu_run.ok_or(RuntimeError::MissingHostTool {
-                tool: HostTool::Umu,
-            })?;
-            invocation.push(umu.to_string_lossy().into_owned());
-        }
-        RunnerKind::Wine | RunnerKind::Custom => {
-            let wine = find_binary(runner.dir(), WINE_CANDIDATES).ok_or(
-                RuntimeError::MissingHostTool {
-                    tool: HostTool::Wine,
-                },
-            )?;
-            invocation.push(wine.to_string_lossy().into_owned());
-        }
-    }
+    invocation.push(
+        prefix_launcher(prefix, umu_run)?
+            .to_string_lossy()
+            .into_owned(),
+    );
     invocation.push(plan.program().to_owned());
     if !plan.args().is_empty() {
         invocation.push(plan.args().to_owned());
@@ -70,7 +89,7 @@ pub(crate) fn build_command(
     })?;
     let mut cmd = Command::new(exe);
     cmd.args(rest);
-    apply_env(&mut cmd, plan, prefix, runner.kind());
+    apply_env(&mut cmd, plan, prefix);
     if let Some(working_dir) = plan.working_dir_ref() {
         cmd.current_dir(working_dir);
     }
@@ -128,12 +147,8 @@ fn kill_command(prefix: &Prefix, umu_run: Option<PathBuf>) -> Result<Command, Ru
 
 /// Set the launch environment: prefix/runner variables first, user overrides merged last so they
 /// always win. Sync (fsync/esync/ntsync) is left to wine/Proton defaults at this phase.
-fn apply_env(cmd: &mut Command, plan: &LaunchPlan, prefix: &Prefix, kind: RunnerKind) {
-    cmd.env("WINEPREFIX", prefix.path());
-    if kind == RunnerKind::ProtonUmu {
-        cmd.env("GAMEID", DEFAULT_GAMEID);
-        cmd.env("PROTONPATH", prefix.runner().dir());
-    }
+fn apply_env(cmd: &mut Command, plan: &LaunchPlan, prefix: &Prefix) {
+    prefix_env(cmd, prefix);
     for (key, value) in plan.env() {
         cmd.env(key, value);
     }
