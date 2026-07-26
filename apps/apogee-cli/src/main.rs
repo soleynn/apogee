@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, BenchStats, Command, Core, CoreConfig, Event, FrameLog, OtpSource,
-    PatchProgress, Profile, Region, RunnerSelection, Secret, Uuid,
+    Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
+    FrameLog, OtpSource, PatchProgress, Profile, Region, RunIn, RunnerSelection, Secret, Trigger,
+    Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -53,6 +54,56 @@ enum Commands {
         #[command(subcommand)]
         action: BenchAction,
     },
+    /// Manage the tools that run alongside the game.
+    Addon {
+        #[command(subcommand)]
+        action: AddonAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AddonAction {
+    /// List a profile's tools, in the order they run.
+    List(TargetArgs),
+    /// Add a tool.
+    Add(AddonAddArgs),
+    /// Remove a tool by its position in the list.
+    Remove(AddonIndexArgs),
+    /// Include a tool in the next launch.
+    Enable(AddonIndexArgs),
+    /// Leave a tool out of the next launch without discarding it.
+    Disable(AddonIndexArgs),
+}
+
+#[derive(Args)]
+struct AddonAddArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Absolute path to the program. A relative path would resolve against wherever the launcher
+    /// started, so the same profile would run different code depending on how it was invoked.
+    #[arg(long)]
+    program: PathBuf,
+    /// An argument for the program. Repeat for each; they are passed through verbatim.
+    /// Hyphens are allowed, since a tool's own flags are the common case.
+    #[arg(long = "arg", allow_hyphen_values = true)]
+    args: Vec<String>,
+    /// Where it runs: `host` (a native binary or script) or `prefix` (a Windows program).
+    #[arg(long, default_value = "host")]
+    run_in: String,
+    /// When it runs: `with-game`, `with-game-keep-running`, or `on-close`.
+    #[arg(long, default_value = "with-game")]
+    trigger: String,
+}
+
+#[derive(Args)]
+struct AddonIndexArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// The tool's position in the list, as shown by `addon list`.
+    #[arg(long)]
+    index: usize,
 }
 
 #[derive(Subcommand)]
@@ -192,6 +243,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(drive(&core, Command::Repair { profile }).await)
         }
         Commands::Bench { action } => bench(action),
+        Commands::Addon { action } => {
+            addon(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -421,6 +476,126 @@ fn read_otp(args: &PlayArgs, account: &Account) -> Result<OtpSource, CliError> {
     }
 }
 
+/// The tools that run alongside the game, read from and written back to the profile that owns them.
+fn addon(core: &Core, action: AddonAction) -> Result<(), CliError> {
+    match action {
+        AddonAction::List(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            if profile.external.is_empty() {
+                println!("no tools configured");
+                return Ok(());
+            }
+            for (index, addon) in profile.external.iter().enumerate() {
+                println!(
+                    "{index}  {:<7}  {:<22}  {}{}",
+                    render_run_in(addon.run_in()),
+                    render_trigger(addon.trigger()),
+                    addon.program().display(),
+                    if addon.enabled() { "" } else { "  (disabled)" }
+                );
+            }
+            Ok(())
+        }
+        AddonAction::Add(args) => {
+            let mut profile = resolve_profile(core, &args.profile)?;
+            let addon = ExternalAddon::new(
+                args.program,
+                args.args,
+                parse_run_in(&args.run_in)?,
+                parse_trigger(&args.trigger)?,
+            )?;
+            println!(
+                "added tool {} at {}",
+                addon.program().display(),
+                profile.external.len()
+            );
+            profile.external.push(addon);
+            core.save_profile(&profile)?;
+            Ok(())
+        }
+        AddonAction::Remove(args) => {
+            let mut profile = resolve_profile(core, &args.profile)?;
+            let addon = take_addon(&mut profile.external, args.index)?;
+            core.save_profile(&profile)?;
+            println!("removed tool {}", addon.program().display());
+            Ok(())
+        }
+        AddonAction::Enable(args) => set_enabled(core, &args, true),
+        AddonAction::Disable(args) => set_enabled(core, &args, false),
+    }
+}
+
+fn set_enabled(core: &Core, args: &AddonIndexArgs, on: bool) -> Result<(), CliError> {
+    let mut profile = resolve_profile(core, &args.profile)?;
+    let addon = profile
+        .external
+        .get_mut(args.index)
+        .ok_or_else(|| out_of_range(args.index))?;
+    addon.set_enabled(on);
+    let program = addon.program().display().to_string();
+    core.save_profile(&profile)?;
+    println!("{} tool {program}", if on { "enabled" } else { "disabled" });
+    Ok(())
+}
+
+fn take_addon(addons: &mut Vec<ExternalAddon>, index: usize) -> Result<ExternalAddon, CliError> {
+    if index >= addons.len() {
+        return Err(out_of_range(index));
+    }
+    Ok(addons.remove(index))
+}
+
+fn out_of_range(index: usize) -> CliError {
+    format!("no tool at index {index} (see `addon list`)").into()
+}
+
+fn parse_run_in(spec: &str) -> Result<RunIn, CliError> {
+    match spec {
+        "host" => Ok(RunIn::Host),
+        "prefix" => Ok(RunIn::Prefix),
+        other => Err(format!("unknown location {other:?} (expected host or prefix)").into()),
+    }
+}
+
+/// Total over the library's states, so the combination that would start a tool and immediately kill
+/// it has no spelling here either, and no rule is needed in the shell to reject it.
+fn parse_trigger(spec: &str) -> Result<Trigger, CliError> {
+    match spec {
+        "with-game" => Ok(Trigger::WithGame {
+            keep_after_close: false,
+        }),
+        "with-game-keep-running" => Ok(Trigger::WithGame {
+            keep_after_close: true,
+        }),
+        "on-close" => Ok(Trigger::OnClose),
+        other => Err(format!(
+            "unknown trigger {other:?} (expected with-game, with-game-keep-running, or on-close)"
+        )
+        .into()),
+    }
+}
+
+fn render_run_in(run_in: RunIn) -> &'static str {
+    match run_in {
+        RunIn::Host => "host",
+        RunIn::Prefix => "prefix",
+        _ => "?",
+    }
+}
+
+fn render_trigger(trigger: Trigger) -> &'static str {
+    match trigger {
+        Trigger::WithGame {
+            keep_after_close: false,
+        } => "with-game",
+        Trigger::WithGame {
+            keep_after_close: true,
+        } => "with-game-keep-running",
+        Trigger::OnClose => "on-close",
+        _ => "?",
+    }
+}
+
 fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
     if spec == "system" {
         return Ok(RunnerSelection::SystemWine);
@@ -461,9 +636,35 @@ fn render(event: &Event) -> String {
         Event::State(state) => format!("state: {state:?}"),
         Event::Progress(progress) => format!("progress: {}/{}", progress.completed, progress.total),
         Event::Patch(patch) => render_patch(patch),
+        Event::Addon(addon) => render_addon(addon),
         Event::Frontier(_) => "frontier data received".to_owned(),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+/// Render one companion-tool event as a plain line.
+fn render_addon(event: &AddonEvent) -> String {
+    match event {
+        AddonEvent::Started { program, pid } => {
+            format!("addon: started {} (pid {pid})", program.display())
+        }
+        AddonEvent::AlreadyRunning { program, pid } => {
+            format!("addon: {} already running (pid {pid})", program.display())
+        }
+        AddonEvent::Stopped { program, pid } => {
+            format!("addon: stopped {} (pid {pid})", program.display())
+        }
+        AddonEvent::Finished { program, outcome } => {
+            format!("addon: {} finished ({outcome:?})", program.display())
+        }
+        AddonEvent::Failed { program, reason } => {
+            format!("addon: {} failed: {reason}", program.display())
+        }
+        AddonEvent::StillWaiting { program, seconds } => {
+            format!("addon: still waiting on {} ({seconds}s)", program.display())
+        }
+        _ => "addon: event".to_owned(),
     }
 }
 

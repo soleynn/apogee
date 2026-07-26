@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use apogee_addons::{Addons, ComponentManifest};
+
+use crate::addons::AddonBackend;
+use crate::addons::addons_backend::AddonsBackend;
 use apogee_fetch::Fetcher;
 use apogee_otp::Otp;
 use apogee_patcher::{Patcher, PatcherConfig};
@@ -95,7 +98,8 @@ pub struct Core {
     runtime: Runtime,
     /// The launch seam over the runner. Held as a trait object so a test can inject a fake.
     launch: Arc<dyn LaunchBackend>,
-    addons: Addons,
+    /// The companion seam over `apogee-addons`. A trait object so a test can inject a fake.
+    addons: Arc<dyn AddonBackend>,
     secrets: Secrets,
     otp: Otp,
     store: Store,
@@ -200,7 +204,7 @@ impl Core {
             patch,
             runtime,
             launch,
-            addons,
+            addons: Arc::new(AddonsBackend::new(addons)) as Arc<dyn AddonBackend>,
             secrets,
             otp,
             store,
@@ -330,6 +334,7 @@ impl Core {
             transport: self.transport.clone(),
             patch: self.patch.clone(),
             launch: self.launch.clone(),
+            addons: self.addons.clone(),
             store: self.store.clone(),
             clock: self.clock.clone(),
             computer_id: self.computer_id,

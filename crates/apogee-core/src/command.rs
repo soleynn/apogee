@@ -132,6 +132,8 @@ pub enum Event {
     /// A patch or repair progress frame relayed verbatim from `apogee-patcher` (download slots, apply
     /// progress, repair phases). The shell renders it; tests consume it identically.
     Patch(PatchProgress),
+    /// One of the user's own tools started, stopped, or failed. Relayed verbatim, like `Patch`.
+    Addon(apogee_addons::AddonEvent),
     Frontier(FrontierData),
     Error(CoreError),
 }
@@ -162,6 +164,9 @@ pub enum FlowState {
     Launching,
     /// The game process is running.
     Running,
+    /// Detaching after launch was requested, but this launch has companion teardown to perform, so
+    /// the launcher stays attached. Without this the launcher would simply appear to hang.
+    SupervisingAddons,
     /// The game process has exited (no exit status is available for a non-child descendant).
     Exited,
 }
