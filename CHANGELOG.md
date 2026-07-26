@@ -18,6 +18,7 @@ is tagged with its change type. Versioning aims to follow
 - Config backup archive, restore, and retention (#70) _(added)_
 - Run the user's own tools alongside the game (#71) _(added)_
 - Stop paying for work a change cannot affect (#72) _(ci)_
+- Drive companion tools from the launch flow and the command line (#73) _(added)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
