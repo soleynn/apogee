@@ -27,6 +27,8 @@ pub enum CoreError {
     Runtime(#[from] apogee_runtime::RuntimeError),
     #[error("addons: {0}")]
     Addons(#[from] apogee_addons::AddonError),
+    #[error("companion tool {program:?} failed: {reason}")]
+    Addon { program: PathBuf, reason: String },
     #[error("secrets: {0}")]
     Secrets(#[from] apogee_secrets::SecretsError),
     #[error("otp: {0}")]

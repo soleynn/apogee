@@ -116,6 +116,10 @@ struct RuntimeGameHandle {
 
 #[async_trait::async_trait]
 impl GameHandle for RuntimeGameHandle {
+    fn prefix(&self) -> Option<apogee_runtime::Prefix> {
+        Some(self.session.prefix().clone())
+    }
+
     fn game_pid(&self) -> i32 {
         self.session.game_pid()
     }

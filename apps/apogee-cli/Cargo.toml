@@ -23,6 +23,7 @@ fixtures = ["dep:apogee-test-support"]
 wine-integration = ["fixtures"]
 
 [dev-dependencies]
+serde_json.workspace = true
 # Sends SIGINT to the CLI child in the e2e test so it shuts the game down cleanly.
 rustix = { workspace = true, features = ["process"] }
 tempfile.workspace = true

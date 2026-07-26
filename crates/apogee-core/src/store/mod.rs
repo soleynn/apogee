@@ -58,9 +58,20 @@ trait Migrate: Sized {
 }
 
 impl Migrate for Profile {
-    const CURRENT_VERSION: u32 = 1;
-    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
-        Err(format!("no migration from schema version {from}"))
+    const CURRENT_VERSION: u32 = 2;
+    fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| "profile payload is not a json object".to_string())?;
+        match from {
+            // Gained the user's own companion tools, starting empty.
+            1 => {
+                obj.entry("external")
+                    .or_insert(serde_json::Value::Array(Vec::new()));
+            }
+            other => return Err(format!("no migration from schema version {other}")),
+        }
+        Ok(value)
     }
 }
 
