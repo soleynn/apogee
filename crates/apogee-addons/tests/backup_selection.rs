@@ -473,3 +473,79 @@ fn the_game_root_is_required_and_the_companion_root_is_not() {
         Presence::Optional
     );
 }
+
+/// The user directory inside a prefix is named after whoever the runner claims to be, and Proton
+/// relocates the whole prefix a level down. Both shapes are real, and both must resolve.
+#[test]
+fn the_game_config_tree_is_found_in_either_prefix_shape() -> Result<(), BackupError> {
+    use apogee_addons::backup::game_config_dirs;
+
+    for (label, drive) in [("plain", ""), ("relocated", "pfx")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = if drive.is_empty() {
+            tmp.path().to_path_buf()
+        } else {
+            tmp.path().join(drive)
+        };
+        let config = root
+            .join("drive_c/users/steamuser/Documents/My Games/FINAL FANTASY XIV - A Realm Reborn");
+        game_tree(&config).unwrap();
+        // A user that never owns a config tree.
+        std::fs::create_dir_all(root.join("drive_c/users/Public/Documents")).unwrap();
+
+        assert_eq!(game_config_dirs(tmp.path()), vec![config], "{label} prefix");
+    }
+    Ok(())
+}
+
+/// A prefix run under two runners holds a full set of settings under each name. Choosing between
+/// them by name would quietly back up whichever sorted first, so both are returned and the one the
+/// game wrote to last comes first.
+#[test]
+fn a_prefix_run_under_two_runners_reports_both_trees_newest_first() -> Result<(), BackupError> {
+    use apogee_addons::backup::game_config_dirs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let users = tmp.path().join("drive_c/users");
+    let under = |user: &str| {
+        users
+            .join(user)
+            .join("Documents/My Games/FINAL FANTASY XIV - A Realm Reborn")
+    };
+    // `lyra` sorts first by name, so an alphabetical pick would take it.
+    game_tree(&under("lyra")).unwrap();
+    game_tree(&under("steamuser")).unwrap();
+
+    // The one the game touched last is the one it is using.
+    let recent = std::time::SystemTime::now();
+    let stale = recent - std::time::Duration::from_secs(60 * 60 * 24 * 30);
+    std::fs::File::options()
+        .write(true)
+        .open(under("lyra").join("FFXIV.cfg"))
+        .unwrap()
+        .set_modified(stale)
+        .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(under("steamuser").join("FFXIV.cfg"))
+        .unwrap()
+        .set_modified(recent)
+        .unwrap();
+
+    let found = game_config_dirs(tmp.path());
+    assert_eq!(found.len(), 2, "both trees are real settings: {found:?}");
+    assert_eq!(found[0], under("steamuser"), "the live tree comes first");
+    assert_eq!(found[1], under("lyra"));
+    Ok(())
+}
+
+/// A prefix the game has never written into has no config tree, which is a state rather than a fault.
+#[test]
+fn a_prefix_the_game_never_ran_in_has_no_config_tree() {
+    use apogee_addons::backup::game_config_dirs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("drive_c/users/steamuser/Documents")).unwrap();
+    assert!(game_config_dirs(tmp.path()).is_empty());
+    assert!(game_config_dirs(&tmp.path().join("absent")).is_empty());
+}

@@ -698,7 +698,7 @@ fn launch_env(profile: &Profile) -> BTreeMap<String, String> {
 }
 
 /// The prefix directory name for a profile: its named prefix, or the profile id when unnamed.
-fn prefix_name(profile: &Profile) -> String {
+pub(crate) fn prefix_name(profile: &Profile) -> String {
     if profile.prefix.name.is_empty() {
         profile.id.to_string()
     } else {
