@@ -2,11 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use super::error::BackupError;
 use super::rule::{Expect, NameMatch, Rule};
 
 /// The namespace a root's entries live under in the archive, and the unit a restore works in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RootLabel {
     /// The game's own config tree.
     User,

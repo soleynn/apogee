@@ -8,8 +8,11 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// The kind of directory entry a rule matches, and the kind a walk found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EntryKind {
     /// A regular file.
     File,

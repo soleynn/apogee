@@ -108,7 +108,7 @@ fn every_character_settings_file_is_captured() -> Result<(), BackupError> {
         let want = format!("user/{CHARACTER_DIR}/{file}");
         assert!(has(&names, &want), "{want} missing from {names:?}");
     }
-    assert!(has(&names, &format!("user/{CHARACTER_DIR}")));
+    assert!(has(&names, &format!("user/{CHARACTER_DIR}/")));
     Ok(())
 }
 
@@ -165,7 +165,7 @@ fn opting_in_brings_back_exactly_what_was_pruned() -> Result<(), BackupError> {
     ));
     assert!(has(&names, &format!("user/{CHARACTER_DIR}/ADDON.DAT.old")));
     assert!(has(&names, "user/FFXIV.cfg.old"));
-    assert!(has(&names, "user/screenshots"));
+    assert!(has(&names, "user/screenshots/"));
     assert!(has(
         &names,
         "user/backup/FFXIV_BKCHR004000174C116E58_00.dat"
@@ -375,12 +375,13 @@ fn the_order_does_not_depend_on_the_order_the_tree_was_built() -> Result<(), Bac
     assert_eq!(names(&a), names(&b));
     // A parent sorts before what it holds, so an archive written in this order never names a file
     // before the directory it belongs to.
-    let chr = format!("user/{CHARACTER_DIR}");
+    let chr = format!("user/{CHARACTER_DIR}/");
     let names_a = names(&a);
     let dir_at = names_a.iter().position(|n| *n == chr).unwrap();
+    // Strictly longer, so this finds a child rather than the directory entry itself.
     let file_at = names_a
         .iter()
-        .position(|n| n.starts_with(&format!("{chr}/")))
+        .position(|n| n.starts_with(&chr) && n.len() > chr.len())
         .unwrap();
     assert!(dir_at < file_at);
     Ok(())
