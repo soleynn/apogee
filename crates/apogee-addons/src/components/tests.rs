@@ -419,6 +419,7 @@ async fn a_registration_naming_a_program_the_archive_lacks_fails_the_component()
     .await
     .expect("call");
 
+    println!("REPORT: {report:?}");
     assert!(report.any_failed(), "{report:?}");
     assert!(
         recorded(&prefix).is_empty(),

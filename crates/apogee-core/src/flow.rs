@@ -265,8 +265,11 @@ async fn install_components(
         .await?;
 
     emit(tx, FlowState::InstallingComponents);
-    let total = wanted.len();
     let report = ctx.addons.ensure(prefix, wanted, cancel, tx).await?;
+    // Counted against the steps the install considered rather than the names the profile listed, so the
+    // two halves of the message share a denominator. A tool's prerequisite verb is a step of its own, so
+    // the two counts otherwise differ and "2 of 2 failed" can be printed for a set where one succeeded.
+    let total = report.outcomes.len();
     let failed = report
         .outcomes
         .iter()
