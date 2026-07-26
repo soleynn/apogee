@@ -177,9 +177,22 @@ pub(crate) async fn download_verified(
     Ok(outcome?)
 }
 
+/// The names a fetched catalog and its detached signature are cached under.
+const CATALOG_FILES: [&str; 2] = ["catalog.json", "catalog.json.sig"];
+/// Where a catalog fetch in progress writes, cleared before every attempt.
+const CATALOG_STAGING: &str = ".fetching";
+
 /// Fetch the signed catalog: download the manifest and its detached signature over HTTPS, then verify
 /// against the compiled-in key. The manifest's own bytes are not sha-pinned ahead of time; the
 /// Ed25519 signature is the authenticity gate.
+///
+/// It downloads into a staging directory that is removed first, and that is load-bearing rather than
+/// tidiness. A catalog is fetched with no content pin and no declared length, and under those terms the
+/// fetcher treats any existing file at the destination as already satisfying the request — correctly,
+/// since it has nothing to check it against. Downloading straight onto the cache path would therefore
+/// serve the first catalog ever fetched back forever, which is exactly the property "a runner bump is a
+/// manifest edit" denies. Publishing only after the signature verifies also means a failed or truncated
+/// fetch cannot destroy the last good copy.
 pub(crate) async fn fetch_catalog(
     fetcher: &Fetcher,
     manifest_url: &Url,
@@ -187,11 +200,13 @@ pub(crate) async fn fetch_catalog(
     cache_dir: &Path,
     cancel: &CancellationToken,
 ) -> Result<Catalog, RuntimeError> {
-    tokio::fs::create_dir_all(cache_dir)
+    let staging = cache_dir.join(CATALOG_STAGING);
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    tokio::fs::create_dir_all(&staging)
         .await
-        .map_err(|e| io_err(cache_dir, e))?;
-    let manifest_path = cache_dir.join("catalog.json");
-    let signature_path = cache_dir.join("catalog.json.sig");
+        .map_err(|e| io_err(&staging, e))?;
+    let manifest_path = staging.join(CATALOG_FILES[0]);
+    let signature_path = staging.join(CATALOG_FILES[1]);
     download_unverified(fetcher, manifest_url, &manifest_path, cancel).await?;
     download_unverified(fetcher, signature_url, &signature_path, cancel).await?;
 
@@ -203,7 +218,22 @@ pub(crate) async fn fetch_catalog(
         .map_err(|e| io_err(&signature_path, e))?;
     let key =
         VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).map_err(|_| CatalogError::BadSignature)?;
-    Ok(Catalog::parse_and_verify(&manifest, &signature, &key)?)
+    let catalog = Catalog::parse_and_verify(&manifest, &signature, &key)?;
+
+    // Only bytes that verified reach the cache. Two renames rather than one, so a crash between them can
+    // leave a manifest beside the previous signature; nothing reads the cache without verifying it, so
+    // that is a refused pair rather than a trusted one.
+    tokio::fs::create_dir_all(cache_dir)
+        .await
+        .map_err(|e| io_err(cache_dir, e))?;
+    for name in CATALOG_FILES {
+        let to = cache_dir.join(name);
+        tokio::fs::rename(staging.join(name), &to)
+            .await
+            .map_err(|e| io_err(&to, e))?;
+    }
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    Ok(catalog)
 }
 
 /// Download `url` to `dest` over HTTPS without a content pin (the caller authenticates the bytes some

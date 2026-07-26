@@ -36,6 +36,14 @@ pub enum ComponentEvent {
     Failed { component: String, reason: String },
     /// The manifest offers it but this build cannot drive it.
     Unsupported { component: String, what: String },
+    /// The signed catalog could not be reached. `using_cached` says whether the last one a fetch verified
+    /// stood in for it, or whether the launch went ahead with none of the enabled components.
+    ///
+    /// A report rather than an error, and that distinction is the point: falling back to a catalog that
+    /// once verified is the *correct* outcome for a launch, so a shell must not turn it into a failed
+    /// exit for a game that started fine. It still has to be said out loud, because which build of a
+    /// companion started is exactly what somebody debugging one needs to know.
+    CatalogUnavailable { detail: String, using_cached: bool },
 }
 
 /// Where component events go. Cloneable and cheap, like the crate's other stream.

@@ -112,6 +112,10 @@ jobs:
       # The unverified-download-over-TLS test needs a client that trusts a loopback test certificate,
       # exposed only behind apogee-fetch's test-only `testing` feature, so it runs as its own step.
       - run: cargo test -p apogee-fetch --features testing --test none_over_tls
+      # Same reason: the component-manifest fetch is checked over TLS against a loopback certificate. It
+      # is what pins the property that a manifest edit reaches the client at all.
+      - run: cargo test -p apogee-addons --features testing --test manifest_fetch
+      - run: cargo test -p apogee-runtime --features testing --test catalog_fetch
       # The corpus fetcher lives behind the `corpus` feature (off by default so it stays out of the
       # plain and cross builds); its self-test is hermetic (chaos-server-backed, no network).
       - run: cargo test -p apogee-test-support --features corpus corpus

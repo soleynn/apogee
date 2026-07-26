@@ -240,7 +240,6 @@ impl Core {
                 components: components_dir,
             },
         );
-        let component_catalog = crate::addons::catalog_urls()?;
         let secrets = Secrets::new();
         let otp = Otp::new();
 
@@ -250,8 +249,7 @@ impl Core {
             patch,
             runtime,
             launch,
-            addons: Arc::new(AddonsBackend::new(addons, component_catalog))
-                as Arc<dyn AddonBackend>,
+            addons: Arc::new(AddonsBackend::new(addons)) as Arc<dyn AddonBackend>,
             secrets,
             otp,
             store,

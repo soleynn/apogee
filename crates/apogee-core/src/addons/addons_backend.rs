@@ -5,8 +5,8 @@
 //! launch is over.
 
 use apogee_addons::{
-    AddonEvents, AddonReport, AddonSession, Addons, ComponentEvents, ComponentManifest,
-    ComponentReport, ExternalAddon, GameContext, Outcome,
+    AddonEvents, AddonReport, AddonSession, Addons, ComponentEvent, ComponentEvents,
+    ComponentManifest, ComponentReport, ExternalAddon, GameContext, Outcome,
 };
 use apogee_runtime::Prefix;
 use async_trait::async_trait;
@@ -22,22 +22,29 @@ use crate::error::CoreError;
 /// The addon seam over the concrete manager.
 pub(crate) struct AddonsBackend {
     addons: Addons,
-    /// The hosted component manifest and its detached signature.
-    catalog: (Url, Url),
 }
 
 impl AddonsBackend {
-    pub(crate) fn new(addons: Addons, catalog: (Url, Url)) -> Self {
-        Self { addons, catalog }
+    pub(crate) fn new(addons: Addons) -> Self {
+        Self { addons }
+    }
+
+    /// Where the signed component catalog lives, resolved when it is needed rather than at construction.
+    ///
+    /// Resolving it eagerly would make an unparseable override fail the whole launcher, including every
+    /// command that never touches a component. A misconfigured catalog should cost the component commands.
+    fn catalog_urls(&self) -> Result<(Url, Url), CoreError> {
+        super::catalog_urls()
     }
 }
 
 #[async_trait]
 impl AddonBackend for AddonsBackend {
     async fn catalog(&self, cancel: &CancellationToken) -> Result<ComponentManifest, CoreError> {
+        let (manifest, signature) = self.catalog_urls()?;
         Ok(self
             .addons
-            .fetch_manifest(&self.catalog.0, &self.catalog.1, cancel)
+            .fetch_manifest(&manifest, &signature, cancel)
             .await?)
     }
 
@@ -51,9 +58,10 @@ impl AddonBackend for AddonsBackend {
         let Some(prefix) = prefix else {
             return Ok(ComponentReport::default());
         };
+        let (manifest_url, signature_url) = self.catalog_urls()?;
         let manifest = self
             .addons
-            .fetch_manifest(&self.catalog.0, &self.catalog.1, cancel)
+            .fetch_manifest(&manifest_url, &signature_url, cancel)
             .await?;
         let (component_events, relay) = relay_components(events);
         let report = self
@@ -131,45 +139,41 @@ impl AddonsBackend {
     /// The manifest to read a launch's companion registrations from: the hosted one, or the last one a
     /// fetch verified when it cannot be reached.
     ///
-    /// The fallback is announced rather than silent, because starting yesterday's companions is the right
-    /// answer and quietly doing it is not: which build of a companion started is exactly the thing
-    /// somebody debugging one would need to know.
+    /// Announced rather than silent, because which build of a companion started is exactly what somebody
+    /// debugging one needs to know. Announced as a *report* rather than an error, because falling back to
+    /// a catalog that once verified is the correct outcome here, and a shell that turned it into a failed
+    /// exit would report a game that started fine as a failure.
     async fn launch_manifest(
         &self,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Option<ComponentManifest> {
-        match self
-            .addons
-            .fetch_manifest(&self.catalog.0, &self.catalog.1, cancel)
-            .await
-        {
-            Ok(manifest) => Some(manifest),
-            Err(fetch_error) => match self.addons.cached_manifest().await {
-                Ok(Some(manifest)) => {
-                    let _ = events.send(Event::Error(CoreError::Launch {
-                        detail: format!(
-                            "the component catalog could not be reached ({fetch_error}); using the last one fetched"
-                        ),
-                    }));
-                    Some(manifest)
-                }
-                // Neither reachable nor usable: the launch goes ahead without the companions the profile
-                // enabled, and says so, because a game that starts beats one that does not.
-                other => {
-                    let cache = match other {
-                        Err(err) => format!("the cached one is unusable: {err}"),
-                        _ => "nothing has been fetched yet".to_owned(),
-                    };
-                    let _ = events.send(Event::Error(CoreError::Launch {
-                        detail: format!(
-                            "no component catalog is available ({fetch_error}; {cache}); this launch starts none of the enabled components"
-                        ),
-                    }));
-                    None
-                }
+        let fetch_error = match self.catalog_urls() {
+            Ok((manifest_url, signature_url)) => match self
+                .addons
+                .fetch_manifest(&manifest_url, &signature_url, cancel)
+                .await
+            {
+                Ok(manifest) => return Some(manifest),
+                Err(err) => err.to_string(),
             },
-        }
+            Err(err) => err.to_string(),
+        };
+        let (manifest, detail) = match self.addons.cached_manifest().await {
+            Ok(Some(manifest)) => (Some(manifest), fetch_error),
+            // Neither reachable nor usable: the launch goes ahead without the companions the profile
+            // enabled, and says so, because a game that starts beats one that does not.
+            Ok(None) => (None, format!("{fetch_error}; nothing was cached")),
+            Err(cache_error) => (
+                None,
+                format!("{fetch_error}; the cached one is unusable: {cache_error}"),
+            ),
+        };
+        let _ = events.send(Event::Component(ComponentEvent::CatalogUnavailable {
+            detail,
+            using_cached: manifest.is_some(),
+        }));
+        manifest
     }
 }
 
@@ -272,15 +276,13 @@ mod tests {
     fn backend() -> Result<AddonsBackend, Box<dyn std::error::Error>> {
         let fetcher = apogee_fetch::Fetcher::builder().build()?;
         let runtime = Runtime::new(fetcher.clone(), RuntimePaths::default());
-        Ok(AddonsBackend::new(
-            Addons::new(runtime, fetcher, AddonPaths::default()),
-            // Never reached: these tests configure no components, and the launch path skips the catalog
-            // entirely when a profile wants none.
-            (
-                Url::parse("https://example.invalid/manifest.json")?,
-                Url::parse("https://example.invalid/manifest.json.sig")?,
-            ),
-        ))
+        // No catalog is reached: these tests configure no components, and the launch path skips the
+        // catalog entirely when a profile wants none.
+        Ok(AddonsBackend::new(Addons::new(
+            runtime,
+            fetcher,
+            AddonPaths::default(),
+        )))
     }
 
     /// The teardown waits for the event relay so no companion event lands after the launch is

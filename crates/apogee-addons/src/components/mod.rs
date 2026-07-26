@@ -90,8 +90,27 @@ impl ComponentReport {
     }
 }
 
+/// The names the manifest and its detached signature are cached under.
+const MANIFEST_FILE: &str = "components.json";
+const SIGNATURE_FILE: &str = "components.json.sig";
+/// Where a fetch in progress writes, cleared before every attempt.
+const STAGING_DIR: &str = ".fetching";
+
 /// Fetch the signed manifest and its detached signature over HTTPS, then verify against the compiled-in
 /// key. The manifest's own bytes are not pinned ahead of time; the signature is the authenticity gate.
+///
+/// Two things about *where* it downloads are load-bearing rather than tidiness.
+///
+/// It downloads into a staging directory that is removed first. A manifest is fetched with no content
+/// pin and no declared length, and under those terms the fetcher treats any existing file at the
+/// destination as already satisfying the request — correctly, since it has nothing to check it against.
+/// Downloading straight onto the cache path would therefore serve the first manifest ever fetched back
+/// forever, and a manifest edit would never reach this build. That is the opposite of the point of
+/// keeping components in signed data.
+///
+/// And it publishes into the cache only after the signature verifies, so what
+/// [`cached_manifest`] later offers as a fallback is a manifest that once verified, and a bad or
+/// truncated fetch cannot destroy the last good one.
 pub(crate) async fn fetch_manifest(
     fetcher: &Fetcher,
     manifest_url: &Url,
@@ -99,11 +118,13 @@ pub(crate) async fn fetch_manifest(
     cache_dir: &Path,
     cancel: &CancellationToken,
 ) -> Result<ComponentManifest> {
-    tokio::fs::create_dir_all(cache_dir)
+    let staging = cache_dir.join(STAGING_DIR);
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    tokio::fs::create_dir_all(&staging)
         .await
-        .map_err(|source| artifact::io_failed("manifest", "cache", cache_dir, source))?;
-    let manifest_path = cache_dir.join("components.json");
-    let signature_path = cache_dir.join("components.json.sig");
+        .map_err(|source| artifact::io_failed("manifest", "cache", &staging, source))?;
+    let manifest_path = staging.join(MANIFEST_FILE);
+    let signature_path = staging.join(SIGNATURE_FILE);
     download_unverified(fetcher, manifest_url, &manifest_path, cancel).await?;
     download_unverified(fetcher, signature_url, &signature_path, cancel).await?;
 
@@ -113,7 +134,30 @@ pub(crate) async fn fetch_manifest(
     let signature = tokio::fs::read(&signature_path)
         .await
         .map_err(|source| artifact::io_failed("manifest", "read", &signature_path, source))?;
-    Ok(ComponentManifest::verify_default(&manifest, &signature)?)
+    let parsed = ComponentManifest::verify_default(&manifest, &signature)?;
+
+    publish(&staging, cache_dir).await?;
+    Ok(parsed)
+}
+
+/// Move a verified manifest and its signature from `staging` into the cache.
+///
+/// Two renames rather than one, so a crash between them can leave a manifest beside the previous
+/// signature. That is survivable rather than silent: [`cached_manifest`] verifies what it reads, so a
+/// mismatched pair is refused like any other unusable cache.
+async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(cache_dir)
+        .await
+        .map_err(|source| artifact::io_failed("manifest", "cache", cache_dir, source))?;
+    for name in [MANIFEST_FILE, SIGNATURE_FILE] {
+        let from = staging.join(name);
+        let to = cache_dir.join(name);
+        tokio::fs::rename(&from, &to)
+            .await
+            .map_err(|source| artifact::io_failed("manifest", "cache", &to, source))?;
+    }
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    Ok(())
 }
 
 /// The last manifest a fetch verified and left in `cache_dir`, re-verified before it is handed back.
@@ -123,8 +167,8 @@ pub(crate) async fn fetch_manifest(
 /// which for a launch beats starting no companions at all. Whether that trade is the right one is the
 /// caller's to make, which is why fetching and reading the cache are separate calls.
 pub(crate) async fn cached_manifest(cache_dir: &Path) -> Result<Option<ComponentManifest>> {
-    let manifest_path = cache_dir.join("components.json");
-    let signature_path = cache_dir.join("components.json.sig");
+    let manifest_path = cache_dir.join(MANIFEST_FILE);
+    let signature_path = cache_dir.join(SIGNATURE_FILE);
     let (Ok(manifest), Ok(signature)) = (
         tokio::fs::read(&manifest_path).await,
         tokio::fs::read(&signature_path).await,
@@ -154,10 +198,15 @@ async fn download_unverified(
 
 /// Install every component in `wanted` into `prefix`, applying the verbs they ask for first.
 ///
+/// A tool whose prerequisite verb failed in this run is not installed. A verb a tool declares is the
+/// prefix setup that tool needs, so installing it anyway would leave a component in place that cannot
+/// work while the prefix records it as installed — which is worse than not having it, because the next
+/// run would skip both.
+///
 /// # Errors
-/// [`AddonError::UnknownComponent`] if a name is in no list, or [`AddonError::PrefixJson`]'s runtime
-/// equivalent if the prefix's record cannot be read: without it there is no way to tell an install that
-/// is needed from one that is not, and re-running everything against a live prefix is worse than
+/// [`AddonError::UnknownComponent`] if a name is in no list, or [`AddonError::Install`] wrapping the
+/// runtime's error if the prefix's record cannot be read: without it there is no way to tell an install
+/// that is needed from one that is not, and re-running everything against a live prefix is worse than
 /// stopping.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ensure(
@@ -181,6 +230,8 @@ pub(crate) async fn ensure(
     // other's staging, and removed at the end whatever happened.
     let work = artifact::work_dir(prefix.path());
     let mut report = ComponentReport::default();
+    // What failed so far, so a tool is not installed over prefix setup that did not apply.
+    let mut failed: Vec<String> = Vec::new();
 
     for step in plan.steps() {
         match &step.action {
@@ -213,12 +264,19 @@ pub(crate) async fn ensure(
                         )
                         .await
                     }
-                    StepKind::Tool(_) => {
-                        install_tool(
-                            fetcher, paths, manifest, prefix, &step.name, &work, cancel, events,
-                        )
-                        .await
-                    }
+                    StepKind::Tool(_) => match blocking_verb(manifest, &step.name, &failed) {
+                        Some(verb) => Err(artifact::install_failed(
+                            &step.name,
+                            "prerequisite",
+                            format!("the prefix setup it needs ({verb}) did not apply"),
+                        )),
+                        None => {
+                            install_tool(
+                                fetcher, paths, manifest, prefix, &step.name, &work, cancel, events,
+                            )
+                            .await
+                        }
+                    },
                 };
                 let state = match outcome {
                     Ok(()) => ComponentState::Installed,
@@ -228,6 +286,7 @@ pub(crate) async fn ensure(
                             component: step.name.clone(),
                             reason: reason.clone(),
                         });
+                        failed.push(step.name.clone());
                         ComponentState::Failed { reason }
                     }
                 };
@@ -241,6 +300,20 @@ pub(crate) async fn ensure(
 
     let _ = tokio::fs::remove_dir_all(&work).await;
     Ok(report)
+}
+
+/// The first verb `tool` requires that is among `failed`, if any.
+fn blocking_verb<'m>(
+    manifest: &'m ComponentManifest,
+    tool: &str,
+    failed: &[String],
+) -> Option<&'m str> {
+    manifest
+        .tool(tool)?
+        .verbs
+        .iter()
+        .find(|verb| failed.iter().any(|f| f == *verb))
+        .map(String::as_str)
 }
 
 /// Apply one verb and record it. Recorded only on success, so a failed apply is retried next time
@@ -317,7 +390,21 @@ async fn install_tool(
             .await?;
         }
         ToolKind::ExternalNative => {
-            install_native(fetcher, paths, tool, &dest, work, cancel, events).await?;
+            let required = tool
+                .register
+                .as_ref()
+                .map(|r| dest.join(r.program.as_path()));
+            install_native(
+                fetcher,
+                paths,
+                tool,
+                &dest,
+                required.as_deref(),
+                work,
+                cancel,
+                events,
+            )
+            .await?;
         }
     }
     if let Some(register) = &tool.register {
@@ -356,22 +443,25 @@ async fn install_tool(
 /// same companion would re-download tens of megabytes to produce the identical tree. A prefix tool gets
 /// no such marker on purpose: its files live in one prefix, and re-laying them is how a damaged install
 /// is repaired.
+///
+/// `required` is the program the caller will go on to register, when there is one. The skip has to be at
+/// least as strict as what the caller then demands, or a directory that lost that one file would be
+/// skipped, fail the registration check, and take the same path on every retry forever.
 #[allow(clippy::too_many_arguments)]
 async fn install_native(
     fetcher: &Fetcher,
     paths: &AddonPaths,
     tool: &ToolEntry,
     dest: &Path,
+    required: Option<&Path>,
     work: &Path,
     cancel: &CancellationToken,
     events: &ComponentEvents,
 ) -> Result<()> {
     let marker_dir = paths.components.join(NATIVE_INSTALLED_DIR);
     let marker = marker_dir.join(format!("{}-{}", tool.name, tool.version));
-    // The destination is checked as well as the marker. A marker alone would make a deleted component
-    // directory unrecoverable: the fetch would be skipped, the registration check would then fail on the
-    // missing program, and every retry would take the same path forever.
-    if marker.is_file() && dest.is_dir() {
+    let intact = dest.is_dir() && required.is_none_or(Path::is_file);
+    if marker.is_file() && intact {
         return Ok(());
     }
     artifact::install(
@@ -448,16 +538,27 @@ fn describe(err: &AddonError) -> String {
     text
 }
 
-/// The launch-time records for whichever of `wanted` are registered tools installed under `paths`.
+/// The launch-time records for whichever of `wanted` are registered tools the prefix records as
+/// installed.
+///
+/// The prefix's record is consulted, not just the manifest. A component a profile has enabled but never
+/// installed has no files, so registering it would hand the launch a program that is not there and turn
+/// one un-run setup step into a spawn failure at every launch.
 ///
 /// # Errors
-/// [`AddonError::InvalidAddon`] if a row's program path cannot be run as written.
+/// [`AddonError::InvalidAddon`] if a row's program path cannot be run as written, or
+/// [`AddonError::Install`] if the prefix's record cannot be read.
 pub(crate) fn registrations(
     paths: &AddonPaths,
     manifest: &ComponentManifest,
     prefix: &Prefix,
     wanted: &[String],
 ) -> Result<Vec<ExternalAddon>> {
+    let installed = prefix.components().map_err(|source| AddonError::Install {
+        component: "prefix".to_owned(),
+        step: "read the prefix record",
+        source: Box::new(source),
+    })?;
     let mut addons = Vec::new();
     for name in wanted {
         let Some(tool) = manifest.tool(name) else {
@@ -466,6 +567,9 @@ pub(crate) fn registrations(
         let Some(register) = &tool.register else {
             continue;
         };
+        if !installed.iter().any(|c| c.name() == name) {
+            continue;
+        }
         let run_in = match tool.kind {
             ToolKind::PrefixTool => RunIn::Prefix,
             ToolKind::ExternalNative => RunIn::Host,

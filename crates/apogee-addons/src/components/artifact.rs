@@ -1,8 +1,10 @@
 //! Getting a pinned artifact onto disk.
 //!
-//! One path for every download this crate makes, so the sha256 pin is checked in exactly one place and
-//! nothing downstream ever sees a path to unverified bytes: the fetcher hands back a `VerifiedFile`,
-//! which only it can mint, and extraction takes that.
+//! One path for every *pinned* download, so the sha256 pin is checked in exactly one place and nothing
+//! downstream is handed a path to bytes that failed it: the fetcher returns a `VerifiedFile`, which only
+//! it can mint, and that is what reaches extraction. The signed manifest itself is the one download that
+//! does not come through here, because it has no pin to check — an Ed25519 signature stands in its place
+//! and its fetch lives beside the verification that gates it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -58,10 +58,11 @@ pub fn extract_archive(
 /// Extract a zip, entry by entry, with the same confinement the tar path applies.
 ///
 /// Permissions are the one deliberate divergence. A runner tarball is built on Unix and its modes are
-/// meaningful, so the tar path takes them as they are; a companion zip is built by Windows tooling and
-/// frequently carries a mode of zero, which would land an install nobody can read. So the low nine
-/// bits are taken where present, the owner's read and write are forced on, and an archive with no mode
-/// at all gets the ordinary file default.
+/// meaningful, so the tar path takes them as they are. A zip's are not dependable: an entry may carry no
+/// external attributes at all, and one written by Windows tooling gets a mode synthesised from the MS-DOS
+/// attribute bits, which is a plausible-looking number rather than an intended one. So the low nine bits
+/// are taken where there are any, the owner's read and write are forced on so an install is never
+/// unreadable, and an entry with no attributes at all gets the ordinary file default.
 fn unpack_zip(
     reader: BufReader<File>,
     strip_prefix: Option<&str>,

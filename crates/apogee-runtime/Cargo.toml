@@ -11,6 +11,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 ed25519-dalek = { workspace = true }
+# Only under `testing`, to build a client that trusts the test server's certificate.
+reqwest = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -33,8 +35,9 @@ rustix = { workspace = true, features = ["process"] }
 # Gates tests that need a real host `wine`; run only in the wine-present CI job.
 wine-integration = []
 # Exposes a prefix handle over an existing directory, so a hermetic test in a crate that builds on this
-# one can have a prefix without a real `wineboot`. Never enabled by a shipping build.
-testing = []
+# one can have a prefix without a real `wineboot`, and a client that trusts the test server's loopback
+# certificate. Never enabled by a shipping build.
+testing = ["apogee-fetch/testing", "dep:reqwest"]
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
@@ -64,6 +67,10 @@ required-features = ["wine-integration"]
 [[test]]
 name = "prefix_program_wine"
 required-features = ["wine-integration"]
+
+[[test]]
+name = "catalog_fetch"
+required-features = ["testing"]
 
 [lints]
 workspace = true

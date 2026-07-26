@@ -73,6 +73,15 @@ pub enum ManifestError {
         path: String,
         reason: &'static str,
     },
+    /// A name or version that would not survive being part of a filename. Both end up in one: a
+    /// component's scratch file and its install marker are named after them, so they are held to the
+    /// same standard as the destinations, which are validated a few lines away.
+    #[error("{field} {value:?} is not usable: {reason}")]
+    BadIdentifier {
+        field: &'static str,
+        value: String,
+        reason: &'static str,
+    },
     #[error("{component}: registry edit {key:?} is not one this launcher will write: {reason}")]
     BadRegistryEdit {
         component: String,
@@ -501,7 +510,39 @@ impl ComponentManifest {
     }
 }
 
+/// Refuse a name or version that would not survive being part of a filename.
+///
+/// Both become one: a component's scratch file is named after it, and a native component's install marker
+/// is `<name>-<version>`. Everything else derived from manifest data is confined by [`ComponentPath`], so
+/// leaving these two unchecked would be the one place a row could name a path component the rest of the
+/// parser exists to prevent. The manifest is signed, so this is depth rather than a boundary — but a
+/// signed row can still be a mistaken one.
+fn check_identifier(field: &'static str, value: &str) -> Result<(), ManifestError> {
+    let bad = |reason: &'static str| ManifestError::BadIdentifier {
+        field,
+        value: value.to_owned(),
+        reason,
+    };
+    if value.is_empty() {
+        return Err(bad("it is empty"));
+    }
+    if value == "." || value == ".." {
+        return Err(bad("it names a directory rather than a component"));
+    }
+    if value.contains('/') || value.contains('\\') {
+        return Err(bad("it carries a path separator"));
+    }
+    if value.chars().any(char::is_control) || value.contains('\0') {
+        return Err(bad("it carries a control character"));
+    }
+    if value.len() > MAX_NAME_BYTES {
+        return Err(bad("it is too long to be part of a filename"));
+    }
+    Ok(())
+}
+
 fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError> {
+    check_identifier("component name", &raw.name)?;
     let kind = match raw.kind.as_str() {
         "dalamud" => InjectableKind::Dalamud,
         _ => return Err(unknown(&raw.name, "injectable kind", raw.kind)),
@@ -526,6 +567,8 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
 }
 
 fn build_tool(raw: RawTool) -> Result<ToolEntry, ManifestError> {
+    check_identifier("component name", &raw.name)?;
+    check_identifier("component version", &raw.version)?;
     let kind = match raw.kind.as_str() {
         "prefix_tool" => ToolKind::PrefixTool,
         "external_native" => ToolKind::ExternalNative,
@@ -567,6 +610,7 @@ fn build_tool(raw: RawTool) -> Result<ToolEntry, ManifestError> {
 }
 
 fn build_verb(raw: RawVerb) -> Result<Verb, ManifestError> {
+    check_identifier("verb name", &raw.name)?;
     let ops = raw
         .ops
         .into_iter()
@@ -912,6 +956,34 @@ mod tests {
             }
             other => panic!("expected UnknownVerb, got {other:?}"),
         }
+    }
+
+    /// A name and a version both become part of a filename: a component's scratch file is named after it
+    /// and a native install marker is `<name>-<version>`. Leaving them unchecked would be the one place a
+    /// row could name a path component the rest of this parser exists to refuse.
+    #[test]
+    fn a_name_or_version_that_would_not_survive_a_filename_is_refused() {
+        for (from, to) in [
+            ("\"name\": \"ACT\"", "\"name\": \"../../etc/x\""),
+            ("\"name\": \"ACT\"", "\"name\": \"..\""),
+            ("\"name\": \"ACT\"", "\"name\": \"a/b\""),
+            ("\"name\": \"ACT\"", r#""name": "a\\b""#),
+            ("\"name\": \"ACT\"", "\"name\": \"\""),
+            ("\"version\": \"3.8.5.288\"", "\"version\": \"../../etc\""),
+            ("\"version\": \"3.8.5.288\"", "\"version\": \"\""),
+        ] {
+            let json = manifest().replacen(from, to, 1);
+            assert!(
+                matches!(parse(&json), Err(ManifestError::BadIdentifier { .. })),
+                "{to} must be refused"
+            );
+        }
+        // A verb's name reaches the same places.
+        let json = manifest().replace("\"name\": \"no-desktop-integration\"", "\"name\": \"../x\"");
+        assert!(matches!(
+            parse(&json),
+            Err(ManifestError::BadIdentifier { .. })
+        ));
     }
 
     /// The destination is where a component's bytes land, so it is the one field a hostile row would

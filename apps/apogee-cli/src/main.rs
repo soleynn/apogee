@@ -363,9 +363,18 @@ async fn component(core: &Core, action: ComponentAction) -> Result<ExitCode, Cli
                 println!("the catalog offers nothing");
                 return Ok(ExitCode::SUCCESS);
             }
+            // Every list the catalog carries, so what is printed and the emptiness check above agree. An
+            // injectable is listed even though this build installs none: what is on offer and what can be
+            // driven are different questions, and `ensure` answers the second one per component.
+            for entry in &manifest.injectables {
+                println!("{:<16}  {:<9}  injectable", entry.name, "-");
+                for caveat in &entry.caveats {
+                    println!("      note: {caveat}");
+                }
+            }
             for tool in &manifest.tools {
                 println!(
-                    "{:<16}  {}  {}",
+                    "{:<16}  {:<9}  {}",
                     tool.name,
                     tool.version,
                     render_kind(tool.kind)
@@ -375,7 +384,7 @@ async fn component(core: &Core, action: ComponentAction) -> Result<ExitCode, Cli
                 }
             }
             for verb in &manifest.verbs {
-                println!("{:<16}  {:<8}  prefix setup", verb.name, "-");
+                println!("{:<16}  {:<9}  prefix setup", verb.name, "-");
                 println!("      why: {}", verb.reason);
             }
             Ok(ExitCode::SUCCESS)
@@ -932,6 +941,16 @@ fn render_component(event: &ComponentEvent) -> String {
         }
         ComponentEvent::Unsupported { component, what } => {
             format!("component: {component} not installed: {what}")
+        }
+        ComponentEvent::CatalogUnavailable {
+            detail,
+            using_cached,
+        } => {
+            if *using_cached {
+                format!("component: catalog unreachable, using the last one fetched ({detail})")
+            } else {
+                format!("component: no catalog available, starting none ({detail})")
+            }
         }
         _ => "component: event".to_owned(),
     }

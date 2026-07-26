@@ -21,6 +21,8 @@ url.workspace = true
 ed25519-dalek.workspace = true
 apogee-runtime = { path = "../apogee-runtime" }
 apogee-fetch = { path = "../apogee-fetch" }
+# Only under `testing`, to build a client that trusts the test server's certificate.
+reqwest = { workspace = true, optional = true }
 
 # openat/mkdirat against a held directory descriptor for restore, and signalling a process group from
 # a drop for companion teardown. Both keep #![forbid(unsafe_code)].
@@ -30,6 +32,9 @@ rustix = { workspace = true, features = ["fs", "process"] }
 [features]
 # Gates tests that need a real host `wine`; run only in the wine-present CI job.
 wine-integration = []
+# Gates the manifest-fetch tests, which need a client that trusts the test server's loopback
+# certificate. Dependency injection, not a certificate bypass.
+testing = ["apogee-fetch/testing", "dep:reqwest"]
 
 [dev-dependencies]
 insta.workspace = true
@@ -43,6 +48,10 @@ zip.workspace = true
 [[test]]
 name = "verb_wine"
 required-features = ["wine-integration"]
+
+[[test]]
+name = "manifest_fetch"
+required-features = ["testing"]
 
 [lints]
 workspace = true

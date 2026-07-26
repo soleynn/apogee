@@ -444,6 +444,72 @@ async fn a_verb_whose_op_fails_is_not_recorded() {
     );
 }
 
+/// A verb a tool declares is the prefix setup that tool needs. Installing the tool anyway would leave a
+/// component in place that cannot work, recorded as installed, so the next run skips both.
+#[tokio::test]
+async fn a_tool_is_not_installed_when_the_verb_it_requires_failed() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    // A tool whose prerequisite is the verb that cannot succeed.
+    let json = format!(
+        r#"{{
+          "version": 1,
+          "tools": [
+            {{ "name": "Blocked", "version": "1", "kind": "prefix_tool",
+               "url": "{url}", "sha256": "{pin}",
+               "archive": {{ "format": "zip", "strip_prefix": "top" }},
+               "into": "apogee/Blocked", "verbs": ["unfixable"] }}
+          ],
+          "verbs": [
+            {{ "name": "unfixable", "reason": "Its op cannot succeed.",
+               "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{wrong}",
+                                       "archive": {{ "format": "zip" }},
+                                       "into": "apogee/verb" }} }} ] }}
+          ]
+        }}"#,
+        url = server.url("component.zip"),
+        wrong = "f".repeat(64),
+    );
+    let manifest = ComponentManifest::from_json_bytes(json.as_bytes()).expect("parse");
+
+    let report = ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["Blocked"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("call");
+
+    assert!(report.present().is_empty(), "{report:?}");
+    assert!(
+        recorded(&prefix).is_empty(),
+        "neither the verb nor the tool it blocks is recorded"
+    );
+    assert!(
+        !prefix.drive_c().join("apogee/Blocked").exists(),
+        "the tool's files were never laid down"
+    );
+    // And the reason points at the setup rather than at the tool's own download, which succeeded.
+    let blocked = report
+        .outcomes
+        .iter()
+        .find(|o| o.name == "Blocked")
+        .expect("an outcome for the tool");
+    match &blocked.state {
+        ComponentState::Failed { reason } => assert!(
+            reason.contains("unfixable"),
+            "the reason names the setup that did not apply: {reason}"
+        ),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
 /// A registration naming a program the archive does not contain is a manifest mistake, and finding it at
 /// install time is the difference between "that row is wrong" and a spawn failure at the next launch.
 #[tokio::test]
@@ -478,7 +544,6 @@ async fn a_registration_naming_a_program_the_archive_lacks_fails_the_component()
     .await
     .expect("call");
 
-    println!("REPORT: {report:?}");
     assert!(report.any_failed(), "{report:?}");
     assert!(
         recorded(&prefix).is_empty(),
@@ -492,6 +557,10 @@ async fn a_registration_naming_a_program_the_archive_lacks_fails_the_component()
 fn registrations_point_at_where_each_kind_was_installed() {
     let dir = tempfile::tempdir().unwrap();
     let (prefix, paths) = scratch(dir.path());
+    // Recorded as installed, since a launch only starts what is actually there.
+    prefix.record_component("InPrefix", Some("1")).unwrap();
+    prefix.record_component("Native", Some("1")).unwrap();
+    prefix.record_component("Unstarted", Some("1")).unwrap();
     let json = r#"{
       "version": 1,
       "tools": [
@@ -531,4 +600,40 @@ fn registrations_point_at_where_each_kind_was_installed() {
     assert_eq!(addons[1].run_in(), RunIn::Host);
     assert_eq!(addons[1].program(), paths.components.join("Native/run.sh"));
     assert_eq!(addons[1].trigger(), crate::Trigger::OnClose);
+}
+
+/// An enabled component that was never installed has no files, so registering it would hand the launch a
+/// program that is not there and turn one un-run setup step into a spawn failure at every launch.
+#[test]
+fn registrations_skip_a_component_the_prefix_does_not_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let json = r#"{
+      "version": 1,
+      "tools": [
+        { "name": "Installed", "version": "1", "kind": "prefix_tool",
+          "url": "https://example.invalid/a.zip",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "archive": { "format": "zip" }, "into": "apogee/Installed",
+          "register": { "program": "tool.exe", "args": [], "trigger": "with_game" } },
+        { "name": "Enabled", "version": "1", "kind": "prefix_tool",
+          "url": "https://example.invalid/b.zip",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "archive": { "format": "zip" }, "into": "apogee/Enabled",
+          "register": { "program": "tool.exe", "args": [], "trigger": "with_game" } }
+      ]
+    }"#;
+    let manifest = ComponentManifest::from_json_bytes(json.as_bytes()).expect("parse");
+    prefix.record_component("Installed", Some("1")).unwrap();
+
+    let wanted: Vec<String> = ["Installed", "Enabled"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let addons = registrations(&paths, &manifest, &prefix, &wanted).expect("registrations");
+    assert_eq!(addons.len(), 1, "{addons:?}");
+    assert_eq!(
+        addons[0].program(),
+        prefix.drive_c().join("apogee/Installed/tool.exe")
+    );
 }

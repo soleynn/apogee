@@ -270,10 +270,18 @@ async fn install_components(
     // two halves of the message share a denominator. A tool's prerequisite verb is a step of its own, so
     // the two counts otherwise differ and "2 of 2 failed" can be printed for a set where one succeeded.
     let total = report.outcomes.len();
+    // `Unsupported` counts too. The user asked for it and it is not installed; that a build cannot drive
+    // it rather than having tried and failed changes the reason, not whether the work happened.
     let failed = report
         .outcomes
         .iter()
-        .filter(|o| matches!(o.state, apogee_addons::ComponentState::Failed { .. }))
+        .filter(|o| {
+            matches!(
+                o.state,
+                apogee_addons::ComponentState::Failed { .. }
+                    | apogee_addons::ComponentState::Unsupported { .. }
+            )
+        })
         .count();
     tracing::debug!(
         installed = report.present().len(),
