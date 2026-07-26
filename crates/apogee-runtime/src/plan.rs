@@ -103,10 +103,69 @@ impl Prefix {
         }
     }
 
+    /// The prefix's `C:` drive, where a component installs its files. For plain wine this is inside
+    /// the prefix; Proton via umu relocates it under `pfx`, which this resolves so a caller never has
+    /// to know which runner built the prefix.
+    #[must_use]
+    pub fn drive_c(&self) -> PathBuf {
+        self.wine_root().join("drive_c")
+    }
+
     /// The path to this prefix's `prefix.json` record.
     #[must_use]
     pub fn metadata_path(&self) -> PathBuf {
         self.path.join(crate::metadata::PREFIX_JSON)
+    }
+
+    /// The components and verbs this prefix records as present, or an empty list if it has no record
+    /// yet. This is what makes re-applying a verb or reinstalling a component a no-op.
+    ///
+    /// # Errors
+    /// [`crate::RuntimeError::PrefixJson`] if the record exists but is corrupt, or
+    /// [`crate::RuntimeError::Io`] if it cannot be read. A corrupt record is the caller's decision:
+    /// treating it as "nothing installed" would silently re-run every install.
+    pub fn components(&self) -> Result<Vec<String>, crate::RuntimeError> {
+        Ok(self
+            .metadata()?
+            .map(|meta| meta.components)
+            .unwrap_or_default())
+    }
+
+    /// Note that `verb` has been applied to this prefix. Returns whether it was newly recorded.
+    ///
+    /// # Errors
+    /// As [`Self::components`], plus a write failure on `prefix.json`.
+    pub fn record_verb(&self, verb: &str) -> Result<bool, crate::RuntimeError> {
+        crate::metadata::record_component(
+            &self.metadata_path(),
+            crate::metadata::RunnerRef::from(&self.runner),
+            verb,
+            crate::SetupStep::VerbApply,
+            verb,
+        )
+    }
+
+    /// Note that component `name` is installed in this prefix, at `version` when the manifest pins
+    /// one. Returns whether it was newly recorded.
+    ///
+    /// # Errors
+    /// As [`Self::record_verb`].
+    pub fn record_component(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<bool, crate::RuntimeError> {
+        let detail = match version {
+            Some(version) => format!("{name} {version}"),
+            None => name.to_owned(),
+        };
+        crate::metadata::record_component(
+            &self.metadata_path(),
+            crate::metadata::RunnerRef::from(&self.runner),
+            name,
+            crate::SetupStep::ComponentInstall,
+            &detail,
+        )
     }
 
     /// The recorded `prefix.json`, or `None` if the prefix has not been initialized yet.

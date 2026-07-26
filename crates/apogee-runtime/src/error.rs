@@ -52,6 +52,13 @@ pub enum RuntimeError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{program} did not finish inside the prefix: {reason}")]
+    InPrefixIncomplete {
+        program: String,
+        reason: &'static str,
+    },
+    #[error("registry key {key:?} is not one this launcher will write: {reason}")]
+    RegistryKey { key: String, reason: &'static str },
     #[error("invalid launch plan: {reason}")]
     InvalidLaunchPlan { reason: &'static str },
     #[error("game process not found after {waited:?}")]
@@ -99,6 +106,10 @@ pub enum SetupStep {
     DxvkInstall,
     /// A registry or configuration tweak.
     ApplyTweaks,
+    /// A curated prefix-setup verb was applied. `detail` names the verb.
+    VerbApply,
+    /// A companion component was installed into the prefix. `detail` names it and its version.
+    ComponentInstall,
 }
 
 /// A prefix health problem found by [`Runtime::check_prefix`](crate::Runtime::check_prefix). Each

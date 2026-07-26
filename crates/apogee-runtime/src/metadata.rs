@@ -142,6 +142,34 @@ impl PrefixMetadata {
     }
 }
 
+/// Note `component` as present in the prefix whose record lives at `path`, appending `step` (carrying
+/// `detail`) to the history. Returns whether the component was newly added.
+///
+/// The component list is a set, so a re-apply leaves one entry and a history that shows it ran twice:
+/// what is installed and what was done to get there are different questions, and conflating them
+/// loses the second one.
+///
+/// Read-modify-write against one file, so two installs into the *same* prefix at the same time can
+/// lose a record. Nothing in the launcher does that, and the alternative (a lock file inside the
+/// prefix) buys a failure mode of its own.
+pub(crate) fn record_component(
+    path: &Path,
+    fallback_runner: RunnerRef,
+    component: &str,
+    step: SetupStep,
+    detail: &str,
+) -> Result<bool, RuntimeError> {
+    let mut meta =
+        PrefixMetadata::load(path)?.unwrap_or_else(|| PrefixMetadata::new(fallback_runner));
+    let added = !meta.components.iter().any(|c| c == component);
+    if added {
+        meta.components.push(component.to_owned());
+    }
+    meta.record(SetupRecord::ok_with(step, detail));
+    meta.save(path)?;
+    Ok(added)
+}
+
 /// The current time as an RFC 3339 UTC string (`YYYY-MM-DDTHH:MM:SSZ`). A clock that is before the
 /// epoch (unreachable in practice) formats as the epoch itself rather than failing.
 fn now_rfc3339() -> String {
@@ -227,5 +255,87 @@ mod tests {
         assert_eq!(json, "\"wineboot_init\"");
         let json = serde_json::to_string(&SetupStep::DxvkInstall).expect("serialize");
         assert_eq!(json, "\"dxvk_install\"");
+        let json = serde_json::to_string(&SetupStep::VerbApply).expect("serialize");
+        assert_eq!(json, "\"verb_apply\"");
+        let json = serde_json::to_string(&SetupStep::ComponentInstall).expect("serialize");
+        assert_eq!(json, "\"component_install\"");
+    }
+
+    /// What is installed and what was done to get there are different questions. The component list is
+    /// a set, so a re-apply is one entry; the history is a log, so a re-apply is two lines. Collapsing
+    /// them either duplicates the list or hides that a step ran twice.
+    #[test]
+    fn recording_the_same_component_twice_lists_it_once_and_logs_it_twice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PREFIX_JSON);
+        let runner = RunnerRef {
+            name: "wine".to_owned(),
+            version: "custom".to_owned(),
+        };
+        PrefixMetadata::new(runner.clone())
+            .save(&path)
+            .expect("seed");
+
+        assert!(
+            record_component(
+                &path,
+                runner.clone(),
+                "corefonts",
+                SetupStep::VerbApply,
+                "corefonts"
+            )
+            .expect("first"),
+            "the first record adds it"
+        );
+        assert!(
+            !record_component(
+                &path,
+                runner,
+                "corefonts",
+                SetupStep::VerbApply,
+                "corefonts"
+            )
+            .expect("second"),
+            "the second record reports it was already there"
+        );
+
+        let meta = PrefixMetadata::load(&path).expect("load").expect("present");
+        assert_eq!(meta.components, ["corefonts"]);
+        assert_eq!(
+            meta.setup_history
+                .iter()
+                .filter(|r| r.step == SetupStep::VerbApply)
+                .count(),
+            2
+        );
+    }
+
+    /// A prefix whose record was lost still records what is installed into it now, rather than
+    /// refusing until someone re-runs a repair.
+    #[test]
+    fn recording_into_a_prefix_with_no_record_writes_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PREFIX_JSON);
+        let runner = RunnerRef {
+            name: "GE-Proton".to_owned(),
+            version: "11-1".to_owned(),
+        };
+
+        record_component(
+            &path,
+            runner.clone(),
+            "ACT",
+            SetupStep::ComponentInstall,
+            "ACT 3.9.0",
+        )
+        .expect("record");
+        let meta = PrefixMetadata::load(&path).expect("load").expect("present");
+        assert_eq!(meta.runner, runner);
+        assert_eq!(meta.components, ["ACT"]);
+        assert_eq!(
+            meta.setup_history[0].detail.as_deref(),
+            Some("ACT 3.9.0"),
+            "the version is in the history, not in the component name"
+        );
     }
 }

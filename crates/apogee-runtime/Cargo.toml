@@ -24,6 +24,8 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 lzma-rs = { workspace = true }
 ruzstd = { workspace = true }
+# Companion components are published as zips, so the confined extractor takes that container too.
+zip = { workspace = true }
 # /proc reads via std::fs; pidfd + signals via rustix, keeping #![forbid(unsafe_code)].
 rustix = { workspace = true, features = ["process"] }
 
@@ -40,12 +42,13 @@ insta = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
-# The extraction integration tests build fixture tarballs in-process (encode side of the decoders).
+# The extraction integration tests build fixture archives in-process (encode side of the decoders).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tar = { workspace = true }
 flate2 = { workspace = true }
 lzma-rs = { workspace = true }
 ruzstd = { workspace = true }
+zip = { workspace = true }
 
 [[test]]
 name = "supervise_wine"
@@ -53,6 +56,10 @@ required-features = ["wine-integration"]
 
 [[test]]
 name = "prefix_wine"
+required-features = ["wine-integration"]
+
+[[test]]
+name = "prefix_program_wine"
 required-features = ["wine-integration"]
 
 [lints]

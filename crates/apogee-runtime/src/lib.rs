@@ -19,6 +19,7 @@ mod dosdevices;
 mod dxvk;
 mod env;
 mod error;
+mod exec;
 #[cfg(target_os = "linux")]
 mod extract;
 #[cfg(target_os = "linux")]
@@ -28,6 +29,7 @@ mod lifecycle;
 mod metadata;
 mod plan;
 mod progress;
+mod registry;
 #[cfg(target_os = "linux")]
 mod session;
 #[cfg(target_os = "linux")]
@@ -54,6 +56,7 @@ pub use env::{
     compute_environment,
 };
 pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep};
+pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
 pub use metadata::{DxvkRef, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord};
@@ -63,6 +66,7 @@ pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 pub use non_linux::{GameExit, GameSession, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{Progress, RuntimeEvent};
+pub use registry::{RegistryEdit, RegistryValue};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
 
@@ -321,6 +325,55 @@ impl Runtime {
         }
     }
 
+    /// Run one program inside `prefix` through its runner and wait for it: the primitive prefix setup
+    /// is built from. Its exit status and captured output come back rather than a pass/fail, because
+    /// what a non-zero status means belongs to the step being performed.
+    ///
+    /// # Errors
+    /// [`RuntimeError::MissingHostTool`] if the runner has no resolvable launcher,
+    /// [`RuntimeError::Spawn`] if the program could not be started, and
+    /// [`RuntimeError::InPrefixIncomplete`] if it outlived its time budget or the run was cancelled.
+    pub async fn run_in_prefix(
+        &self,
+        prefix: &Prefix,
+        program: &ProgramInPrefix,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<PrefixRun, RuntimeError> {
+        let umu = self.umu_for(prefix.runner().kind());
+        exec::run(prefix, program, umu.as_deref(), cancel).await
+    }
+
+    /// Write one registry value inside `prefix`. Idempotent: the value is overwritten rather than
+    /// added, so applying the same edit twice is applying it once.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RegistryKey`] if the edit is not a shape this launcher writes,
+    /// [`RuntimeError::PrefixInit`] if `reg` reported a failure, plus anything
+    /// [`Self::run_in_prefix`] raises.
+    pub async fn registry_set(
+        &self,
+        prefix: &Prefix,
+        edit: &RegistryEdit,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let program = edit.command()?;
+        let run = self.run_in_prefix(prefix, &program, cancel).await?;
+        if run.ok() {
+            return Ok(());
+        }
+        Err(RuntimeError::PrefixInit {
+            step: SetupStep::ApplyTweaks,
+            source: Box::new(std::io::Error::other(format!(
+                "reg add {}\\{} exited with {}: {}",
+                edit.key,
+                edit.name,
+                run.code
+                    .map_or_else(|| "a signal".to_owned(), |c| c.to_string()),
+                run.diagnostic()
+            ))),
+        })
+    }
+
     /// Spawn a companion program: a native tool on the host, or a Windows one run inside a prefix
     /// through its runner. Unlike [`Self::launch`] the child is held rather than resolved through
     /// `/proc`, so a short-lived companion is supported and its exit status is readable.
@@ -349,6 +402,30 @@ impl Runtime {
     pub fn spawn_companion(&self, _spec: &CompanionSpec) -> Result<Companion, RuntimeError> {
         Err(RuntimeError::Unsupported {
             what: "running a companion program",
+        })
+    }
+
+    /// Running a program inside a prefix is Linux-only at this phase.
+    pub async fn run_in_prefix(
+        &self,
+        _prefix: &Prefix,
+        _program: &ProgramInPrefix,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<PrefixRun, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "running a program inside a prefix",
+        })
+    }
+
+    /// Prefix registry edits are Linux-only at this phase.
+    pub async fn registry_set(
+        &self,
+        _prefix: &Prefix,
+        _edit: &RegistryEdit,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "editing a prefix registry",
         })
     }
 
