@@ -12,6 +12,8 @@
 mod bench;
 mod catalog;
 #[cfg(target_os = "linux")]
+mod companion;
+#[cfg(target_os = "linux")]
 mod dosdevices;
 #[cfg(target_os = "linux")]
 mod dxvk;
@@ -43,6 +45,8 @@ pub use catalog::{
     ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEY, Catalog, DxvkEntry,
     NvapiRef, Runner, RunnerKind, ToolEntry,
 };
+#[cfg(target_os = "linux")]
+pub use companion::{Companion, CompanionExit, CompanionSpec};
 #[cfg(target_os = "linux")]
 pub use dosdevices::DriveMap;
 pub use env::{
@@ -283,6 +287,17 @@ impl Runtime {
                 Err(e)
             }
         }
+    }
+
+    /// Spawn a companion program: a native tool on the host, or a Windows one run inside a prefix
+    /// through its runner. Unlike [`Self::launch`] the child is held rather than resolved through
+    /// `/proc`, so a short-lived companion is supported and its exit status is readable.
+    ///
+    /// # Errors
+    /// [`RuntimeError::MissingHostTool`] if a prefix companion has no resolvable runner launcher,
+    /// or [`RuntimeError::Spawn`] if the process could not be started.
+    pub fn spawn_companion(&self, spec: &CompanionSpec) -> Result<Companion, RuntimeError> {
+        companion::spawn(spec, &self.tools_dir())
     }
 
     /// Kill everything in a prefix. Separate and explicit: never the default stop.
