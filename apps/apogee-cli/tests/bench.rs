@@ -7,12 +7,14 @@ use std::process::Command;
 use tempfile::tempdir;
 
 /// A minimal but real-shaped MangoHud frametime CSV: metadata block, data header, three frames.
+/// `elapsed` is process uptime in **nanoseconds**, so it has to run ahead of the cumulative
+/// frametimes; a row whose frametime exceeds it is dropped as an instrumentation artifact.
 const FRAMETIME_CSV: &str = "os,cpu,gpu,ram,kernel,driver,cpuscheduler\n\
 TestOS,TestCPU,TestGPU,0,0.0.0,,none\n\
 fps,frametime,elapsed\n\
-120,8.0,1\n\
-60,16.0,2\n\
-30,33.0,3\n";
+120,8.0,8000000\n\
+60,16.0,24000000\n\
+30,33.0,57000000\n";
 
 /// Run the built CLI with storage pinned to a throwaway home so nothing touches real config.
 fn run_bench(
