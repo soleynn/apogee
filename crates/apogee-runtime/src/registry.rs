@@ -6,7 +6,13 @@
 //! writes with `/f`, which overwrites an existing value without prompting, so applying the same edit
 //! twice is the same as applying it once and no read-back is needed to decide.
 //!
-//! The value types are the three with an unambiguous single-argument encoding. `REG_MULTI_SZ` needs a
+//! `/f` is not a nicety. Observed on wine 10.0: without it, `reg add` over a value that already exists
+//! asks whether to overwrite, and with stdin closed it re-asks in a tight loop rather than giving up —
+//! 36 MB of prompts in twenty seconds. So the flag is part of the composed command rather than a
+//! caller's option, and the time budget and output cap in [`crate::exec`] are what bound that shape if
+//! anything else ever produces it.
+//!
+//! The value types are the ones with an unambiguous single-argument encoding. `REG_MULTI_SZ` needs a
 //! separator convention and `REG_BINARY` a hex one, and a manifest that gets either subtly wrong would
 //! write a plausible-looking wrong value rather than failing; neither is added until a verb needs it.
 
@@ -42,21 +48,26 @@ pub struct RegistryEdit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RegistryValue {
-    /// `REG_SZ`. Never empty: the only thing an empty string expresses in the keys a component touches
-    /// is "disabled", and switching something off prefix-wide as a side effect of installing a
-    /// component is not a thing a component gets to do.
+    /// `REG_SZ`. Never empty; [`Self::Disabled`] is how an empty one is spelled.
     String(String),
     /// `REG_EXPAND_SZ`, for a value carrying `%SystemRoot%`-style references.
     ExpandString(String),
     /// `REG_DWORD`, written in decimal.
     Dword(u32),
+    /// An empty `REG_SZ`, which under `Wine\DllOverrides` means "load neither the native library nor
+    /// the builtin one".
+    ///
+    /// Its own variant rather than an empty [`Self::String`] so that a row meaning it says so, while a
+    /// row whose value went missing is still refused. Those are opposite intentions with the same
+    /// spelling otherwise.
+    Disabled,
 }
 
 impl RegistryValue {
     /// The `/t` type name.
     fn type_name(&self) -> &'static str {
         match self {
-            Self::String(_) => "REG_SZ",
+            Self::String(_) | Self::Disabled => "REG_SZ",
             Self::ExpandString(_) => "REG_EXPAND_SZ",
             Self::Dword(_) => "REG_DWORD",
         }
@@ -67,6 +78,7 @@ impl RegistryValue {
         match self {
             Self::String(s) | Self::ExpandString(s) => s.clone(),
             Self::Dword(n) => n.to_string(),
+            Self::Disabled => String::new(),
         }
     }
 }
@@ -89,9 +101,11 @@ impl RegistryEdit {
                 "/t".to_owned(),
                 self.value.type_name().to_owned(),
                 "/d".to_owned(),
+                // Passed even when empty. `reg` also treats an omitted `/d` as an empty value, but
+                // stating it is one fewer default to depend on.
                 self.value.data(),
-                // Overwrite an existing value instead of asking, which is what makes a second apply a
-                // no-op rather than a program waiting on a prompt nobody can answer.
+                // Overwrite instead of asking. See the module note: the prompt does not merely block,
+                // it loops.
                 "/f".to_owned(),
             ],
         ))
@@ -124,7 +138,7 @@ impl RegistryEdit {
             return Err(self.rejected("a leading slash would be read as an option"));
         }
         let data = self.value.data();
-        if data.is_empty() {
+        if data.is_empty() && self.value != RegistryValue::Disabled {
             return Err(self.rejected("the value is empty"));
         }
         for text in [&self.key, &self.name, &data] {
@@ -202,6 +216,34 @@ mod tests {
         .command()
         .expect("valid");
         assert!(command_args(&expand).contains(&"REG_EXPAND_SZ".to_owned()));
+    }
+
+    /// The one value that is legitimately empty. It has to be spelled, because the check that catches a
+    /// row whose value went missing would otherwise catch this too.
+    #[test]
+    fn disabling_a_dll_writes_an_empty_string_value() {
+        let command = edit(
+            r"HKCU\Software\Wine\DllOverrides",
+            "winemenubuilder.exe",
+            RegistryValue::Disabled,
+        )
+        .command()
+        .expect("an explicit disable is allowed");
+        let args = command_args(&command);
+        assert_eq!(
+            args,
+            [
+                "add",
+                r"HKCU\Software\Wine\DllOverrides",
+                "/v",
+                "winemenubuilder.exe",
+                "/t",
+                "REG_SZ",
+                "/d",
+                "",
+                "/f",
+            ]
+        );
     }
 
     /// A key that is not rooted is a manifest mistake, and `reg` would report it as its own opaque
