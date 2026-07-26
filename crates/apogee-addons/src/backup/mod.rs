@@ -13,8 +13,10 @@
 //! things costs the user their settings.
 
 mod archive;
+mod confine;
 mod error;
 mod manifest;
+mod restore;
 mod root;
 mod rule;
 mod walk;
@@ -24,11 +26,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub use archive::{BackupReport, BackupSpec, create, inspect};
+pub use confine::RejectReason;
 pub use error::BackupError;
 pub use manifest::{
     BACKUP_EXTENSION, BACKUP_FORMAT, BACKUP_FORMAT_VERSION, BackupManifest, EntryRecord,
     MANIFEST_ENTRY, RootRecord, RuleRecord,
 };
+pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
 pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, SelectionRoot};
 pub use rule::{EntryKind, Expect, NameMatch, Rule};
 

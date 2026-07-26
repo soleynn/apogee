@@ -75,6 +75,7 @@ dependencies = [
  "apogee-runtime",
  "async-trait",
  "insta",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

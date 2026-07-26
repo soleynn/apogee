@@ -4,6 +4,11 @@
 //! rather than in files are copied from a live install, because those are exactly the details a
 //! selection or an archive can get wrong while still appearing to work.
 
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different part of the fixture"
+)]
+
 use std::io;
 use std::path::Path;
 
