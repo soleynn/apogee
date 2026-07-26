@@ -137,14 +137,15 @@ impl Prefix {
         self.path.join(crate::metadata::PREFIX_JSON)
     }
 
-    /// The components and verbs this prefix records as present, or an empty list if it has no record
-    /// yet. This is what makes re-applying a verb or reinstalling a component a no-op.
+    /// The components and verbs this prefix records as present, with the version of each that carries
+    /// one, or an empty list if it has no record yet. This is what makes re-applying a verb or
+    /// reinstalling a component a no-op, and what makes an upgraded row not one.
     ///
     /// # Errors
     /// [`crate::RuntimeError::PrefixJson`] if the record exists but is corrupt, or
     /// [`crate::RuntimeError::Io`] if it cannot be read. A corrupt record is the caller's decision:
     /// treating it as "nothing installed" would silently re-run every install.
-    pub fn components(&self) -> Result<Vec<String>, crate::RuntimeError> {
+    pub fn components(&self) -> Result<Vec<crate::InstalledComponent>, crate::RuntimeError> {
         Ok(self
             .metadata()?
             .map(|meta| meta.components)
@@ -160,13 +161,14 @@ impl Prefix {
             &self.metadata_path(),
             crate::metadata::RunnerRef::from(&self.runner),
             verb,
+            None,
             crate::SetupStep::VerbApply,
             verb,
         )
     }
 
     /// Note that component `name` is installed in this prefix, at `version` when the manifest pins
-    /// one. Returns whether it was newly recorded.
+    /// one. Returns whether it was newly recorded; an upgrade replaces the entry and reports `false`.
     ///
     /// # Errors
     /// As [`Self::record_verb`].
@@ -183,6 +185,7 @@ impl Prefix {
             &self.metadata_path(),
             crate::metadata::RunnerRef::from(&self.runner),
             name,
+            version,
             crate::SetupStep::ComponentInstall,
             &detail,
         )

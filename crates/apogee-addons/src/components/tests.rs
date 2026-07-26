@@ -108,6 +108,17 @@ fn collect(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ComponentEvent>) -> Vec
     out
 }
 
+/// The names the prefix records, which is what these assertions are about; the versions have their own
+/// test in the planner.
+fn recorded(prefix: &Prefix) -> Vec<String> {
+    prefix
+        .components()
+        .expect("record")
+        .iter()
+        .map(|c| c.name().to_owned())
+        .collect()
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut out, b| {
@@ -153,10 +164,7 @@ async fn installing_puts_each_kind_where_it_belongs_and_records_it() {
         "the native tool landed on the host"
     );
 
-    assert_eq!(
-        prefix.components().expect("record"),
-        ["marker", "InPrefix", "Native"]
-    );
+    assert_eq!(recorded(&prefix), ["marker", "InPrefix", "Native"]);
 
     // The caveat is reported while the component is being set up, which is the only time it is useful.
     let events = collect(&mut rx);
@@ -220,7 +228,7 @@ async fn a_second_ensure_installs_nothing_and_downloads_nothing() {
         "a recorded component must not be re-fetched"
     );
     // And the record did not grow a duplicate.
-    assert_eq!(prefix.components().expect("record"), ["marker", "InPrefix"]);
+    assert_eq!(recorded(&prefix), ["marker", "InPrefix"]);
 }
 
 /// A native component's directory is shared by every profile, so a second prefix wanting the same
@@ -252,7 +260,7 @@ async fn a_native_component_is_fetched_once_across_prefixes() {
         .expect("ensure");
         // Each prefix records it for itself: whether this profile has it is a different question from
         // whether the bytes are on this machine.
-        assert_eq!(prefix.components().expect("record"), ["Native"]);
+        assert_eq!(recorded(&prefix), ["Native"]);
     }
     assert_eq!(
         server.stats().requests(),
@@ -318,7 +326,7 @@ async fn an_artifact_that_does_not_match_its_pin_fails_that_component_only() {
         "nothing was written from bytes that failed their pin"
     );
     assert_eq!(
-        prefix.components().expect("record"),
+        recorded(&prefix),
         ["marker"],
         "a failed install is not recorded, so it is retried rather than remembered as done"
     );
@@ -352,12 +360,7 @@ async fn an_archive_that_does_not_match_its_declared_layout_fails() {
     .expect("call");
 
     assert!(report.any_failed(), "{report:?}");
-    assert!(
-        !prefix
-            .components()
-            .expect("record")
-            .contains(&"InPrefix".to_owned())
-    );
+    assert!(!recorded(&prefix).contains(&"InPrefix".to_owned()));
 }
 
 /// A launch reads its companions from the manifest every time, so where each program is and how it runs

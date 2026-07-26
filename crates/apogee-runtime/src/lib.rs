@@ -59,7 +59,9 @@ pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError,
 pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
-pub use metadata::{DxvkRef, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord};
+pub use metadata::{
+    DxvkRef, InstalledComponent, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord,
+};
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 #[cfg(not(target_os = "linux"))]

@@ -87,6 +87,15 @@ async fn override_present(runtime: &Runtime, prefix: &Prefix) -> Result<bool, Bo
         .ok())
 }
 
+/// The names the prefix records.
+fn recorded(prefix: &Prefix) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(prefix
+        .components()?
+        .iter()
+        .map(|c| c.name().to_owned())
+        .collect())
+}
+
 /// Rewrite the prefix's record without its component list, standing in for a record lost or truncated
 /// between two runs.
 fn forget_components(prefix: &Prefix) -> Result<(), Box<dyn Error>> {
@@ -134,7 +143,7 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
         "the verb wrote the value"
     );
     assert_eq!(
-        prefix.components().expect("record"),
+        recorded(&prefix).expect("record"),
         ["no-desktop-integration"]
     );
 
@@ -152,7 +161,7 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
         "{second:?}"
     );
     assert_eq!(
-        prefix.components().expect("record"),
+        recorded(&prefix).expect("record"),
         ["no-desktop-integration"]
     );
 

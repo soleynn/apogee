@@ -5,6 +5,8 @@
 //! that tool, and a component the prefix already records is not touched. Both are checkable without a
 //! prefix, a download, or a wine.
 
+use apogee_runtime::InstalledComponent;
+
 use crate::manifest::{ComponentManifest, ToolKind};
 use crate::{AddonError, Result};
 
@@ -52,6 +54,12 @@ impl EnsurePlan {
     /// matters when a later tool needs a verb an earlier one did not: batching would apply it before a
     /// tool that has no use for it, which is a prefix mutation the user did not ask for yet.
     ///
+    /// A tool is already present only if the version the record carries is the version the row now
+    /// offers, so a bumped row is an install rather than a no-op. That is the whole point of a
+    /// version living in a manifest. A record with no version at all — a verb, or something an older
+    /// build wrote — counts as present, because there is nothing to compare and re-installing on every
+    /// run would be worse than a stale entry.
+    ///
     /// # Errors
     /// [`AddonError::UnknownComponent`] if a name is in no list. Refused for the whole call rather than
     /// recorded per-name: a name that resolves to nothing is a configuration mistake, and installing
@@ -60,7 +68,7 @@ impl EnsurePlan {
     pub fn build(
         manifest: &ComponentManifest,
         wanted: &[String],
-        installed: &[String],
+        installed: &[InstalledComponent],
     ) -> Result<Self> {
         let mut steps: Vec<PlanStep> = Vec::new();
         for name in wanted {
@@ -68,11 +76,17 @@ impl EnsurePlan {
                 for verb in &tool.verbs {
                     // Present by construction: the manifest refuses a tool naming a verb it does not
                     // define.
-                    push(&mut steps, verb, StepKind::Verb, installed);
+                    push(&mut steps, verb, None, StepKind::Verb, installed);
                 }
-                push(&mut steps, name, StepKind::Tool(tool.kind), installed);
+                push(
+                    &mut steps,
+                    name,
+                    Some(tool.version.as_str()),
+                    StepKind::Tool(tool.kind),
+                    installed,
+                );
             } else if manifest.verb(name).is_some() {
-                push(&mut steps, name, StepKind::Verb, installed);
+                push(&mut steps, name, None, StepKind::Verb, installed);
             } else if manifest.injectable(name).is_some() {
                 // Offered by the schema so a manifest does not need a new version when the code that
                 // drives these lands. Until then, saying so beats installing nothing quietly.
@@ -109,11 +123,18 @@ impl EnsurePlan {
     }
 }
 
-fn push(steps: &mut Vec<PlanStep>, name: &str, kind: StepKind, installed: &[String]) {
-    let action = if installed.iter().any(|c| c == name) {
-        StepAction::AlreadyPresent
-    } else {
-        StepAction::Install
+fn push(
+    steps: &mut Vec<PlanStep>,
+    name: &str,
+    wanted_version: Option<&str>,
+    kind: StepKind,
+    installed: &[InstalledComponent],
+) {
+    let action = match installed.iter().find(|c| c.name() == name) {
+        // Nothing to compare: a verb, or a record from a build that did not keep versions.
+        Some(record) if record.version().is_none() => StepAction::AlreadyPresent,
+        Some(record) if record.version() == wanted_version => StepAction::AlreadyPresent,
+        _ => StepAction::Install,
     };
     push_step(
         steps,
@@ -185,11 +206,22 @@ mod tests {
         assert_eq!(names(&plan), ["shared", "ACT"]);
     }
 
+    /// A record for a verb, or for a tool at the version the manifest offers.
+    fn present(name: &str, version: Option<&str>) -> InstalledComponent {
+        match version {
+            Some(version) => InstalledComponent::Versioned {
+                name: name.to_owned(),
+                version: version.to_owned(),
+            },
+            None => InstalledComponent::Name(name.to_owned()),
+        }
+    }
+
     /// The prefix's own record is what makes a second run a no-op, and it covers the pulled-in verbs
     /// too, not only the names the user typed.
     #[test]
     fn what_the_prefix_already_records_is_not_installed_again() {
-        let installed = vec!["shared".to_owned(), "ACT".to_owned()];
+        let installed = vec![present("shared", None), present("ACT", Some("1"))];
         let plan = EnsurePlan::build(
             &manifest(),
             &["ACT".to_owned(), "Other".to_owned()],
@@ -210,6 +242,30 @@ mod tests {
 
         let all = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &installed).expect("plan");
         assert!(all.is_empty(), "a fully-installed set has nothing to do");
+    }
+
+    /// The point of a version living in a manifest: bumping a row has to install, not report the prefix
+    /// as up to date against a row it has never seen.
+    #[test]
+    fn a_row_at_a_different_version_than_the_record_is_installed_again() {
+        // The fixture's ACT row is version "1".
+        let stale = vec![present("shared", None), present("ACT", Some("0"))];
+        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &stale).expect("plan");
+        assert_eq!(
+            plan.steps().iter().map(|s| &s.action).collect::<Vec<_>>(),
+            [&StepAction::AlreadyPresent, &StepAction::Install]
+        );
+        assert!(!plan.is_empty());
+    }
+
+    /// A record with no version is all an older build wrote, and there is nothing to compare it against.
+    /// Treating that as needing an install would re-download every component on the first run of this
+    /// build, which is worse than a stale entry.
+    #[test]
+    fn a_record_with_no_version_counts_as_present() {
+        let unversioned = vec![present("shared", None), present("ACT", None)];
+        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &unversioned).expect("plan");
+        assert!(plan.is_empty(), "{:?}", plan.steps());
     }
 
     #[test]
