@@ -409,7 +409,7 @@ fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), Cli
 /// Build the core against the real network transport and XDG-resolved storage. Under the `fixtures`
 /// feature a scripted transport may be substituted (the launch backend stays real).
 fn build_core() -> Result<Core, CliError> {
-    let config = CoreConfig::from_env();
+    let config = CoreConfig::try_from_env()?;
     #[cfg(feature = "fixtures")]
     if let Some(transport) = fixtures::transport() {
         return Ok(Core::with_transport(config, transport)?);

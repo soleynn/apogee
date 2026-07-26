@@ -47,6 +47,40 @@ struct Stored<T> {
     data: T,
 }
 
+/// Create `dir` and its ancestors owner-only, and narrow it if an earlier build left it readable.
+///
+/// Narrowing an existing directory rather than only setting the mode on a new one is deliberate: an
+/// install made before this was owner-only would otherwise keep exposing the same files forever.
+fn private_dir(dir: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .or_else(|err| {
+                if err.kind() == ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(err)
+                }
+            })
+            .map_err(io_at(dir))?;
+        let mode = fs::metadata(dir).map_err(io_at(dir))?.permissions().mode();
+        if mode & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(mode & 0o700))
+                .map_err(io_at(dir))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir).map_err(io_at(dir))
+    }
+}
+
 /// A persisted type that knows its current schema version and how to advance an older one.
 trait Migrate: Sized {
     /// The version this build reads and writes.
@@ -117,7 +151,7 @@ impl Migrate for UidCacheEntry {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 4;
+    const CURRENT_VERSION: u32 = 5;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -137,6 +171,11 @@ impl Migrate for Settings {
             3 => {
                 obj.entry("backups_kept")
                     .or_insert(serde_json::Value::from(5));
+            }
+            // Gained the pre-patch capture, on by default.
+            4 => {
+                obj.entry("backup_before_patch")
+                    .or_insert(serde_json::Value::Bool(true));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }
@@ -285,7 +324,7 @@ impl Store {
         T: Serialize + Migrate,
     {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(io_at(parent))?;
+            private_dir(parent)?;
         }
         let envelope = Stored {
             schema_version: T::CURRENT_VERSION,
@@ -301,11 +340,14 @@ impl Store {
         // or planted symlink at the temp name is rejected (EEXIST) rather than followed. list_profiles
         // ignores non-".json" names, so the temp is never read as an entity.
         let tmp = suffixed(path, &format!("{}.tmp", Uuid::new_v4()));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(io_at(&tmp))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Owner-only from the moment it exists, never widened by a later chmod: these files carry
+        // account identity, a live registration id, and the list of programs the launcher executes.
+        // The mode travels with the rename, so the entity is private too.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp).map_err(io_at(&tmp))?;
         file.write_all(&bytes).map_err(io_at(&tmp))?;
         file.sync_all().map_err(io_at(&tmp))?;
         drop(file);
