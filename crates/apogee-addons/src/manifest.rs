@@ -822,10 +822,38 @@ mod tests {
         }
     }
 
+    /// Both halves of the pin decoder: the length, and the digits. A pin of the right length made of
+    /// wrong characters is the one that would otherwise decode to a silently wrong 32 bytes, and it is
+    /// also the likelier mistake — a typo'd digit, or a digest in the wrong encoding.
     #[test]
     fn a_bad_pin_is_refused() {
-        let json = manifest().replace(GOOD_PIN, "not-hex");
-        assert!(matches!(parse(&json), Err(ManifestError::BadPin { .. })));
+        for bad in [
+            "not-hex".to_owned(),
+            "g".repeat(64),
+            format!("{}Z", &GOOD_PIN[1..]),
+            GOOD_PIN[1..].to_owned(),
+            format!("{GOOD_PIN}0"),
+            String::new(),
+        ] {
+            let json = manifest().replace(GOOD_PIN, &bad);
+            assert!(
+                matches!(parse(&json), Err(ManifestError::BadPin { .. })),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /// A pin is compared as bytes, so its hex has to decode the same either way it is written.
+    #[test]
+    fn a_pin_decodes_the_same_in_either_case() {
+        let lower = "0123456789abcdef".repeat(4);
+        let upper = lower.to_uppercase();
+        let of = |pin: &str| {
+            let json = manifest().replace(GOOD_PIN, pin);
+            parse(&json).expect("parse").tools[0].artifact.sha256
+        };
+        assert_eq!(of(&lower), of(&upper));
+        assert_eq!(of(&lower)[0], 0x01);
     }
 
     #[test]

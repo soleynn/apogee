@@ -98,6 +98,9 @@ pub(crate) mod fake {
     /// launched game's `kill()` ran (the Ctrl-C path).
     pub(crate) struct FakeLaunchBackend {
         recorded: Mutex<Vec<LaunchRequest>>,
+        /// The prefix directories `prepare` was asked for, so a flow that has to prepare one before
+        /// doing anything else can be checked on rather than taken on trust.
+        prepared: Mutex<Vec<std::path::PathBuf>>,
         auto_exit: bool,
         killed: Arc<AtomicBool>,
     }
@@ -116,9 +119,18 @@ pub(crate) mod fake {
         fn with_auto_exit(auto_exit: bool) -> Self {
             Self {
                 recorded: Mutex::new(Vec::new()),
+                prepared: Mutex::new(Vec::new()),
                 auto_exit,
                 killed: Arc::new(AtomicBool::new(false)),
             }
+        }
+
+        /// The prefix directories that were prepared, in order.
+        pub(crate) fn prepared(&self) -> Vec<std::path::PathBuf> {
+            self.prepared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
         }
 
         /// The most recently launched request, if any.
@@ -149,10 +161,14 @@ pub(crate) mod fake {
         async fn prepare(
             &self,
             _runner: &RunnerSelection,
-            _prefix_dir: &std::path::Path,
+            prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
         ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
+            self.prepared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(prefix_dir.to_path_buf());
             // No prefix: a fake runner has no wine to initialize one with, and the flows that consume
             // one are written to treat its absence as nothing to do.
             Ok(None)

@@ -70,10 +70,16 @@ fn manifest(server: &ChaosServer, pin: &str) -> ComponentManifest {
                "register": {{ "program": "run.sh", "args": [], "trigger": "with_game" }} }}
           ],
           "verbs": [
-            {{ "name": "marker", "reason": "Recorded without touching anything.", "ops": [] }}
+            {{ "name": "marker", "reason": "Recorded without touching anything.", "ops": [] }},
+            {{ "name": "unfixable", "reason": "Its op cannot succeed.",
+               "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{wrong_pin}",
+                                       "archive": {{ "format": "zip" }},
+                                       "into": "apogee/verb" }} }} ] }}
           ]
         }}"#,
         url = server.url("component.zip"),
+        // A pin the served bytes cannot match, so the op fails without needing a wine.
+        wrong_pin = "f".repeat(64),
     );
     ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses")
 }
@@ -352,12 +358,22 @@ async fn an_artifact_that_does_not_match_its_pin_fails_that_component_only() {
         ["marker"],
         "a failed install is not recorded, so it is retried rather than remembered as done"
     );
+    // The reason names the pin, not a generic download problem: the bytes arrived, they are just not the
+    // bytes the signed manifest promised, and that distinction is what tells a user their catalog and
+    // their mirror disagree.
     let events = collect(&mut rx);
+    let reason = events
+        .iter()
+        .find_map(|e| match e {
+            ComponentEvent::Failed { component, reason } if component == "InPrefix" => {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no failure reported: {events:?}"));
     assert!(
-        events.iter().any(
-            |e| matches!(e, ComponentEvent::Failed { component, .. } if component == "InPrefix")
-        ),
-        "{events:?}"
+        reason.contains("integrity mismatch"),
+        "a pin failure is reported as one: {reason}"
     );
 }
 
@@ -383,6 +399,49 @@ async fn an_archive_that_does_not_match_its_declared_layout_fails() {
 
     assert!(report.any_failed(), "{report:?}");
     assert!(!recorded(&prefix).contains(&"InPrefix".to_owned()));
+}
+
+/// A verb whose op failed must not be recorded, or the prefix would claim a setup step that never landed
+/// and the next run would skip it. The tool path has its own test for this; a verb takes the other branch.
+#[tokio::test]
+async fn a_verb_whose_op_fails_is_not_recorded() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let report = ensure_all(
+        &prefix,
+        &paths,
+        &manifest(&server, &pin),
+        &["unfixable"],
+        &ComponentEvents::new(tx),
+    )
+    .await
+    .expect("the call itself succeeds");
+
+    assert!(report.any_failed(), "{report:?}");
+    assert!(
+        recorded(&prefix).is_empty(),
+        "a verb that did not apply is not remembered as applied"
+    );
+    let events = collect(&mut rx);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ComponentEvent::Failed { component, .. } if component == "unfixable"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ComponentEvent::Applied { .. })),
+        "a verb that failed is not reported as applied: {events:?}"
+    );
 }
 
 /// A registration naming a program the archive does not contain is a manifest mistake, and finding it at

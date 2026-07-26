@@ -31,6 +31,9 @@ pub(crate) enum AddonCall {
 #[derive(Clone, Default)]
 pub(crate) struct FakeAddons {
     calls: Arc<Mutex<Vec<AddonCall>>>,
+    /// The list the launch handed to `start`, in order. Kept whole rather than counted, because the
+    /// order within it is a property the flow is responsible for and a count cannot see it.
+    started: Arc<Mutex<Vec<ExternalAddon>>>,
     /// Reported by the lifecycle, so a test can drive the close-after-launch decision.
     has_work: bool,
     /// Failures the teardown reports, so a test can check they reach the event stream.
@@ -74,6 +77,14 @@ impl FakeAddons {
     /// Everything the flow asked for, in order.
     pub(crate) fn calls(&self) -> Vec<AddonCall> {
         self.calls.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// The programs the launch handed to `start`, in the order it handed them over.
+    pub(crate) fn started_programs(&self) -> Vec<std::path::PathBuf> {
+        self.started
+            .lock()
+            .map(|started| started.iter().map(|a| a.program().to_path_buf()).collect())
+            .unwrap_or_default()
     }
 
     fn record(&self, call: AddonCall) {
@@ -137,6 +148,9 @@ impl AddonBackend for FakeAddons {
             game_pid,
             count: addons.len(),
         });
+        if let Ok(mut started) = self.started.lock() {
+            started.extend(addons);
+        }
         Box::new(FakeLifecycle {
             calls: self.calls.clone(),
             has_work: self.has_work,

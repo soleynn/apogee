@@ -787,12 +787,17 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
             AddonCall::GameClosed,
         ]
     );
-    // The profile's list reached the seam, and the game was up before it did.
-    let running = states(&events)
-        .iter()
-        .position(|s| *s == FlowState::Running)
-        .expect("the game ran");
-    assert!(running < states(&events).len());
+    // The profile's list reached the seam, and the game was up before it did: `Running` is emitted from
+    // `launch_game` between the launch and the companion start, so its position among the states is what
+    // says the ordering held.
+    assert_eq!(
+        states(&events),
+        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+    );
+    assert_eq!(
+        addons.started_programs(),
+        [std::path::PathBuf::from("/opt/act/act.sh")]
+    );
 }
 
 /// A companion an installed component contributes runs ahead of the user's own tools, because a tool the
@@ -858,6 +863,15 @@ async fn a_components_companion_starts_before_the_users_own_tools() {
             AddonCall::GameClosed,
         ]
     );
+    // The order, not just the count: the component's companion is started first, because the user's tool
+    // is pointed at it. A count alone would pass with the two swapped.
+    assert_eq!(
+        addons.started_programs(),
+        [
+            std::path::PathBuf::from("/prefixes/act/Advanced Combat Tracker.exe"),
+            std::path::PathBuf::from("/opt/mine/tool.sh"),
+        ]
+    );
 }
 
 /// Installing components is its own command, and it prepares the prefix first: a component installs into
@@ -899,7 +913,14 @@ async fn installing_components_prepares_the_prefix_and_asks_only_for_the_enabled
         states(&events)
     );
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
-    // Nothing was launched: preparing a prefix is not launching a game.
+    // The prefix was prepared, at the directory this profile's prefix resolves to. Without this the whole
+    // prepare step could be deleted and the test would still pass, since the fake install ignores it.
+    let profile = h.store.load_profile(h.profile).unwrap();
+    assert_eq!(
+        launch.prepared(),
+        [h.prefixes.path().join(super::prefix_name(&profile))]
+    );
+    // And nothing was launched: preparing a prefix is not launching a game.
     assert_eq!(launch.launch_count(), 0);
 }
 

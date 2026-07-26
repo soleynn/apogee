@@ -286,11 +286,39 @@ mod tests {
         assert_eq!(run.diagnostic(), "nope");
     }
 
-    /// A hung setup program must not hang the launcher, and must not be left running either.
+    /// A script that records its own pid and then hangs, so a test can check what became of it.
+    fn hanging_prefix() -> (tempfile::TempDir, Prefix, PathBuf) {
+        let (dir, prefix) = scripted_prefix("echo $$ > \"$APOGEE_TEST_PID_FILE\"; sleep 30");
+        let pid_file = dir.path().join("child.pid");
+        (dir, prefix, pid_file)
+    }
+
+    fn with_pid_file(program: ProgramInPrefix, pid_file: &Path) -> ProgramInPrefix {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "APOGEE_TEST_PID_FILE".to_owned(),
+            pid_file.display().to_string(),
+        );
+        program.env(env)
+    }
+
+    /// Whether the pid the script recorded is still alive.
+    fn still_running(pid_file: &Path) -> bool {
+        let text = std::fs::read_to_string(pid_file).expect("the child recorded its pid");
+        let pid: i32 = text.trim().parse().expect("a pid");
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    /// A hung setup program must not hang the launcher, and must not be left running either. The second
+    /// half has exactly one line of code behind it, so it gets an assertion of its own rather than
+    /// riding on the returned error.
     #[tokio::test]
-    async fn a_program_that_never_finishes_fails_the_budget() {
-        let (_dir, prefix) = scripted_prefix("sleep 30");
-        let program = ProgramInPrefix::new("cmd", Vec::new()).timeout(Duration::from_millis(100));
+    async fn a_program_that_never_finishes_fails_the_budget_and_is_killed() {
+        let (_dir, prefix, pid_file) = hanging_prefix();
+        let program = with_pid_file(
+            ProgramInPrefix::new("cmd", Vec::new()).timeout(Duration::from_millis(300)),
+            &pid_file,
+        );
         let err = run(&prefix, &program, None, &CancellationToken::new())
             .await
             .expect_err("must not wait 30 seconds");
@@ -302,21 +330,28 @@ mod tests {
                 ..
             }
         ));
+        // The kill lands asynchronously once the handle drops, so give it a moment before insisting.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !still_running(&pid_file),
+            "the program that outran its budget was left running"
+        );
     }
 
     #[tokio::test]
-    async fn cancelling_stops_waiting() {
-        let (_dir, prefix) = scripted_prefix("sleep 30");
+    async fn cancelling_stops_waiting_and_kills_the_program() {
+        let (_dir, prefix, pid_file) = hanging_prefix();
         let cancel = CancellationToken::new();
-        cancel.cancel();
-        let err = run(
-            &prefix,
-            &ProgramInPrefix::new("cmd", Vec::new()),
-            None,
-            &cancel,
-        )
-        .await
-        .expect_err("cancelled");
+        let program = with_pid_file(ProgramInPrefix::new("cmd", Vec::new()), &pid_file);
+        // Cancelled after it is up, so the race the select exists to win is the one exercised.
+        let signal = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            signal.cancel();
+        });
+        let err = run(&prefix, &program, None, &cancel)
+            .await
+            .expect_err("cancelled");
 
         assert!(matches!(
             err,
@@ -325,6 +360,11 @@ mod tests {
                 ..
             }
         ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !still_running(&pid_file),
+            "the cancelled program was left running"
+        );
     }
 
     /// A wall of output is bounded to what a message can use, and the tail is what is kept because a
