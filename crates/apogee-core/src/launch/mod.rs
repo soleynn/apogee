@@ -54,6 +54,19 @@ pub(crate) trait GameHandle: Send + Sync {
 /// Prepares a runner/prefix and launches the supervised game.
 #[async_trait::async_trait]
 pub(crate) trait LaunchBackend: Send + Sync {
+    /// Install the runner if needed and initialize the prefix, without launching anything.
+    ///
+    /// `None` means the backend has no real prefix to hand back, which only the test double does. A
+    /// caller that needs one treats that as nothing to do rather than as a failure, so the flows around
+    /// a prefix stay drivable without a wine.
+    async fn prepare(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<apogee_runtime::Prefix>, CoreError>;
+
     /// Prepare the runner named by `req` and spawn the game, relaying download/extract progress onto
     /// `events` as [`Event::Progress`]. Returns a handle to the running game.
     async fn launch(
@@ -77,7 +90,7 @@ pub(crate) mod fake {
 
     use super::{
         CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchRequest,
-        UnboundedSender,
+        RunnerSelection, UnboundedSender,
     };
 
     /// A fake backend. `exiting` returns handles that exit immediately (drives through to `Exited`);
@@ -133,6 +146,18 @@ pub(crate) mod fake {
 
     #[async_trait::async_trait]
     impl LaunchBackend for FakeLaunchBackend {
+        async fn prepare(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
+            // No prefix: a fake runner has no wine to initialize one with, and the flows that consume
+            // one are written to treat its absence as nothing to do.
+            Ok(None)
+        }
+
         async fn launch(
             &self,
             req: LaunchRequest,
@@ -193,6 +218,7 @@ mod tests {
     use super::fake::FakeLaunchBackend;
     use super::{CancellationToken, LaunchBackend, LaunchRequest};
     use crate::model::RunnerSelection;
+    use std::path::Path;
 
     fn request() -> LaunchRequest {
         LaunchRequest {
@@ -222,6 +248,24 @@ mod tests {
         );
         // An exiting handle resolves its wait immediately.
         handle.wait().await.unwrap();
+    }
+
+    /// The double has nothing to prepare, and the flows that ask it for a prefix have to be able to
+    /// carry on without one.
+    #[tokio::test]
+    async fn a_fake_backend_prepares_no_prefix() {
+        let backend = FakeLaunchBackend::exiting();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let prepared = backend
+            .prepare(
+                &RunnerSelection::SystemWine,
+                Path::new("/tmp/apogee-prefix"),
+                &CancellationToken::new(),
+                &tx,
+            )
+            .await
+            .unwrap();
+        assert!(prepared.is_none());
     }
 
     #[tokio::test]

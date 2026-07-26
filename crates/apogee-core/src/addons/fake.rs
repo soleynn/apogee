@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use apogee_addons::ExternalAddon;
+use apogee_addons::{ComponentReport, ExternalAddon};
 
 use super::{AddonBackend, AddonLifecycle};
 use crate::command::Event;
@@ -20,6 +20,8 @@ use crate::error::CoreError;
 /// What the flow did with the addon seam, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AddonCall {
+    Ensured { wanted: Vec<String> },
+    Registrations { wanted: Vec<String> },
     Started { game_pid: i32, count: usize },
     GameClosed,
     Abandoned,
@@ -33,6 +35,10 @@ pub(crate) struct FakeAddons {
     has_work: bool,
     /// Failures the teardown reports, so a test can check they reach the event stream.
     failures: Vec<String>,
+    /// Records this seam contributes to a launch, so a test can check they run ahead of the user's own.
+    registrations: Vec<ExternalAddon>,
+    /// Components the install reports as failed.
+    component_failures: Vec<String>,
 }
 
 impl FakeAddons {
@@ -52,14 +58,73 @@ impl FakeAddons {
         self
     }
 
+    /// Contribute `addon` to a launch, as an installed component's registration would.
+    pub(crate) fn contributing(mut self, addon: ExternalAddon) -> Self {
+        self.registrations.push(addon);
+        self
+    }
+
+    /// Report `component` as having failed to install, so a test can check the flow does not call that a
+    /// success.
+    pub(crate) fn component_failure(mut self, component: &str) -> Self {
+        self.component_failures.push(component.to_owned());
+        self
+    }
+
     /// Everything the flow asked for, in order.
     pub(crate) fn calls(&self) -> Vec<AddonCall> {
         self.calls.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    fn record(&self, call: AddonCall) {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(call);
+        }
     }
 }
 
 #[async_trait]
 impl AddonBackend for FakeAddons {
+    async fn catalog(
+        &self,
+        _cancel: &CancellationToken,
+    ) -> Result<apogee_addons::ComponentManifest, CoreError> {
+        Ok(apogee_addons::ComponentManifest::default())
+    }
+
+    async fn ensure(
+        &self,
+        _prefix: Option<Prefix>,
+        wanted: Vec<String>,
+        _cancel: &CancellationToken,
+        _events: &UnboundedSender<Event>,
+    ) -> Result<ComponentReport, CoreError> {
+        self.record(AddonCall::Ensured { wanted });
+        Ok(ComponentReport {
+            outcomes: self
+                .component_failures
+                .iter()
+                .map(|name| apogee_addons::ComponentOutcome {
+                    name: name.clone(),
+                    state: apogee_addons::ComponentState::Failed {
+                        reason: "the fake refused it".to_owned(),
+                    },
+                })
+                .collect(),
+        })
+    }
+
+    async fn registrations(
+        &self,
+        _prefix: Option<Prefix>,
+        wanted: Vec<String>,
+        _cancel: &CancellationToken,
+        _events: &UnboundedSender<Event>,
+    ) -> Vec<ExternalAddon> {
+        self.record(AddonCall::Registrations { wanted });
+        self.registrations.clone()
+    }
+
     async fn start(
         &self,
         game_pid: i32,
@@ -68,12 +133,10 @@ impl AddonBackend for FakeAddons {
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(AddonCall::Started {
-                game_pid,
-                count: addons.len(),
-            });
-        }
+        self.record(AddonCall::Started {
+            game_pid,
+            count: addons.len(),
+        });
         Box::new(FakeLifecycle {
             calls: self.calls.clone(),
             has_work: self.has_work,

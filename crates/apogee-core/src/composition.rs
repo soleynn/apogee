@@ -240,6 +240,7 @@ impl Core {
                 components: components_dir,
             },
         );
+        let component_catalog = crate::addons::catalog_urls()?;
         let secrets = Secrets::new();
         let otp = Otp::new();
 
@@ -249,7 +250,8 @@ impl Core {
             patch,
             runtime,
             launch,
-            addons: Arc::new(AddonsBackend::new(addons)) as Arc<dyn AddonBackend>,
+            addons: Arc::new(AddonsBackend::new(addons, component_catalog))
+                as Arc<dyn AddonBackend>,
             secrets,
             otp,
             store,
@@ -267,6 +269,17 @@ impl Core {
     /// corrupt.
     pub fn profiles(&self) -> Result<Vec<Profile>, CoreError> {
         Ok(self.store.list_profiles()?)
+    }
+
+    /// The signed catalog of installable companion components.
+    ///
+    /// Not a command, because there is nothing to narrate: it is one small signed fetch and the answer.
+    /// Installing what it offers is [`Command::Components`], which does have progress to report.
+    ///
+    /// # Errors
+    /// [`CoreError::Addons`] if it cannot be fetched or does not verify against the compiled-in key.
+    pub async fn component_catalog(&self) -> Result<apogee_addons::ComponentManifest, CoreError> {
+        self.addons.catalog(&CancellationToken::new()).await
     }
 
     /// The launcher-wide settings, defaulting when none is stored yet.

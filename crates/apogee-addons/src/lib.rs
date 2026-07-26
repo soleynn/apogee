@@ -176,10 +176,29 @@ impl Addons {
             &self.fetcher,
             manifest_url,
             signature_url,
-            &self.paths.components.join(".catalog"),
+            &self.catalog_cache(),
             cancel,
         )
         .await
+    }
+
+    /// The last manifest a fetch verified, re-verified before it is returned, or `None` if none has been
+    /// fetched yet.
+    ///
+    /// Separate from [`Self::fetch_manifest`] rather than folded into it as a fallback, because whether a
+    /// stale manifest is better than none depends on what the caller is doing: a launch would rather
+    /// start yesterday's companions than none, and an install the user just asked for would rather say
+    /// it could not reach the catalog.
+    ///
+    /// # Errors
+    /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
+    /// cache rather than an absent one.
+    pub async fn cached_manifest(&self) -> Result<Option<ComponentManifest>> {
+        components::cached_manifest(&self.catalog_cache()).await
+    }
+
+    fn catalog_cache(&self) -> PathBuf {
+        self.paths.components.join(".catalog")
     }
 
     /// Install the named components into `prefix`, applying the verbs they ask for first.

@@ -116,6 +116,26 @@ pub(crate) async fn fetch_manifest(
     Ok(ComponentManifest::verify_default(&manifest, &signature)?)
 }
 
+/// The last manifest a fetch verified and left in `cache_dir`, re-verified before it is handed back.
+///
+/// `None` when nothing has been fetched yet. A signature check stands between the cache and every caller,
+/// so this is a freshness fallback and never a trust one: the worst it can serve is yesterday's rows,
+/// which for a launch beats starting no companions at all. Whether that trade is the right one is the
+/// caller's to make, which is why fetching and reading the cache are separate calls.
+pub(crate) async fn cached_manifest(cache_dir: &Path) -> Result<Option<ComponentManifest>> {
+    let manifest_path = cache_dir.join("components.json");
+    let signature_path = cache_dir.join("components.json.sig");
+    let (Ok(manifest), Ok(signature)) = (
+        tokio::fs::read(&manifest_path).await,
+        tokio::fs::read(&signature_path).await,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(ComponentManifest::verify_default(
+        &manifest, &signature,
+    )?))
+}
+
 /// Download `url` to `dest` over HTTPS with no content pin, because the caller authenticates these bytes
 /// with an Ed25519 signature instead. The fetcher refuses this over plain `http`.
 async fn download_unverified(

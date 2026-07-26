@@ -23,7 +23,7 @@ use crate::command::{Command, Event, FlowState};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, Profile, Settings};
+use crate::model::{Account, AccountKind, ComponentSelection, Profile, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::store::{Store, UidCacheEntry};
@@ -778,6 +778,8 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
     assert_eq!(
         addons.calls(),
         [
+            // The profile enables no components, so the seam is asked and contributes nothing.
+            AddonCall::Registrations { wanted: Vec::new() },
             AddonCall::Started {
                 game_pid: std::process::id().cast_signed(),
                 count: 1,
@@ -791,6 +793,165 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
         .position(|s| *s == FlowState::Running)
         .expect("the game ran");
     assert!(running < states(&events).len());
+}
+
+/// A companion an installed component contributes runs ahead of the user's own tools, because a tool the
+/// user pointed at one of them expects it to already be up.
+#[tokio::test]
+async fn a_components_companion_starts_before_the_users_own_tools() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+        // Switched off, so it must not reach the seam at all.
+        profile.components.push(ComponentSelection {
+            id: "Triggevent".to_owned(),
+            enabled: false,
+        });
+        profile.external.push(
+            ExternalAddon::new(
+                "/opt/mine/tool.sh",
+                vec![],
+                RunIn::Host,
+                Trigger::WithGame {
+                    keep_after_close: false,
+                },
+            )
+            .expect("a fixture tool"),
+        );
+    });
+
+    let contributed = ExternalAddon::new(
+        "/prefixes/act/Advanced Combat Tracker.exe",
+        vec!["-portable".into()],
+        RunIn::Prefix,
+        Trigger::WithGame {
+            keep_after_close: false,
+        },
+    )
+    .unwrap();
+    let addons = Arc::new(FakeAddons::new().contributing(contributed));
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    assert_eq!(
+        addons.calls(),
+        [
+            // Only the switched-on component is asked for.
+            AddonCall::Registrations {
+                wanted: vec!["ACT".to_owned()],
+            },
+            // Both the contributed companion and the user's own tool reached the launch.
+            AddonCall::Started {
+                game_pid: std::process::id().cast_signed(),
+                count: 2,
+            },
+            AddonCall::GameClosed,
+        ]
+    );
+}
+
+/// Installing components is its own command, and it prepares the prefix first: a component installs into
+/// one, and requiring a launch before a companion can be set up would be an ordering nobody could guess.
+#[tokio::test]
+async fn installing_components_prepares_the_prefix_and_asks_only_for_the_enabled_ones() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+        profile.components.push(ComponentSelection {
+            id: "OverlayPlugin".to_owned(),
+            enabled: false,
+        });
+    });
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert_eq!(
+        addons.calls(),
+        [AddonCall::Ensured {
+            wanted: vec!["ACT".to_owned()],
+        }]
+    );
+    assert!(
+        states(&events).contains(&FlowState::InstallingComponents),
+        "the install is narrated: {:?}",
+        states(&events)
+    );
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    // Nothing was launched: preparing a prefix is not launching a game.
+    assert_eq!(launch.launch_count(), 0);
+}
+
+/// A component that did not install must not end the same way as one that did, or a shell reports
+/// success for work that never happened.
+#[tokio::test]
+async fn installing_components_reports_a_failure_rather_than_finishing_quietly() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let addons = Arc::new(FakeAddons::new().component_failure("ACT"));
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons,
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    // One summary, carrying a count rather than repeating the reason already on the stream.
+    assert_eq!(
+        errors(&events),
+        ["1 of 1 components could not be installed"]
+    );
+}
+
+/// A profile with no components asks nothing of the seam and reaches no catalog, so the feature costs a
+/// user who does not use it nothing at all.
+#[tokio::test]
+async fn installing_components_with_none_enabled_does_nothing() {
+    let h = harness(false);
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert!(addons.calls().is_empty());
+    assert!(states(&events).is_empty());
+    assert!(errors(&events).is_empty());
 }
 
 /// A cancelled launch stops what was started but never runs the tools that expect a session which

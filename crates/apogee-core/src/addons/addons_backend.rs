@@ -5,13 +5,15 @@
 //! launch is over.
 
 use apogee_addons::{
-    AddonEvents, AddonReport, AddonSession, Addons, ExternalAddon, GameContext, Outcome,
+    AddonEvents, AddonReport, AddonSession, Addons, ComponentEvents, ComponentManifest,
+    ComponentReport, ExternalAddon, GameContext, Outcome,
 };
 use apogee_runtime::Prefix;
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::{AddonBackend, AddonLifecycle};
 use crate::command::Event;
@@ -20,16 +22,76 @@ use crate::error::CoreError;
 /// The addon seam over the concrete manager.
 pub(crate) struct AddonsBackend {
     addons: Addons,
+    /// The hosted component manifest and its detached signature.
+    catalog: (Url, Url),
 }
 
 impl AddonsBackend {
-    pub(crate) fn new(addons: Addons) -> Self {
-        Self { addons }
+    pub(crate) fn new(addons: Addons, catalog: (Url, Url)) -> Self {
+        Self { addons, catalog }
     }
 }
 
 #[async_trait]
 impl AddonBackend for AddonsBackend {
+    async fn catalog(&self, cancel: &CancellationToken) -> Result<ComponentManifest, CoreError> {
+        Ok(self
+            .addons
+            .fetch_manifest(&self.catalog.0, &self.catalog.1, cancel)
+            .await?)
+    }
+
+    async fn ensure(
+        &self,
+        prefix: Option<Prefix>,
+        wanted: Vec<String>,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<ComponentReport, CoreError> {
+        let Some(prefix) = prefix else {
+            return Ok(ComponentReport::default());
+        };
+        let manifest = self
+            .addons
+            .fetch_manifest(&self.catalog.0, &self.catalog.1, cancel)
+            .await?;
+        let (component_events, relay) = relay_components(events);
+        let report = self
+            .addons
+            .ensure(&manifest, &prefix, &wanted, cancel, &component_events)
+            .await;
+        // Dropped before the relay is awaited: the relay ends when the channel closes, and the channel
+        // closes only when the last sender is gone.
+        drop(component_events);
+        let _ = relay.await;
+        report.map_err(CoreError::from)
+    }
+
+    async fn registrations(
+        &self,
+        prefix: Option<Prefix>,
+        wanted: Vec<String>,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Vec<ExternalAddon> {
+        let Some(prefix) = prefix else {
+            return Vec::new();
+        };
+        if wanted.is_empty() {
+            // A profile with no components pays nothing for the feature, including a network round trip.
+            return Vec::new();
+        }
+        let Some(manifest) = self.launch_manifest(cancel, events).await else {
+            return Vec::new();
+        };
+        match self.addons.registrations(&manifest, &prefix, &wanted) {
+            Ok(addons) => addons,
+            Err(err) => {
+                let _ = events.send(Event::Error(CoreError::Addons(err)));
+                Vec::new()
+            }
+        }
+    }
     async fn start(
         &self,
         game_pid: i32,
@@ -62,6 +124,52 @@ impl AddonBackend for AddonsBackend {
             addon_events: Some(addon_events),
             relay,
         })
+    }
+}
+
+impl AddonsBackend {
+    /// The manifest to read a launch's companion registrations from: the hosted one, or the last one a
+    /// fetch verified when it cannot be reached.
+    ///
+    /// The fallback is announced rather than silent, because starting yesterday's companions is the right
+    /// answer and quietly doing it is not: which build of a companion started is exactly the thing
+    /// somebody debugging one would need to know.
+    async fn launch_manifest(
+        &self,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Option<ComponentManifest> {
+        match self
+            .addons
+            .fetch_manifest(&self.catalog.0, &self.catalog.1, cancel)
+            .await
+        {
+            Ok(manifest) => Some(manifest),
+            Err(fetch_error) => match self.addons.cached_manifest().await {
+                Ok(Some(manifest)) => {
+                    let _ = events.send(Event::Error(CoreError::Launch {
+                        detail: format!(
+                            "the component catalog could not be reached ({fetch_error}); using the last one fetched"
+                        ),
+                    }));
+                    Some(manifest)
+                }
+                // Neither reachable nor usable: the launch goes ahead without the companions the profile
+                // enabled, and says so, because a game that starts beats one that does not.
+                other => {
+                    let cache = match other {
+                        Err(err) => format!("the cached one is unusable: {err}"),
+                        _ => "nothing has been fetched yet".to_owned(),
+                    };
+                    let _ = events.send(Event::Error(CoreError::Launch {
+                        detail: format!(
+                            "no component catalog is available ({fetch_error}; {cache}); this launch starts none of the enabled components"
+                        ),
+                    }));
+                    None
+                }
+            },
+        }
     }
 }
 
@@ -143,6 +251,18 @@ fn relay(events: &UnboundedSender<Event>) -> (AddonEvents, JoinHandle<()>) {
     (AddonEvents::new(tx), handle)
 }
 
+/// The same, for the component-install stream.
+fn relay_components(events: &UnboundedSender<Event>) -> (ComponentEvents, JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let events = events.clone();
+    let handle = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = events.send(Event::Component(event));
+        }
+    });
+    (ComponentEvents::new(tx), handle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,11 +272,15 @@ mod tests {
     fn backend() -> Result<AddonsBackend, Box<dyn std::error::Error>> {
         let fetcher = apogee_fetch::Fetcher::builder().build()?;
         let runtime = Runtime::new(fetcher.clone(), RuntimePaths::default());
-        Ok(AddonsBackend::new(Addons::new(
-            runtime,
-            fetcher,
-            AddonPaths::default(),
-        )))
+        Ok(AddonsBackend::new(
+            Addons::new(runtime, fetcher, AddonPaths::default()),
+            // Never reached: these tests configure no components, and the launch path skips the catalog
+            // entirely when a profile wants none.
+            (
+                Url::parse("https://example.invalid/manifest.json")?,
+                Url::parse("https://example.invalid/manifest.json.sig")?,
+            ),
+        ))
     }
 
     /// The teardown waits for the event relay so no companion event lands after the launch is
