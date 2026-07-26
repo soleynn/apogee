@@ -363,6 +363,47 @@ async fn an_archive_that_does_not_match_its_declared_layout_fails() {
     assert!(!recorded(&prefix).contains(&"InPrefix".to_owned()));
 }
 
+/// A registration naming a program the archive does not contain is a manifest mistake, and finding it at
+/// install time is the difference between "that row is wrong" and a spawn failure at the next launch.
+#[tokio::test]
+async fn a_registration_naming_a_program_the_archive_lacks_fails_the_component() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    // The archive holds `tool.exe`, not `missing.exe`.
+    let json = serde_json::to_string(&serde_json::json!({
+        "version": 1,
+        "tools": [{
+            "name": "InPrefix", "version": "1.2", "kind": "prefix_tool",
+            "url": server.url("component.zip").to_string(), "sha256": pin,
+            "archive": { "format": "zip", "strip_prefix": "top" },
+            "into": "apogee/InPrefix",
+            "register": { "program": "missing.exe", "args": [], "trigger": "with_game" }
+        }]
+    }))
+    .unwrap();
+    let manifest = ComponentManifest::from_json_bytes(json.as_bytes()).expect("parse");
+
+    let report = ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["InPrefix"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("call");
+
+    assert!(report.any_failed(), "{report:?}");
+    assert!(
+        recorded(&prefix).is_empty(),
+        "a component whose registration cannot be honored is not recorded as installed"
+    );
+}
+
 /// A launch reads its companions from the manifest every time, so where each program is and how it runs
 /// follows the manifest rather than a copy taken when it was installed.
 #[test]

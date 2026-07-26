@@ -321,11 +321,26 @@ async fn install_tool(
         }
     }
     if let Some(register) = &tool.register {
-        // A host program the launcher is about to exec has to be executable, and the archives these
-        // come in are built on Windows: the one shipped launcher script here arrives mode 644. A
+        let program = dest.join(register.program.as_path());
+        // A registration naming a program the archive does not contain is a manifest mistake, and it is
+        // checked here so it reads as "that row is wrong" rather than turning up at the next launch as a
+        // spawn failure with a path in it. Checked for both kinds: a prefix tool's program is a real file
+        // on this side too, since the runner is handed its host path.
+        if !program.is_file() {
+            return Err(artifact::install_failed(
+                &tool.name,
+                "register",
+                format!(
+                    "the archive holds no {} to register",
+                    register.program.as_path().display()
+                ),
+            ));
+        }
+        // A host program the launcher execs itself has to be executable, and these archives are built on
+        // Windows: the one native companion in the hosted manifest ships its launcher at mode 644. A
         // program inside the prefix needs nothing, since the runner is what executes it.
         if tool.kind == ToolKind::ExternalNative {
-            make_executable(&dest.join(register.program.as_path()), &tool.name)?;
+            make_executable(&program, &tool.name)?;
         }
     }
     record(prefix, &tool.name, Some(&tool.version))?;
