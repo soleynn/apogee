@@ -12,19 +12,38 @@
 //! mistake in a rule that drops things costs archive size, while a mistake in a rule that keeps
 //! things costs the user their settings.
 
+mod archive;
+mod confine;
 mod error;
+mod manifest;
+// Opens every target against a directory descriptor, so it is unix-only by construction.
+#[cfg(unix)]
+mod restore;
+mod retain;
 mod root;
 mod rule;
 mod walk;
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
+pub use archive::{BackupReport, BackupSpec, create, inspect};
+pub use confine::RejectReason;
 pub use error::BackupError;
+pub use manifest::{
+    BACKUP_EXTENSION, BACKUP_FORMAT, BACKUP_FORMAT_VERSION, BackupManifest, EntryRecord,
+    MANIFEST_ENTRY, RootRecord, RuleRecord,
+};
+#[cfg(unix)]
+pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
+pub use retain::{ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, plan_prune, prune};
 pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, SelectionRoot};
 pub use rule::{EntryKind, Expect, NameMatch, Rule};
 
 /// Where a rule sits in the order each entry is tested in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuleRole {
     /// Drops an entry at any depth, and cannot be switched off by a caller.
     Deny,
