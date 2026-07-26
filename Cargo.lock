@@ -74,6 +74,7 @@ dependencies = [
  "apogee-fetch",
  "apogee-runtime",
  "async-trait",
+ "tempfile",
  "thiserror",
 ]
 
