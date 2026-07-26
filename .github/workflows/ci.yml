@@ -24,6 +24,7 @@ jobs:
   changes:
     name: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       fuzz: ${{ steps.filter.outputs.fuzz }}
     steps:
@@ -50,6 +51,7 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -67,6 +69,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -88,6 +91,7 @@ jobs:
   test-linux:
     name: test-linux
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -123,6 +127,7 @@ jobs:
   test-linux-wine:
     name: test-linux-wine
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -161,6 +166,7 @@ jobs:
   build-windows-cross:
     name: build-windows-cross
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -182,6 +188,7 @@ jobs:
   deny:
     name: deny
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -191,6 +198,7 @@ jobs:
   audit:
     name: audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -203,6 +211,7 @@ jobs:
   fuzz-smoke:
     name: fuzz-smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     needs: changes
     # The longest job in the run, and only the parsers fed hostile input can regress it. A change
     # that touches none of their crates skips it; a push to main always runs it.
@@ -262,6 +271,7 @@ jobs:
   boot-check-live:
     name: boot-check-live
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     continue-on-error: true
     # Talks to the live service with real credentials, so it runs once the change is on main rather
     # than on every push to every branch.

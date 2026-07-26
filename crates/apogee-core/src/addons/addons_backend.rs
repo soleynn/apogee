@@ -74,12 +74,25 @@ struct RunningAddons {
 }
 
 impl RunningAddons {
-    /// Drop the sender and wait for the relay to drain, so the last companion event is delivered
-    /// before the flow moves on.
-    async fn drain(mut self) -> Vec<CoreError> {
-        let _ = self.addon_events.take();
+    /// Run the teardown, then let the relay finish and wait for it, so the last companion event is
+    /// delivered before the flow says the launch is over.
+    ///
+    /// The sender is moved out and dropped here rather than cloned. The relay ends when the channel
+    /// closes, and the channel closes only when the last sender is gone, so holding a second one
+    /// across the await would wait forever.
+    async fn finish<F>(mut self, teardown: F) -> Vec<CoreError>
+    where
+        F: AsyncFnOnce(AddonSession, &AddonEvents) -> AddonReport,
+    {
+        let events = self.addon_events.take().unwrap_or_else(AddonEvents::none);
+        let report = match self.session.take() {
+            Some(session) => teardown(session, &events).await,
+            None => AddonReport::default(),
+        };
+        let failures = failures(&report);
+        drop(events);
         let _ = self.relay.await;
-        Vec::new()
+        failures
     }
 }
 
@@ -89,26 +102,16 @@ impl AddonLifecycle for RunningAddons {
         self.session.as_ref().is_some_and(AddonSession::has_work)
     }
 
-    async fn game_closed(mut self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
-        let events = self.addon_events.clone().unwrap_or_else(AddonEvents::none);
-        let report = match self.session.take() {
-            Some(session) => session.game_closed(&events).await,
-            None => AddonReport::default(),
-        };
-        let mut failures = failures(&report);
-        failures.extend((*self).drain().await);
-        failures
+    async fn game_closed(self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
+        (*self)
+            .finish(async |session, events| session.game_closed(events).await)
+            .await
     }
 
-    async fn abandon(mut self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
-        let events = self.addon_events.clone().unwrap_or_else(AddonEvents::none);
-        let report = match self.session.take() {
-            Some(session) => session.abandon(&events).await,
-            None => AddonReport::default(),
-        };
-        let mut failures = failures(&report);
-        failures.extend((*self).drain().await);
-        failures
+    async fn abandon(self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
+        (*self)
+            .finish(async |session, events| session.abandon(events).await)
+            .await
     }
 }
 
@@ -138,4 +141,77 @@ fn relay(events: &UnboundedSender<Event>) -> (AddonEvents, JoinHandle<()>) {
         }
     });
     (AddonEvents::new(tx), handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apogee_addons::{Addons, ComponentManifest};
+    use apogee_runtime::{Runtime, RuntimePaths};
+
+    fn backend() -> Result<AddonsBackend, Box<dyn std::error::Error>> {
+        let fetcher = apogee_fetch::Fetcher::builder().build()?;
+        let runtime = Runtime::new(fetcher.clone(), RuntimePaths::default());
+        Ok(AddonsBackend::new(Addons::new(
+            runtime,
+            fetcher,
+            ComponentManifest::default(),
+        )))
+    }
+
+    /// The teardown waits for the event relay so no companion event lands after the launch is
+    /// reported over. It must not wait forever: the relay ends when the channel closes, and the
+    /// channel closes only when the last sender is gone, so a sender held across the await is a
+    /// deadlock that no amount of waiting resolves.
+    #[tokio::test]
+    async fn the_teardown_finishes_when_no_companion_was_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backend = backend()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+
+        let lifecycle = backend
+            .start(
+                std::process::id().cast_signed(),
+                None,
+                Vec::new(),
+                &cancel,
+                &tx,
+            )
+            .await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lifecycle.game_closed(&cancel),
+        )
+        .await
+        .map_err(|_| "the teardown never finished")?;
+        Ok(())
+    }
+
+    /// The same for the path a cancelled launch takes.
+    #[tokio::test]
+    async fn abandoning_finishes_too() -> Result<(), Box<dyn std::error::Error>> {
+        let backend = backend()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+
+        let lifecycle = backend
+            .start(
+                std::process::id().cast_signed(),
+                None,
+                Vec::new(),
+                &cancel,
+                &tx,
+            )
+            .await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lifecycle.abandon(&cancel),
+        )
+        .await
+        .map_err(|_| "the teardown never finished")?;
+        Ok(())
+    }
 }
