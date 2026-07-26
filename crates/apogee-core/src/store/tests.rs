@@ -33,6 +33,7 @@ fn settings_round_trips_at_the_current_version() {
         close_after_launch: true,
         keep_patches: true,
         backups_kept: 3,
+        backup_before_patch: false,
     };
     store.save_settings(&settings).unwrap();
     assert_eq!(store.load_settings().unwrap(), settings);
@@ -243,8 +244,74 @@ proptest::proptest! {
             close_after_launch: close,
             keep_patches: keep,
             backups_kept: 5,
+            backup_before_patch: true,
         };
         store.save_settings(&settings).unwrap();
         proptest::prop_assert_eq!(store.load_settings().unwrap(), settings);
     }
+}
+
+/// The store holds account identity, a live registration id, and the list of programs the launcher
+/// executes. None of it is anyone else's business.
+#[cfg(unix)]
+#[test]
+fn everything_written_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, store) = store();
+    let account = Account::new("someone", AccountKind::Standard);
+    let profile = Profile::new("main", account.id, "/tmp/ffxiv".into());
+    store.save_account(&account).unwrap();
+    store.save_profile(&profile).unwrap();
+    store.save_settings(&Settings::default()).unwrap();
+
+    let mut checked = 0;
+    let mut walk = vec![dir.path().to_path_buf()];
+    while let Some(path) = walk.pop() {
+        for entry in std::fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            let mode = entry.metadata().unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{:?} is readable by someone else (mode {:o})",
+                entry.path(),
+                mode
+            );
+            checked += 1;
+            if entry.path().is_dir() {
+                walk.push(entry.path());
+            }
+        }
+    }
+    assert!(checked > 0, "nothing was written to check");
+}
+
+/// An install made before the store was owner-only must not keep exposing its files forever, so an
+/// existing directory is narrowed rather than left as it was found.
+#[cfg(unix)]
+#[test]
+fn a_directory_left_readable_by_an_earlier_build_is_narrowed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("apogee");
+    std::fs::create_dir_all(base.join("profiles")).unwrap();
+    std::fs::set_permissions(
+        base.join("profiles"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let store = Store::new(base.clone());
+    let account = Account::new("someone", AccountKind::Standard);
+    store
+        .save_profile(&Profile::new("main", account.id, "/tmp/ffxiv".into()))
+        .unwrap();
+
+    let mode = std::fs::metadata(base.join("profiles"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "still group/other readable: {mode:o}");
 }

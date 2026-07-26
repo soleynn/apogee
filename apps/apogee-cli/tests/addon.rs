@@ -273,3 +273,32 @@ fn a_profile_from_before_companion_tools_still_loads() -> std::io::Result<()> {
     );
     Ok(())
 }
+
+/// The store names the programs the launcher runs, so it must never resolve against whatever
+/// directory the launcher happened to start in. With no home and no base directory set, there is no
+/// answer, and inventing a relative one would mean running whatever sits beside the working
+/// directory.
+#[test]
+fn a_launcher_with_no_home_refuses_rather_than_using_the_working_directory() -> std::io::Result<()>
+{
+    let work = tempdir()?;
+    // A profile store planted where a relative resolution would land.
+    std::fs::create_dir_all(work.path().join(".config/apogee/profiles"))?;
+
+    let out = Command::new(env!("CARGO_BIN_EXE_apogee-cli"))
+        .current_dir(work.path())
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .args(["addon", "list", "--profile", "main"])
+        .output()?;
+
+    assert!(!out.status.success(), "a relative store was accepted");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("XDG_CONFIG_HOME") || stderr.contains("home directory"),
+        "unhelpful message: {stderr}"
+    );
+    Ok(())
+}

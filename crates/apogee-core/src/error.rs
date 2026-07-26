@@ -29,6 +29,8 @@ pub enum CoreError {
     Addons(#[from] apogee_addons::AddonError),
     #[error("companion tool {program:?} failed: {reason}")]
     Addon { program: PathBuf, reason: String },
+    #[error("{var} could not be resolved: {reason}")]
+    Config { var: String, reason: &'static str },
     #[error("secrets: {0}")]
     Secrets(#[from] apogee_secrets::SecretsError),
     #[error("otp: {0}")]

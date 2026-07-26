@@ -56,6 +56,7 @@ struct Harness {
     _game: TempDir,
     _store_dir: TempDir,
     prefixes: TempDir,
+    backups: TempDir,
     store: Store,
     profile: Uuid,
     account: Uuid,
@@ -71,6 +72,7 @@ fn harness_customized(use_otp: bool, customize: impl FnOnce(&mut Profile)) -> Ha
     let game = game_install();
     let store_dir = TempDir::new().unwrap();
     let prefixes = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
     let store = Store::new(store_dir.path().to_path_buf());
 
     let account = Account {
@@ -86,6 +88,7 @@ fn harness_customized(use_otp: bool, customize: impl FnOnce(&mut Profile)) -> Ha
         _game: game,
         _store_dir: store_dir,
         prefixes,
+        backups,
         store,
         profile: profile.id,
         account: account.id,
@@ -137,6 +140,7 @@ fn context_with_addons(
         clock: Arc::new(move || now),
         computer_id: host::computer_id(),
         prefixes_dir: h.prefixes.path().to_path_buf(),
+        backups_dir: h.backups.path().to_path_buf(),
     }
 }
 
@@ -611,6 +615,7 @@ async fn close_after_launch_detaches_without_supervising() {
             close_after_launch: true,
             keep_patches: false,
             backups_kept: 5,
+            backup_before_patch: false,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
@@ -626,6 +631,114 @@ async fn close_after_launch_detaches_without_supervising() {
     assert!(
         !launch.was_killed(),
         "a detached launch does not kill the game"
+    );
+}
+
+/// A login that lands on one pending game patch, then reports current.
+fn login_then_patch() -> [ProtoResponse; 5] {
+    [
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_with_patches(
+            UNIQUE_ID,
+            &[&game_entry(
+                1_000,
+                "2024.03.28.0001.0000",
+                "http://patch-dl.example.invalid/game/4e9a232b/D2024.03.28.0001.0000.patch",
+            )],
+        ),
+        fx::register_current(UNIQUE_ID),
+    ]
+}
+
+/// Write a config tree into the prefix the launcher will derive for this profile, so there is
+/// something to capture.
+fn plant_config(h: &Harness) -> std::path::PathBuf {
+    let profile = h.store.load_profile(h.profile).unwrap();
+    let config = h
+        .prefixes
+        .path()
+        .join(crate::flow::prefix_name(&profile))
+        .join("drive_c/users/steamuser/Documents/My Games/FINAL FANTASY XIV - A Realm Reborn");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("FFXIV.cfg"), "cfg").unwrap();
+    config
+}
+
+/// A patch is the moment settings are most likely to be rewritten, so the launcher captures them
+/// first. Once per flow, not once per repo.
+#[tokio::test]
+async fn patching_captures_the_settings_first() {
+    let h = harness(false);
+    plant_config(&h);
+    let transport = Arc::new(FixtureTransport::new(login_then_patch()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch, NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    let states = states(&events);
+
+    let backing = states
+        .iter()
+        .position(|s| *s == FlowState::BackingUp)
+        .expect("the capture is announced");
+    let patching = states
+        .iter()
+        .position(|s| *s == FlowState::Patching)
+        .expect("patching happens");
+    assert!(backing < patching, "captured after patching: {states:?}");
+    assert_eq!(
+        states
+            .iter()
+            .filter(|s| **s == FlowState::BackingUp)
+            .count(),
+        1,
+        "captured more than once: {states:?}"
+    );
+
+    let archives: Vec<_> = std::fs::read_dir(h.backups.path().join(h.profile.to_string()))
+        .expect("a backup directory")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(archives.len(), 1, "expected one archive");
+}
+
+/// Turning it off means exactly that: no capture, and no state claiming one happened.
+#[tokio::test]
+async fn a_patch_captures_nothing_when_the_setting_is_off() {
+    let h = harness(false);
+    plant_config(&h);
+    h.store
+        .save_settings(&Settings {
+            backup_before_patch: false,
+            ..Settings::default()
+        })
+        .unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_patch()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch, NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert!(!states(&events).contains(&FlowState::BackingUp));
+    assert!(!h.backups.path().join(h.profile.to_string()).exists());
+}
+
+/// A prefix the game has never written into is the ordinary state before a first launch. Nothing is
+/// captured, and nothing claims otherwise: announcing it would say a backup was taken, and reporting
+/// it would fail an install that is going fine.
+#[tokio::test]
+async fn a_prefix_with_no_settings_yet_neither_captures_nor_complains() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(login_then_patch()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch, NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert!(!states(&events).contains(&FlowState::BackingUp));
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Error(_))),
+        "a first-run patch reported an error: {events:?}"
     );
 }
 
@@ -730,6 +843,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
             close_after_launch: true,
             keep_patches: false,
             backups_kept: 5,
+            backup_before_patch: false,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
@@ -766,6 +880,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
             close_after_launch: true,
             keep_patches: false,
             backups_kept: 5,
+            backup_before_patch: false,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
