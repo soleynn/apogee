@@ -17,8 +17,8 @@ use std::path::Path;
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{
-    Prefix, ProgramInPrefix, Progress, RegistryEdit, RegistryValue, RunnerKind, Runtime,
-    RuntimePaths,
+    Prefix, ProgramInPrefix, Progress, RegistryDelete, RegistryEdit, RegistryValue, RunnerKind,
+    Runtime, RuntimePaths,
 };
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
@@ -135,4 +135,88 @@ async fn a_program_the_prefix_does_not_have_reports_a_status() {
         .await
         .expect("the run itself completed");
     assert!(!run.ok(), "a missing program is not a success");
+}
+
+/// Removing a value has to be idempotent, and `reg delete` is not: it exits non-zero when there is
+/// nothing there. This crate reads exit status rather than output, so "it was not there" and "it could
+/// not be removed" would otherwise be the same answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn removing_a_registry_value_is_idempotent() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (runtime, prefix) = prepared(root.path()).await.expect("prepare under wine");
+    let cancel = CancellationToken::new();
+    let delete = RegistryDelete {
+        key: KEY.to_owned(),
+        name: Some("Setting".to_owned()),
+    };
+
+    // Removing something absent is success, not a failure.
+    runtime
+        .registry_delete(&prefix, &delete, &cancel)
+        .await
+        .expect("removing what is not there is not an error");
+
+    runtime
+        .registry_set(&prefix, &edit("present"), &cancel)
+        .await
+        .expect("write");
+    assert!(value_present(&runtime, &prefix).await.expect("query"));
+
+    runtime
+        .registry_delete(&prefix, &delete, &cancel)
+        .await
+        .expect("remove");
+    assert!(
+        !value_present(&runtime, &prefix).await.expect("query"),
+        "the value is gone"
+    );
+
+    // And again, over the hole it just made.
+    runtime
+        .registry_delete(&prefix, &delete, &cancel)
+        .await
+        .expect("removing it twice is not an error");
+}
+
+/// A whole-key removal takes the subtree with it, which is what clearing a vendor runtime's leftover
+/// registration needs. Deep enough to be allowed, since the primitive refuses shallow keys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn removing_a_key_takes_its_subtree() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (runtime, prefix) = prepared(root.path()).await.expect("prepare under wine");
+    let cancel = CancellationToken::new();
+
+    let nested = RegistryEdit {
+        key: format!(r"{KEY}\Nested"),
+        name: "Leaf".to_owned(),
+        value: RegistryValue::String("here".to_owned()),
+    };
+    runtime
+        .registry_set(&prefix, &nested, &cancel)
+        .await
+        .expect("write a nested value");
+
+    runtime
+        .registry_delete(
+            &prefix,
+            &RegistryDelete {
+                key: KEY.to_owned(),
+                name: None,
+            },
+            &cancel,
+        )
+        .await
+        .expect("remove the key");
+
+    let query = ProgramInPrefix::new("reg", vec!["query".to_owned(), format!(r"{KEY}\Nested")]);
+    assert!(
+        !runtime
+            .run_in_prefix(&prefix, &query, &cancel)
+            .await
+            .expect("query")
+            .ok(),
+        "the subtree went with the key"
+    );
 }

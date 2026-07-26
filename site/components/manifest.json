@@ -9,9 +9,9 @@
       "sha256": "1a0ca91375d79daf3d2cbbb2920c90dbc40f3be2421cdc6765d93e27bf25e4b0",
       "archive": { "format": "zip" },
       "into": "apogee/ACT",
-      "verbs": ["no-desktop-integration"],
+      "verbs": ["no-desktop-integration", "dotnet48"],
       "caveats": [
-        "Needs Microsoft .NET Framework in the prefix. Apogee does not install it: the vendor installer is opaque, it wants Wine's Mono removed and the reported Windows version changed, and Proton undoes a partial install of it on the next prefix upgrade. Wine's own Mono runs the window but not the plugins. Use winetricks or protontricks against this prefix.",
+        "The Microsoft .NET Framework it needs is installed for you, from Microsoft's own pinned installer. That step is slow (a 120 MB download and several minutes inside the prefix) and it is the least certain thing here: it has not yet been observed to complete on every runner. It checks its own result rather than trusting the installer, so if it did not land you are told, and `component ensure` retries it. Falling back to winetricks or protontricks against this prefix is always available.",
         "Install the FFXIV parsing plugin from ACT's own Get Plugins dialog rather than expecting Apogee to pin one. It is locked to the game patch and is reissued on patch day, so a pinned copy is stale by design.",
         "Combat data now reaches the plugin only by injecting a helper library into the running game, which is why this is installed into the game's own prefix rather than beside it. Reading the game's network traffic directly, with or without a packet driver, stopped working upstream when the game obfuscated its packets, so the older advice to switch capture modes no longer applies. Whether the injection itself works under Wine is not established."
       ],
@@ -29,7 +29,7 @@
       "sha256": "ffa627ed168009b04237dc07a42e4aee23947e2136ad198679da1d56f3fd7064",
       "archive": { "format": "zip" },
       "into": "apogee/ACT/Plugins",
-      "verbs": ["no-desktop-integration"],
+      "verbs": ["no-desktop-integration", "dotnet48"],
       "caveats": [
         "Add it from ACT's own Plugins tab after installing. ACT records every plugin by the path it was pointed at, so there is no folder Apogee can drop it into that enables it.",
         "Fetches a Chromium bundle and a Visual C++ redistributable itself the first time an overlay is shown. How well that renders under Wine is not established.",
@@ -58,6 +58,58 @@
     }
   ],
   "verbs": [
+    {
+      "name": "dotnet48",
+      "reason": "ACT and OverlayPlugin are .NET Framework applications, and Wine's own Mono runs their windows but not their plugins. This installs Microsoft's .NET Framework 4.8 from Microsoft's pinned installer. It is the least certain step in this catalog, so it states what must exist afterwards and is judged on that rather than on what the installer reports: a run that did not land is not recorded, and the next ensure tries again. That also means an install a runner upgrade removes from under the prefix comes back on its own.",
+      "verify": [
+        "windows/Microsoft.NET/Framework64/v4.0.30319/mscorlib.dll",
+        "windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll"
+      ],
+      "ops": [
+        {
+          "registry_delete": {
+            "key": "HKLM\\Software\\Microsoft\\NET Framework Setup\\NDP\\v4"
+          }
+        },
+        {
+          "registry_delete": {
+            "key": "HKLM\\Software\\Wow6432Node\\Microsoft\\NET Framework Setup\\NDP\\v4"
+          }
+        },
+        {
+          "registry": {
+            "key": "HKCU\\Software\\Wine",
+            "name": "Version",
+            "type": "string",
+            "value": "win7"
+          }
+        },
+        {
+          "run": {
+            "url": "https://download.visualstudio.microsoft.com/download/pr/2d6bb6b2-226a-4baa-bdec-798822606ff1/8494001c276a4b96804cde7829c04d7f/ndp48-x86-x64-allos-enu.exe",
+            "sha256": "68c9986a8dcc0214d909aa1f31bee9fb5461bb839edca996a75b08ddffc1483f",
+            "file_name": "ndp48-x86-x64-allos-enu.exe",
+            "args": ["/q", "/norestart"],
+            "env": [["WINEDLLOVERRIDES", "fusion=b"]],
+            "timeout_secs": 1800
+          }
+        },
+        {
+          "registry": {
+            "key": "HKCU\\Software\\Wine\\DllOverrides",
+            "name": "mscoree",
+            "type": "string",
+            "value": "native"
+          }
+        },
+        {
+          "registry_delete": {
+            "key": "HKCU\\Software\\Wine",
+            "name": "Version"
+          }
+        }
+      ]
+    },
     {
       "name": "no-desktop-integration",
       "reason": "Wine writes desktop entries and file associations into the host session when a program in the prefix creates a shortcut. A prefix the launcher manages has no business adding entries to the user's application menu, so this is applied before any Windows component is installed into one.",

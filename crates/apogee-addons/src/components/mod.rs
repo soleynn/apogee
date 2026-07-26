@@ -224,7 +224,10 @@ pub(crate) async fn ensure(
         step: "read the prefix record",
         source: Box::new(source),
     })?;
-    let plan = EnsurePlan::build(manifest, wanted, &installed)?;
+    // A verb the record claims but whose effect is gone has to be applied again, so the check happens
+    // before the plan is built rather than being discovered halfway through it.
+    let stale = stale_verbs(manifest, prefix, &installed);
+    let plan = EnsurePlan::build(manifest, wanted, &installed, &stale)?;
 
     // One scratch directory per prefix, so two installs into different prefixes cannot clobber each
     // other's staging, and removed at the end whatever happened.
@@ -300,6 +303,24 @@ pub(crate) async fn ensure(
 
     let _ = tokio::fs::remove_dir_all(&work).await;
     Ok(report)
+}
+
+/// The recorded components whose effect the manifest says is checkable and which no longer have it.
+///
+/// Only verbs, and only those naming something to look for. A tool's presence is not re-derived from its
+/// files: a component's own updater rewrites its tree, so absence of a particular file there means little,
+/// whereas a verb states exactly what its effect is.
+fn stale_verbs(
+    manifest: &ComponentManifest,
+    prefix: &Prefix,
+    installed: &[apogee_runtime::InstalledComponent],
+) -> Vec<String> {
+    installed
+        .iter()
+        .filter_map(|record| manifest.verb(record.name()))
+        .filter(|verb| verb::missing(prefix, verb).is_some())
+        .map(|verb| verb.name.clone())
+        .collect()
 }
 
 /// The first verb `tool` requires that is among `failed`, if any.

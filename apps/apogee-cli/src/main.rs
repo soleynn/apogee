@@ -933,6 +933,13 @@ fn render_component(event: &ComponentEvent) -> String {
             format!("component: applying {verb} ({reason})")
         }
         ComponentEvent::Applied { verb } => format!("component: applied {verb}"),
+        ComponentEvent::Running { verb, program } => {
+            format!("component: {verb} is running {program} in the prefix, this can take minutes")
+        }
+        ComponentEvent::InstallerStatus { verb, code, detail } => format!(
+            "component: {verb}'s installer exited with {} ({detail}); its own check decides",
+            code.map_or_else(|| "a signal".to_owned(), |c| c.to_string())
+        ),
         ComponentEvent::Caveat { component, note } => {
             format!("component: {component} note: {note}")
         }

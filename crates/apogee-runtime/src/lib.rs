@@ -68,7 +68,7 @@ pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 pub use non_linux::{GameExit, GameSession, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{Progress, RuntimeEvent};
-pub use registry::{RegistryEdit, RegistryValue};
+pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
 
@@ -376,6 +376,44 @@ impl Runtime {
         })
     }
 
+    /// Remove one registry value, or a key and everything under it, inside `prefix`.
+    ///
+    /// Idempotent, and it takes two invocations to be so: `reg delete` on something absent exits
+    /// non-zero, and this crate reads exit status rather than output, so it asks whether the thing is
+    /// there before removing it. Nothing to remove is success.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RegistryKey`] if the removal is not one this launcher will perform,
+    /// [`RuntimeError::PrefixInit`] if `reg` reported a failure, plus anything
+    /// [`Self::run_in_prefix`] raises.
+    pub async fn registry_delete(
+        &self,
+        prefix: &Prefix,
+        delete: &RegistryDelete,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let probe = delete.probe()?;
+        if !self.run_in_prefix(prefix, &probe, cancel).await?.ok() {
+            return Ok(());
+        }
+        let run = self
+            .run_in_prefix(prefix, &delete.command()?, cancel)
+            .await?;
+        if run.ok() {
+            return Ok(());
+        }
+        Err(RuntimeError::PrefixInit {
+            step: SetupStep::ApplyTweaks,
+            source: Box::new(std::io::Error::other(format!(
+                "reg delete {} exited with {}: {}",
+                delete.key,
+                run.code
+                    .map_or_else(|| "a signal".to_owned(), |c| c.to_string()),
+                run.diagnostic()
+            ))),
+        })
+    }
+
     /// Spawn a companion program: a native tool on the host, or a Windows one run inside a prefix
     /// through its runner. Unlike [`Self::launch`] the child is held rather than resolved through
     /// `/proc`, so a short-lived companion is supported and its exit status is readable.
@@ -424,6 +462,18 @@ impl Runtime {
         &self,
         _prefix: &Prefix,
         _edit: &RegistryEdit,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "editing a prefix registry",
+        })
+    }
+
+    /// Prefix registry removals are Linux-only at this phase.
+    pub async fn registry_delete(
+        &self,
+        _prefix: &Prefix,
+        _delete: &RegistryDelete,
         _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(), RuntimeError> {
         Err(RuntimeError::Unsupported {

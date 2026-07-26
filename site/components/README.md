@@ -38,12 +38,22 @@ Signed with a **staging** key for development; the production key ceremony is se
   ],
   "verbs": [
     { "name": "…", "reason": "<why it exists>",
+      // Paths under C: that must exist once this verb has been applied. Required for a verb with a
+      // `run` op; optional otherwise, since a verb whose whole effect is a registry value has nothing
+      // on disk to look for.
+      "verify": ["<relative to C:>"],
       "ops": [
         { "registry": { "key": "HKCU\\…", "name": "…",
                         "type": "string" | "expand_string" | "dword" | "disabled",
                         "value": "…" } },
+        // Omit `name` to remove the key and its subtree; a subtree removal must name a key at least
+        // three components below its root.
+        { "registry_delete": { "key": "HKLM\\…", "name": "…" } },
         { "files": { "url": "https://…", "sha256": "<64 hex>",
-                     "archive": { "format": "zip" }, "into": "<relative to C:>" } }
+                     "archive": { "format": "zip" }, "into": "<relative to C:>" } },
+        { "run": { "url": "https://…", "sha256": "<64 hex>", "file_name": "setup.exe",
+                   "args": ["/q"], "env": [["WINEDLLOVERRIDES", "fusion=b"]],
+                   "timeout_secs": 1800 } }
       ] }
   ]
 }
@@ -67,18 +77,39 @@ Several `into` values are informed guesses about where a Windows program looks f
 is exactly why they are rows rather than constants: correcting one is an edit here plus a re-sign, not a
 release.
 
-## Why the verb list is short
+## Why a verb states what it produces
 
-Verbs are described entirely by these ops, and there is deliberately no op that runs an arbitrary
-installer. The first thing that wanted one was Microsoft's .NET Framework, for ACT: satisfying it means
-running an opaque vendor installer, removing Wine's Mono, changing the reported Windows version, and
-then losing all of it when Proton next upgrades the prefix. A verb that did some of that and reported
-success would be worse than no verb, so the requirement is stated as a caveat on the row that needs it
-and the user reaches for `winetricks` or `protontricks` themselves. Apogee is not a winetricks.
+`verify` is the field that makes a verb's effect checkable instead of merely recorded, and it does three
+jobs at once:
 
-That leaves the ops that are idempotent by construction: a registry write, which is overwritten rather
-than added, and a pinned file placement, which is overwritten too. Anything a verb does has to be safe
-to do twice, because the only thing standing between a re-apply and a re-run is the prefix's own record.
+- A verb whose ops "succeeded" without producing these paths is a **failure**, so a half-finished install
+  is not remembered as done and the next `ensure` tries again.
+- A verb the prefix records but whose paths have since **gone** is applied again. That is not theoretical:
+  Proton removes a `Microsoft.NET` directory it judges broken on a prefix upgrade, so without this the
+  record would say .NET is installed while it is not, forever.
+- It is the same evidence a health view would want.
+
+It is optional, and empty is the honest answer for a verb whose whole effect is a registry value — there
+is no file to look for, and the prefix's record is the only evidence there is. A verb with a `run` op may
+**not** be empty, and is refused at parse time if it is.
+
+## Why the op list is four, and why `run` is the shape it is
+
+Three of the ops are idempotent by construction: a registry write overwrites rather than adds, a removal
+treats "it was not there" as success, and a file placement overwrites. That is the selection criterion,
+not a coincidence — anything a verb does has to be safe to do twice, because the only thing between a
+re-apply and a re-run is the prefix's own record.
+
+`run` is the exception and is deliberately narrow. It runs a **pinned download and nothing else**: it
+cannot invoke something already in the prefix, there is no shell, and its verb must carry a `verify`. An
+opaque installer's exit status is not evidence — several vendor installers exit non-zero having worked and
+several exit zero having done nothing — so the status is reported and the `verify` is what decides.
+
+The one row that uses it is `dotnet48`, for ACT. It is the least certain thing in this catalog: six ops,
+one of which is a 120 MB Microsoft installer, and the sequence has **not yet been observed to complete on a
+real runner**. Its `verify` is what makes that a reported failure with a retry rather than a silent one,
+and the ACT row still names `winetricks`/`protontricks` as the fallback. Apogee is not a winetricks: the op
+set stays at four, and a component needing something these cannot express states it as a caveat instead.
 
 ## Adding or updating a row
 

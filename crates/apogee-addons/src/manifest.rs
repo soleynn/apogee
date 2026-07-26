@@ -21,7 +21,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
 
-use apogee_runtime::{ArchiveFormat, ArchiveLayout, RegistryEdit, RegistryValue};
+use apogee_runtime::{ArchiveFormat, ArchiveLayout, RegistryDelete, RegistryEdit, RegistryValue};
 
 use crate::SupportTier;
 use crate::external::Trigger;
@@ -93,6 +93,9 @@ pub enum ManifestError {
     /// ambiguous.
     #[error("two components are both named {name:?}")]
     DuplicateName { name: String },
+    /// A verb that runs an opaque installer without saying what should exist afterwards.
+    #[error("verb {verb:?} runs an installer but names nothing to verify afterwards")]
+    UnverifiableVerb { verb: String },
     /// A tool naming a verb no row defines. Caught here rather than at install time, because a tool
     /// that installs and then cannot be set up is worse than one that was never offered.
     #[error("{component} requires verb {verb:?}, which the manifest does not define")]
@@ -246,16 +249,43 @@ pub struct InjectableEntry {
     pub caveats: Vec<String>,
 }
 
+/// The longest a verb's `run` op may be given, and the default when the row does not say.
+///
+/// A vendor installer that unpacks a runtime takes minutes, so the ordinary in-prefix budget is far too
+/// short; the ceiling is there so a row cannot describe a step that hangs a launcher indefinitely.
+const MAX_RUN_SECS: u64 = 3600;
+const DEFAULT_RUN_SECS: u64 = 900;
+
 /// One step of a verb.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum VerbOp {
     /// Write one registry value. Idempotent by construction.
     Registry(RegistryEdit),
+    /// Remove a registry value, or a key and its subtree. Idempotent: nothing to remove is success.
+    RegistryDelete(RegistryDelete),
     /// Place a pinned artifact's files under the prefix's `C:`. Idempotent by overwrite.
     Files {
         artifact: Artifact,
         into: ComponentPath,
+    },
+    /// Run a pinned program inside the prefix.
+    ///
+    /// The escape hatch for the one thing the other ops cannot express: a vendor runtime whose install
+    /// is an opaque executable. Deliberately narrow. The program is a pinned download and nothing else —
+    /// it cannot invoke something already in the prefix, and there is no shell — and a verb containing one
+    /// is refused unless it also carries a [`Verb::verify`], because an opaque installer's own exit status
+    /// is not evidence that anything landed.
+    Run {
+        artifact: Artifact,
+        /// Named so the downloaded file lands under a name the installer will accept; several vendor
+        /// installers inspect their own filename.
+        file_name: String,
+        args: Vec<String>,
+        /// Extra environment for the installer, which is how a `WINEDLLOVERRIDES` an install needs is
+        /// stated as data rather than assumed.
+        env: Vec<(String, String)>,
+        timeout: std::time::Duration,
     },
 }
 
@@ -266,6 +296,18 @@ pub struct Verb {
     pub name: String,
     /// Why it exists, shown when it is applied. A verb with no reason is a verb nobody can review.
     pub reason: String,
+    /// Paths under the prefix's `C:` that must exist once this verb has been applied.
+    ///
+    /// This is what makes a verb's effect checkable rather than merely recorded, and it does three jobs
+    /// at once. A verb whose ops "succeeded" without producing these is a failure, so a half-finished
+    /// install is not remembered as done. A verb the prefix records but whose paths have since gone is
+    /// applied again, which is how something a runner upgrade removed from under us comes back. And it is
+    /// the same evidence a health check would want.
+    ///
+    /// Empty is allowed and means "the record is the only evidence there is", which is the honest answer
+    /// for a verb whose whole effect is a registry value: there is no file to look for. A verb with a
+    /// `Run` op may not be empty.
+    pub verify: Vec<ComponentPath>,
     pub ops: Vec<VerbOp>,
 }
 
@@ -414,6 +456,8 @@ struct RawVerb {
     name: String,
     reason: String,
     #[serde(default)]
+    verify: Vec<String>,
+    #[serde(default)]
     ops: Vec<RawOp>,
 }
 
@@ -423,7 +467,31 @@ struct RawVerb {
 #[serde(rename_all = "snake_case")]
 enum RawOp {
     Registry(RawRegistry),
+    RegistryDelete(RawRegistryDelete),
     Files(RawFiles),
+    Run(RawRun),
+}
+
+#[derive(Deserialize)]
+struct RawRegistryDelete {
+    key: String,
+    /// Absent removes the key and its subtree; present removes just that value.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawRun {
+    url: String,
+    sha256: String,
+    /// What the download is saved as before it is run. Several vendor installers inspect their own name.
+    file_name: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: Vec<(String, String)>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -616,9 +684,23 @@ fn build_verb(raw: RawVerb) -> Result<Verb, ManifestError> {
         .into_iter()
         .map(|op| build_op(&raw.name, op))
         .collect::<Result<Vec<_>, _>>()?;
+    let verify = raw
+        .verify
+        .iter()
+        .map(|path| ComponentPath::parse(path, &raw.name))
+        .collect::<Result<Vec<_>, _>>()?;
+    // An opaque installer's own exit status is not evidence that anything landed, so a verb that runs one
+    // has to say what to look for afterwards. Refused here rather than at apply time, because a row that
+    // cannot be checked should never have been published.
+    if verify.is_empty() && ops.iter().any(|op| matches!(op, VerbOp::Run { .. })) {
+        return Err(ManifestError::UnverifiableVerb {
+            verb: raw.name.clone(),
+        });
+    }
     Ok(Verb {
         name: raw.name,
         reason: raw.reason,
+        verify,
         ops,
     })
 }
@@ -663,10 +745,49 @@ fn build_op(component: &str, raw: RawOp) -> Result<VerbOp, ManifestError> {
                 })?;
             Ok(VerbOp::Registry(edit))
         }
+        RawOp::RegistryDelete(entry) => {
+            let delete = RegistryDelete {
+                key: entry.key,
+                name: entry.name,
+            };
+            delete
+                .validate()
+                .map_err(|reason| ManifestError::BadRegistryEdit {
+                    component: component.to_owned(),
+                    key: delete.key.clone(),
+                    reason,
+                })?;
+            Ok(VerbOp::RegistryDelete(delete))
+        }
         RawOp::Files(files) => Ok(VerbOp::Files {
             artifact: build_artifact(component, &files.url, &files.sha256, files.archive)?,
             into: ComponentPath::parse(&files.into, component)?,
         }),
+        RawOp::Run(run) => {
+            // The saved name becomes a filename, so it is held to the same standard as a component name.
+            check_identifier("run file name", &run.file_name)?;
+            let secs = run.timeout_secs.unwrap_or(DEFAULT_RUN_SECS);
+            if secs == 0 || secs > MAX_RUN_SECS {
+                return Err(unknown(component, "run timeout", secs.to_string()));
+            }
+            Ok(VerbOp::Run {
+                artifact: build_artifact(
+                    component,
+                    &run.url,
+                    &run.sha256,
+                    RawArchive {
+                        // A run op names one executable, not an archive. The layout field exists on
+                        // `Artifact` for the ops that do extract; here it is never consulted.
+                        format: "zip".to_owned(),
+                        strip_prefix: None,
+                    },
+                )?,
+                file_name: run.file_name,
+                args: run.args,
+                env: run.env,
+                timeout: std::time::Duration::from_secs(secs),
+            })
+        }
     }
 }
 
@@ -1074,6 +1195,104 @@ mod tests {
             parse(&without),
             Err(ManifestError::UnknownValue { .. })
         ));
+    }
+
+    /// A verb carrying a `run` op, with the verify it is refused without.
+    fn run_verb(verify: &str, timeout: &str) -> String {
+        format!(
+            r#"{{ "version": 1, "verbs": [
+                {{ "name": "runner-verb", "reason": "why", {verify}
+                   "ops": [ {{ "run": {{ "url": "https://example.invalid/setup.exe",
+                                         "sha256": "{GOOD_PIN}", "file_name": "setup.exe",
+                                         "args": ["/q"], "timeout_secs": {timeout} }} }} ] }} ] }}"#
+        )
+    }
+
+    /// The escape hatch is only allowed with evidence attached. An opaque installer's exit status says it
+    /// ran, not that anything landed, so a row that cannot be checked should never have been published.
+    #[test]
+    fn a_verb_that_runs_an_installer_must_say_what_to_verify() {
+        let parsed = parse(&run_verb(r#""verify": ["windows/thing.dll"],"#, "600")).expect("parse");
+        let verb = parsed.verb("runner-verb").expect("row");
+        assert_eq!(verb.verify.len(), 1);
+        match verb.ops.as_slice() {
+            [
+                VerbOp::Run {
+                    file_name,
+                    args,
+                    timeout,
+                    ..
+                },
+            ] => {
+                assert_eq!(file_name, "setup.exe");
+                assert_eq!(args, &["/q".to_owned()]);
+                assert_eq!(timeout.as_secs(), 600);
+            }
+            other => panic!("expected one run op, got {other:?}"),
+        }
+
+        assert!(matches!(
+            parse(&run_verb("", "600")),
+            Err(ManifestError::UnverifiableVerb { .. })
+        ));
+
+        // A budget of zero, or one past the ceiling, is a typed error rather than a hang.
+        for timeout in ["0", "100000"] {
+            assert!(
+                matches!(
+                    parse(&run_verb(r#""verify": ["windows/thing.dll"],"#, timeout)),
+                    Err(ManifestError::UnknownValue { .. })
+                ),
+                "a budget of {timeout} must be refused"
+            );
+        }
+    }
+
+    /// A verb with no `run` op needs no verify: its whole effect may be a registry value, and there would
+    /// be nothing on disk to look for.
+    #[test]
+    fn a_verb_without_an_installer_needs_no_verify() {
+        let parsed = parse(&manifest()).expect("parse");
+        let verb = parsed.verb("no-desktop-integration").expect("row");
+        assert!(verb.verify.is_empty());
+    }
+
+    /// A key removal is the one registry operation that can destroy something the launcher did not create,
+    /// so a row naming a key too shallow to be ours is refused. Naming the value makes the same key fine:
+    /// it then removes exactly what it names.
+    #[test]
+    fn a_key_removal_too_shallow_to_be_ours_is_refused() {
+        let row = |key: &str, name: &str| {
+            format!(
+                r#"{{ "version": 1, "verbs": [ {{ "name": "v", "reason": "why",
+                    "ops": [ {{ "registry_delete": {{ "key": "{key}"{name} }} }} ] }} ] }}"#
+            )
+        };
+        let deep = row(
+            r"HKLM\\Software\\Wow6432Node\\Microsoft\\NET Framework Setup\\NDP\\v4",
+            "",
+        );
+        match parse(&deep)
+            .expect("parse")
+            .verb("v")
+            .expect("row")
+            .ops
+            .as_slice()
+        {
+            [VerbOp::RegistryDelete(delete)] => assert!(delete.name.is_none()),
+            other => panic!("expected one delete op, got {other:?}"),
+        }
+
+        for shallow in [r"HKLM\\Software", r"HKLM\\Software\\Microsoft", "HKLM"] {
+            assert!(
+                matches!(
+                    parse(&row(shallow, "")),
+                    Err(ManifestError::BadRegistryEdit { .. })
+                ),
+                "{shallow} must be refused as a subtree removal"
+            );
+        }
+        assert!(parse(&row(r"HKCU\\Software\\Wine", r#", "name": "Version""#)).is_ok());
     }
 
     #[test]

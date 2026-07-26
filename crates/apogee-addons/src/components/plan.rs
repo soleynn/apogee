@@ -60,6 +60,10 @@ impl EnsurePlan {
     /// build wrote — counts as present, because there is nothing to compare and re-installing on every
     /// run would be worse than a stale entry.
     ///
+    /// `stale` names components the record claims but whose effect has been checked and is gone, which
+    /// overrides the record. That is what makes a verb whose install a runner upgrade removed from under
+    /// us come back, instead of being skipped forever on the strength of an entry that is no longer true.
+    ///
     /// # Errors
     /// [`AddonError::UnknownComponent`] if a name is in no list. Refused for the whole call rather than
     /// recorded per-name: a name that resolves to nothing is a configuration mistake, and installing
@@ -69,6 +73,7 @@ impl EnsurePlan {
         manifest: &ComponentManifest,
         wanted: &[String],
         installed: &[InstalledComponent],
+        stale: &[String],
     ) -> Result<Self> {
         let mut steps: Vec<PlanStep> = Vec::new();
         for name in wanted {
@@ -76,7 +81,7 @@ impl EnsurePlan {
                 for verb in &tool.verbs {
                     // Present by construction: the manifest refuses a tool naming a verb it does not
                     // define.
-                    push(&mut steps, verb, None, StepKind::Verb, installed);
+                    push(&mut steps, verb, None, StepKind::Verb, installed, stale);
                 }
                 push(
                     &mut steps,
@@ -84,9 +89,10 @@ impl EnsurePlan {
                     Some(tool.version.as_str()),
                     StepKind::Tool(tool.kind),
                     installed,
+                    stale,
                 );
             } else if manifest.verb(name).is_some() {
-                push(&mut steps, name, None, StepKind::Verb, installed);
+                push(&mut steps, name, None, StepKind::Verb, installed, stale);
             } else if manifest.injectable(name).is_some() {
                 // Offered by the schema so a manifest does not need a new version when the code that
                 // drives these lands. Until then, saying so beats installing nothing quietly.
@@ -129,7 +135,19 @@ fn push(
     wanted_version: Option<&str>,
     kind: StepKind,
     installed: &[InstalledComponent],
+    stale: &[String],
 ) {
+    if stale.iter().any(|s| s == name) {
+        push_step(
+            steps,
+            PlanStep {
+                name: name.to_owned(),
+                kind,
+                action: StepAction::Install,
+            },
+        );
+        return;
+    }
     let action = match installed.iter().find(|c| c.name() == name) {
         // Nothing to compare: a verb, or a record from a build that did not keep versions.
         Some(record) if record.version().is_none() => StepAction::AlreadyPresent,
@@ -193,16 +211,26 @@ mod tests {
     /// that needs it.
     #[test]
     fn a_tools_verbs_are_planned_immediately_before_it_and_never_twice() {
-        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned(), "Other".to_owned()], &[])
-            .expect("plan");
+        let plan = EnsurePlan::build(
+            &manifest(),
+            &["ACT".to_owned(), "Other".to_owned()],
+            &[],
+            &[],
+        )
+        .expect("plan");
         assert_eq!(names(&plan), ["shared", "ACT", "extra", "Other"]);
     }
 
     /// A verb the user asked for directly is one step, not a duplicate of the one a tool pulls in.
     #[test]
     fn naming_a_verb_directly_and_through_a_tool_plans_it_once() {
-        let plan = EnsurePlan::build(&manifest(), &["shared".to_owned(), "ACT".to_owned()], &[])
-            .expect("plan");
+        let plan = EnsurePlan::build(
+            &manifest(),
+            &["shared".to_owned(), "ACT".to_owned()],
+            &[],
+            &[],
+        )
+        .expect("plan");
         assert_eq!(names(&plan), ["shared", "ACT"]);
     }
 
@@ -226,6 +254,7 @@ mod tests {
             &manifest(),
             &["ACT".to_owned(), "Other".to_owned()],
             &installed,
+            &[],
         )
         .expect("plan");
         let actions: Vec<&StepAction> = plan.steps().iter().map(|s| &s.action).collect();
@@ -240,7 +269,8 @@ mod tests {
         );
         assert!(!plan.is_empty(), "two steps still have work");
 
-        let all = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &installed).expect("plan");
+        let all =
+            EnsurePlan::build(&manifest(), &["ACT".to_owned()], &installed, &[]).expect("plan");
         assert!(all.is_empty(), "a fully-installed set has nothing to do");
     }
 
@@ -250,12 +280,28 @@ mod tests {
     fn a_row_at_a_different_version_than_the_record_is_installed_again() {
         // The fixture's ACT row is version "1".
         let stale = vec![present("shared", None), present("ACT", Some("0"))];
-        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &stale).expect("plan");
+        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &stale, &[]).expect("plan");
         assert_eq!(
             plan.steps().iter().map(|s| &s.action).collect::<Vec<_>>(),
             [&StepAction::AlreadyPresent, &StepAction::Install]
         );
         assert!(!plan.is_empty());
+    }
+
+    /// A verb whose effect has gone has to be applied again, whatever the record says. Without this, one
+    /// runner upgrade that removes what a verb installed leaves it skipped forever on the strength of an
+    /// entry that is no longer true.
+    #[test]
+    fn a_recorded_component_whose_effect_is_gone_is_installed_again() {
+        let installed = vec![present("shared", None), present("ACT", Some("1"))];
+        let stale = vec!["shared".to_owned()];
+        let plan =
+            EnsurePlan::build(&manifest(), &["ACT".to_owned()], &installed, &stale).expect("plan");
+        assert_eq!(
+            plan.steps().iter().map(|s| &s.action).collect::<Vec<_>>(),
+            [&StepAction::Install, &StepAction::AlreadyPresent],
+            "the stale verb is re-applied and the tool that needed it is left alone"
+        );
     }
 
     /// A record with no version is all an older build wrote, and there is nothing to compare it against.
@@ -264,14 +310,20 @@ mod tests {
     #[test]
     fn a_record_with_no_version_counts_as_present() {
         let unversioned = vec![present("shared", None), present("ACT", None)];
-        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned()], &unversioned).expect("plan");
+        let plan =
+            EnsurePlan::build(&manifest(), &["ACT".to_owned()], &unversioned, &[]).expect("plan");
         assert!(plan.is_empty(), "{:?}", plan.steps());
     }
 
     #[test]
     fn the_step_kind_says_where_a_tool_installs() {
-        let plan = EnsurePlan::build(&manifest(), &["ACT".to_owned(), "Native".to_owned()], &[])
-            .expect("plan");
+        let plan = EnsurePlan::build(
+            &manifest(),
+            &["ACT".to_owned(), "Native".to_owned()],
+            &[],
+            &[],
+        )
+        .expect("plan");
         let kinds: Vec<StepKind> = plan.steps().iter().map(|s| s.kind).collect();
         assert_eq!(
             kinds,
@@ -287,7 +339,12 @@ mod tests {
     /// around it is how a launcher reports success with half a companion set.
     #[test]
     fn a_name_no_row_offers_fails_the_whole_plan() {
-        match EnsurePlan::build(&manifest(), &["ACT".to_owned(), "Ghost".to_owned()], &[]) {
+        match EnsurePlan::build(
+            &manifest(),
+            &["ACT".to_owned(), "Ghost".to_owned()],
+            &[],
+            &[],
+        ) {
             Err(AddonError::UnknownComponent { name }) => assert_eq!(name, "Ghost"),
             other => panic!("expected UnknownComponent, got {other:?}"),
         }
@@ -301,7 +358,7 @@ mod tests {
             { "name": "Dalamud", "kind": "dalamud", "distribution": "https://example.invalid/v",
               "tier": "best_effort", "note": "n" } ] }"#;
         let manifest = ComponentManifest::from_json_bytes(json.as_bytes()).expect("parse");
-        let plan = EnsurePlan::build(&manifest, &["Dalamud".to_owned()], &[]).expect("plan");
+        let plan = EnsurePlan::build(&manifest, &["Dalamud".to_owned()], &[], &[]).expect("plan");
         assert!(matches!(
             plan.steps(),
             [PlanStep {

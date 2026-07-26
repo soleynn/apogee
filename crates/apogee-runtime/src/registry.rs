@@ -83,6 +83,129 @@ impl RegistryValue {
     }
 }
 
+/// The fewest path components below a root a whole-key removal may name.
+///
+/// `HKLM\Software` and `HKLM\Software\Microsoft` are not keys anything here has business removing, and a
+/// row that meant to name something deeper and lost a component would otherwise take the whole subtree
+/// with it. Removing a single *value* is not held to this, since it names exactly what it removes.
+const MIN_KEY_DEPTH: usize = 3;
+
+/// A registry value or key to remove.
+///
+/// Its own type rather than an option on [`RegistryEdit`], because removal is the one registry operation
+/// that can destroy something the launcher did not create, and it is worth being unable to write one by
+/// accident while reaching for a write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryDelete {
+    /// The key, backslash-separated from a root.
+    pub key: String,
+    /// The value to remove, or `None` to remove the key and everything under it.
+    pub name: Option<String>,
+}
+
+impl RegistryDelete {
+    /// Why this removal is not one this primitive will perform, or `Ok` when it is.
+    ///
+    /// # Errors
+    /// The reason, as [`RegistryEdit::validate`], plus a whole-key removal that names a key too shallow
+    /// to be one the launcher put there.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.check()
+    }
+
+    /// The invocation that asks whether there is anything to remove.
+    ///
+    /// Asked first because `reg delete` on something absent exits non-zero, and this crate reads exit
+    /// status rather than output, so "it was not there" and "it could not be removed" are otherwise the
+    /// same answer. Two status-only invocations tell them apart without parsing anything.
+    pub(crate) fn probe(&self) -> Result<ProgramInPrefix, RuntimeError> {
+        self.check().map_err(|reason| self.rejected(reason))?;
+        let mut args = vec!["query".to_owned(), self.key.clone()];
+        if let Some(name) = &self.name {
+            args.push("/v".to_owned());
+            args.push(name.clone());
+        }
+        Ok(ProgramInPrefix::new("reg", args))
+    }
+
+    /// The invocation that performs the removal.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RegistryKey`] if [`Self::validate`] refuses it.
+    pub(crate) fn command(&self) -> Result<ProgramInPrefix, RuntimeError> {
+        self.check().map_err(|reason| self.rejected(reason))?;
+        let mut args = vec!["delete".to_owned(), self.key.clone()];
+        if let Some(name) = &self.name {
+            args.push("/v".to_owned());
+            args.push(name.clone());
+        }
+        // No prompt, for the reason the module note gives: it does not merely block, it loops.
+        args.push("/f".to_owned());
+        Ok(ProgramInPrefix::new("reg", args))
+    }
+
+    fn check(&self) -> Result<(), &'static str> {
+        check_key(&self.key)?;
+        match &self.name {
+            Some(name) => check_value_name(name)?,
+            None => {
+                if self.key.split('\\').skip(1).count() < MIN_KEY_DEPTH {
+                    return Err("it removes a key too shallow to be one this launcher created");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rejected(&self, reason: &'static str) -> RuntimeError {
+        RuntimeError::RegistryKey {
+            key: match &self.name {
+                Some(name) => format!("{}\\{name}", self.key),
+                None => self.key.clone(),
+            },
+            reason,
+        }
+    }
+}
+
+/// The key rules both a write and a removal are held to.
+fn check_key(key: &str) -> Result<(), &'static str> {
+    let root = key
+        .split('\\')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if !ROOTS.contains(&root.as_str()) {
+        return Err("it does not start at a registry root");
+    }
+    if key.split('\\').skip(1).any(str::is_empty) {
+        return Err("it has an empty path component");
+    }
+    // `reg` reads a leading slash as a flag, so a key that starts with one would be swallowed as an
+    // option rather than used.
+    if key.starts_with('/') {
+        return Err("a leading slash would be read as an option");
+    }
+    if key.chars().any(char::is_control) {
+        return Err("it carries a control character");
+    }
+    Ok(())
+}
+
+/// The rules a value name is held to.
+fn check_value_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("the value name is empty");
+    }
+    if name.starts_with('/') {
+        return Err("a leading slash would be read as an option");
+    }
+    if name.chars().any(char::is_control) {
+        return Err("it carries a control character");
+    }
+    Ok(())
+}
+
 impl RegistryEdit {
     /// Why this edit is not a shape this primitive will write, or `Ok` when it is.
     ///
@@ -129,34 +252,14 @@ impl RegistryEdit {
     }
 
     fn check(&self) -> Result<(), &'static str> {
-        let root = self
-            .key
-            .split('\\')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-        if !ROOTS.contains(&root.as_str()) {
-            return Err("it does not start at a registry root");
-        }
-        if self.key.split('\\').skip(1).any(str::is_empty) {
-            return Err("it has an empty path component");
-        }
-        if self.name.is_empty() {
-            return Err("the value name is empty");
-        }
-        // `reg` reads a leading slash as a flag, so a name or key that starts with one would be
-        // swallowed as an option rather than used.
-        if self.name.starts_with('/') || self.key.starts_with('/') {
-            return Err("a leading slash would be read as an option");
-        }
+        check_key(&self.key)?;
+        check_value_name(&self.name)?;
         let data = self.value.data();
         if data.is_empty() && self.value != RegistryValue::Disabled {
             return Err("the value is empty");
         }
-        for text in [&self.key, &self.name, &data] {
-            if text.chars().any(|c| c.is_control()) {
-                return Err("it carries a control character");
-            }
+        if data.chars().any(char::is_control) {
+            return Err("it carries a control character");
         }
         Ok(())
     }

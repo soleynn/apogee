@@ -74,6 +74,24 @@ fn extract(_archive: &Path, _layout: &apogee_runtime::ArchiveLayout, _dest: &Pat
     })
 }
 
+/// Download one pinned artifact and leave it at `file_name` inside `work`, without extracting it.
+///
+/// For the one op that runs a program rather than laying out a tree. The name is the row's, because
+/// several vendor installers inspect their own filename, and it is validated when the manifest is parsed.
+pub(super) async fn fetch_file(
+    fetcher: &Fetcher,
+    artifact: &Artifact,
+    component: &str,
+    work: &Path,
+    file_name: &str,
+    cancel: &CancellationToken,
+    events: &ComponentEvents,
+) -> Result<PathBuf> {
+    let dest = work.join(file_name);
+    let verified = download(fetcher, artifact, component, &dest, cancel, events).await?;
+    Ok(verified.path().to_path_buf())
+}
+
 /// Download and verify one artifact, relaying progress onto the component event stream.
 async fn download(
     fetcher: &Fetcher,

@@ -71,6 +71,16 @@ fn manifest(server: &ChaosServer, pin: &str) -> ComponentManifest {
           ],
           "verbs": [
             {{ "name": "marker", "reason": "Recorded without touching anything.", "ops": [] }},
+            {{ "name": "checked", "reason": "It states what it produces.",
+               "verify": ["apogee/checked/tool.exe"],
+               "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{pin}",
+                                       "archive": {{ "format": "zip", "strip_prefix": "top" }},
+                                       "into": "apogee/checked" }} }} ] }},
+            {{ "name": "unproduced", "reason": "Its op runs but produces nothing it names.",
+               "verify": ["apogee/never/lands.dll"],
+               "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{pin}",
+                                       "archive": {{ "format": "zip", "strip_prefix": "top" }},
+                                       "into": "apogee/elsewhere" }} }} ] }},
             {{ "name": "unfixable", "reason": "Its op cannot succeed.",
                "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{wrong_pin}",
                                        "archive": {{ "format": "zip" }},
@@ -465,6 +475,16 @@ async fn a_tool_is_not_installed_when_the_verb_it_requires_failed() {
                "into": "apogee/Blocked", "verbs": ["unfixable"] }}
           ],
           "verbs": [
+            {{ "name": "checked", "reason": "It states what it produces.",
+               "verify": ["apogee/checked/tool.exe"],
+               "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{pin}",
+                                       "archive": {{ "format": "zip", "strip_prefix": "top" }},
+                                       "into": "apogee/checked" }} }} ] }},
+            {{ "name": "unproduced", "reason": "Its op runs but produces nothing it names.",
+               "verify": ["apogee/never/lands.dll"],
+               "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{pin}",
+                                       "archive": {{ "format": "zip", "strip_prefix": "top" }},
+                                       "into": "apogee/elsewhere" }} }} ] }},
             {{ "name": "unfixable", "reason": "Its op cannot succeed.",
                "ops": [ {{ "files": {{ "url": "{url}", "sha256": "{wrong}",
                                        "archive": {{ "format": "zip" }},
@@ -636,4 +656,108 @@ fn registrations_skip_a_component_the_prefix_does_not_record() {
         addons[0].program(),
         prefix.drive_c().join("apogee/Installed/tool.exe")
     );
+}
+
+/// A verb is judged on what it produced, not on whether its ops returned success. Several vendor
+/// installers exit zero having done nothing, which is exactly the case this exists for.
+#[tokio::test]
+async fn a_verb_that_did_not_produce_what_it_names_is_a_failure() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let manifest = manifest(&server, &pin);
+
+    // Its file op succeeds, but into a different place than it claims to verify.
+    let report = ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["unproduced"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("call");
+    assert!(report.any_failed(), "{report:?}");
+    assert!(recorded(&prefix).is_empty());
+    // The files it did place are there; the verb still failed, because what it promised is not.
+    assert!(prefix.drive_c().join("apogee/elsewhere/tool.exe").is_file());
+
+    // And one that does produce what it names succeeds and is recorded.
+    let report = ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["checked"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("call");
+    assert!(!report.any_failed(), "{report:?}");
+    assert_eq!(recorded(&prefix), ["checked"]);
+}
+
+/// The point of a verb saying what it produces: when a runner upgrade removes it, the next run notices
+/// and puts it back, rather than skipping it forever on the strength of the record.
+#[tokio::test]
+async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let manifest = manifest(&server, &pin);
+
+    ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["checked"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("first apply");
+    assert_eq!(recorded(&prefix), ["checked"]);
+
+    // Nothing changed: the record stands and the effect is there.
+    let again = ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["checked"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("second apply");
+    assert!(
+        again
+            .outcomes
+            .iter()
+            .all(|o| o.state == ComponentState::AlreadyPresent),
+        "{again:?}"
+    );
+
+    // Now something outside the launcher removes what it produced, which is what a Proton prefix
+    // upgrade does to a .NET install.
+    std::fs::remove_dir_all(prefix.drive_c().join("apogee/checked")).unwrap();
+    let healed = ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["checked"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("third apply");
+    assert!(
+        healed
+            .outcomes
+            .iter()
+            .all(|o| o.state == ComponentState::Installed),
+        "the record did not stop it being re-applied: {healed:?}"
+    );
+    assert!(prefix.drive_c().join("apogee/checked/tool.exe").is_file());
 }

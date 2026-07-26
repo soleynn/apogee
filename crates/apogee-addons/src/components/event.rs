@@ -30,6 +30,17 @@ pub enum ComponentEvent {
     Applying { verb: String, reason: String },
     /// A verb was applied and recorded.
     Applied { verb: String },
+    /// A verb is running a pinned installer inside the prefix, which can take minutes.
+    Running { verb: String, program: String },
+    /// A verb's installer exited non-zero. Reported rather than treated as the answer: several vendor
+    /// installers exit non-zero for reasons that do not stop them working, and several exit zero having
+    /// done nothing, so the verb's own verify is what decides. This exists so the status is not lost when
+    /// the verify then passes anyway.
+    InstallerStatus {
+        verb: String,
+        code: Option<i32>,
+        detail: String,
+    },
     /// Something the user needs to know about this component now rather than later.
     Caveat { component: String, note: String },
     /// One component could not be installed. The rest of the set continues.
