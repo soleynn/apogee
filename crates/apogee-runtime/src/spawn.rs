@@ -78,24 +78,39 @@ pub(crate) fn build_command(
     Ok(cmd)
 }
 
-/// Kill everything in a prefix (`wineserver -k`) — the separate, explicit broad stop.
+/// Kill everything in a prefix: the separate, explicit broad stop.
 pub(crate) async fn kill_prefix(
     prefix: &Prefix,
     umu_run: Option<PathBuf>,
 ) -> Result<(), RuntimeError> {
+    let mut cmd = kill_command(prefix, umu_run)?;
+    // A non-zero status (nothing to kill) is not an error.
+    cmd.status().await.map_err(|source| RuntimeError::Spawn {
+        runner: prefix.runner().name().to_owned(),
+        source,
+    })?;
+    Ok(())
+}
+
+/// Compose the broad-stop command for `prefix`: `wineserver -k` for a wine runner, `wineboot -k`
+/// through umu for a Proton one.
+fn kill_command(prefix: &Prefix, umu_run: Option<PathBuf>) -> Result<Command, RuntimeError> {
     let runner = prefix.runner();
-    let mut cmd = match runner.kind() {
+    match runner.kind() {
         RunnerKind::ProtonUmu => {
             let umu = umu_run.ok_or(RuntimeError::MissingHostTool {
                 tool: HostTool::Umu,
             })?;
             let mut cmd = Command::new(umu);
-            cmd.arg("wineserver").arg("-k");
-            // Proton relocates the live prefix under /pfx.
-            cmd.env("WINEPREFIX", prefix.path().join("pfx"));
+            // `wineboot -k`, not `wineserver -k`: umu runs a program inside the prefix, and bare
+            // `wineserver` does not resolve there (it exits nonzero having killed nothing).
+            cmd.arg("wineboot").arg("-k");
+            // The prefix root, never `<prefix>/pfx`: umu owns that relocation, and handing it the
+            // relocated path makes it nest another one (leaving a `pfx -> .` loop behind).
+            cmd.env("WINEPREFIX", prefix.path());
             cmd.env("GAMEID", DEFAULT_GAMEID);
             cmd.env("PROTONPATH", runner.dir());
-            cmd
+            Ok(cmd)
         }
         RunnerKind::Wine | RunnerKind::Custom => {
             let wineserver = find_binary(runner.dir(), WINESERVER_CANDIDATES).ok_or(
@@ -106,15 +121,9 @@ pub(crate) async fn kill_prefix(
             let mut cmd = Command::new(wineserver);
             cmd.arg("-k");
             cmd.env("WINEPREFIX", prefix.path());
-            cmd
+            Ok(cmd)
         }
-    };
-    // A non-zero status (nothing to kill) is not an error.
-    cmd.status().await.map_err(|source| RuntimeError::Spawn {
-        runner: runner.name().to_owned(),
-        source,
-    })?;
-    Ok(())
+    }
 }
 
 /// Set the launch environment: prefix/runner variables first, user overrides merged last so they
@@ -197,6 +206,33 @@ mod tests {
 
         let cmd = build_command(&plan, None).unwrap();
         assert_eq!(cmd.as_std().get_current_dir(), Some(working.as_path()));
+    }
+
+    /// Through umu the broad stop must be `wineboot -k` against the prefix *root*. `wineserver -k`
+    /// does not resolve as a program inside the prefix, and `<prefix>/pfx` makes umu nest a second
+    /// relocation; either way the stop exits nonzero having killed nothing.
+    #[test]
+    fn kill_command_runs_wineboot_against_the_umu_prefix_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix_dir = tmp.path().join("prefix");
+        let runner = RunnerHandle::new(
+            tmp.path().join("runner"),
+            RunnerKind::ProtonUmu,
+            "GE-Proton",
+            "11-1",
+        );
+        let prefix = Prefix::new(prefix_dir.clone(), runner);
+
+        let cmd = kill_command(&prefix, Some(PathBuf::from("/usr/bin/umu-run"))).unwrap();
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args, ["wineboot", "-k"]);
+        let wineprefix = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "WINEPREFIX")
+            .and_then(|(_, v)| v)
+            .unwrap();
+        assert_eq!(Path::new(wineprefix), prefix_dir);
     }
 
     #[test]

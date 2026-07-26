@@ -22,8 +22,8 @@ use crate::plan::{Prefix, RunnerHandle};
 use crate::progress::{Progress, RuntimeEvent};
 use crate::spawn::{DEFAULT_GAMEID, find_wine};
 
-/// Cap on a single `wineboot`/`createprefix` run. A fresh prefix on a loaded machine can take tens of
-/// seconds; past this it is treated as hung and killed.
+/// Cap on a single `wineboot` run. A fresh prefix on a loaded machine can take tens of seconds;
+/// past this it is treated as hung and killed.
 const WINEBOOT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The wine skeleton files/dirs a healthy prefix always has, relative to its wine root.
@@ -236,8 +236,8 @@ pub(crate) async fn recreate(
     .await
 }
 
-/// Build and run the `wineboot`/`createprefix` command, waiting for it under a cancellation token and
-/// a hard timeout. A non-zero exit, a timeout, or cancellation is a [`RuntimeError::PrefixInit`].
+/// Build and run the `wineboot` command, waiting for it under a cancellation token and a hard
+/// timeout. A non-zero exit, a timeout, or cancellation is a [`RuntimeError::PrefixInit`].
 async fn run_wineboot(
     prefix: &Prefix,
     umu: Option<&Path>,
@@ -288,8 +288,8 @@ async fn run_wineboot(
     }
 }
 
-/// Compose the `wineboot`/`createprefix` command with the init environment. `WINEDLLOVERRIDES`
-/// disables the Mono/Gecko installers so a headless init never blocks on their download prompt.
+/// Compose the `wineboot` command with the init environment. `WINEDLLOVERRIDES` disables the
+/// Mono/Gecko installers so a headless init never blocks on their download prompt.
 fn wineboot_command(
     prefix: &Prefix,
     umu: Option<&Path>,
@@ -302,7 +302,6 @@ fn wineboot_command(
                 tool: crate::error::HostTool::Umu,
             })?;
             let mut command = Command::new(umu);
-            command.arg("createprefix");
             command.env("GAMEID", DEFAULT_GAMEID);
             command.env("PROTONPATH", runner.dir());
             // umu relocates the live prefix under `<WINEPREFIX>/pfx` itself.
@@ -314,11 +313,13 @@ fn wineboot_command(
                 tool: crate::error::HostTool::Wine,
             })?;
             let mut command = Command::new(wine);
-            command.arg("wineboot").arg(if fresh { "-i" } else { "-u" });
             command.env("WINEPREFIX", prefix.path());
             command
         }
     };
+    // Both runners take the program to run inside the prefix: umu-run has no prefix-creation verb of
+    // its own (umu 1.4.1 dropped `createprefix`), and initializing is the side effect of wineboot.
+    command.arg("wineboot").arg(if fresh { "-i" } else { "-u" });
     command.env("WINEDEBUG", "-all");
     command.env("WINEDLLOVERRIDES", "mscoree,mshtml=");
     command.stdin(Stdio::null());
@@ -441,6 +442,29 @@ mod tests {
         });
         meta.save(&prefix.metadata_path()).expect("save metadata");
         (dir, prefix)
+    }
+
+    /// umu 1.4.1 dropped `createprefix`: it still created the prefix as a side effect but exited
+    /// nonzero, so init failed on a prefix that was in fact there. Both runners take `wineboot`, and
+    /// `fresh` picks the verb for each.
+    #[test]
+    fn umu_prefix_init_runs_wineboot_with_the_fresh_verb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let handle = RunnerHandle::for_test(
+            root.join("runner"),
+            RunnerKind::ProtonUmu,
+            "GE-Proton",
+            "11-1",
+        );
+        let prefix = Prefix::new(root.to_path_buf(), handle);
+        let umu = PathBuf::from("/usr/bin/umu-run");
+
+        for (fresh, verb) in [(true, "-i"), (false, "-u")] {
+            let command = wineboot_command(&prefix, Some(&umu), fresh).expect("command");
+            let args: Vec<_> = command.as_std().get_args().collect();
+            assert_eq!(args, ["wineboot", verb], "fresh = {fresh}");
+        }
     }
 
     #[tokio::test]

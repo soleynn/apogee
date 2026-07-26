@@ -283,7 +283,7 @@ impl Runtime {
         }
     }
 
-    /// Kill everything in a prefix (`wineserver -k`). Separate and explicit: never the default stop.
+    /// Kill everything in a prefix. Separate and explicit: never the default stop.
     pub async fn kill_prefix(&self, prefix: &Prefix) -> Result<(), RuntimeError> {
         let umu = if prefix.runner().kind() == RunnerKind::ProtonUmu {
             spawn::resolve_umu(&self.tools_dir())
