@@ -32,6 +32,7 @@ fn settings_round_trips_at_the_current_version() {
         language: "ja".to_string(),
         close_after_launch: true,
         keep_patches: true,
+        backups_kept: 3,
     };
     store.save_settings(&settings).unwrap();
     assert_eq!(store.load_settings().unwrap(), settings);
@@ -237,7 +238,12 @@ proptest::proptest! {
         keep in proptest::bool::ANY,
     ) {
         let (_dir, store) = store();
-        let settings = Settings { language, close_after_launch: close, keep_patches: keep };
+        let settings = Settings {
+            language,
+            close_after_launch: close,
+            keep_patches: keep,
+            backups_kept: 5,
+        };
         store.save_settings(&settings).unwrap();
         proptest::prop_assert_eq!(store.load_settings().unwrap(), settings);
     }

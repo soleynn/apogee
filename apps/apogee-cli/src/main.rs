@@ -5,6 +5,7 @@
 
 use std::error::Error;
 use std::io::{self, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -59,6 +60,55 @@ enum Commands {
         #[command(subcommand)]
         action: AddonAction,
     },
+    /// Back up, restore, and prune the game's settings.
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    /// Capture the game settings in a profile's prefix.
+    Create(BackupCreateArgs),
+    /// List a profile's backups, newest first.
+    List(TargetArgs),
+    /// Put a backup back. The tree it replaces is set aside, not deleted.
+    #[cfg(unix)]
+    Restore(BackupRestoreArgs),
+    /// Delete all but the newest N backups. Only archives this launcher wrote are considered.
+    Prune(BackupPruneArgs),
+}
+
+#[derive(Args)]
+struct BackupCreateArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// A note carried in the archive, such as why it was taken.
+    #[arg(long)]
+    note: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Args)]
+struct BackupRestoreArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// The archive to restore, as shown by `backup list`.
+    #[arg(long)]
+    archive: PathBuf,
+}
+
+#[derive(Args)]
+struct BackupPruneArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// How many to keep. Keeping none is not expressible: it would delete every backup there is.
+    #[arg(long, default_value = "5")]
+    keep: NonZeroUsize,
 }
 
 #[derive(Subcommand)]
@@ -245,6 +295,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Commands::Bench { action } => bench(action),
         Commands::Addon { action } => {
             addon(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Backup { action } => {
+            backup(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -473,6 +527,72 @@ fn read_otp(args: &PlayArgs, account: &Account) -> Result<OtpSource, CliError> {
         Ok(OtpSource::Manual(prompt_line("One-time password: ")?))
     } else {
         Ok(OtpSource::Manual(String::new()))
+    }
+}
+
+/// The game's settings: captured, listed, put back, and pruned.
+fn backup(core: &Core, action: BackupAction) -> Result<(), CliError> {
+    match action {
+        BackupAction::Create(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            let (report, others) = core.backup_config(profile.id, args.note)?;
+            println!(
+                "backed up {} file(s), {} bytes -> {}",
+                report.roots.iter().map(|r| r.files()).sum::<usize>(),
+                report.archive_bytes,
+                report.archive.display()
+            );
+            // Stated rather than hidden: a prefix run under more than one runner holds more than one
+            // tree, and only the one the game wrote to last was captured.
+            for other in others {
+                println!("note: not captured, an older tree: {}", other.display());
+            }
+            Ok(())
+        }
+        BackupAction::List(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            let records = core.backups(profile.id)?;
+            if records.is_empty() {
+                println!("no backups");
+                return Ok(());
+            }
+            for record in records {
+                println!(
+                    "{:>10}  {:>9}  {}",
+                    record.created_at,
+                    record.bytes,
+                    record.path.display()
+                );
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        BackupAction::Restore(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            let report = core.restore_config(profile.id, &args.archive)?;
+            for root in &report.restored {
+                println!(
+                    "restored {} file(s) to {}",
+                    root.files,
+                    root.target.display()
+                );
+                if let Some(aside) = &root.displaced_to {
+                    println!("  the tree that was there is at {}", aside.display());
+                }
+            }
+            Ok(())
+        }
+        BackupAction::Prune(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            let report = core.prune_backups(profile.id, args.keep)?;
+            println!(
+                "kept {}, deleted {}, left {} file(s) alone",
+                report.kept,
+                report.deleted.len(),
+                report.foreign
+            );
+            Ok(())
+        }
     }
 }
 

@@ -133,6 +133,8 @@ pub struct Settings {
     /// later repair re-fetch broken ranges from the local patch files first (and a re-apply skip the
     /// download). Read once at construction, so a change takes effect on the next launch.
     pub keep_patches: bool,
+    /// How many config backups to keep per profile. Nothing is pruned until a backup is taken.
+    pub backups_kept: u32,
 }
 
 impl Default for Settings {
@@ -141,6 +143,7 @@ impl Default for Settings {
             language: "en".to_string(),
             close_after_launch: false,
             keep_patches: false,
+            backups_kept: 5,
         }
     }
 }

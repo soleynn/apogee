@@ -18,7 +18,9 @@
 //! The check fails open. When nothing can be established the companion starts: a duplicate is a
 //! smaller harm than a tool that silently never runs, and these tools are usually singletons anyway.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 use apogee_runtime::Prefix;
 
@@ -61,6 +63,7 @@ fn exe(pid: i32) -> Option<PathBuf> {
 }
 
 /// Whether two host paths name the same file, resolving links where possible.
+#[cfg(target_os = "linux")]
 fn same_file(a: &Path, b: &Path) -> bool {
     let left = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
     let right = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
@@ -117,6 +120,10 @@ pub(crate) fn find_host(program: &Path) -> Option<Running> {
 /// Two spellings count, because both were observed from real runners: the host path, which plain
 /// wine passes through, and the prefix's own Windows path, which the Proton loader rewrites it into.
 /// Separators and case are folded, since the Windows form uses backslashes and is case-insensitive.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "only the process probe calls this")
+)]
 pub(crate) fn prefix_argv_matches(argv0: &str, program: &Path, windows: Option<&str>) -> bool {
     let normalize = |s: &str| s.replace('\\', "/").to_lowercase();
     let found = normalize(argv0);
