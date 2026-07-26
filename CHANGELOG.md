@@ -14,6 +14,7 @@ is tagged with its change type. Versioning aims to follow
 - Proton prefix init and broad stop under umu 1.4.1 (#66) _(fixed)_
 - Frame-consistency metrics and a bench analyze command (#67) _(added)_
 - Spawn and stop companion programs alongside the game (#68) _(added)_
+- Choose config backup contents by rules that cannot silently match nothing (#69) _(added)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
