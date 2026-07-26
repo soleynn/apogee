@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
+use crate::addons::AddonBackend;
 use crate::command::{Command, Event, FlowState};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
@@ -57,6 +58,7 @@ pub(crate) struct FlowContext {
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) patch: Arc<dyn PatchBackend>,
     pub(crate) launch: Arc<dyn LaunchBackend>,
+    pub(crate) addons: Arc<dyn AddonBackend>,
     pub(crate) store: Store,
     pub(crate) clock: Clock,
     pub(crate) computer_id: ComputerId,
@@ -579,15 +581,42 @@ async fn launch_game(
     tracing::debug!(pid = handle.game_pid(), "game process running");
     emit(tx, FlowState::Running);
 
-    // Closing after launch detaches the launcher; otherwise supervise until the game exits or the
-    // caller cancels (Ctrl-C), in which case the game is killed.
+    // Started once the game is up, so a companion that looks for it finds it.
+    let addons = ctx
+        .addons
+        .start(
+            handle.game_pid(),
+            handle.prefix(),
+            profile.external.clone(),
+            cancel,
+            tx,
+        )
+        .await;
+
+    // Closing after launch detaches the launcher, but only when nothing is owed at exit: detaching
+    // with companions still to stop would leave them running with nothing left that knows about them.
     if settings.close_after_launch {
-        return Ok(());
+        if !addons.has_work() {
+            return Ok(());
+        }
+        emit(tx, FlowState::SupervisingAddons);
     }
-    tokio::select! {
-        result = handle.wait() => result?,
-        () = cancel.cancelled() => handle.kill().await?,
+
+    // Bound rather than propagated, because the teardown has to run on the failing paths too. An
+    // early return here is exactly how a launch leaves companions behind.
+    let result = tokio::select! {
+        result = handle.wait() => result,
+        () = cancel.cancelled() => handle.kill().await,
+    };
+    let failures = if cancel.is_cancelled() {
+        addons.abandon(cancel).await
+    } else {
+        addons.game_closed(cancel).await
+    };
+    for failure in failures {
+        let _ = tx.send(Event::Error(failure));
     }
+    result?;
     emit(tx, FlowState::Exited);
     Ok(())
 }

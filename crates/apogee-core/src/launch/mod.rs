@@ -43,6 +43,8 @@ pub(crate) struct LaunchRequest {
 pub(crate) trait GameHandle: Send + Sync {
     /// The resolved game process id.
     fn game_pid(&self) -> i32;
+    /// The prefix the game runs in, when the launch has one.
+    fn prefix(&self) -> Option<apogee_runtime::Prefix>;
     /// Resolve when the game process exits (no exit status is available).
     async fn wait(&self) -> Result<(), CoreError>;
     /// Terminate the game process (targeted; not the whole prefix).
@@ -160,7 +162,12 @@ pub(crate) mod fake {
     #[async_trait::async_trait]
     impl GameHandle for FakeHandle {
         fn game_pid(&self) -> i32 {
-            0
+            // A real pid: the addon layer refuses zero, which means "my whole process group".
+            std::process::id().cast_signed()
+        }
+
+        fn prefix(&self) -> Option<apogee_runtime::Prefix> {
+            None
         }
 
         async fn wait(&self) -> Result<(), CoreError> {

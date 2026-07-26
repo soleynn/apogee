@@ -122,12 +122,38 @@ pub enum ComponentKind {
 pub struct ComponentManifest {/* signed rows not yet modeled */}
 
 /// Companion / component manager (`apogee-core`'s `addons` field).
-#[derive(Debug)]
-pub struct Addons;
+///
+/// A cheap handle: clone it to share. Every field it holds is itself a handle.
+#[derive(Debug, Clone)]
+pub struct Addons {
+    runtime: Runtime,
+    #[expect(dead_code, reason = "component downloads are a later concern")]
+    fetcher: Fetcher,
+    #[expect(dead_code, reason = "the signed component catalog is a later concern")]
+    manifest: ComponentManifest,
+}
 
 impl Addons {
     /// Construct over the runtime, fetcher, and component manifest (composition root).
-    pub fn new(_runtime: Runtime, _fetcher: Fetcher, _manifest: ComponentManifest) -> Self {
-        Self
+    #[must_use]
+    pub fn new(runtime: Runtime, fetcher: Fetcher, manifest: ComponentManifest) -> Self {
+        Self {
+            runtime,
+            fetcher,
+            manifest,
+        }
+    }
+
+    /// Start the companions that run alongside a game that is already up.
+    ///
+    /// Never fails as a whole: an entry that cannot be run is recorded in the session's report and
+    /// the rest continue, because a helper tool must not fail a launch that has already succeeded.
+    pub async fn start_external(
+        &self,
+        addons: &[ExternalAddon],
+        game: &GameContext,
+        events: &AddonEvents,
+    ) -> AddonSession {
+        external::start(&self.runtime, addons, game, events).await
     }
 }

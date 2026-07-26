@@ -10,8 +10,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use apogee_addons::ExternalAddon;
+
 /// A launch configuration: one account, one game path, one runner and prefix, a component set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: an external addon keeps the keys a newer build might add, and those are arbitrary JSON.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     /// Stable identity, minted once and never derived from the other fields.
     pub id: Uuid,
@@ -22,6 +26,9 @@ pub struct Profile {
     pub runner: RunnerSelection,
     pub prefix: PrefixSelection,
     pub components: Vec<ComponentSelection>,
+    /// The user's own tools, run alongside the game in list order.
+    #[serde(default)]
+    pub external: Vec<ExternalAddon>,
     pub launch: LaunchSettings,
 }
 
@@ -37,6 +44,7 @@ impl Profile {
             runner: RunnerSelection::SystemWine,
             prefix: PrefixSelection::default(),
             components: Vec::new(),
+            external: Vec::new(),
             launch: LaunchSettings::default(),
         }
     }

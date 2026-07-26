@@ -8,6 +8,7 @@
 //! forward and never deletes on a load failure. The login-to-play orchestration arrives in a later
 //! change; its command arms are stubbed today.
 
+mod addons;
 mod command;
 mod composition;
 mod error;
@@ -19,6 +20,7 @@ mod patch;
 mod store;
 mod transport;
 
+pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome as AddonOutcome, RunIn, Trigger};
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{BenchError, BenchStats, FrameLog};

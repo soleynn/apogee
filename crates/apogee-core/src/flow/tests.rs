@@ -17,6 +17,8 @@ use uuid::Uuid;
 use apogee_patcher::{PatchProgress, Repo};
 
 use super::{FlowContext, drive, language_id, launch_arguments, read_repo_ver};
+use crate::addons::AddonBackend;
+use crate::addons::fake::{AddonCall, FakeAddons};
 use crate::command::{Command, Event, FlowState};
 use crate::host;
 use crate::launch::LaunchBackend;
@@ -25,6 +27,7 @@ use crate::model::{Account, AccountKind, Profile, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::store::{Store, UidCacheEntry};
+use apogee_addons::{ExternalAddon, RunIn, Trigger};
 
 use fx::{BOOT_VERSION, GAME_VERSION, SESSION_ID, UNIQUE_ID};
 
@@ -106,10 +109,30 @@ fn context_with(
     launch: Arc<dyn LaunchBackend>,
     now: u64,
 ) -> FlowContext {
+    context_with_addons(
+        h,
+        transport,
+        patch,
+        launch,
+        Arc::new(FakeAddons::new()),
+        now,
+    )
+}
+
+/// Like [`context_with`], but with an explicit addon backend the caller can inspect afterwards.
+fn context_with_addons(
+    h: &Harness,
+    transport: Arc<dyn Transport>,
+    patch: Arc<dyn PatchBackend>,
+    launch: Arc<dyn LaunchBackend>,
+    addons: Arc<dyn AddonBackend>,
+    now: u64,
+) -> FlowContext {
     FlowContext {
         transport,
         patch,
         launch,
+        addons,
         store: h.store.clone(),
         clock: Arc::new(move || now),
         computer_id: host::computer_id(),
@@ -602,6 +625,192 @@ async fn close_after_launch_detaches_without_supervising() {
     assert!(
         !launch.was_killed(),
         "a detached launch does not kill the game"
+    );
+}
+
+/// Companions start once the game is up, and are torn down when it exits. The order is the flow's
+/// responsibility: a tool that looks for the game has to find it.
+#[tokio::test]
+async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
+    let h = harness(false);
+    let mut profile = h.store.load_profile(h.profile).unwrap();
+    profile.external.push(
+        ExternalAddon::new(
+            "/opt/act/act.sh",
+            vec![],
+            RunIn::Host,
+            Trigger::WithGame {
+                keep_after_close: false,
+            },
+        )
+        .unwrap(),
+    );
+    h.store.save_profile(&profile).unwrap();
+
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        transport,
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+
+    assert_eq!(
+        addons.calls(),
+        [
+            AddonCall::Started {
+                game_pid: std::process::id().cast_signed(),
+                count: 1,
+            },
+            AddonCall::GameClosed,
+        ]
+    );
+    // The profile's list reached the seam, and the game was up before it did.
+    let running = states(&events)
+        .iter()
+        .position(|s| *s == FlowState::Running)
+        .expect("the game ran");
+    assert!(running < states(&events).len());
+}
+
+/// A cancelled launch stops what was started but never runs the tools that expect a session which
+/// actually happened.
+#[tokio::test]
+async fn a_cancelled_launch_abandons_its_companions() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::running());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        transport,
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons.clone(),
+        NOW,
+    );
+
+    let cancel = CancellationToken::new();
+    let on_cancel = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        on_cancel.cancel();
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        drive(ctx, play_no_otp(h.profile), tx, cancel),
+    )
+    .await
+    .expect("a cancelled launch must finish");
+
+    assert!(
+        addons.calls().contains(&AddonCall::Abandoned),
+        "expected the companions to be abandoned, got {:?}",
+        addons.calls()
+    );
+    assert!(!addons.calls().contains(&AddonCall::GameClosed));
+}
+
+/// Detaching after launch is conditional on owing nothing. Detaching with companions still to stop
+/// would leave them running with nothing left that knows about them.
+#[tokio::test]
+async fn close_after_launch_stays_attached_when_teardown_is_owed() {
+    let h = harness(false);
+    h.store
+        .save_settings(&Settings {
+            language: "en".to_string(),
+            close_after_launch: true,
+            keep_patches: false,
+        })
+        .unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new().with_work());
+    let ctx = context_with_addons(
+        &h,
+        transport,
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons.clone(),
+        NOW,
+    );
+
+    let events = tokio::time::timeout(Duration::from_secs(5), run(ctx, play_no_otp(h.profile)))
+        .await
+        .expect("the launch must finish");
+
+    assert!(
+        states(&events).contains(&FlowState::SupervisingAddons),
+        "staying attached must be visible, got {:?}",
+        states(&events)
+    );
+    assert!(addons.calls().contains(&AddonCall::GameClosed));
+}
+
+/// With nothing owed, detaching is exactly the behavior it was before companions existed.
+#[tokio::test]
+async fn close_after_launch_still_detaches_when_nothing_is_owed() {
+    let h = harness(false);
+    h.store
+        .save_settings(&Settings {
+            language: "en".to_string(),
+            close_after_launch: true,
+            keep_patches: false,
+        })
+        .unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    // Running, so awaiting the game would block forever: detaching must not await it.
+    let launch = Arc::new(FakeLaunchBackend::running());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        transport,
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons.clone(),
+        NOW,
+    );
+
+    let events = tokio::time::timeout(Duration::from_secs(5), run(ctx, play_no_otp(h.profile)))
+        .await
+        .expect("detaching must not block on supervision");
+
+    assert_eq!(states(&events), [FlowState::Launching, FlowState::Running]);
+    assert!(!addons.calls().contains(&AddonCall::GameClosed));
+}
+
+/// A companion that failed has to reach the shell, which only learns about failure from the event
+/// stream. A report nobody reads is the same as no report.
+#[tokio::test]
+async fn a_companion_failure_reaches_the_event_stream() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new().failing("no such file"));
+    let ctx = context_with_addons(
+        &h,
+        transport,
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons,
+        NOW,
+    );
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Error(crate::error::CoreError::Addon { reason, .. }) if reason == "no such file"
+        )),
+        "a failed companion must be reported, got {events:?}"
     );
 }
 
