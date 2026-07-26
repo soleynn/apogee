@@ -9,6 +9,7 @@
 //! supervised. Runner management is Linux-first: on other targets the async methods return
 //! [`RuntimeError::Unsupported`].
 
+mod bench;
 mod catalog;
 #[cfg(target_os = "linux")]
 mod dosdevices;
@@ -37,6 +38,7 @@ use std::sync::Arc;
 
 use apogee_fetch::Fetcher;
 
+pub use bench::{BenchError, BenchStats, FrameLog};
 pub use catalog::{
     ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEY, Catalog, DxvkEntry,
     NvapiRef, Runner, RunnerKind, ToolEntry,
