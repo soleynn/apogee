@@ -156,6 +156,8 @@ pub enum FlowState {
     PatchesPending { count: u32, bytes: u64 },
     /// The installed version is no longer serviced (registration returned 410).
     VersionNotServiced,
+    /// The game's settings are being captured before patches are applied.
+    BackingUp,
     /// Patches are being applied.
     Patching,
     /// The install is being verified and repaired against its block index.

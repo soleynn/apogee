@@ -3,7 +3,6 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
 
 // Restore is unix-only, and so is everything only it needs.
 #[cfg(unix)]
@@ -11,10 +10,7 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::path::Path;
 
-use apogee_addons::backup::{
-    ArchiveRecord, BackupError, BackupReport, BackupSpec, GameConfigOpts, PruneReport, Retain,
-    Selection, SelectionRoot,
-};
+use apogee_addons::backup::{ArchiveRecord, BackupError, BackupReport, PruneReport, Retain};
 #[cfg(unix)]
 use apogee_addons::backup::{RestorePlan, RestoreReport, RootLabel};
 use apogee_addons::{AddonError, Addons, ComponentManifest};
@@ -77,29 +73,47 @@ impl CoreConfig {
 
     /// A config resolved from the XDG base-directory environment: configuration under the config
     /// home, runners and prefixes under the data home, staged patches under the cache home.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let data = xdg_dir("XDG_DATA_HOME", ".local/share");
-        Self {
-            store_dir: xdg_dir("XDG_CONFIG_HOME", ".config").join("apogee"),
+    ///
+    /// # Errors
+    /// [`CoreError::Config`] if a base directory cannot be resolved to an absolute path. The store
+    /// holds account ids and the list of programs the launcher executes, so resolving it relative to
+    /// the working directory would mean the launcher runs whatever happens to sit beside wherever it
+    /// was started from. That is reachable in ordinary setups with no home set: a systemd unit, a
+    /// cron entry, `env -i`, or a stripped container.
+    pub fn try_from_env() -> Result<Self, CoreError> {
+        let data = xdg_dir("XDG_DATA_HOME", ".local/share")?;
+        Ok(Self {
+            store_dir: xdg_dir("XDG_CONFIG_HOME", ".config")?.join("apogee"),
             runners_dir: data.join("apogee/runners"),
             prefixes_dir: data.join("apogee/prefixes"),
-            patch_store: xdg_dir("XDG_CACHE_HOME", ".cache").join("apogee/patches"),
+            patch_store: xdg_dir("XDG_CACHE_HOME", ".cache")?.join("apogee/patches"),
             // Data, not cache: a backup that a cache cleaner may delete is not a backup.
             backups_dir: data.join("apogee/backups"),
-        }
+        })
     }
 }
 
 /// Resolve an XDG base directory from `var`, falling back to `$HOME/<fallback>`.
-fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
-    if let Some(dir) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+///
+/// Refuses anything that is not absolute rather than falling back to a bare relative name.
+fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf, CoreError> {
+    let resolved = if let Some(dir) = std::env::var_os(var).filter(|v| !v.is_empty()) {
         PathBuf::from(dir)
-    } else if let Some(home) = std::env::var_os("HOME") {
+    } else if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         PathBuf::from(home).join(fallback)
     } else {
-        PathBuf::from(fallback)
+        return Err(CoreError::Config {
+            reason: "neither the base directory nor a home directory is set",
+            var: var.to_owned(),
+        });
+    };
+    if !resolved.is_absolute() {
+        return Err(CoreError::Config {
+            reason: "the base directory must be an absolute path",
+            var: var.to_owned(),
+        });
     }
+    Ok(resolved)
 }
 
 /// The launcher core: every subsystem, constructed once and injected.
@@ -326,11 +340,6 @@ impl Core {
         Ok(self.store.delete_account(id)?)
     }
 
-    /// Where this profile's config backups live.
-    fn profile_backups(&self, profile: Uuid) -> PathBuf {
-        self.backups_dir.join(profile.to_string())
-    }
-
     /// Back up the game config in `profile`'s prefix, then prune to the retention setting.
     ///
     /// Returns the report and the trees that were not covered. A prefix run under more than one
@@ -345,42 +354,20 @@ impl Core {
         profile: Uuid,
         note: Option<String>,
     ) -> Result<(BackupReport, Vec<PathBuf>), CoreError> {
-        let profile_record = self.store.load_profile(profile)?;
-        let prefix = self
-            .prefixes_dir
-            .join(crate::flow::prefix_name(&profile_record));
-        let mut trees = apogee_addons::backup::game_config_dirs(&prefix);
-        if trees.is_empty() {
-            return Err(CoreError::Addons(AddonError::Backup(
-                BackupError::MissingRoot { path: prefix },
-            )));
-        }
-        let source = trees.remove(0);
-        let spec = BackupSpec {
-            selection: Selection::new()
-                .with_root(SelectionRoot::game_config(
-                    &source,
-                    GameConfigOpts::default(),
-                ))
-                .map_err(AddonError::Backup)?,
-            dest_dir: self.profile_backups(profile),
-            // The clock is injected, so a test can compare two runs byte for byte.
-            created_at: UNIX_EPOCH + Duration::from_secs((self.clock)()),
-            note,
-        };
-        let report = apogee_addons::backup::create(&spec).map_err(AddonError::Backup)?;
+        let record = self.store.load_profile(profile)?;
         let kept = self
             .store
             .load_settings()
             .map(|s| s.backups_kept)
             .unwrap_or(5);
-        if let Some(keep) = NonZeroUsize::new(kept as usize) {
-            // Pruning after a successful backup, never before: the new archive is the one that makes
-            // dropping an old one safe.
-            apogee_addons::backup::prune(&self.profile_backups(profile), Retain::keep(keep))
-                .map_err(AddonError::Backup)?;
-        }
-        Ok((report, trees))
+        crate::backup::create(
+            &self.prefixes_dir,
+            &self.backups_dir,
+            &record,
+            kept,
+            (self.clock)(),
+            note,
+        )
     }
 
     /// This profile's backups, newest first.
@@ -388,7 +375,8 @@ impl Core {
     /// # Errors
     /// [`CoreError::Addons`] if the backup directory cannot be read.
     pub fn backups(&self, profile: Uuid) -> Result<Vec<ArchiveRecord>, CoreError> {
-        let dir = self.profile_backups(profile);
+        let record = self.store.load_profile(profile)?;
+        let dir = crate::backup::profile_dir(&self.backups_dir, &record);
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
@@ -443,10 +431,9 @@ impl Core {
         profile: Uuid,
         keep: NonZeroUsize,
     ) -> Result<PruneReport, CoreError> {
-        Ok(
-            apogee_addons::backup::prune(&self.profile_backups(profile), Retain::keep(keep))
-                .map_err(AddonError::Backup)?,
-        )
+        let record = self.store.load_profile(profile)?;
+        let dir = crate::backup::profile_dir(&self.backups_dir, &record);
+        Ok(apogee_addons::backup::prune(&dir, Retain::keep(keep)).map_err(AddonError::Backup)?)
     }
 
     /// Run `cmd`, yielding the events it produces.
@@ -484,6 +471,7 @@ impl Core {
             clock: self.clock.clone(),
             computer_id: self.computer_id,
             prefixes_dir: self.prefixes_dir.clone(),
+            backups_dir: self.backups_dir.clone(),
         }
     }
 }

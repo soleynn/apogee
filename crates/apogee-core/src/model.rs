@@ -135,6 +135,9 @@ pub struct Settings {
     pub keep_patches: bool,
     /// How many config backups to keep per profile. Nothing is pruned until a backup is taken.
     pub backups_kept: u32,
+    /// Capture the game's settings before applying patches. On by default: a capture is tens of
+    /// kilobytes, and a patch is the moment settings are most likely to be rewritten.
+    pub backup_before_patch: bool,
 }
 
 impl Default for Settings {
@@ -144,6 +147,7 @@ impl Default for Settings {
             close_after_launch: false,
             keep_patches: false,
             backups_kept: 5,
+            backup_before_patch: true,
         }
     }
 }

@@ -9,6 +9,7 @@
 //! change; its command arms are stubbed today.
 
 mod addons;
+mod backup;
 mod command;
 mod composition;
 mod error;

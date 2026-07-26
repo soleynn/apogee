@@ -63,6 +63,7 @@ pub(crate) struct FlowContext {
     pub(crate) clock: Clock,
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
+    pub(crate) backups_dir: std::path::PathBuf,
 }
 
 /// Run `cmd` to completion, emitting its events on `tx`. A failure becomes an [`Event::Error`].
@@ -337,7 +338,7 @@ async fn patch_to_current(
     let mut patching_announced = false;
 
     if mode == InstallMode::FromNothing {
-        announce_patching(tx, &mut patching_announced);
+        announce_patching(ctx, profile, tx, &mut patching_announced);
         ensure_boot_current(ctx, profile, mode, tx, cancel).await?;
     }
 
@@ -351,7 +352,7 @@ async fn patch_to_current(
                 return Ok(None);
             }
             Registration::NeedsBootPatch => {
-                announce_patching(tx, &mut patching_announced);
+                announce_patching(ctx, profile, tx, &mut patching_announced);
                 if !ensure_boot_current(ctx, profile, mode, tx, cancel).await? {
                     // Registration demands a boot patch, but the boot server offers none: a
                     // contradiction (tampered boot EXEs, or a stuck server). Stop rather than spin.
@@ -369,7 +370,7 @@ async fn patch_to_current(
                     ctx.store.save_uid_cache(profile.account, &session)?;
                     return Ok(Some(session));
                 }
-                announce_patching(tx, &mut patching_announced);
+                announce_patching(ctx, profile, tx, &mut patching_announced);
                 install_game_patches(
                     ctx,
                     profile,
@@ -442,12 +443,54 @@ async fn install_game_patches(
     Ok(())
 }
 
-/// Emit [`FlowState::Patching`] the first time a flow reaches a patch operation.
-fn announce_patching(tx: &UnboundedSender<Event>, announced: &mut bool) {
-    if !*announced {
-        emit(tx, FlowState::Patching);
-        *announced = true;
+/// Emit [`FlowState::Patching`] the first time a flow reaches a patch operation, capturing the game's
+/// settings first when that is asked for.
+///
+/// This is the one place every patch path passes through, which is what makes it the place to capture
+/// from: a patch is the moment settings are most likely to be rewritten, and it happens once per flow
+/// rather than once per repo.
+///
+/// A capture that fails never fails the patch. It is reported and the patch proceeds, because
+/// refusing to update a game over a settings snapshot would be the worse trade, and a silent skip
+/// would leave the user believing they had one.
+fn announce_patching(
+    ctx: &FlowContext,
+    profile: &Profile,
+    tx: &UnboundedSender<Event>,
+    announced: &mut bool,
+) {
+    if *announced {
+        return;
     }
+    *announced = true;
+
+    let settings = ctx.store.load_settings().unwrap_or_default();
+    // A prefix the game has never written into has nothing to capture. That is the ordinary state
+    // before a first launch, not a failure, so it is neither announced nor reported: doing either
+    // would tell the user a backup was attempted, and reporting it would fail an install that is
+    // going perfectly well.
+    let has_config =
+        !apogee_addons::backup::game_config_dirs(&ctx.prefixes_dir.join(prefix_name(profile)))
+            .is_empty();
+    if settings.backup_before_patch && has_config {
+        emit(tx, FlowState::BackingUp);
+        match crate::backup::create(
+            &ctx.prefixes_dir,
+            &ctx.backups_dir,
+            profile,
+            settings.backups_kept,
+            (ctx.clock)(),
+            Some("before patching".to_owned()),
+        ) {
+            Ok((report, _)) => {
+                tracing::debug!(archive = ?report.archive, "captured the game settings");
+            }
+            Err(error) => {
+                let _ = tx.send(Event::Error(error));
+            }
+        }
+    }
+    emit(tx, FlowState::Patching);
 }
 
 /// Build the registration version report for `mode`: strict for an update (a missing repo is a fault),
