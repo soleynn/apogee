@@ -5,12 +5,12 @@
 
 use std::error::Error;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, Command, Core, CoreConfig, Event, OtpSource, PatchProgress, Profile,
-    Region, RunnerSelection, Secret, Uuid,
+    Account, AccountKind, BenchStats, Command, Core, CoreConfig, Event, FrameLog, OtpSource,
+    PatchProgress, Profile, Region, RunnerSelection, Secret, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -48,6 +48,24 @@ enum Commands {
     Install(PlayArgs),
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
     Repair(TargetArgs),
+    /// Frame-consistency analysis over MangoHud frametime logs.
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchAction {
+    /// Compute frame-consistency metrics from one or more MangoHud frametime CSV logs.
+    Analyze(BenchAnalyzeArgs),
+}
+
+#[derive(Args)]
+struct BenchAnalyzeArgs {
+    /// MangoHud CSV files, or directories to scan (non-recursively) for `*.csv`.
+    #[arg(required = true)]
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -173,6 +191,99 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             let profile = resolve_profile(&core, &args.profile)?.id;
             Ok(drive(&core, Command::Repair { profile }).await)
         }
+        Commands::Bench { action } => bench(action),
+    }
+}
+
+/// Frame-consistency analysis over MangoHud frametime logs. Offline: reads CSVs and prints a table;
+/// the metrics themselves live in the library.
+fn bench(action: BenchAction) -> Result<ExitCode, CliError> {
+    match action {
+        BenchAction::Analyze(args) => bench_analyze(&args.paths),
+    }
+}
+
+fn bench_analyze(paths: &[PathBuf]) -> Result<ExitCode, CliError> {
+    let files = collect_csv_files(paths)?;
+    if files.is_empty() {
+        return Err("no CSV files found in the given paths".into());
+    }
+    println!(
+        "{:<32}  {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>8}  {:>7}",
+        "file", "frames", "dur(s)", "avg", "1%low", "0.1%low", "ft(ms)", "ft(sd)"
+    );
+    let mut failed = false;
+    for file in files {
+        let name = file.file_name().map_or_else(
+            || file.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        match analyze_one(&file) {
+            Ok(s) => println!(
+                "{:<32}  {:>6}  {:>7.3}  {:>7.2}  {:>7.2}  {:>8.2}  {:>8.3}  {:>7.3}",
+                truncate(&name, 32),
+                s.frame_count,
+                s.duration_s,
+                s.average_fps,
+                s.low_1pct,
+                s.low_0_1pct,
+                s.frametime_mean_ms,
+                s.frametime_stddev_ms,
+            ),
+            Err(err) => {
+                failed = true;
+                println!("{:<32}  error: {err}", truncate(&name, 32));
+            }
+        }
+    }
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Parse one MangoHud CSV into frame-consistency metrics.
+fn analyze_one(file: &Path) -> Result<BenchStats, CliError> {
+    let text = std::fs::read_to_string(file)?;
+    Ok(FrameLog::from_mangohud_csv(&text)?.stats()?)
+}
+
+/// Expand the given paths: files are kept as-is, directories are scanned (non-recursively, sorted)
+/// for `*.csv`.
+fn collect_csv_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(path)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+                        // MangoHud writes a companion `<name>_summary.csv` (no frametime rows) next
+                        // to each frametime log; skip it so a dir scan hits only the real logs.
+                        && !p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with("_summary.csv"))
+                })
+                .collect();
+            found.sort();
+            files.extend(found);
+        } else {
+            files.push(path.clone());
+        }
+    }
+    Ok(files)
+}
+
+/// Shorten a display string to at most `max` characters, marking the cut with a trailing `..`.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        s.chars().take(max - 2).collect::<String>() + ".."
     }
 }
 
