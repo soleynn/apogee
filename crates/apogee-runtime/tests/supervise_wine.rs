@@ -3,8 +3,8 @@
 //!
 //! The hermetic `supervise` test covers the scanner logic with a script runner; this one proves the
 //! same path against **stock wine**: that wine sets `/proc/<pid>/comm` to the PE basename, that the
-//! scanner resolves the game, that a targeted kill stops it, and that `kill_prefix` (`wineserver -k`)
-//! is the separate broad stop. The stub is a tiny PE compiled with mingw at test time.
+//! scanner resolves the game, that a targeted kill stops it, and that `kill_prefix` is the separate
+//! broad stop. The stub is a tiny PE compiled with mingw at test time.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -146,6 +146,6 @@ async fn kill_prefix_is_the_separate_broad_stop() {
     let pid = session.game_pid();
     let prefix = session.prefix().clone();
 
-    runtime.kill_prefix(&prefix).await.expect("wineserver -k");
+    runtime.kill_prefix(&prefix).await.expect("broad stop");
     assert!(wait_gone(pid).await, "kill_prefix stopped the game");
 }
