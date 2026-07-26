@@ -213,6 +213,75 @@ impl Selected {
     }
 }
 
+/// The directory name the game writes its settings into, under the user's documents.
+const GAME_CONFIG_DIR: &str = "FINAL FANTASY XIV - A Realm Reborn";
+
+/// Users that never own a config tree.
+const NOT_A_USER: &[&str] = &["Public"];
+
+/// Every game config tree inside `prefix`, most recently written first.
+///
+/// A search rather than a path join, and a list rather than one answer. The user directory inside a
+/// prefix is named after whoever the runner claims to be, which differs between a plain wine prefix
+/// and a Proton one, and a prefix that has been run under both holds a tree for each. Proton also
+/// relocates the whole prefix a level down, so the drive is either directly inside or one `pfx`
+/// deeper.
+///
+/// Returning them all is deliberate: on a real prefix run under two runners, both trees hold a full
+/// set of settings, and choosing between them by name would quietly back up whichever sorted first.
+/// The caller decides, and the order here gives it something better than alphabetical to decide with:
+/// the tree the game wrote to last is the one it is using.
+///
+/// Empty when the game has never written a config, which is the state of a prefix that has only been
+/// prepared.
+#[must_use]
+pub fn game_config_dirs(prefix: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<(std::time::SystemTime, PathBuf, PathBuf)> = Vec::new();
+    // The relocation Proton applies is checked as well as the direct path, so a plain prefix whose
+    // own directory is named `pfx` still resolves.
+    for root in [prefix.to_path_buf(), prefix.join("pfx")] {
+        let Ok(listing) = std::fs::read_dir(root.join("drive_c").join("users")) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            let Some(user) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if NOT_A_USER
+                .iter()
+                .any(|skip| user.eq_ignore_ascii_case(skip))
+            {
+                continue;
+            }
+            let candidate = entry
+                .path()
+                .join("Documents")
+                .join("My Games")
+                .join(GAME_CONFIG_DIR);
+            if !candidate.is_dir() {
+                continue;
+            }
+            // The root config file is what the game rewrites on exit, so it dates the tree far better
+            // than the directory's own timestamp.
+            let written = std::fs::metadata(candidate.join("FFXIV.cfg"))
+                .or_else(|_| std::fs::metadata(&candidate))
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            // Resolved before comparing: a Proton prefix links `pfx` back at itself, so the same
+            // tree is reachable under two names and would otherwise be reported twice.
+            let key = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            if !found.iter().any(|(_, seen, _)| *seen == key) {
+                found.push((written, key, candidate));
+            }
+        }
+    }
+    // Newest first, then by path, so the order is total and does not shift between runs.
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, _, path)| path).collect()
+}
+
 /// The set of source trees one backup covers.
 #[derive(Debug, Clone, Default)]
 pub struct Selection {

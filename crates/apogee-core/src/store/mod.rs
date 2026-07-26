@@ -117,7 +117,7 @@ impl Migrate for UidCacheEntry {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 3;
+    const CURRENT_VERSION: u32 = 4;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -132,6 +132,11 @@ impl Migrate for Settings {
             2 => {
                 obj.entry("keep_patches")
                     .or_insert(serde_json::Value::Bool(false));
+            }
+            // Gained the config-backup retention count.
+            3 => {
+                obj.entry("backups_kept")
+                    .or_insert(serde_json::Value::from(5));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }

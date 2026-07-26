@@ -1,9 +1,23 @@
 //! The composition root: the one place every subsystem is constructed, tuned, and injected.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
-use apogee_addons::{Addons, ComponentManifest};
+// Restore is unix-only, and so is everything only it needs.
+#[cfg(unix)]
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::path::Path;
+
+use apogee_addons::backup::{
+    ArchiveRecord, BackupError, BackupReport, BackupSpec, GameConfigOpts, PruneReport, Retain,
+    Selection, SelectionRoot,
+};
+#[cfg(unix)]
+use apogee_addons::backup::{RestorePlan, RestoreReport, RootLabel};
+use apogee_addons::{AddonError, Addons, ComponentManifest};
 
 use crate::addons::AddonBackend;
 use crate::addons::addons_backend::AddonsBackend;
@@ -42,6 +56,8 @@ pub struct CoreConfig {
     pub prefixes_dir: PathBuf,
     /// Where downloaded patches are staged.
     pub patch_store: PathBuf,
+    /// Where config backups are written, one directory per profile.
+    pub backups_dir: PathBuf,
 }
 
 impl CoreConfig {
@@ -55,6 +71,7 @@ impl CoreConfig {
             runners_dir: base.join("runners"),
             prefixes_dir: base.join("prefixes"),
             patch_store: base.join("patches"),
+            backups_dir: base.join("backups"),
         }
     }
 
@@ -68,6 +85,8 @@ impl CoreConfig {
             runners_dir: data.join("apogee/runners"),
             prefixes_dir: data.join("apogee/prefixes"),
             patch_store: xdg_dir("XDG_CACHE_HOME", ".cache").join("apogee/patches"),
+            // Data, not cache: a backup that a cache cleaner may delete is not a backup.
+            backups_dir: data.join("apogee/backups"),
         }
     }
 }
@@ -109,6 +128,7 @@ pub struct Core {
     clock: Clock,
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
+    backups_dir: PathBuf,
 }
 
 impl Core {
@@ -149,6 +169,7 @@ impl Core {
             runners_dir,
             prefixes_dir,
             patch_store,
+            backups_dir,
         } = config;
         let store = Store::new(store_dir);
         // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
@@ -211,6 +232,7 @@ impl Core {
             computer_id: host::computer_id(),
             clock: host::system_clock(),
             prefixes_dir,
+            backups_dir,
         })
     }
 
@@ -302,6 +324,129 @@ impl Core {
     /// Returns a [`CoreError::Store`] if no such account exists or on an IO failure.
     pub fn delete_account(&self, id: Uuid) -> Result<(), CoreError> {
         Ok(self.store.delete_account(id)?)
+    }
+
+    /// Where this profile's config backups live.
+    fn profile_backups(&self, profile: Uuid) -> PathBuf {
+        self.backups_dir.join(profile.to_string())
+    }
+
+    /// Back up the game config in `profile`'s prefix, then prune to the retention setting.
+    ///
+    /// Returns the report and the trees that were not covered. A prefix run under more than one
+    /// runner can hold more than one config tree; the one the game wrote to last is the one backed
+    /// up, and the rest are named rather than silently ignored.
+    ///
+    /// # Errors
+    /// [`CoreError::Store`] if the profile or settings cannot be read, and [`CoreError::Addons`] for
+    /// anything the backup itself refuses, including a prefix the game has never written into.
+    pub fn backup_config(
+        &self,
+        profile: Uuid,
+        note: Option<String>,
+    ) -> Result<(BackupReport, Vec<PathBuf>), CoreError> {
+        let profile_record = self.store.load_profile(profile)?;
+        let prefix = self
+            .prefixes_dir
+            .join(crate::flow::prefix_name(&profile_record));
+        let mut trees = apogee_addons::backup::game_config_dirs(&prefix);
+        if trees.is_empty() {
+            return Err(CoreError::Addons(AddonError::Backup(
+                BackupError::MissingRoot { path: prefix },
+            )));
+        }
+        let source = trees.remove(0);
+        let spec = BackupSpec {
+            selection: Selection::new()
+                .with_root(SelectionRoot::game_config(
+                    &source,
+                    GameConfigOpts::default(),
+                ))
+                .map_err(AddonError::Backup)?,
+            dest_dir: self.profile_backups(profile),
+            // The clock is injected, so a test can compare two runs byte for byte.
+            created_at: UNIX_EPOCH + Duration::from_secs((self.clock)()),
+            note,
+        };
+        let report = apogee_addons::backup::create(&spec).map_err(AddonError::Backup)?;
+        let kept = self
+            .store
+            .load_settings()
+            .map(|s| s.backups_kept)
+            .unwrap_or(5);
+        if let Some(keep) = NonZeroUsize::new(kept as usize) {
+            // Pruning after a successful backup, never before: the new archive is the one that makes
+            // dropping an old one safe.
+            apogee_addons::backup::prune(&self.profile_backups(profile), Retain::keep(keep))
+                .map_err(AddonError::Backup)?;
+        }
+        Ok((report, trees))
+    }
+
+    /// This profile's backups, newest first.
+    ///
+    /// # Errors
+    /// [`CoreError::Addons`] if the backup directory cannot be read.
+    pub fn backups(&self, profile: Uuid) -> Result<Vec<ArchiveRecord>, CoreError> {
+        let dir = self.profile_backups(profile);
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        // Retention's own identification, so listing and pruning agree on what is ours.
+        let plan = apogee_addons::backup::plan_prune(&dir, Retain::keep(NonZeroUsize::MAX))
+            .map_err(AddonError::Backup)?;
+        Ok(plan.ours)
+    }
+
+    /// Restore `archive` into the game config tree of `profile`'s prefix.
+    ///
+    ///
+    /// The tree that was there is renamed aside rather than deleted, so this is undone with one
+    /// rename; the report says where it went.
+    ///
+    /// # Errors
+    /// [`CoreError::Store`] if the profile cannot be read, and [`CoreError::Addons`] for anything the
+    /// restore refuses.
+    #[cfg(unix)]
+    pub fn restore_config(
+        &self,
+        profile: Uuid,
+        archive: &Path,
+    ) -> Result<RestoreReport, CoreError> {
+        let profile_record = self.store.load_profile(profile)?;
+        let prefix = self
+            .prefixes_dir
+            .join(crate::flow::prefix_name(&profile_record));
+        let target = apogee_addons::backup::game_config_dirs(&prefix)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                CoreError::Addons(AddonError::Backup(BackupError::MissingRoot {
+                    path: prefix.clone(),
+                }))
+            })?;
+        let mut targets = BTreeMap::new();
+        targets.insert(RootLabel::User, target);
+        let plan = RestorePlan {
+            archive: archive.to_path_buf(),
+            targets,
+        };
+        Ok(apogee_addons::backup::restore(&plan).map_err(AddonError::Backup)?)
+    }
+
+    /// Prune `profile`'s backups to `keep`, deleting only archives this launcher wrote.
+    ///
+    /// # Errors
+    /// [`CoreError::Addons`] if the directory cannot be read or an archive cannot be removed.
+    pub fn prune_backups(
+        &self,
+        profile: Uuid,
+        keep: NonZeroUsize,
+    ) -> Result<PruneReport, CoreError> {
+        Ok(
+            apogee_addons::backup::prune(&self.profile_backups(profile), Retain::keep(keep))
+                .map_err(AddonError::Backup)?,
+        )
     }
 
     /// Run `cmd`, yielding the events it produces.

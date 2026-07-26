@@ -610,6 +610,7 @@ async fn close_after_launch_detaches_without_supervising() {
             language: "en".to_string(),
             close_after_launch: true,
             keep_patches: false,
+            backups_kept: 5,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
@@ -728,6 +729,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
             language: "en".to_string(),
             close_after_launch: true,
             keep_patches: false,
+            backups_kept: 5,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
@@ -763,6 +765,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
             language: "en".to_string(),
             close_after_launch: true,
             keep_patches: false,
+            backups_kept: 5,
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
