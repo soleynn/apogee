@@ -12,6 +12,7 @@ is tagged with its change type. Versioning aims to follow
 - Prefix lifecycle, health check, and in-process path translation (#64) _(added)_
 - Environment matrix and DXVK install (#65) _(added)_
 - Proton prefix init and broad stop under umu 1.4.1 (#66) _(fixed)_
+- Frame-consistency metrics and a bench analyze command (#67) _(added)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
