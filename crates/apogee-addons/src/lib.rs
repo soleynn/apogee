@@ -13,6 +13,10 @@ use thiserror::Error;
 use apogee_fetch::{FetchError, Fetcher};
 use apogee_runtime::{GameSession, LaunchPlan, Prefix, Progress, Runtime};
 
+pub mod backup;
+
+pub use backup::{BackupError, Selection};
+
 /// Crate result over [`AddonError`].
 pub type Result<T> = std::result::Result<T, AddonError>;
 
@@ -62,12 +66,8 @@ pub enum AddonError {
         #[source]
         source: std::io::Error,
     },
-    #[error("backup of {path:?} failed")]
-    Backup {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error("config backup failed")]
+    Backup(#[from] BackupError),
     #[error("unsupported: {what}")]
     Unsupported { what: &'static str },
 }
