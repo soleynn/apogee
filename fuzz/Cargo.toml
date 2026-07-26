@@ -20,6 +20,7 @@ apogee-sqpack = { path = "../crates/apogee-sqpack" }
 apogee-zipatch = { path = "../crates/apogee-zipatch" }
 apogee-fetch = { path = "../crates/apogee-fetch", features = ["fuzzing"] }
 apogee-patcher = { path = "../crates/apogee-patcher" }
+apogee-addons = { path = "../crates/apogee-addons" }
 
 [[bin]]
 name = "patchlist"
@@ -108,6 +109,13 @@ bench = false
 [[bin]]
 name = "index_manifest"
 path = "fuzz_targets/index_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "component_manifest"
+path = "fuzz_targets/component_manifest.rs"
 test = false
 doc = false
 bench = false

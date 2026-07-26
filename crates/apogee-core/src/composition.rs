@@ -13,7 +13,7 @@ use std::path::Path;
 use apogee_addons::backup::{ArchiveRecord, BackupError, BackupReport, PruneReport, Retain};
 #[cfg(unix)]
 use apogee_addons::backup::{RestorePlan, RestoreReport, RootLabel};
-use apogee_addons::{AddonError, Addons, ComponentManifest};
+use apogee_addons::{AddonError, AddonPaths, Addons};
 
 use crate::addons::AddonBackend;
 use crate::addons::addons_backend::AddonsBackend;
@@ -54,6 +54,9 @@ pub struct CoreConfig {
     pub patch_store: PathBuf,
     /// Where config backups are written, one directory per profile.
     pub backups_dir: PathBuf,
+    /// Where natively-installed companion components are unpacked, one directory per component. Shared
+    /// across profiles, because a native tool runs on the host rather than in any one prefix.
+    pub components_dir: PathBuf,
 }
 
 impl CoreConfig {
@@ -68,6 +71,7 @@ impl CoreConfig {
             prefixes_dir: base.join("prefixes"),
             patch_store: base.join("patches"),
             backups_dir: base.join("backups"),
+            components_dir: base.join("components"),
         }
     }
 
@@ -89,6 +93,9 @@ impl CoreConfig {
             patch_store: xdg_dir("XDG_CACHE_HOME", ".cache")?.join("apogee/patches"),
             // Data, not cache: a backup that a cache cleaner may delete is not a backup.
             backups_dir: data.join("apogee/backups"),
+            // Data too: a component the launcher is configured to start is not a cache entry, and a
+            // cleaner removing one would leave a profile pointing at a program that is gone.
+            components_dir: data.join("apogee/components"),
         })
     }
 }
@@ -184,6 +191,7 @@ impl Core {
             prefixes_dir,
             patch_store,
             backups_dir,
+            components_dir,
         } = config;
         let store = Store::new(store_dir);
         // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
@@ -228,7 +236,9 @@ impl Core {
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),
-            ComponentManifest::default(),
+            AddonPaths {
+                components: components_dir,
+            },
         );
         let secrets = Secrets::new();
         let otp = Otp::new();

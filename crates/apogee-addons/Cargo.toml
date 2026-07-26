@@ -13,7 +13,12 @@ serde_json.workspace = true
 sha2.workspace = true
 zip.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tempfile.workspace = true
+url.workspace = true
+# The signed component manifest: parse its JSON and verify the Ed25519 signature against the compiled-in
+# key before any sha256 pin inside is trusted.
+ed25519-dalek.workspace = true
 apogee-runtime = { path = "../apogee-runtime" }
 apogee-fetch = { path = "../apogee-fetch" }
 
@@ -22,9 +27,22 @@ apogee-fetch = { path = "../apogee-fetch" }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 
+[features]
+# Gates tests that need a real host `wine`; run only in the wine-present CI job.
+wine-integration = []
+
 [dev-dependencies]
 insta.workspace = true
-apogee-fetch = { path = "../apogee-fetch" }
+apogee-test-support = { path = "../apogee-test-support" }
+tokio-util.workspace = true
+serial_test.workspace = true
+# A prefix handle over a scratch directory, so the install tests need no real wine.
+apogee-runtime = { path = "../apogee-runtime", features = ["testing"] }
+zip.workspace = true
+
+[[test]]
+name = "verb_wine"
+required-features = ["wine-integration"]
 
 [lints]
 workspace = true

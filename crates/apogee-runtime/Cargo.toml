@@ -32,6 +32,9 @@ rustix = { workspace = true, features = ["process"] }
 [features]
 # Gates tests that need a real host `wine`; run only in the wine-present CI job.
 wine-integration = []
+# Exposes a prefix handle over an existing directory, so a hermetic test in a crate that builds on this
+# one can have a prefix without a real `wineboot`. Never enabled by a shipping build.
+testing = []
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }

@@ -79,6 +79,26 @@ impl Prefix {
         Self { path, runner }
     }
 
+    /// A prefix handle over an existing directory, for tests in crates that build on this one.
+    ///
+    /// The ordinary constructors go through `wineboot`, so a hermetic test in a consumer crate has no
+    /// other way to obtain a prefix. Behind a feature, so a shipping build cannot reach it and cannot
+    /// hand itself a prefix that was never initialized.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn for_testing(
+        path: impl Into<PathBuf>,
+        runner_dir: impl Into<PathBuf>,
+        kind: RunnerKind,
+        name: &str,
+        version: &str,
+    ) -> Self {
+        Self::new(
+            path.into(),
+            RunnerHandle::new(runner_dir.into(), kind, name, version),
+        )
+    }
+
     /// The prefix directory (the `WINEPREFIX`).
     #[must_use]
     pub fn path(&self) -> &Path {

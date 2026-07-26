@@ -146,7 +146,7 @@ fn relay(events: &UnboundedSender<Event>) -> (AddonEvents, JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apogee_addons::{Addons, ComponentManifest};
+    use apogee_addons::{AddonPaths, Addons};
     use apogee_runtime::{Runtime, RuntimePaths};
 
     fn backend() -> Result<AddonsBackend, Box<dyn std::error::Error>> {
@@ -155,7 +155,7 @@ mod tests {
         Ok(AddonsBackend::new(Addons::new(
             runtime,
             fetcher,
-            ComponentManifest::default(),
+            AddonPaths::default(),
         )))
     }
 

@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "ACT",
+      "version": "3.8.5.288",
+      "kind": "prefix_tool",
+      "url": "https://github.com/EQAditu/AdvancedCombatTracker/releases/download/3.8.5.288/ACTv3.zip",
+      "sha256": "1a0ca91375d79daf3d2cbbb2920c90dbc40f3be2421cdc6765d93e27bf25e4b0",
+      "archive": { "format": "zip" },
+      "into": "apogee/ACT",
+      "verbs": ["no-desktop-integration"],
+      "caveats": [
+        "Needs Microsoft .NET Framework in the prefix. Apogee does not install it: the vendor installer is opaque, it wants Wine's Mono removed and the reported Windows version changed, and Proton undoes a partial install of it on the next prefix upgrade. Wine's own Mono runs the window but not the plugins. Use winetricks or protontricks against this prefix.",
+        "Install the FFXIV parsing plugin from ACT's own Get Plugins dialog rather than expecting Apogee to pin one. It is locked to the game patch and is reissued on patch day, so a pinned copy is stale by design.",
+        "Combat data now reaches the plugin only by injecting a helper library into the running game, which is why this is installed into the game's own prefix rather than beside it. Reading the game's network traffic directly, with or without a packet driver, stopped working upstream when the game obfuscated its packets, so the older advice to switch capture modes no longer applies. Whether the injection itself works under Wine is not established."
+      ],
+      "register": {
+        "program": "Advanced Combat Tracker.exe",
+        "args": ["-portable"],
+        "trigger": "with_game"
+      }
+    },
+    {
+      "name": "OverlayPlugin",
+      "version": "0.19.101",
+      "kind": "prefix_tool",
+      "url": "https://github.com/OverlayPlugin/OverlayPlugin/releases/download/v0.19.101/OverlayPlugin-0.19.101.zip",
+      "sha256": "ffa627ed168009b04237dc07a42e4aee23947e2136ad198679da1d56f3fd7064",
+      "archive": { "format": "zip" },
+      "into": "apogee/ACT/Plugins",
+      "verbs": ["no-desktop-integration"],
+      "caveats": [
+        "Add it from ACT's own Plugins tab after installing. ACT records every plugin by the path it was pointed at, so there is no folder Apogee can drop it into that enables it.",
+        "Fetches a Chromium bundle and a Visual C++ redistributable itself the first time an overlay is shown. How well that renders under Wine is not established.",
+        "Tools outside the prefix read game data from its WebSocket server, which stays off until it is started from its own WSServer tab. The default there is ws://127.0.0.1:10501/ws."
+      ]
+    },
+    {
+      "name": "Triggevent",
+      "version": "1.0-10",
+      "kind": "external_native",
+      "url": "https://github.com/xpdota/event-trigger/releases/download/v1.0-10/triggevent-linux.zip",
+      "sha256": "b4a35fb16112c2f654e6c7c72a2b039e0ff96ef333ac594045454506232a6cd2",
+      "archive": { "format": "zip", "strip_prefix": "triggevent" },
+      "into": "Triggevent",
+      "caveats": [
+        "Captures no game data of its own. Everything it reacts to arrives over a WebSocket from ACT and OverlayPlugin, so it needs both installed in the prefix and OverlayPlugin's WSServer started.",
+        "Needs Java 17 on the host, and exactly 17: its own launcher refuses newer ones. The runtime must not be a headless build.",
+        "This is the project's last tagged release. It replaces its own jars from the project's rolling update channel the first time it runs, and that channel does not carry its launcher scripts, so the scripts stay at this version.",
+        "Overlay click-through needs X11, or XWayland under a Wayland session."
+      ],
+      "register": {
+        "program": "triggevent.sh",
+        "args": [],
+        "trigger": "with_game"
+      }
+    }
+  ],
+  "verbs": [
+    {
+      "name": "no-desktop-integration",
+      "reason": "Wine writes desktop entries and file associations into the host session when a program in the prefix creates a shortcut. A prefix the launcher manages has no business adding entries to the user's application menu, so this is applied before any Windows component is installed into one.",
+      "ops": [
+        {
+          "registry": {
+            "key": "HKCU\\Software\\Wine\\DllOverrides",
+            "name": "winemenubuilder.exe",
+            "type": "disabled"
+          }
+        }
+      ]
+    }
+  ]
+}

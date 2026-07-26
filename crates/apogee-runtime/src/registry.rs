@@ -84,13 +84,30 @@ impl RegistryValue {
 }
 
 impl RegistryEdit {
+    /// Why this edit is not a shape this primitive will write, or `Ok` when it is.
+    ///
+    /// Public because a manifest that describes registry edits wants to reject a bad row when it is
+    /// parsed, naming the row, rather than at the moment of the write. Returns the reason rather than a
+    /// [`RuntimeError`] so a caller can report it in its own taxonomy.
+    ///
+    /// Not injection defence: the composed argv has no shell to escape into. It is there so a typo is a
+    /// named error at the point of the mistake, rather than a non-zero exit from `reg` or, worse, a
+    /// write that lands somewhere plausible.
+    ///
+    /// # Errors
+    /// The reason, when the key is not rooted at a registry root, a path component or the value name is
+    /// empty, a leading slash would be read as an option, the value is empty without saying so, or
+    /// anything carries a control character.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.check()
+    }
+
     /// The program invocation that applies this edit.
     ///
     /// # Errors
-    /// [`RuntimeError::RegistryKey`] if the key is not rooted at a registry root, or if the key, name,
-    /// or value carries something `reg` would reinterpret rather than store.
+    /// [`RuntimeError::RegistryKey`] if [`Self::validate`] refuses it.
     pub(crate) fn command(&self) -> Result<ProgramInPrefix, RuntimeError> {
-        self.check()?;
+        self.check().map_err(|reason| self.rejected(reason))?;
         Ok(ProgramInPrefix::new(
             "reg",
             vec![
@@ -111,12 +128,7 @@ impl RegistryEdit {
         ))
     }
 
-    /// Refuse an edit that is not the shape this primitive promises.
-    ///
-    /// Not injection defence: the argv has no shell to escape into. It is there so a manifest typo is
-    /// a named error at the point of the mistake, rather than a non-zero exit from `reg` or, worse, a
-    /// write that lands somewhere plausible.
-    fn check(&self) -> Result<(), RuntimeError> {
+    fn check(&self) -> Result<(), &'static str> {
         let root = self
             .key
             .split('\\')
@@ -124,26 +136,26 @@ impl RegistryEdit {
             .unwrap_or_default()
             .to_ascii_uppercase();
         if !ROOTS.contains(&root.as_str()) {
-            return Err(self.rejected("it does not start at a registry root"));
+            return Err("it does not start at a registry root");
         }
         if self.key.split('\\').skip(1).any(str::is_empty) {
-            return Err(self.rejected("it has an empty path component"));
+            return Err("it has an empty path component");
         }
         if self.name.is_empty() {
-            return Err(self.rejected("the value name is empty"));
+            return Err("the value name is empty");
         }
         // `reg` reads a leading slash as a flag, so a name or key that starts with one would be
         // swallowed as an option rather than used.
         if self.name.starts_with('/') || self.key.starts_with('/') {
-            return Err(self.rejected("a leading slash would be read as an option"));
+            return Err("a leading slash would be read as an option");
         }
         let data = self.value.data();
         if data.is_empty() && self.value != RegistryValue::Disabled {
-            return Err(self.rejected("the value is empty"));
+            return Err("the value is empty");
         }
         for text in [&self.key, &self.name, &data] {
             if text.chars().any(|c| c.is_control()) {
-                return Err(self.rejected("it carries a control character"));
+                return Err("it carries a control character");
             }
         }
         Ok(())
