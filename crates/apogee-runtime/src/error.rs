@@ -91,7 +91,7 @@ pub enum CatalogError {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SetupStep {
-    /// `wineboot -i` (or umu `createprefix`) on a brand-new prefix.
+    /// `wineboot -i` on a brand-new prefix.
     WinebootInit,
     /// `wineboot -u`: a non-destructive update that regenerates missing prefix structure.
     WinebootUpdate,
