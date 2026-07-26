@@ -17,6 +17,7 @@ mod confine;
 mod error;
 mod manifest;
 mod restore;
+mod retain;
 mod root;
 mod rule;
 mod walk;
@@ -33,6 +34,7 @@ pub use manifest::{
     MANIFEST_ENTRY, RootRecord, RuleRecord,
 };
 pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
+pub use retain::{ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, plan_prune, prune};
 pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, SelectionRoot};
 pub use rule::{EntryKind, Expect, NameMatch, Rule};
 
