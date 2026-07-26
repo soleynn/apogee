@@ -368,7 +368,10 @@ async fn install_native(
 ) -> Result<()> {
     let marker_dir = paths.components.join(NATIVE_INSTALLED_DIR);
     let marker = marker_dir.join(format!("{}-{}", tool.name, tool.version));
-    if marker.is_file() {
+    // The destination is checked as well as the marker. A marker alone would make a deleted component
+    // directory unrecoverable: the fetch would be skipped, the registration check would then fail on the
+    // missing program, and every retry would take the same path forever.
+    if marker.is_file() && dest.is_dir() {
         return Ok(());
     }
     artifact::install(

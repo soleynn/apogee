@@ -267,6 +267,28 @@ async fn a_native_component_is_fetched_once_across_prefixes() {
         1,
         "the second prefix reused the host install"
     );
+
+    // A marker on its own would make a deleted component directory unrecoverable: the fetch would be
+    // skipped and the registration check would then fail on the missing program, forever.
+    std::fs::remove_dir_all(shared.components.join("Native")).unwrap();
+    let root = dir.path().join("third");
+    std::fs::create_dir_all(&root).unwrap();
+    let (prefix, _) = scratch(&root);
+    ensure_all(
+        &prefix,
+        &shared,
+        &manifest,
+        &["Native"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("ensure");
+    assert!(shared.components.join("Native/run.sh").is_file());
+    assert_eq!(
+        server.stats().requests(),
+        2,
+        "a component whose files are gone is fetched again"
+    );
 }
 
 /// A native companion is exec'd by the launcher itself, and these archives are built on Windows: the one
