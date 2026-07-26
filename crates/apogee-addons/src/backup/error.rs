@@ -28,4 +28,27 @@ pub enum BackupError {
     TooDeep { path: PathBuf, limit: usize },
     #[error("no source tree held anything to back up")]
     NothingSelected,
+    #[error("writing archive entry {entry} failed")]
+    Archive {
+        entry: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("the archive record could not be read or written")]
+    Manifest {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("{path:?} is not one of our archives")]
+    NotAnArchive { path: PathBuf },
+    #[error("{path:?} is format {found}, and this build reads up to {supported}")]
+    UnsupportedFormat {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+    #[error("{found} entries selected, more than the {limit} an archive may hold")]
+    TooManyEntries { found: usize, limit: usize },
+    #[error("{found} bytes selected, more than the {limit} an archive may hold")]
+    TooLarge { found: u64, limit: u64 },
 }

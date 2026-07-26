@@ -178,8 +178,12 @@ fn descend(
             }
             EntryKind::Dir => {
                 report.dirs += 1;
+                // The trailing separator is what marks a directory in the archive, and carrying it
+                // here rather than at write time keeps one name and therefore one sort order. It also
+                // keeps a directory ahead of its contents under a byte sort even when a sibling name
+                // would otherwise fall between them, since `/` outranks the characters that could.
                 entries.push(SelectedEntry {
-                    name: archive_name.clone(),
+                    name: format!("{archive_name}/"),
                     source: entry.path(),
                     kind,
                     size: 0,

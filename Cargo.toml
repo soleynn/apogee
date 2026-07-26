@@ -37,6 +37,10 @@ flate2           = "1"
 ed25519-dalek    = "3"
 # safe syscall wrappers (monotonic clock now; /proc + signals later), keeping #![forbid(unsafe_code)]
 rustix           = "1"
+# config-backup container, gated to apogee-addons. Default features off on purpose: the `time`
+# feature makes the default write options stamp the wall clock, which would make archives
+# unreproducible.
+zip              = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # in-process, pure-Rust streaming archive decoders for runner tarballs (no system tar, no C linkage)
 tar              = "0.4"
 lzma-rs          = "0.3"

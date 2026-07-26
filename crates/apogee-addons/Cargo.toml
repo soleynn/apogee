@@ -8,11 +8,16 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zip.workspace = true
+tempfile.workspace = true
 apogee-runtime = { path = "../apogee-runtime" }
 apogee-fetch = { path = "../apogee-fetch" }
 
 [dev-dependencies]
-tempfile.workspace = true
+insta.workspace = true
 
 [lints]
 workspace = true
