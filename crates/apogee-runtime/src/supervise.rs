@@ -123,7 +123,7 @@ fn pick_game(pids: &[i32], wrapper_pid: Option<i32>, grace_elapsed: bool) -> Opt
 
 /// All pids whose `comm` and `WINEPREFIX` match, in `/proc` order. A pid that races away mid-scan is
 /// skipped, not fatal.
-fn scan_matches(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Vec<i32>> {
+pub(crate) fn scan_matches(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Vec<i32>> {
     let mut matches = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
@@ -152,7 +152,7 @@ fn scan_matches(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Ve
 }
 
 /// The `comm` string to match: the basename truncated to the kernel's limit (on a char boundary).
-fn comm_target(basename: &str) -> String {
+pub(crate) fn comm_target(basename: &str) -> String {
     let mut end = basename.len().min(COMM_MAX);
     while !basename.is_char_boundary(end) {
         end -= 1;

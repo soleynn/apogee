@@ -12,16 +12,19 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 zip.workspace = true
+tokio.workspace = true
 tempfile.workspace = true
 apogee-runtime = { path = "../apogee-runtime" }
 apogee-fetch = { path = "../apogee-fetch" }
 
-# openat/mkdirat against a held directory descriptor, keeping #![forbid(unsafe_code)].
+# openat/mkdirat against a held directory descriptor for restore, and signalling a process group from
+# a drop for companion teardown. Both keep #![forbid(unsafe_code)].
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 
 [dev-dependencies]
 insta.workspace = true
+apogee-fetch = { path = "../apogee-fetch" }
 
 [lints]
 workspace = true

@@ -58,11 +58,43 @@ pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError,
 pub use extract::extract_archive;
 pub use metadata::{DxvkRef, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord};
 #[cfg(not(target_os = "linux"))]
-pub use non_linux::{GameExit, GameSession};
+pub use non_linux::{Companion, CompanionExit, CompanionSpec};
+#[cfg(not(target_os = "linux"))]
+pub use non_linux::{GameExit, GameSession, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{Progress, RuntimeEvent};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
+
+/// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
+///
+/// This is a candidate set, not an identity. The kernel caps a process name at 15 bytes and the
+/// runner renames its loader to the executable's base name, so two programs whose names share a
+/// 15-byte prefix both come back and the caller is expected to narrow. The prefix side is exact: it
+/// reads each process's own `WINEPREFIX`, normalized for the relocation Proton applies, and the
+/// kernel restricts that file to the user who owns the process.
+///
+/// # Errors
+/// [`RuntimeError::Io`] if `/proc` cannot be read.
+#[cfg(target_os = "linux")]
+pub async fn prefix_processes(
+    prefix: &Prefix,
+    program_name: &str,
+) -> Result<Vec<i32>, RuntimeError> {
+    let comm = supervise::comm_target(program_name);
+    let path = prefix.path().to_path_buf();
+    // A whole-of-`/proc` walk is blocking work, and this runs on the launch path.
+    tokio::task::spawn_blocking(move || supervise::scan_matches(&comm, &path))
+        .await
+        .map_err(|source| RuntimeError::Io {
+            path: PathBuf::from("/proc"),
+            source: std::io::Error::other(source),
+        })?
+        .map_err(|source| RuntimeError::Io {
+            path: PathBuf::from("/proc"),
+            source,
+        })
+}
 
 /// Where the runtime stores runners and prefixes.
 #[derive(Debug, Clone, Default)]
@@ -313,6 +345,13 @@ impl Runtime {
 
 #[cfg(not(target_os = "linux"))]
 impl Runtime {
+    /// Companion tools are Linux-only at this phase.
+    pub fn spawn_companion(&self, _spec: &CompanionSpec) -> Result<Companion, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "running a companion program",
+        })
+    }
+
     /// Runner management is Linux-only at this phase.
     pub async fn fetch_catalog(
         &self,
@@ -435,6 +474,110 @@ impl Runtime {
 /// surface is inert.
 #[cfg(not(target_os = "linux"))]
 mod non_linux {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    /// See the Linux implementation.
+    pub async fn prefix_processes(
+        _prefix: &crate::Prefix,
+        _program_name: &str,
+    ) -> Result<Vec<i32>, crate::RuntimeError> {
+        Err(crate::RuntimeError::Unsupported {
+            what: "reading the process table",
+        })
+    }
+
+    /// What to run and where (see the Linux implementation).
+    #[derive(Debug, Clone)]
+    pub struct CompanionSpec {
+        _program: PathBuf,
+    }
+
+    impl CompanionSpec {
+        /// A companion run directly on the host.
+        #[must_use]
+        pub fn host(program: impl Into<PathBuf>, _args: Vec<String>) -> Self {
+            Self {
+                _program: program.into(),
+            }
+        }
+
+        /// A companion run inside a prefix through its runner.
+        #[must_use]
+        pub fn in_prefix(
+            program: impl Into<PathBuf>,
+            args: Vec<String>,
+            _prefix: &crate::Prefix,
+        ) -> Self {
+            Self::host(program, args)
+        }
+
+        /// Add environment variables for the child.
+        #[must_use]
+        pub fn env(self, _env: BTreeMap<String, String>) -> Self {
+            self
+        }
+
+        /// Set the child's working directory.
+        #[must_use]
+        pub fn working_dir(self, _dir: impl Into<PathBuf>) -> Self {
+            self
+        }
+
+        /// The prefix this companion runs in.
+        #[must_use]
+        pub fn prefix_ref(&self) -> Option<&crate::Prefix> {
+            None
+        }
+    }
+
+    /// How a companion process ended (see the Linux implementation).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct CompanionExit {
+        /// The exit status, or `None` when the process was ended by a signal.
+        pub code: Option<i32>,
+    }
+
+    /// A running companion. Constructed only by the Linux spawn path; here it is uninhabited, so it
+    /// exists solely to satisfy cross-platform consumers.
+    pub struct Companion(std::convert::Infallible);
+
+    impl Companion {
+        /// The unix PID of the spawned process.
+        #[must_use]
+        pub fn pid(&self) -> i32 {
+            match self.0 {}
+        }
+
+        /// Wait for the companion to exit.
+        pub async fn wait(&mut self) -> Result<CompanionExit, crate::RuntimeError> {
+            match self.0 {}
+        }
+
+        /// The companion's exit if it has already ended.
+        pub fn try_wait(&mut self) -> Result<Option<CompanionExit>, crate::RuntimeError> {
+            match self.0 {}
+        }
+
+        /// Wait for the companion and its process group.
+        pub async fn wait_group(&mut self) -> Result<CompanionExit, crate::RuntimeError> {
+            match self.0 {}
+        }
+
+        /// Stop the companion and everything it started.
+        pub async fn stop(&mut self, _grace: Duration) -> Result<(), crate::RuntimeError> {
+            match self.0 {}
+        }
+    }
+
+    impl std::fmt::Debug for Companion {
+        fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {}
+        }
+    }
+
     /// An opaque game-exit marker (see the Linux implementation).
     #[derive(Debug, Clone)]
     #[non_exhaustive]

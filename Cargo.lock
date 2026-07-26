@@ -81,6 +81,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "zip",
 ]
 

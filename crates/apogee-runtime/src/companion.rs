@@ -11,13 +11,16 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use tokio::process::{Child, Command};
 
 use crate::error::RuntimeError;
 use crate::plan::Prefix;
 use crate::spawn::{prefix_env, prefix_launcher, resolve_umu};
 use crate::supervise::{ExitWatch, wait_exit, watch_exit};
+
+/// How often a process group is re-probed once its leader has gone.
+const GROUP_POLL: Duration = Duration::from_millis(50);
 
 /// What to run and where.
 #[derive(Debug, Clone)]
@@ -113,6 +116,43 @@ impl Companion {
         Ok(CompanionExit {
             code: status.code(),
         })
+    }
+
+    /// The companion's exit if it has already ended, without waiting. Reaps it when it has.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Spawn`] if the process could not be waited on.
+    pub fn try_wait(&mut self) -> Result<Option<CompanionExit>, RuntimeError> {
+        let status = self
+            .child
+            .try_wait()
+            .map_err(|source| RuntimeError::Spawn {
+                runner: self.name.clone(),
+                source,
+            })?;
+        Ok(status.map(|status| CompanionExit {
+            code: status.code(),
+        }))
+    }
+
+    /// Resolve once the companion and everything it started have exited: the leader is reaped for its
+    /// status, then its process group is polled until nothing is left in it.
+    ///
+    /// A launcher script that backgrounds the real work and returns immediately would otherwise be
+    /// reported as finished while the tool it started is still running. The group's surviving members
+    /// hold the group id open, so a recycled pid cannot be mistaken for the group still being alive.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Spawn`] if the leader could not be reaped.
+    pub async fn wait_group(&mut self) -> Result<CompanionExit, RuntimeError> {
+        let exit = self.wait().await?;
+        if let Some(pid) = Pid::from_raw(self.pid) {
+            // Asks only whether the group still has a member to deliver to, without signalling it.
+            while test_kill_process_group(pid).is_ok() {
+                tokio::time::sleep(GROUP_POLL).await;
+            }
+        }
+        Ok(exit)
     }
 
     /// Stop the companion and everything it started: `SIGTERM` to its process group, then `SIGKILL`
@@ -282,6 +322,43 @@ mod tests {
         let spec = CompanionSpec::host("/bin/sh", vec!["-c".into(), "exit 3".into()]);
         let mut companion = spawn(&spec, dir.path()).expect("spawn");
         assert_eq!(companion.wait().await.expect("wait").code, Some(3));
+    }
+
+    /// A leader that backgrounds the real work and returns is the shape that makes waiting on the
+    /// child alone report finished while the tool is still running.
+    #[tokio::test]
+    async fn waiting_on_the_group_outlasts_a_leader_that_returns_early() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("done");
+        let spec = CompanionSpec::host(
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                format!("(sleep 0.4; : > {}) & exit 0", marker.display()),
+            ],
+        );
+        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+
+        companion.wait_group().await.expect("wait_group");
+        assert!(
+            marker.exists(),
+            "the group was reported done while its work was still running"
+        );
+    }
+
+    /// Asking without waiting is what lets a caller notice a companion that quit on its own.
+    #[tokio::test]
+    async fn a_companion_still_running_reports_no_exit_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = CompanionSpec::host("/bin/sh", vec!["-c".into(), "sleep 0.2".into()]);
+        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+
+        assert_eq!(companion.try_wait().expect("try_wait"), None);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            companion.try_wait().expect("try_wait"),
+            Some(CompanionExit { code: Some(0) })
+        );
     }
 
     /// Arguments reach the child verbatim: no shell, so a value with spaces or quotes stays one

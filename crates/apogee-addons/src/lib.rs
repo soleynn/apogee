@@ -14,8 +14,13 @@ use apogee_fetch::{FetchError, Fetcher};
 use apogee_runtime::{GameSession, LaunchPlan, Prefix, Progress, Runtime};
 
 pub mod backup;
+pub mod external;
 
 pub use backup::{BackupError, Selection};
+pub use external::{
+    AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
+    Outcome, RunIn, Running, Trigger,
+};
 
 /// Crate result over [`AddonError`].
 pub type Result<T> = std::result::Result<T, AddonError>;
@@ -60,11 +65,23 @@ pub enum AddonError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("failed to spawn {path:?}")]
+    #[error("addon {index} ({program:?}) cannot be run: {reason}")]
+    InvalidAddon {
+        program: PathBuf,
+        index: usize,
+        reason: &'static str,
+    },
+    #[error("{program:?} runs inside a prefix, but this launch has no prefix")]
+    PrefixRequired { program: PathBuf },
+    #[error("{program:?} asks for {field:?}, which this launcher does not support")]
+    UnsupportedField { program: PathBuf, field: String },
+    #[error("failed to start {program:?}")]
     ExternalSpawn {
-        path: PathBuf,
+        program: PathBuf,
+        /// Boxed because the runtime's own taxonomy is wide, and this error type is carried in the
+        /// error half of results all over this crate.
         #[source]
-        source: std::io::Error,
+        source: Box<apogee_runtime::RuntimeError>,
     },
     #[error("config backup failed")]
     Backup(#[from] BackupError),
@@ -92,18 +109,12 @@ pub trait Injectable: Send + Sync {
     }
 }
 
-/// An externally-run companion tool.
-#[derive(Debug, Clone)]
-pub struct ExternalAddon {
-    pub path: PathBuf,
-}
-
 /// The kinds of component the manager drives.
 pub enum ComponentKind {
     Injectable(Box<dyn Injectable>),
     PrefixTool,
     Verb,
-    External(ExternalAddon),
+    ExternalNative,
 }
 
 /// A signed catalog of installable components.
