@@ -16,6 +16,8 @@ mod archive;
 mod confine;
 mod error;
 mod manifest;
+// Opens every target against a directory descriptor, so it is unix-only by construction.
+#[cfg(unix)]
 mod restore;
 mod retain;
 mod root;
@@ -33,6 +35,7 @@ pub use manifest::{
     BACKUP_EXTENSION, BACKUP_FORMAT, BACKUP_FORMAT_VERSION, BackupManifest, EntryRecord,
     MANIFEST_ENTRY, RootRecord, RuleRecord,
 };
+#[cfg(unix)]
 pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
 pub use retain::{ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, plan_prune, prune};
 pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, SelectionRoot};

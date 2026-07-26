@@ -12,11 +12,13 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 zip.workspace = true
-# openat/mkdirat against a held directory descriptor, keeping #![forbid(unsafe_code)].
-rustix = { workspace = true, features = ["fs"] }
 tempfile.workspace = true
 apogee-runtime = { path = "../apogee-runtime" }
 apogee-fetch = { path = "../apogee-fetch" }
+
+# openat/mkdirat against a held directory descriptor, keeping #![forbid(unsafe_code)].
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 insta.workspace = true

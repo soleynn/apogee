@@ -9,6 +9,11 @@
 //! trailing space escapes anything at the Linux layer, and every one of them is reinterpreted by the
 //! runner or by the game's own config reader.
 
+#![cfg_attr(
+    not(unix),
+    allow(dead_code, reason = "only the restore path calls this")
+)]
+
 use std::path::{Component, Path, PathBuf};
 
 use super::root::RootLabel;
