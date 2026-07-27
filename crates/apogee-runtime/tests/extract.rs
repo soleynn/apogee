@@ -1,12 +1,15 @@
 #![cfg(target_os = "linux")]
-//! Runner-tarball extraction: every archive format, prefix stripping, the exec bit, in-tree
-//! symlinks, and rejection of a symlink that escapes the destination.
+//! Archive extraction: every format, prefix stripping, the exec bit, in-tree symlinks, and rejection
+//! of a symlink that escapes the destination. Zip is a component container rather than a runner one,
+//! so it is checked against what the tools that build those archives actually emit: `\`-separated
+//! names, missing modes, and a symlink smuggled in as a mode bit.
 
-use std::io::{self, Write};
+use std::io::{self, Cursor, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apogee_runtime::{ArchiveFormat, ArchiveLayout, RuntimeError, extract_archive};
+use zip::write::SimpleFileOptions;
 
 /// A small runner tree under `top/`: an executable, a nested data file, and an in-tree symlink.
 fn build_archive(top: &str, format: ArchiveFormat) -> io::Result<Vec<u8>> {
@@ -147,6 +150,121 @@ fn extracts_each_format_stripping_the_prefix() {
             "{format:?}: symlink target"
         );
     }
+}
+
+/// A zip laid out the way a Windows-built companion archive is: a wrapping top directory, one entry
+/// with no mode at all, one marked executable, and a nested path written with backslashes.
+fn build_component_zip(top: &str) -> io::Result<Vec<u8>> {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let no_mode = SimpleFileOptions::DEFAULT.last_modified_time(zip::DateTime::default());
+    writer
+        .start_file(format!("{top}/tool.exe"), no_mode)
+        .and_then(|()| writer.write_all(b"MZ").map_err(Into::into))
+        .map_err(io::Error::other)?;
+    writer
+        .start_file(
+            format!("{top}/bin/launch.sh"),
+            no_mode.unix_permissions(0o755),
+        )
+        .and_then(|()| writer.write_all(b"#!/bin/sh\n").map_err(Into::into))
+        .map_err(io::Error::other)?;
+    // A `\` in a zip name is out of spec, and Windows tooling emits it anyway. On Linux it is an
+    // ordinary character, so it has to be folded or the whole path lands as one filename.
+    writer
+        .start_file(format!("{top}\\plugins\\overlay.dll"), no_mode)
+        .and_then(|()| writer.write_all(b"dll").map_err(Into::into))
+        .map_err(io::Error::other)?;
+    Ok(writer.finish().map_err(io::Error::other)?.into_inner())
+}
+
+/// A zip whose only entry is a symlink out of the tree. A zip marks a link with `S_IFLNK` in the mode
+/// bits above the permissions and stores the target as the entry's content, so this is the shape a
+/// crafted archive would use to plant one.
+fn build_zip_symlink() -> io::Result<Vec<u8>> {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    writer
+        .add_symlink(
+            "escape",
+            "/etc/passwd",
+            SimpleFileOptions::DEFAULT.last_modified_time(zip::DateTime::default()),
+        )
+        .map_err(io::Error::other)?;
+    Ok(writer.finish().map_err(io::Error::other)?.into_inner())
+}
+
+fn extract_zip(
+    bytes: &[u8],
+    strip_prefix: Option<&str>,
+) -> io::Result<(tempfile::TempDir, Result<u64, RuntimeError>)> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("component.zip");
+    std::fs::write(&archive, bytes)?;
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::Zip,
+        strip_prefix: strip_prefix.map(str::to_owned),
+    };
+    let result = extract_archive(&archive, &layout, &tmp.path().join("out"));
+    Ok((tmp, result))
+}
+
+#[test]
+fn extracts_a_component_zip_stripping_the_prefix() {
+    let bytes = build_component_zip("ACT-3.9.0").expect("build zip");
+    let (tmp, result) = extract_zip(&bytes, Some("ACT-3.9.0")).expect("stage");
+    let dest = tmp.path().join("out");
+    assert_eq!(result.expect("extract"), 3);
+
+    assert!(!dest.join("ACT-3.9.0").exists(), "prefix stripped");
+    assert_eq!(
+        std::fs::read(dest.join("tool.exe")).expect("read exe"),
+        b"MZ"
+    );
+    // The backslash path became a real nested path rather than one long filename.
+    assert_eq!(
+        std::fs::read(dest.join("plugins/overlay.dll")).expect("read dll"),
+        b"dll"
+    );
+
+    // A mode the archive did state is kept, which is what a native launcher script needs.
+    assert_ne!(
+        mode_bits(&dest.join("bin/launch.sh")).expect("mode") & 0o111,
+        0,
+        "the executable bit survived"
+    );
+    // A mode the archive did not state still lands readable, rather than as a file nobody can open.
+    assert_ne!(
+        mode_bits(&dest.join("tool.exe")).expect("mode") & 0o400,
+        0,
+        "an entry with no mode is still readable"
+    );
+}
+
+#[test]
+fn rejects_a_zip_symlink_entry() {
+    let bytes = build_zip_symlink().expect("build zip");
+    let (tmp, result) = extract_zip(&bytes, None).expect("stage");
+    let err = result.expect_err("a zip symlink must be refused");
+    assert!(matches!(err, RuntimeError::Extract { .. }));
+    assert!(!tmp.path().join("out/escape").exists(), "nothing landed");
+}
+
+#[test]
+fn rejects_a_zip_entry_escaping_the_destination() {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    writer
+        .start_file(
+            r"..\..\etc\passwd",
+            SimpleFileOptions::DEFAULT.last_modified_time(zip::DateTime::default()),
+        )
+        .expect("start");
+    writer.write_all(b"pwned").expect("write");
+    let bytes = writer.finish().expect("finish").into_inner();
+
+    let (_tmp, result) = extract_zip(&bytes, None).expect("stage");
+    assert!(matches!(
+        result.expect_err("traversal must reject"),
+        RuntimeError::Extract { .. }
+    ));
 }
 
 #[test]

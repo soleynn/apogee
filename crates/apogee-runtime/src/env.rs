@@ -3,7 +3,7 @@
 //!
 //! The computation is pure and host-injected ([`HostCaps`]), so a fixed profile yields a byte-exact
 //! result a golden test can pin. The one rule that overrides everything else: the user's free-form
-//! overrides are merged **last**, so they always win over Apogee's computed values (Apogee.md §5.5).
+//! overrides are merged **last**, so they always win over Apogee's computed values.
 //!
 //! The matrix produces the *graphics/sync/user* environment. The structural prefix variables
 //! (`WINEPREFIX`, `GAMEID`, `PROTONPATH`) are set by the spawner from the prepared prefix, not here.
@@ -50,8 +50,8 @@ pub enum Hud {
     Mango,
 }
 
-/// Hybrid-GPU selection. The per-vendor variable sets are the ones observed on real hybrid laptops
-/// (runtime §7); a bump is a change to one arm, not the launch path.
+/// Hybrid-GPU selection. The per-vendor variable sets are the ones observed on real hybrid laptops; a
+/// bump is a change to one arm, not the launch path.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum GpuSelect {
     /// The system default GPU; set nothing.

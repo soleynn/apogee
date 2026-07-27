@@ -19,6 +19,7 @@ mod dosdevices;
 mod dxvk;
 mod env;
 mod error;
+mod exec;
 #[cfg(target_os = "linux")]
 mod extract;
 #[cfg(target_os = "linux")]
@@ -28,8 +29,12 @@ mod lifecycle;
 mod metadata;
 mod plan;
 mod progress;
+mod registry;
 #[cfg(target_os = "linux")]
 mod session;
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod shim;
 #[cfg(target_os = "linux")]
 mod spawn;
 #[cfg(target_os = "linux")]
@@ -53,16 +58,22 @@ pub use env::{
     DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, SyncChoice, SyncStatus,
     compute_environment,
 };
-pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep};
+pub use error::{
+    CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep, StepCancelled,
+};
+pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
-pub use metadata::{DxvkRef, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord};
+pub use metadata::{
+    DxvkRef, InstalledComponent, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord,
+};
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{GameExit, GameSession, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{Progress, RuntimeEvent};
+pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
 
@@ -145,19 +156,57 @@ impl Runtime {
         }
     }
 
+    /// Where a verified catalog and its signature are published.
+    fn catalog_cache(&self) -> PathBuf {
+        self.inner.paths.runners.join(".catalog")
+    }
+
     /// Fetch the signed runner catalog and verify it against the compiled-in key.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Catalog`] if the manifest does not verify or does not parse, plus anything the
+    /// download raises.
     pub async fn fetch_catalog(
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
-        let cache = self.inner.paths.runners.join(".catalog");
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY)
+            .map_err(|_| CatalogError::BadSignature)?;
         install::fetch_catalog(
             &self.inner.fetcher,
             manifest_url,
             signature_url,
-            &cache,
+            &self.catalog_cache(),
+            &key,
+            cancel,
+        )
+        .await
+    }
+
+    /// The same fetch, verified against `key` instead of the compiled-in one, so a test can drive the
+    /// whole download-verify-publish path with a signature it can produce.
+    ///
+    /// Behind a feature, so a shipping build cannot fetch a catalog trusted against anything but the
+    /// key compiled into it.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_catalog`].
+    #[cfg(feature = "testing")]
+    pub async fn fetch_catalog_for_testing(
+        &self,
+        manifest_url: &url::Url,
+        signature_url: &url::Url,
+        key: &ed25519_dalek::VerifyingKey,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Catalog, RuntimeError> {
+        install::fetch_catalog(
+            &self.inner.fetcher,
+            manifest_url,
+            signature_url,
+            &self.catalog_cache(),
+            key,
             cancel,
         )
         .await
@@ -247,7 +296,7 @@ impl Runtime {
     }
 
     /// Destructively recreate a prefix: delete it and reinitialize from scratch. Explicit and
-    /// user-initiated — never the automatic response to a health problem.
+    /// user-initiated, never the automatic response to a health problem.
     pub async fn recreate_prefix(
         &self,
         prefix: &Prefix,
@@ -321,6 +370,101 @@ impl Runtime {
         }
     }
 
+    /// Run one program inside `prefix` through its runner and wait for it: the primitive prefix setup
+    /// is built from. Its exit status and captured output come back rather than a pass/fail, because
+    /// what a non-zero status means belongs to the step being performed.
+    ///
+    /// # Errors
+    /// [`RuntimeError::MissingHostTool`] if the runner has no resolvable launcher,
+    /// [`RuntimeError::Spawn`] if the program could not be started, and
+    /// [`RuntimeError::InPrefixIncomplete`] if it outlived its time budget or the run was cancelled.
+    pub async fn run_in_prefix(
+        &self,
+        prefix: &Prefix,
+        program: &ProgramInPrefix,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<PrefixRun, RuntimeError> {
+        let umu = self.umu_for(prefix.runner().kind());
+        exec::run(prefix, program, umu.as_deref(), cancel).await
+    }
+
+    /// Write one registry value inside `prefix`. Idempotent: the value is overwritten rather than
+    /// added, so applying the same edit twice is applying it once.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RegistryKey`] if the edit is not a shape this launcher writes,
+    /// [`RuntimeError::PrefixInit`] if `reg` reported a failure, plus anything
+    /// [`Self::run_in_prefix`] raises.
+    pub async fn registry_set(
+        &self,
+        prefix: &Prefix,
+        edit: &RegistryEdit,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let program = edit.command()?;
+        let run = self.run_in_prefix(prefix, &program, cancel).await?;
+        if run.ok() {
+            return Ok(());
+        }
+        Err(RuntimeError::PrefixInit {
+            step: SetupStep::ApplyTweaks,
+            source: Box::new(std::io::Error::other(format!(
+                "reg add {}\\{} exited with {}: {}",
+                edit.key,
+                edit.name,
+                run.code
+                    .map_or_else(|| "a signal".to_owned(), |c| c.to_string()),
+                run.diagnostic()
+            ))),
+        })
+    }
+
+    /// Remove one registry value, or a key and everything under it, inside `prefix`.
+    ///
+    /// Idempotent, and it takes more than one invocation to be so: `reg delete` on something absent
+    /// exits non-zero, and this crate reads exit status rather than output. The removal runs first, and
+    /// only a failed one is explained, by two further status-only probes: whether the thing is still
+    /// there, and whether `reg` answers at all for a key every prefix has. Absent while the registry
+    /// still answers is the one reading that counts as nothing to remove; a prefix that cannot answer
+    /// is an error, and so is a probe killed before it answered, because a removal reported as done is
+    /// one a caller records and never retries.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RegistryKey`] if the removal is not one this launcher will perform,
+    /// [`RuntimeError::PrefixInit`] if `reg` reported a failure or the registry could not be read,
+    /// plus anything [`Self::run_in_prefix`] raises.
+    pub async fn registry_delete(
+        &self,
+        prefix: &Prefix,
+        delete: &RegistryDelete,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let run = self
+            .run_in_prefix(prefix, &delete.command()?, cancel)
+            .await?;
+        if run.ok() {
+            return Ok(());
+        }
+        let target = self.run_in_prefix(prefix, &delete.probe()?, cancel).await?;
+        let control = self
+            .run_in_prefix(prefix, &registry::readable_probe(), cancel)
+            .await?;
+        let reason = match registry::read_failed_delete(&target, &control) {
+            registry::DeleteVerdict::AlreadyAbsent => return Ok(()),
+            registry::DeleteVerdict::Failed(reason) => reason,
+        };
+        Err(RuntimeError::PrefixInit {
+            step: SetupStep::ApplyTweaks,
+            source: Box::new(std::io::Error::other(format!(
+                "reg delete {} exited with {} and {reason}: {}",
+                delete.key,
+                run.code
+                    .map_or_else(|| "a signal".to_owned(), |c| c.to_string()),
+                run.diagnostic()
+            ))),
+        })
+    }
+
     /// Spawn a companion program: a native tool on the host, or a Windows one run inside a prefix
     /// through its runner. Unlike [`Self::launch`] the child is held rather than resolved through
     /// `/proc`, so a short-lived companion is supported and its exit status is readable.
@@ -352,11 +496,61 @@ impl Runtime {
         })
     }
 
+    /// Running a program inside a prefix is Linux-only at this phase.
+    pub async fn run_in_prefix(
+        &self,
+        _prefix: &Prefix,
+        _program: &ProgramInPrefix,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<PrefixRun, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "running a program inside a prefix",
+        })
+    }
+
+    /// Prefix registry edits are Linux-only at this phase.
+    pub async fn registry_set(
+        &self,
+        _prefix: &Prefix,
+        _edit: &RegistryEdit,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "editing a prefix registry",
+        })
+    }
+
+    /// Prefix registry removals are Linux-only at this phase.
+    pub async fn registry_delete(
+        &self,
+        _prefix: &Prefix,
+        _delete: &RegistryDelete,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "editing a prefix registry",
+        })
+    }
+
     /// Runner management is Linux-only at this phase.
     pub async fn fetch_catalog(
         &self,
         _manifest_url: &url::Url,
         _signature_url: &url::Url,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Catalog, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    #[cfg(feature = "testing")]
+    pub async fn fetch_catalog_for_testing(
+        &self,
+        _manifest_url: &url::Url,
+        _signature_url: &url::Url,
+        _key: &ed25519_dalek::VerifyingKey,
         _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
         Err(RuntimeError::Unsupported {

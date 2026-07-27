@@ -46,7 +46,7 @@ jobs:
         with:
           config: cliff.toml
           args: ${{ steps.tag.outputs.cliff_args }}
-      # Stable tags ship a binary; pre-release checkpoints do not (§3.3). Build, strip, and package the
+      # Stable tags ship a binary; pre-release checkpoints do not. Build, strip, and package the
       # CLI so the release carries a self-contained tarball plus a sha256 sidecar. Linux only for now.
       - name: Set up Rust
         if: steps.tag.outputs.prerelease == 'false'

@@ -39,6 +39,9 @@ const KILL_TOTAL_GRACE: Duration = Duration::from_millis(2000);
 /// we spawned: wine renames that loader to the PE basename and then execs the game and exits, so a
 /// match at that pid is preferred against — the loader is only accepted once it proves stable (the
 /// single-process case), letting the separate game process win when there is one.
+///
+/// A wait the token ends is [`RuntimeError::GameWaitCancelled`], not a process that failed to appear:
+/// the two are the same absence and only one of them is worth reporting to whoever caused it.
 pub(crate) async fn resolve_game(
     program_basename: &str,
     prefix_path: &Path,
@@ -52,7 +55,7 @@ pub(crate) async fn resolve_game(
     let start = Instant::now();
     loop {
         if cancel.is_cancelled() {
-            return Err(RuntimeError::GameProcessNotFound {
+            return Err(RuntimeError::GameWaitCancelled {
                 waited: start.elapsed(),
             });
         }
@@ -276,6 +279,25 @@ pub(crate) async fn terminate(watch: &ExitWatch) -> Result<(), RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Half a minute passes between the spawn and the game showing up in `/proc`, which is long enough
+    /// for a user to think better of it. Reported as a process that never appeared, stopping a launch
+    /// on purpose looks exactly like a launch that broke.
+    #[tokio::test]
+    async fn a_wait_the_token_ended_is_a_cancellation_not_a_process_that_never_appeared() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let err = resolve_game(
+            "ffxiv_dx11.exe",
+            Path::new("/nonexistent-prefix"),
+            None,
+            &cancel,
+        )
+        .await
+        .expect_err("a wait that was stopped resolved no game");
+        assert!(err.is_cancellation(), "{err:?}");
+    }
 
     #[test]
     fn comm_target_truncates_to_the_kernel_limit() {

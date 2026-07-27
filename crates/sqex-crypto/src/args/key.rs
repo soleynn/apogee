@@ -15,9 +15,8 @@ impl TickCount {
     ///
     /// The game runs under Wine, which maps `GetTickCount` onto the host `CLOCK_MONOTONIC_RAW`, so the
     /// launcher must read that same clock or the game can't recover the key. Mirrors XL's Linux
-    /// `GetRawTickCount`
-    /// (`References/FFXIVQuickLauncher/src/XIVLauncher.Common/Encryption/ArgumentBuilder.cs:122-132`):
-    /// `CLOCK_MONOTONIC_RAW`, then `tv_sec * 1000 + tv_nsec / 1_000_000`, truncated to `u32`.
+    /// `GetRawTickCount` (`ArgumentBuilder.cs:122-132`): `CLOCK_MONOTONIC_RAW`, then
+    /// `tv_sec * 1000 + tv_nsec / 1_000_000`, truncated to `u32`.
     #[cfg(target_os = "linux")]
     #[must_use]
     pub fn now_for_game() -> Self {
