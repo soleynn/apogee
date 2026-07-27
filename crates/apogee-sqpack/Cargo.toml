@@ -10,14 +10,22 @@ thiserror.workspace = true
 # The block codec's DEFLATE payloads (raw, no zlib wrapper); one implementation shared with the
 # patcher via this crate's `codec` module.
 flate2.workspace = true
+# The index path hash is CRC-32 with the final bit-inversion left off.
+crc32fast.workspace = true
 
 [dev-dependencies]
-# Temp game trees for install-enumeration tests.
+# Temp game trees for install-enumeration and lookup tests.
 tempfile.workspace = true
-# Recorded-fact header fixtures (parsed field values + a sha256, no SE bytes) captured from a real
-# install; serde_json reads them, sha2 re-hashes the live header in the install-gated test.
+# Recorded-fact header, index and path-hash fixtures (parsed field values + digests, no SE bytes)
+# captured from a real install; serde_json reads them, sha2 re-hashes the live bytes in the
+# install-gated tests and digests the generated path corpus.
 serde_json.workspace = true
 sha2.workspace = true
+# The install-gated index test recomputes each segment's SHA-1 over the bytes the parser framed and
+# checks it against the one the header declares.
+sha1.workspace = true
+# The lookup-agrees-with-a-linear-scan property over synthetic index containers.
+proptest.workspace = true
 
 [lints]
 workspace = true

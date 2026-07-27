@@ -1,0 +1,457 @@
+{
+  "note": "Recorded facts for SqPack index containers, captured from a real FFXIV install. No Square Enix bytes: only parsed header fields, segment extents, the SHA-1 each segment header already declares, counts, and a handful of entries with the paths and locations they resolve to. The hermetic test checks the recording against the crate's own definitions (every recorded key is what hash_path computes for its path, every count is the segment's size over its record length, the segments tile the file); the install-gated test (APOGEE_SQPACK_REAL_INSTALL) re-reads the real containers and confirms the parser still reproduces all of it. Segment 3 is recorded by extent only: its role is not settled.",
+  "records": [
+    {
+      "path": "ffxiv/000000.win32.index",
+      "repo": "ffxiv",
+      "archive": "000000",
+      "file_len": 7984,
+      "kind": "index1",
+      "header_size": 1024,
+      "version": 1,
+      "kind_word": 0,
+      "data_file_count": 1,
+      "dat_files_present": 1,
+      "segments": [
+        {
+          "offset": 2048,
+          "size": 4240,
+          "sha1": "96ad4933c408a07093e12a7eaaafbef21f62228d"
+        },
+        {
+          "offset": 6288,
+          "size": 256,
+          "sha1": "5e9d28d0485da838f62d713c3db6961a6e13d83b"
+        },
+        {
+          "offset": 6544,
+          "size": 1296,
+          "sha1": "919c3fe39e1aeb43613356f3dd046c5868188cea"
+        },
+        {
+          "offset": 7840,
+          "size": 144,
+          "sha1": "a32057f1c0e00d108c23429e0a1622059796e878"
+        }
+      ],
+      "entry_count": 265,
+      "folder_count": 9,
+      "collision_count": 0,
+      "entries_sorted": true,
+      "sample_entries": [
+        {
+          "at": 0,
+          "key": "004ecf681c5002ef",
+          "packed": "006e0160"
+        },
+        {
+          "at": 132,
+          "key": "66210f732afe4c00",
+          "packed": "00904080"
+        },
+        {
+          "at": 264,
+          "key": "e7abfb26c6542d01",
+          "packed": "004b6650"
+        }
+      ],
+      "sample_folders": [
+        {
+          "hash": "004ecf68",
+          "entries_offset": 2048,
+          "entries_size": 320
+        },
+        {
+          "hash": "0686c56e",
+          "entries_offset": 2368,
+          "entries_size": 1344
+        },
+        {
+          "hash": "0c5bb6fb",
+          "entries_offset": 3712,
+          "entries_size": 64
+        }
+      ],
+      "collisions": [],
+      "resolved": [
+        {
+          "path": "common/font/font1.tex",
+          "key": "66210f73bd7e365c",
+          "dat": 0,
+          "offset": 2299136
+        },
+        {
+          "path": "common/font/fonticon_ps5.tex",
+          "key": "66210f734bf1bed2",
+          "dat": 0,
+          "offset": 77597312
+        }
+      ]
+    },
+    {
+      "path": "ffxiv/000000.win32.index2",
+      "repo": "ffxiv",
+      "archive": "000000",
+      "file_len": 4424,
+      "kind": "index2",
+      "header_size": 1024,
+      "version": 1,
+      "kind_word": 2,
+      "data_file_count": 1,
+      "dat_files_present": 1,
+      "segments": [
+        {
+          "offset": 2048,
+          "size": 2120,
+          "sha1": "8da8664b6ea1b63685aaac63464a14d9a2f33879"
+        },
+        {
+          "offset": 4168,
+          "size": 256,
+          "sha1": "5e9d28d0485da838f62d713c3db6961a6e13d83b"
+        },
+        {
+          "offset": 0,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        },
+        {
+          "offset": 0,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        }
+      ],
+      "entry_count": 265,
+      "folder_count": 0,
+      "collision_count": 0,
+      "entries_sorted": true,
+      "sample_entries": [
+        {
+          "at": 0,
+          "key": "0000000000233ccd",
+          "packed": "0048bb80"
+        },
+        {
+          "at": 132,
+          "key": "000000008740012d",
+          "packed": "006e2460"
+        },
+        {
+          "at": 264,
+          "key": "00000000ff3c6e9b",
+          "packed": "007d44f0"
+        }
+      ],
+      "sample_folders": [],
+      "collisions": [],
+      "resolved": [
+        {
+          "path": "common/font/font1.tex",
+          "key": "0000000005a36f0d",
+          "dat": 0,
+          "offset": 2299136
+        }
+      ]
+    },
+    {
+      "path": "ffxiv/0a0000.win32.index",
+      "repo": "ffxiv",
+      "archive": "0a0000",
+      "file_len": 644560,
+      "kind": "index1",
+      "header_size": 1024,
+      "version": 1,
+      "kind_word": 0,
+      "data_file_count": 1,
+      "dat_files_present": 1,
+      "segments": [
+        {
+          "offset": 2048,
+          "size": 605952,
+          "sha1": "f6a41e3ccc16b413a250b45584a7bcc9bc0ca3d3"
+        },
+        {
+          "offset": 608000,
+          "size": 256,
+          "sha1": "5e9d28d0485da838f62d713c3db6961a6e13d83b"
+        },
+        {
+          "offset": 608256,
+          "size": 34512,
+          "sha1": "1bb2a4cd0061872752d76f121105d50322d6ebb1"
+        },
+        {
+          "offset": 642768,
+          "size": 1792,
+          "sha1": "1bdfb61b1205a83ae60d006b2119e306718f362f"
+        }
+      ],
+      "entry_count": 37872,
+      "folder_count": 112,
+      "collision_count": 0,
+      "entries_sorted": true,
+      "sample_entries": [
+        {
+          "at": 0,
+          "key": "00a4ae8501fafd5b",
+          "packed": "019cc2b0"
+        },
+        {
+          "at": 18936,
+          "key": "96eae4acae5ffca6",
+          "packed": "000fdcc0"
+        },
+        {
+          "at": 37871,
+          "key": "ff9b2162fefc3d66",
+          "packed": "0052c020"
+        }
+      ],
+      "sample_folders": [
+        {
+          "hash": "00a4ae85",
+          "entries_offset": 2048,
+          "entries_size": 560
+        },
+        {
+          "hash": "059371c5",
+          "entries_offset": 2608,
+          "entries_size": 8000
+        },
+        {
+          "hash": "07c96a9c",
+          "entries_offset": 10608,
+          "entries_size": 160
+        }
+      ],
+      "collisions": [],
+      "resolved": [
+        {
+          "path": "exd/root.exl",
+          "key": "e39b799951b57ebc",
+          "dat": 0,
+          "offset": 172429440
+        },
+        {
+          "path": "exd/item.exh",
+          "key": "e39b7999debb8979",
+          "dat": 0,
+          "offset": 12285952
+        }
+      ]
+    },
+    {
+      "path": "ffxiv/040000.win32.index2",
+      "repo": "ffxiv",
+      "archive": "040000",
+      "file_len": 2652728,
+      "kind": "index2",
+      "header_size": 1024,
+      "version": 1,
+      "kind_word": 2,
+      "data_file_count": 7,
+      "dat_files_present": 7,
+      "segments": [
+        {
+          "offset": 2048,
+          "size": 2643256,
+          "sha1": "5b25287776a1cb7f4e70c382553c20a2026131a9"
+        },
+        {
+          "offset": 2645304,
+          "size": 7424,
+          "sha1": "468aabd6208bc614566241c9ca3224733c371aeb"
+        },
+        {
+          "offset": 0,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        },
+        {
+          "offset": 0,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        }
+      ],
+      "entry_count": 330407,
+      "folder_count": 0,
+      "collision_count": 28,
+      "entries_sorted": true,
+      "sample_entries": [
+        {
+          "at": 0,
+          "key": "0000000000002673",
+          "packed": "01e04d70"
+        },
+        {
+          "at": 165203,
+          "key": "00000000800507ec",
+          "packed": "039bf9c4"
+        },
+        {
+          "at": 330406,
+          "key": "00000000ffffe9dc",
+          "packed": "354bd4f0"
+        }
+      ],
+      "sample_folders": [],
+      "collisions": [
+        {
+          "key": "00000000080f0dc1",
+          "packed": "31ce5590",
+          "conflict_index": 0,
+          "path": "chara/weapon/w2101/obj/body/b0038/texture/v02_w2101b0038_b_id.tex"
+        },
+        {
+          "key": "00000000080f0dc1",
+          "packed": "0c279e2a",
+          "conflict_index": 1,
+          "path": "chara/equipment/e6009/model/c0201e6009_dwn.mdl"
+        },
+        {
+          "key": "000000000e7eb872",
+          "packed": "59761fe0",
+          "conflict_index": 0,
+          "path": "chara/equipment/e6249/texture/v01_c1101e6249_top_norm.tex"
+        },
+        {
+          "key": "000000000e7eb872",
+          "packed": "025a73d4",
+          "conflict_index": 1,
+          "path": "chara/human/c9204/animation/f0020/nonresident/emot/bow.pap"
+        }
+      ],
+      "resolved": [
+        {
+          "path": "chara/equipment/e6009/model/c0201e6009_dwn.mdl",
+          "key": "00000000080f0dc1",
+          "dat": 5,
+          "offset": 1631383808
+        }
+      ]
+    },
+    {
+      "path": "ex1/020100.win32.index",
+      "repo": "ex1",
+      "archive": "020100",
+      "file_len": 2304,
+      "kind": "index1",
+      "header_size": 1024,
+      "version": 1,
+      "kind_word": 0,
+      "data_file_count": 1,
+      "dat_files_present": 1,
+      "segments": [
+        {
+          "offset": 2048,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        },
+        {
+          "offset": 2048,
+          "size": 256,
+          "sha1": "5e9d28d0485da838f62d713c3db6961a6e13d83b"
+        },
+        {
+          "offset": 0,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        },
+        {
+          "offset": 2304,
+          "size": 0,
+          "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        }
+      ],
+      "entry_count": 0,
+      "folder_count": 0,
+      "collision_count": 0,
+      "entries_sorted": true,
+      "sample_entries": [],
+      "sample_folders": [],
+      "collisions": [],
+      "resolved": []
+    },
+    {
+      "path": "ex1/020101.win32.index",
+      "repo": "ex1",
+      "archive": "020101",
+      "file_len": 265024,
+      "kind": "index1",
+      "header_size": 1024,
+      "version": 1,
+      "kind_word": 0,
+      "data_file_count": 1,
+      "dat_files_present": 1,
+      "segments": [
+        {
+          "offset": 2048,
+          "size": 236352,
+          "sha1": "9faed2a2b53e4597d5600dcaac563227145c9a97"
+        },
+        {
+          "offset": 238400,
+          "size": 256,
+          "sha1": "5e9d28d0485da838f62d713c3db6961a6e13d83b"
+        },
+        {
+          "offset": 238656,
+          "size": 24624,
+          "sha1": "e63240971abb7eaf2a1c19701b2570dfc2dfb1b8"
+        },
+        {
+          "offset": 263280,
+          "size": 1744,
+          "sha1": "16878b226e17a138f7bcaf615ee6077e01c63ce2"
+        }
+      ],
+      "entry_count": 14772,
+      "folder_count": 109,
+      "collision_count": 0,
+      "entries_sorted": true,
+      "sample_entries": [
+        {
+          "at": 0,
+          "key": "05c06d4a11e1db41",
+          "packed": "00d98fc0"
+        },
+        {
+          "at": 7386,
+          "key": "7e242271aa752e16",
+          "packed": "01fce570"
+        },
+        {
+          "at": 14771,
+          "key": "fdbaa8f7ffecb78c",
+          "packed": "03b6f3e0"
+        }
+      ],
+      "sample_folders": [
+        {
+          "hash": "05c06d4a",
+          "entries_offset": 2048,
+          "entries_size": 336
+        },
+        {
+          "hash": "05ceaaa6",
+          "entries_offset": 2384,
+          "entries_size": 1456
+        },
+        {
+          "hash": "0c1d4969",
+          "entries_offset": 3840,
+          "entries_size": 160
+        }
+      ],
+      "collisions": [],
+      "resolved": [
+        {
+          "path": "bg/ex1/01_roc_r2/twn/r2t1/level/planmap.lgb",
+          "key": "1c27eeb977c3d938",
+          "dat": 0,
+          "offset": 141864448
+        }
+      ]
+    }
+  ]
+}

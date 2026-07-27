@@ -242,8 +242,11 @@ dependencies = [
 name = "apogee-sqpack"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "flate2",
+ "proptest",
  "serde_json",
+ "sha1",
  "sha2",
  "tempfile",
  "thiserror",
