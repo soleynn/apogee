@@ -29,6 +29,9 @@ pub enum Error {
     /// A compressed block's framing or payload was structurally invalid.
     #[error("block corrupt at offset {offset}: {detail}")]
     BlockCorrupt { offset: u64, detail: &'static str },
+    /// An index container's header or segment table contradicted the format.
+    #[error("index corrupt at offset {offset}: {detail}")]
+    IndexCorrupt { offset: u64, detail: &'static str },
     /// A hash collision landed on a synonym entry that could not yet be resolved.
     #[error("unresolved synonym for key {key}")]
     SynonymUnresolved { key: String },
