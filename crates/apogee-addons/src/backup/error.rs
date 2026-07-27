@@ -10,7 +10,9 @@ use super::confine::RejectReason;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BackupError {
-    #[error("{path:?} could not be read")]
+    // Both directions, because this arm covers creating and renaming and removing as well as reading:
+    // a capture reads, a restore writes, and pruning deletes.
+    #[error("{path:?} could not be read or written")]
     Io {
         path: PathBuf,
         #[source]

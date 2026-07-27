@@ -30,7 +30,7 @@ use url::Url;
 pub use event::{SetupEvent, SetupEvents};
 pub use plan::{PlanStep, SetupPlan, StepAction};
 
-use crate::manifest::ComponentManifest;
+use crate::manifest::{ComponentManifest, Verb};
 use crate::{AddonError, Result};
 
 /// What became of one verb.
@@ -84,6 +84,8 @@ const MANIFEST_FILE: &str = "components.json";
 const SIGNATURE_FILE: &str = "components.json.sig";
 /// Where a fetch in progress writes, cleared before every attempt.
 const STAGING_DIR: &str = ".fetching";
+/// What a failure on the catalog's own filesystem steps is reported against.
+const CATALOG: &str = "the signed catalog";
 
 /// Fetch the signed manifest and its detached signature over HTTPS, then verify against `key`. The
 /// manifest's own bytes are not pinned ahead of time; the signature is the authenticity gate.
@@ -116,18 +118,20 @@ pub(crate) async fn fetch_manifest(
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging)
         .await
-        .map_err(|source| artifact::io_failed("manifest", "cache", &staging, source))?;
+        .map_err(|source| {
+            artifact::io_failed(CATALOG, "make a staging directory", &staging, source)
+        })?;
     let manifest_path = staging.join(MANIFEST_FILE);
     let signature_path = staging.join(SIGNATURE_FILE);
     download_unverified(fetcher, manifest_url, &manifest_path, cancel).await?;
     download_unverified(fetcher, signature_url, &signature_path, cancel).await?;
 
-    let manifest = tokio::fs::read(&manifest_path)
-        .await
-        .map_err(|source| artifact::io_failed("manifest", "read", &manifest_path, source))?;
-    let signature = tokio::fs::read(&signature_path)
-        .await
-        .map_err(|source| artifact::io_failed("manifest", "read", &signature_path, source))?;
+    let manifest = tokio::fs::read(&manifest_path).await.map_err(|source| {
+        artifact::io_failed(CATALOG, "read what it downloaded", &manifest_path, source)
+    })?;
+    let signature = tokio::fs::read(&signature_path).await.map_err(|source| {
+        artifact::io_failed(CATALOG, "read what it downloaded", &signature_path, source)
+    })?;
     let parsed = ComponentManifest::parse_and_verify(&manifest, &signature, key)?;
 
     publish(&staging, cache_dir).await?;
@@ -142,13 +146,15 @@ pub(crate) async fn fetch_manifest(
 async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(cache_dir)
         .await
-        .map_err(|source| artifact::io_failed("manifest", "cache", cache_dir, source))?;
+        .map_err(|source| {
+            artifact::io_failed(CATALOG, "make its cache directory", cache_dir, source)
+        })?;
     for name in [MANIFEST_FILE, SIGNATURE_FILE] {
         let from = staging.join(name);
         let to = cache_dir.join(name);
         tokio::fs::rename(&from, &to)
             .await
-            .map_err(|source| artifact::io_failed("manifest", "cache", &to, source))?;
+            .map_err(|source| artifact::io_failed(CATALOG, "publish what verified", &to, source))?;
     }
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(())
@@ -197,8 +203,8 @@ async fn download_unverified(
 /// Apply every verb `manifest` defines that `prefix` is missing.
 ///
 /// # Errors
-/// [`AddonError::Install`] wrapping the runtime's error if the prefix's record cannot be read: without
-/// it there is no way to tell setup that is needed from setup that is not, and re-running everything
+/// [`AddonError::Io`] wrapping the runtime's error if the prefix's record cannot be read: without it
+/// there is no way to tell setup that is needed from setup that is not, and re-running everything
 /// against a live prefix is worse than stopping. [`AddonError::Cancelled`] if the token fired, which
 /// ends the pass rather than failing the verbs it did not get to.
 pub(crate) async fn apply_verbs(
@@ -209,9 +215,9 @@ pub(crate) async fn apply_verbs(
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
-    let installed = prefix.components().map_err(|source| AddonError::Install {
-        component: "prefix".to_owned(),
-        step: "read the prefix record",
+    let installed = prefix.components().map_err(|source| AddonError::Io {
+        what: "this prefix".to_owned(),
+        step: "read what setup it already has",
         source: Box::new(source),
     })?;
     // A verb the record claims but whose effect is gone has to be applied again, so the check happens
@@ -237,18 +243,16 @@ pub(crate) async fn apply_verbs(
         match step.action {
             StepAction::AlreadyPresent => {
                 events.emit(SetupEvent::AlreadyPresent {
-                    what: step.name.clone(),
+                    what: step.verb.name.clone(),
                 });
                 report.outcomes.push(SetupOutcome {
-                    name: step.name.clone(),
+                    name: step.verb.name.clone(),
                     state: SetupState::AlreadyPresent,
                 });
             }
             StepAction::Apply => {
-                let outcome = apply_verb(
-                    runtime, fetcher, manifest, prefix, &step.name, &work, cancel, events,
-                )
-                .await;
+                let outcome =
+                    apply_verb(runtime, fetcher, prefix, step.verb, &work, cancel, events).await;
                 // The step that was in flight when the token fired is the one the check above cannot
                 // catch: it ran before the step started. So the token is read again here, ahead of
                 // whatever the step made of being interrupted, and for both ways a step can come back
@@ -271,14 +275,14 @@ pub(crate) async fn apply_verbs(
                     Err(err) => {
                         let reason = describe(&err);
                         events.emit(SetupEvent::Failed {
-                            what: step.name.clone(),
+                            what: step.verb.name.clone(),
                             reason: reason.clone(),
                         });
                         SetupState::Failed { reason }
                     }
                 };
                 report.outcomes.push(SetupOutcome {
-                    name: step.name.clone(),
+                    name: step.verb.name.clone(),
                     state,
                 });
             }
@@ -287,7 +291,7 @@ pub(crate) async fn apply_verbs(
 
     // The scratch directory goes either way: a pass that stopped early has no more claim on it than one
     // that finished.
-    let _ = tokio::fs::remove_dir_all(&work).await;
+    artifact::clear_work_dirs(prefix.path()).await;
     if cancelled {
         return Err(AddonError::Cancelled);
     }
@@ -313,33 +317,26 @@ fn stale_verbs(
 
 /// Apply one verb and record it. Recorded only on success, so a failed apply is retried next time
 /// rather than remembered as done.
-#[allow(clippy::too_many_arguments)]
 async fn apply_verb(
     runtime: &Runtime,
     fetcher: &Fetcher,
-    manifest: &ComponentManifest,
     prefix: &Prefix,
-    name: &str,
+    row: &Verb,
     work: &Path,
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<()> {
-    let row = manifest
-        .verb(name)
-        .ok_or_else(|| AddonError::UnknownComponent {
-            name: name.to_owned(),
-        })?;
     events.emit(SetupEvent::Applying {
         verb: row.name.clone(),
         reason: row.reason.clone(),
     });
     verb::apply(runtime, fetcher, prefix, row, work, cancel, events).await?;
     prefix
-        .record_verb(name)
+        .record_verb(&row.name)
         .map(|_| ())
-        .map_err(|source| AddonError::Install {
-            component: name.to_owned(),
-            step: "record it in the prefix",
+        .map_err(|source| AddonError::Io {
+            what: row.name.clone(),
+            step: "record itself in the prefix",
             source: Box::new(source),
         })?;
     events.emit(SetupEvent::Applied {

@@ -80,20 +80,32 @@ pub enum AddonError {
     Download(#[from] FetchError),
     #[error("invalid download request")]
     Spec(#[from] apogee_fetch::SpecError),
-    #[error("the component manifest is not trustworthy")]
+    /// The signed catalog was refused. Transparent, because the reason is the inner variant and an
+    /// outer sentence over nine of them can only be vague enough to fit a schema slip and a forged
+    /// signature at once, which reads as tampering either way.
+    #[error(transparent)]
     Manifest(#[from] ManifestError),
-    #[error("no component named {name:?} in the manifest")]
-    UnknownComponent { name: String },
-    #[error("integrity mismatch for {component}: expected {expected}, got {got}")]
+    #[error("{verb}: the bytes fetched are not the ones it pins (expected {expected}, got {got})")]
     IntegrityMismatch {
-        component: String,
+        verb: String,
         expected: String,
         got: String,
     },
-    #[error("install of {component} failed at step {step}")]
-    Install {
-        component: String,
+    /// A filesystem step failed. `what` names what was being set up and `step` which part of it: the
+    /// io error underneath names a path and a kind, and nothing about why the launcher was there.
+    #[error("{what}: could not {step}")]
+    Io {
+        what: String,
         step: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// An archive did not become the files it was meant to. Its own variant rather than an io failure:
+    /// the bytes already matched their pin, so what is wrong is the archive's shape or the layout
+    /// declared for it, and retrying the download fixes neither.
+    #[error("{what}: the archive did not unpack")]
+    Unpack {
+        what: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -137,7 +149,10 @@ pub enum AddonError {
         #[source]
         source: Box<apogee_runtime::RuntimeError>,
     },
-    #[error("config backup failed")]
+    /// Transparent for the same reason as [`Self::Manifest`], and one more: this arm carries restore
+    /// and pruning as well as capture, so any outer sentence naming one of the three is wrong about
+    /// the other two.
+    #[error(transparent)]
     Backup(#[from] BackupError),
     /// The cancellation token fired, so the work stopped where it was. Its own variant rather than a
     /// per-step failure: a caller counts what failed to decide whether it did what was asked, and a run

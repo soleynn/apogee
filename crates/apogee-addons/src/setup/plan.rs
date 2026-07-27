@@ -7,7 +7,7 @@
 
 use apogee_runtime::InstalledComponent;
 
-use crate::manifest::ComponentManifest;
+use crate::manifest::{ComponentManifest, Verb};
 
 /// What the setup pass will do about one verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,19 +20,23 @@ pub enum StepAction {
 }
 
 /// One thing a setup pass will consider, in the order it will be considered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanStep {
-    pub name: String,
+///
+/// It borrows the row rather than copying its name out, so the pass that carries the plan out cannot
+/// look a name back up and find nothing: the manifest a step came from is the manifest it is applied
+/// against, and holding the row is what says so in the types.
+#[derive(Debug, Clone)]
+pub struct PlanStep<'m> {
+    pub verb: &'m Verb,
     pub action: StepAction,
 }
 
 /// The ordered decision a setup pass is about to carry out.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetupPlan {
-    steps: Vec<PlanStep>,
+#[derive(Debug, Clone)]
+pub struct SetupPlan<'m> {
+    steps: Vec<PlanStep<'m>>,
 }
 
-impl SetupPlan {
+impl<'m> SetupPlan<'m> {
     /// Plan every verb `manifest` defines, marking what `installed` already covers.
     ///
     /// Every verb, not a chosen subset: a verb is prefix hygiene the launcher performs, so the list a
@@ -45,7 +49,7 @@ impl SetupPlan {
     /// true.
     #[must_use]
     pub fn build(
-        manifest: &ComponentManifest,
+        manifest: &'m ComponentManifest,
         installed: &[InstalledComponent],
         stale: &[String],
     ) -> Self {
@@ -54,7 +58,7 @@ impl SetupPlan {
             .iter()
             .map(|verb| PlanStep {
                 action: action_for(&verb.name, installed, stale),
-                name: verb.name.clone(),
+                verb,
             })
             .collect();
         Self { steps }
@@ -62,7 +66,7 @@ impl SetupPlan {
 
     /// Every step, in order.
     #[must_use]
-    pub fn steps(&self) -> &[PlanStep] {
+    pub fn steps(&self) -> &[PlanStep<'m>] {
         &self.steps
     }
 
@@ -107,7 +111,7 @@ mod tests {
         InstalledComponent::Name(name.to_owned())
     }
 
-    fn actions(plan: &SetupPlan) -> Vec<&StepAction> {
+    fn actions<'p>(plan: &'p SetupPlan<'_>) -> Vec<&'p StepAction> {
         plan.steps().iter().map(|s| &s.action).collect()
     }
 
@@ -115,11 +119,12 @@ mod tests {
     /// hygiene rather than a feature somebody opts into.
     #[test]
     fn every_verb_the_manifest_defines_is_planned_in_manifest_order() {
-        let plan = SetupPlan::build(&manifest(), &[], &[]);
+        let manifest = manifest();
+        let plan = SetupPlan::build(&manifest, &[], &[]);
         assert_eq!(
             plan.steps()
                 .iter()
-                .map(|s| s.name.as_str())
+                .map(|s| s.verb.name.as_str())
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
@@ -131,13 +136,14 @@ mod tests {
     /// also writes into.
     #[test]
     fn what_the_prefix_already_records_is_not_applied_again() {
-        let plan = SetupPlan::build(&manifest(), &[recorded("first")], &[]);
+        let manifest = manifest();
+        let plan = SetupPlan::build(&manifest, &[recorded("first")], &[]);
         assert_eq!(
             actions(&plan),
             [&StepAction::AlreadyPresent, &StepAction::Apply]
         );
 
-        let all = SetupPlan::build(&manifest(), &[recorded("first"), recorded("second")], &[]);
+        let all = SetupPlan::build(&manifest, &[recorded("first"), recorded("second")], &[]);
         assert!(all.is_empty(), "a fully-applied prefix has nothing to do");
     }
 
@@ -146,8 +152,9 @@ mod tests {
     /// entry that is no longer true.
     #[test]
     fn a_recorded_verb_whose_effect_is_gone_is_applied_again() {
+        let manifest = manifest();
         let installed = vec![recorded("first"), recorded("second")];
-        let plan = SetupPlan::build(&manifest(), &installed, &["first".to_owned()]);
+        let plan = SetupPlan::build(&manifest, &installed, &["first".to_owned()]);
         assert_eq!(
             actions(&plan),
             [&StepAction::Apply, &StepAction::AlreadyPresent],
