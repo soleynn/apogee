@@ -64,11 +64,6 @@ pub enum Command {
     Repair {
         profile: Uuid,
     },
-    /// Install the companion components the profile has enabled into its prefix, applying the prefix
-    /// setup they ask for. Idempotent, and does not launch.
-    Components {
-        profile: Uuid,
-    },
     FirstRun(FirstRunStep),
     ImportXivLauncher(PathBuf),
     /// Fetch pre-login display data (news, gate status, banners).
@@ -109,10 +104,6 @@ impl fmt::Debug for Command {
             Command::Repair { profile } => {
                 f.debug_struct("Repair").field("profile", profile).finish()
             }
-            Command::Components { profile } => f
-                .debug_struct("Components")
-                .field("profile", profile)
-                .finish(),
             Command::FirstRun(step) => f.debug_tuple("FirstRun").field(step).finish(),
             Command::ImportXivLauncher(path) => {
                 f.debug_tuple("ImportXivLauncher").field(path).finish()
@@ -143,10 +134,10 @@ pub enum Event {
     Patch(PatchProgress),
     /// One of the user's own tools started, stopped, or failed. Relayed verbatim, like `Patch`.
     Addon(apogee_addons::AddonEvent),
-    /// A companion component being installed, or a caveat about one. Relayed verbatim; the caveats in
-    /// particular are the reason this is a stream rather than a report, since they are only useful while
-    /// the thing is being set up.
-    Component(apogee_addons::ComponentEvent),
+    /// The prefix being brought up to what a managed one should have, or an injectable being installed.
+    /// Relayed verbatim; the caveats in particular are the reason this is a stream rather than a report,
+    /// since they are only useful while the thing is being set up.
+    Setup(apogee_addons::SetupEvent),
     Frontier(FrontierData),
     Error(CoreError),
 }
@@ -171,8 +162,9 @@ pub enum FlowState {
     VersionNotServiced,
     /// The game's settings are being captured before patches are applied.
     BackingUp,
-    /// Companion components are being installed into the prefix.
-    InstallingComponents,
+    /// The prefix is being brought up to what a managed one should have, and whatever this launch loads
+    /// into the game is being installed.
+    PreparingPrefix,
     /// Patches are being applied.
     Patching,
     /// The install is being verified and repaired against its block index.
@@ -190,8 +182,8 @@ pub enum FlowState {
     ///
     /// A disposition rather than an [`Event::Error`]: a shell counts failures to decide whether it got
     /// what it asked for, and a run the user stopped on purpose has nothing to count. A supervised
-    /// launch already ends this way (killing the game and narrating its exit), so a cancelled patch or
-    /// component install ending in a failure would be the same act reported two ways.
+    /// launch already ends this way (killing the game and narrating its exit), so a cancelled patch
+    /// ending in a failure would be the same act reported two ways.
     Cancelled,
 }
 

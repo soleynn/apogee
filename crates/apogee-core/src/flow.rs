@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use apogee_otp::OtpSource;
 use apogee_patcher::{InstallRequest, Repo, SePatch};
+use apogee_runtime::LaunchPlan;
 use apogee_secrets::Secret;
 use sqex_crypto::{ArgKey, ArgumentBuilder, TickCount};
 use sqex_proto::{
@@ -27,8 +28,8 @@ use crate::addons::AddonBackend;
 use crate::command::{Command, Event, FlowState};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
-use crate::launch::{LaunchBackend, LaunchRequest};
-use crate::model::{Account, Profile, Region};
+use crate::launch::LaunchBackend;
+use crate::model::{Account, Profile, Region, Settings};
 use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo_ver_path};
 use crate::store::{Store, StoreError, UidCacheEntry};
 
@@ -133,7 +134,6 @@ pub(crate) async fn drive(
             .await
         }
         Command::Repair { profile } => repair(&ctx, profile, &tx, &cancel).await,
-        Command::Components { profile } => install_components(&ctx, profile, &tx, &cancel).await,
         Command::FirstRun(_) => todo!("walk the initial setup"),
         Command::ImportXivLauncher(_) => todo!("import an existing launcher configuration"),
         Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
@@ -170,8 +170,8 @@ fn is_cancellation(error: &CoreError) -> bool {
     match error {
         CoreError::Patch(apogee_patcher::PatchError::Cancelled)
         | CoreError::Addons(apogee_addons::AddonError::Cancelled)
-        // The component catalog is fetched before the install loop that turns a stopped step into the
-        // addons' own cancellation, so a run stopped during that download arrives spelled as the fetch.
+        // The signed catalog is fetched before the loop that turns a stopped step into the addons'
+        // own cancellation, so a run stopped during that download arrives spelled as the fetch.
         | CoreError::Addons(apogee_addons::AddonError::Download(
             apogee_fetch::FetchError::Cancelled,
         )) => true,
@@ -277,71 +277,6 @@ async fn repair(
         "repair complete"
     );
     Ok(())
-}
-
-/// Install the components the profile has enabled into its prefix.
-///
-/// Prepares the prefix first, because a component installs into one and the profile's prefix may never
-/// have been created: asking the user to launch the game once before they can set up a companion would be
-/// an ordering nobody can guess.
-async fn install_components(
-    ctx: &FlowContext,
-    profile_id: Uuid,
-    tx: &UnboundedSender<Event>,
-    cancel: &CancellationToken,
-) -> Result<(), CoreError> {
-    let (profile, _account) = resolve(ctx, profile_id)?;
-    let wanted = enabled_components(&profile);
-    if wanted.is_empty() {
-        return Ok(());
-    }
-    let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
-    let prefix = ctx
-        .launch
-        .prepare(&profile.runner, &prefix_dir, cancel, tx)
-        .await?;
-
-    emit(tx, FlowState::InstallingComponents);
-    let report = ctx.addons.ensure(prefix, wanted, cancel, tx).await?;
-    // Counted against the steps the install considered rather than the names the profile listed, so the
-    // two halves of the message share a denominator. A tool's prerequisite verb is a step of its own, so
-    // the two counts otherwise differ and "2 of 2 failed" can be printed for a set where one succeeded.
-    let total = report.outcomes.len();
-    // `Unsupported` counts too. The user asked for it and it is not installed; that a build cannot drive
-    // it rather than having tried and failed changes the reason, not whether the work happened.
-    let failed = report
-        .outcomes
-        .iter()
-        .filter(|o| {
-            matches!(
-                o.state,
-                apogee_addons::ComponentState::Failed { .. }
-                    | apogee_addons::ComponentState::Unsupported { .. }
-            )
-        })
-        .count();
-    tracing::debug!(
-        installed = report.present().len(),
-        failed,
-        "component install complete"
-    );
-    if failed > 0 {
-        // Each failure is already on the stream as the event that failed it, so this carries a count and
-        // no reasons. It exists because otherwise a run that installed nothing would end the same way as
-        // one that installed everything, which is a shell reporting success for work that did not happen.
-        return Err(CoreError::Components { failed, total });
-    }
-    Ok(())
-}
-
-/// The component ids a profile has switched on, in list order.
-fn enabled_components(profile: &Profile) -> Vec<String> {
-    profile
-        .components
-        .iter()
-        .filter(|c| c.enabled)
-        .map(|c| c.id.clone())
-        .collect()
 }
 
 /// Launch from a still-valid cached session, or narrate that a login is needed first.
@@ -699,7 +634,12 @@ fn read_repo_ver(game_root: &Path, repo: Repo) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
-/// Build the encrypted launch arguments, spawn through the launch backend, and supervise the game.
+/// Prepare the prefix, compose the launch, spawn it through the launch backend, and supervise the game.
+///
+/// The prefix is prepared as its own step rather than inside the spawn, because what is launched is
+/// decided in between: the prefix is brought up to the setup the signed catalog publishes, and whatever
+/// the profile loads into the game composes itself onto the plan. Neither can happen without a prefix in
+/// hand, and neither is allowed to fail the launch.
 async fn launch_game(
     ctx: &FlowContext,
     profile: &Profile,
@@ -709,37 +649,49 @@ async fn launch_game(
 ) -> Result<(), CoreError> {
     let settings = ctx.store.load_settings()?;
     let game_dir = profile.game_path.join("game");
-    let request = LaunchRequest {
-        runner: profile.runner.clone(),
-        prefix_dir: ctx.prefixes_dir.join(prefix_name(profile)),
-        program: game_dir
-            .join("ffxiv_dx11.exe")
-            .to_string_lossy()
-            .into_owned(),
-        working_dir: game_dir,
-        encrypted_args: build_launch_args(session, language_id(&settings.language)),
-        env: launch_env(profile),
-        wrappers: profile.launch.wrappers.clone(),
-    };
+    let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
+
+    emit(tx, FlowState::PreparingPrefix);
+    let prefix = ctx
+        .launch
+        .prepare(&profile.runner, &prefix_dir, cancel, tx)
+        .await?;
+
+    let mut plan = LaunchPlan::new(
+        game_dir.join("ffxiv_dx11.exe").to_string_lossy(),
+        build_launch_args(session, language_id(&settings.language)),
+        launch_env(profile),
+    )
+    .in_directory(&game_dir)
+    .with_wrappers(profile.launch.wrappers.clone());
+    if let Some(prefix) = &prefix {
+        plan = plan.prefix(prefix);
+    }
+    ctx.addons
+        .prepare_launch(
+            prefix,
+            dalamud_config(profile, session, &settings),
+            &mut plan,
+            cancel,
+            tx,
+        )
+        .await;
 
     emit(tx, FlowState::Launching);
-    let handle = ctx.launch.launch(request, cancel, tx).await?;
+    let handle = ctx.launch.launch(plan, cancel, tx).await?;
     tracing::debug!(pid = handle.game_pid(), "game process running");
     emit(tx, FlowState::Running);
-
-    // The companions the profile's components contribute run ahead of the user's own, because a tool the
-    // user pointed at one of them expects it to be up. Derived from the catalog on every launch rather
-    // than copied into the profile when installed, so a corrected row takes effect here.
-    let mut companions = ctx
-        .addons
-        .registrations(handle.prefix(), enabled_components(profile), cancel, tx)
-        .await;
-    companions.extend(profile.external.iter().cloned());
 
     // Started once the game is up, so a companion that looks for it finds it.
     let addons = ctx
         .addons
-        .start(handle.game_pid(), handle.prefix(), companions, cancel, tx)
+        .start(
+            handle.game_pid(),
+            handle.prefix(),
+            profile.external.clone(),
+            cancel,
+            tx,
+        )
         .await;
 
     // Closing after launch detaches the launcher, but only when nothing is owed at exit: detaching
@@ -853,6 +805,27 @@ pub(crate) fn prefix_name(profile: &Profile) -> String {
     } else {
         profile.prefix.name.clone()
     }
+}
+
+/// What this launch loads into the game, or `None` when the profile's toggle is off.
+///
+/// `None` is what keeps a launch from contacting the distribution at all, so it is the whole of the
+/// opt-in: nothing downstream re-checks the setting.
+fn dalamud_config(
+    profile: &Profile,
+    session: &UidCacheEntry,
+    settings: &Settings,
+) -> Option<apogee_addons::DalamudConfig> {
+    profile
+        .launch
+        .dalamud
+        .then(|| apogee_addons::DalamudConfig {
+            language: apogee_addons::ClientLanguage::from_ordinal(language_id(&settings.language)),
+            // The version the session was registered against, which is the install's own. A release
+            // built for another one reads the client's memory at offsets that have moved.
+            game_version: session.game_version.clone(),
+            ..apogee_addons::DalamudConfig::default()
+        })
 }
 
 /// The game's numeric language id (Japanese 0, English 1, German 2, French 3), defaulting English.

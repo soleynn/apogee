@@ -84,8 +84,8 @@ pub(crate) fn build_command(
     }
 
     // Wrappers (gamescope/gamemode/...) wrap the whole invocation.
-    let mut argv: Vec<String> = Vec::with_capacity(plan.wrapper_list().len() + invocation.len());
-    argv.extend(plan.wrapper_list().iter().cloned());
+    let mut argv: Vec<String> = Vec::with_capacity(plan.wrappers().len() + invocation.len());
+    argv.extend(plan.wrappers().iter().cloned());
     argv.extend(invocation);
 
     let (exe, rest) = argv.split_first().ok_or(RuntimeError::InvalidLaunchPlan {
@@ -94,7 +94,7 @@ pub(crate) fn build_command(
     let mut cmd = Command::new(exe);
     cmd.args(rest);
     apply_env(&mut cmd, plan, prefix);
-    if let Some(working_dir) = plan.working_dir_ref() {
+    if let Some(working_dir) = plan.working_dir() {
         cmd.current_dir(working_dir);
     }
     cmd.kill_on_drop(false);
@@ -221,7 +221,7 @@ mod tests {
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
         let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new())
             .prefix(&prefix)
-            .working_dir(&working);
+            .in_directory(&working);
 
         let cmd = build_command(&plan, None).unwrap();
         assert_eq!(cmd.as_std().get_current_dir(), Some(working.as_path()));

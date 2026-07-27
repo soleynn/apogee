@@ -12,8 +12,8 @@ pub(crate) mod addons_backend;
 #[cfg(test)]
 pub(crate) mod fake;
 
-use apogee_addons::{ComponentReport, ExternalAddon};
-use apogee_runtime::Prefix;
+use apogee_addons::{DalamudConfig, ExternalAddon};
+use apogee_runtime::{LaunchPlan, Prefix};
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -46,43 +46,26 @@ fn parse_url(raw: &str) -> Result<Url, CoreError> {
 /// Drives `apogee-addons` for one launch, relaying its events onto the core event stream.
 #[async_trait]
 pub(crate) trait AddonBackend: Send + Sync {
-    /// The signed catalog of what can be installed, verified against the compiled-in key.
+    /// Bring `prefix` up to the setup the signed catalog publishes, then let whatever this launch loads
+    /// into the game contribute to `plan`.
     ///
-    /// # Errors
-    /// [`CoreError::Addons`] if it cannot be fetched or does not verify. Fallible because the only caller
-    /// is a user asking what is on offer, and an empty answer would read as "nothing" rather than "I
-    /// could not look".
-    async fn catalog(
-        &self,
-        cancel: &CancellationToken,
-    ) -> Result<apogee_addons::ComponentManifest, CoreError>;
-
-    /// Install the components `wanted` into `prefix`, applying the verbs they ask for first.
+    /// `dalamud` is `Some` when the profile's toggle is on, and its absence is what keeps a launch from
+    /// contacting the distribution at all.
     ///
-    /// Fallible, unlike the launch-time methods, because this is something the user asked for directly:
-    /// a catalog it cannot reach means it did not do what was asked, and reporting success would be a
-    /// lie. A single component failing is in the report rather than the error.
+    /// Infallible by design, like `start`. Everything here is an addition to a launch rather than a
+    /// precondition for one: an unreachable catalog, a verb a wine refused, an injectable between
+    /// releases. Each is reported on `events` and the game still starts, because a launcher that refuses
+    /// to run the game over prefix hygiene is worse than one that runs it without.
     ///
     /// `prefix` of `None` is nothing to do, which is what the test double hands back.
-    async fn ensure(
+    async fn prepare_launch(
         &self,
         prefix: Option<Prefix>,
-        wanted: Vec<String>,
+        dalamud: Option<DalamudConfig>,
+        plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<ComponentReport, CoreError>;
-
-    /// The launch-time records for whichever of `wanted` are companions that join a launch.
-    ///
-    /// Infallible for the same reason `start` is: a launch that already has everything it needs must not
-    /// fail because a companion catalog was unreachable. What it cannot resolve it reports and omits.
-    async fn registrations(
-        &self,
-        prefix: Option<Prefix>,
-        wanted: Vec<String>,
-        cancel: &CancellationToken,
-        events: &UnboundedSender<Event>,
-    ) -> Vec<ExternalAddon>;
+    );
 
     /// Start the profile's companions for a game that is already running.
     ///

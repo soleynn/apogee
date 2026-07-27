@@ -2,7 +2,8 @@
 //!
 //! `SystemWine` synthesizes a thin runner directory whose `wine`/`wineserver` shim to the host
 //! tools, then adopts it as a custom runner (no download). `Managed` runners are fetched and verified
-//! from the signed catalog. The prepared prefix is launched and the real game process supervised.
+//! from the signed catalog. The plan the flow hands over is spawned as it stands, and the real game
+//! process supervised: what it launches was settled before it got here.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +14,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{GameHandle, LaunchBackend, LaunchRequest};
+use super::{GameHandle, LaunchBackend};
 use crate::command::{Event, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
@@ -104,20 +105,11 @@ impl LaunchBackend for RuntimeLauncher {
 
     async fn launch(
         &self,
-        req: LaunchRequest,
+        plan: LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<Box<dyn GameHandle>, CoreError> {
         let progress = relay_progress(events);
-        let prefix = self
-            .prepare_prefix(&req.runner, &req.prefix_dir, cancel, &progress)
-            .await?;
-        let mut plan = LaunchPlan::new(req.program, req.encrypted_args, req.env)
-            .prefix(&prefix)
-            .working_dir(req.working_dir);
-        if !req.wrappers.is_empty() {
-            plan = plan.wrappers(req.wrappers);
-        }
         let session = self.runtime.launch(plan, cancel, &progress).await?;
         Ok(Box::new(RuntimeGameHandle { session }))
     }

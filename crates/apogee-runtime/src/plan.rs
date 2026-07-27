@@ -251,14 +251,14 @@ impl LaunchPlan {
     /// Set the child process working directory (the game runs from its own install directory, e.g.
     /// `<game>/game`, so it resolves data paths relative to the exe).
     #[must_use]
-    pub fn working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+    pub fn in_directory(mut self, dir: impl Into<PathBuf>) -> Self {
         self.working_dir = Some(dir.into());
         self
     }
 
     /// Set the wrapper commands composed around the runner invocation (gamescope, gamemode, …).
     #[must_use]
-    pub fn wrappers(mut self, wrappers: Vec<String>) -> Self {
+    pub fn with_wrappers(mut self, wrappers: Vec<String>) -> Self {
         self.wrappers = wrappers;
         self
     }
@@ -340,16 +340,20 @@ impl LaunchPlan {
         self.prefix.as_ref()
     }
 
-    pub(crate) fn prefix_ref(&self) -> Option<&Prefix> {
-        self.prefix.as_ref()
-    }
-
-    pub(crate) fn working_dir_ref(&self) -> Option<&Path> {
+    /// The child process working directory, if one was set.
+    #[must_use]
+    pub fn working_dir(&self) -> Option<&Path> {
         self.working_dir.as_deref()
     }
 
-    pub(crate) fn wrapper_list(&self) -> &[String] {
+    /// The wrapper commands composed around the runner invocation.
+    #[must_use]
+    pub fn wrappers(&self) -> &[String] {
         &self.wrappers
+    }
+
+    pub(crate) fn prefix_ref(&self) -> Option<&Prefix> {
+        self.prefix.as_ref()
     }
 }
 

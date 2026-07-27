@@ -65,6 +65,20 @@ impl ClientLanguage {
     pub fn ordinal(self) -> u8 {
         self as u8
     }
+
+    /// The language an ordinal names, defaulting to English for one this build does not know.
+    ///
+    /// Takes the number rather than a name because the number is what the game itself is told, so the
+    /// launcher decides the language once and this converts it rather than deciding again.
+    #[must_use]
+    pub fn from_ordinal(ordinal: u8) -> Self {
+        match ordinal {
+            0 => Self::Japanese,
+            2 => Self::German,
+            3 => Self::French,
+            _ => Self::English,
+        }
+    }
 }
 
 impl fmt::Display for ClientLanguage {
