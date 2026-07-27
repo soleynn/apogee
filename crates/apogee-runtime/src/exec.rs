@@ -145,6 +145,39 @@ fn capture(bytes: &[u8]) -> String {
     String::from_utf8_lossy(tail).into_owned()
 }
 
+/// What the child branch of the race means once the token is taken into account.
+///
+/// `select!` picks pseudo-randomly among branches that are ready together, so a program that ends in
+/// the same instant the token fires wins the race about half the time and would come back as a run that
+/// succeeded. Callers record a completed step, which is exactly the thing a stopped run must not leave
+/// behind, so the token outranks the child: cancelled is cancelled whichever branch the race went to.
+///
+/// The token is consulted before the wait's own result, so an io error draining the pipes is read the
+/// same way. Killing a child to stop it is a routine way for that read to fail, and reporting it as a
+/// spawn failure narrates a run the user stopped as a broken install.
+#[cfg(target_os = "linux")]
+fn completed(
+    name: String,
+    waited: std::io::Result<std::process::Output>,
+    cancelled: bool,
+) -> Result<PrefixRun, RuntimeError> {
+    if cancelled {
+        return Err(RuntimeError::InPrefixIncomplete {
+            program: name,
+            reason: crate::error::CANCELLED_REASON,
+        });
+    }
+    let output = waited.map_err(|source| RuntimeError::Spawn {
+        runner: name,
+        source,
+    })?;
+    Ok(PrefixRun {
+        code: output.status.code(),
+        stdout: capture(&output.stdout),
+        stderr: capture(&output.stderr),
+    })
+}
+
 /// Run `program` inside `prefix` through its runner and wait for it.
 ///
 /// A non-zero exit is not an error here: it is a fact in the returned [`PrefixRun`], because what a
@@ -197,18 +230,10 @@ pub(crate) async fn run(
     .await;
 
     match waited {
-        Ok(Some(Ok(output))) => Ok(PrefixRun {
-            code: output.status.code(),
-            stdout: capture(&output.stdout),
-            stderr: capture(&output.stderr),
-        }),
-        Ok(Some(Err(source))) => Err(RuntimeError::Spawn {
-            runner: name,
-            source,
-        }),
+        Ok(Some(result)) => completed(name, result, cancel.is_cancelled()),
         Ok(None) => Err(RuntimeError::InPrefixIncomplete {
             program: name,
-            reason: "cancelled",
+            reason: crate::error::CANCELLED_REASON,
         }),
         Err(_elapsed) => Err(RuntimeError::InPrefixIncomplete {
             program: name,
@@ -220,27 +245,8 @@ pub(crate) async fn run(
 #[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
-    use crate::catalog::RunnerKind;
-    use crate::plan::RunnerHandle;
-
-    /// A prefix whose "runner" is a shell script standing in for `wine`, so the spawn path can be
-    /// exercised without one. The script echoes its arguments and exits with the status the first one
-    /// asks for, which is enough to check the parts this module owns: the argv it composes, the
-    /// capture, and the budget.
-    fn scripted_prefix(body: &str) -> (tempfile::TempDir, Prefix) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let runner_dir = dir.path().join("runner");
-        std::fs::create_dir_all(runner_dir.join("bin")).expect("bin");
-        let wine = runner_dir.join("bin/wine");
-        std::fs::write(&wine, format!("#!/bin/sh\n{body}\n")).expect("write shim");
-        std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let handle = RunnerHandle::for_test(runner_dir, RunnerKind::Wine, "shim", "custom");
-        let prefix = Prefix::new(dir.path().join("prefix"), handle);
-        (dir, prefix)
-    }
+    use crate::shim::scripted_prefix;
 
     /// The program name and its arguments reach the runner as an argv, in order, with no shell in
     /// between: a value with spaces stays one argument.
@@ -286,6 +292,85 @@ mod tests {
         assert_eq!(run.diagnostic(), "nope");
     }
 
+    /// The tie the race itself cannot settle: the child finished and the token fired together, and
+    /// `select!` hands the win to either one. Reported as a completed run, the caller records a step it
+    /// performed after the run was stopped, so the token is what decides.
+    ///
+    /// Both readings of that branch are held to it. A wait that ended in an io error rather than a
+    /// status is the same run from the user's side, and reported as a spawn failure it is a stop
+    /// narrated as a broken install.
+    #[test]
+    fn a_child_that_finishes_as_the_token_fires_is_still_a_cancelled_run() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"installed".to_vec(),
+            stderr: Vec::new(),
+        };
+        let err = completed("setup.exe".to_owned(), Ok(output), true)
+            .expect_err("a run the token stopped is not a run that succeeded");
+        assert!(err.is_cancellation(), "{err:?}");
+        assert!(matches!(
+            err,
+            RuntimeError::InPrefixIncomplete {
+                reason: "cancelled",
+                ..
+            }
+        ));
+
+        let drained = completed(
+            "setup.exe".to_owned(),
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            true,
+        )
+        .expect_err("a stopped run whose pipes failed is still a stopped run");
+        assert!(
+            drained.is_cancellation(),
+            "a pipe that broke because the child was killed to stop it is not a spawn failure: {drained:?}"
+        );
+
+        let broken = completed(
+            "setup.exe".to_owned(),
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            false,
+        )
+        .expect_err("an io error with no cancellation is still a failure");
+        assert!(matches!(broken, RuntimeError::Spawn { .. }), "{broken:?}");
+    }
+
+    /// A run the user stopped and a program that hung are the same variant, and a shell has to tell
+    /// them apart: one is a disposition to narrate, the other a failure to report. Read off the variant
+    /// alone, Ctrl-C is a failed install.
+    #[tokio::test]
+    async fn a_run_the_token_stopped_reads_as_a_cancellation_and_an_overrun_does_not() {
+        let (_dir, prefix) = scripted_prefix("sleep 30");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let stopped = run(
+            &prefix,
+            &ProgramInPrefix::new("cmd", Vec::new()),
+            None,
+            &cancel,
+        )
+        .await
+        .expect_err("a stopped run did not finish");
+        assert!(stopped.is_cancellation(), "{stopped:?}");
+
+        let overran = run(
+            &prefix,
+            &ProgramInPrefix::new("cmd", Vec::new()).timeout(Duration::from_millis(100)),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("a program that outran its budget did not finish either");
+        assert!(
+            !overran.is_cancellation(),
+            "a hung installer is a failure, not a cancellation: {overran:?}"
+        );
+    }
+
     /// A script that records its own pid and then hangs, so a test can check what became of it.
     fn hanging_prefix() -> (tempfile::TempDir, Prefix, PathBuf) {
         let (dir, prefix) = scripted_prefix("echo $$ > \"$APOGEE_TEST_PID_FILE\"; sleep 30");
@@ -302,11 +387,30 @@ mod tests {
         program.env(env)
     }
 
-    /// Whether the pid the script recorded is still alive.
-    fn still_running(pid_file: &Path) -> bool {
-        let text = std::fs::read_to_string(pid_file).expect("the child recorded its pid");
-        let pid: i32 = text.trim().parse().expect("a pid");
-        Path::new(&format!("/proc/{pid}")).exists()
+    /// The pid the script recorded, or `None` if it never got far enough to record one. Absent is not
+    /// an error here: under a time budget the shell can be killed before it writes, and a test that
+    /// panicked on that would be blaming the child for its own timing.
+    fn recorded_pid(pid_file: &Path) -> Option<i32> {
+        std::fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+    }
+
+    /// Wait for the process the script recorded to go away.
+    ///
+    /// The signal lands when the handle drops and the process stays a zombie, with `/proc/<pid>` still
+    /// present, until tokio's orphan reaper collects it. So this polls for the fact rather than
+    /// sleeping a fixed span and asserting: the span would be measuring how loaded the machine is.
+    /// The ceiling only exists so a program that genuinely survives fails as itself.
+    async fn wait_until_gone(pid_file: &Path) {
+        let pid = recorded_pid(pid_file).expect("the child recorded its pid before it was stopped");
+        for _ in 0..600 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the program was left running: /proc/{pid} is still there");
     }
 
     /// A hung setup program must not hang the launcher, and must not be left running either. The second
@@ -330,12 +434,7 @@ mod tests {
                 ..
             }
         ));
-        // The kill lands asynchronously once the handle drops, so give it a moment before insisting.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            !still_running(&pid_file),
-            "the program that outran its budget was left running"
-        );
+        wait_until_gone(&pid_file).await;
     }
 
     #[tokio::test]
@@ -360,11 +459,45 @@ mod tests {
                 ..
             }
         ));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            !still_running(&pid_file),
-            "the cancelled program was left running"
-        );
+        wait_until_gone(&pid_file).await;
+    }
+
+    /// The same tie through the real spawn path, which is what the check in [`run`] answers for. The
+    /// test above holds [`completed`] to it, and that passes whether or not anything ever passes it a
+    /// cancelled token, so it says nothing about the branch the `select!` actually took.
+    ///
+    /// Staged rather than hoped for. One poll spawns the child and registers its pipes; parking the
+    /// runtime on a sleep lets the io driver mark them readable after the child has exited, with
+    /// nothing polling the run; the token then fires. The next poll therefore finds both branches
+    /// ready, and `select!` hands the win to either. Repeated a few times because the pick is
+    /// pseudo-random, so one pass says nothing about the branch that loses.
+    ///
+    /// The assertion is only ever about the outcome. How many of the passes were genuinely tied is a
+    /// property of the scheduler, not of this crate, so counting them would be a test that fails on a
+    /// slow machine and never on a regression.
+    #[tokio::test]
+    async fn a_child_that_wins_the_race_against_a_fired_token_still_reports_a_cancelled_run() {
+        let (_dir, prefix) = scripted_prefix("sleep 0.01; echo done");
+        for _ in 0..8 {
+            let cancel = CancellationToken::new();
+            let program = ProgramInPrefix::new("cmd", Vec::new());
+            let running = run(&prefix, &program, None, &cancel);
+            tokio::pin!(running);
+            // Enough to spawn and register, not enough to finish. A pass that somehow did finish is
+            // not a tie and proves nothing either way.
+            if tokio::time::timeout(Duration::from_millis(1), &mut running)
+                .await
+                .is_ok()
+            {
+                continue;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel.cancel();
+            assert!(
+                running.await.is_err(),
+                "a run the token stopped came back as a run that succeeded"
+            );
+        }
     }
 
     /// A wall of output is bounded to what a message can use, and the tail is what is kept because a

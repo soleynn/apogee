@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::RunnerKind;
 use crate::dosdevices::resolve_drive_target;
-use crate::error::{HealthIssue, PrefixHealth, RuntimeError, SetupStep};
+use crate::error::{HealthIssue, PrefixHealth, RuntimeError, SetupStep, StepCancelled};
 use crate::metadata::{PrefixMetadata, RunnerRef, SetupRecord};
 use crate::plan::{Prefix, RunnerHandle};
 use crate::progress::{Progress, RuntimeEvent};
@@ -237,7 +237,9 @@ pub(crate) async fn recreate(
 }
 
 /// Build and run the `wineboot` command, waiting for it under a cancellation token and a hard
-/// timeout. A non-zero exit, a timeout, or cancellation is a [`RuntimeError::PrefixInit`].
+/// timeout. A non-zero exit, a timeout, or cancellation is a [`RuntimeError::PrefixInit`]; the
+/// cancelled one carries [`StepCancelled`] as its source, which is what
+/// [`RuntimeError::is_cancellation`] reads.
 async fn run_wineboot(
     prefix: &Prefix,
     umu: Option<&Path>,
@@ -273,10 +275,13 @@ async fn run_wineboot(
         Ok(Some(Err(source))) => Err(prefix_init(step, source)),
         Ok(None) => {
             let _ = child.start_kill();
-            Err(prefix_init(
+            // Carried as a type, not a message: this is the error a first run produces when the user
+            // stops the longest phase of it, and every consumer above has to be able to tell it from a
+            // wine that failed.
+            Err(RuntimeError::PrefixInit {
                 step,
-                io::Error::new(io::ErrorKind::Interrupted, "prefix init cancelled"),
-            ))
+                source: Box::new(StepCancelled),
+            })
         }
         Err(_elapsed) => {
             let _ = child.start_kill();
@@ -427,6 +432,8 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+    // `body` is what `wineboot` becomes.
+    use crate::shim::scripted_prefix as scripted_runner;
 
     /// A minimal healthy wine prefix skeleton under a temp dir, plus a matching `prefix.json`.
     fn healthy_prefix(name: &str, version: &str) -> (tempfile::TempDir, Prefix) {
@@ -465,6 +472,33 @@ mod tests {
             let args: Vec<_> = command.as_std().get_args().collect();
             assert_eq!(args, ["wineboot", verb], "fresh = {fresh}");
         }
+    }
+
+    /// Creating the prefix is the longest phase of a first run and the one a user is most likely to
+    /// stop. A `wineboot` the token interrupted has to be tellable from one that failed, and the
+    /// variant alone does not distinguish them, so the error itself answers.
+    #[tokio::test]
+    async fn a_prefix_init_the_token_stopped_reads_as_a_cancellation() {
+        let (_dir, prefix) = scripted_runner("sleep 30");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let err = run_wineboot(&prefix, None, true, &cancel)
+            .await
+            .expect_err("a prefix init that was stopped did not finish");
+        assert!(err.is_cancellation(), "{err:?}");
+    }
+
+    /// And the case it must stay distinct from: a wine that ran and failed is a failure, whatever the
+    /// token says afterwards.
+    #[tokio::test]
+    async fn a_prefix_init_that_failed_is_not_a_cancellation() {
+        let (_dir, prefix) = scripted_runner("exit 1");
+
+        let err = run_wineboot(&prefix, None, true, &CancellationToken::new())
+            .await
+            .expect_err("a wineboot that exits non-zero failed the init");
+        assert!(!err.is_cancellation(), "{err:?}");
     }
 
     #[tokio::test]

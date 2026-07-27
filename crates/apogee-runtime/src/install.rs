@@ -9,8 +9,8 @@ use ed25519_dalek::VerifyingKey;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::catalog::{ArchiveLayout, CATALOG_PUBLIC_KEY, Catalog, Runner, ToolEntry};
-use crate::error::{CatalogError, RuntimeError};
+use crate::catalog::{ArchiveLayout, Catalog, Runner, ToolEntry};
+use crate::error::RuntimeError;
 use crate::extract::extract_archive;
 use crate::progress::{Progress, RuntimeEvent};
 
@@ -183,12 +183,14 @@ const CATALOG_FILES: [&str; 2] = ["catalog.json", "catalog.json.sig"];
 const CATALOG_STAGING: &str = ".fetching";
 
 /// Fetch the signed catalog: download the manifest and its detached signature over HTTPS, then verify
-/// against the compiled-in key. The manifest's own bytes are not sha-pinned ahead of time; the
-/// Ed25519 signature is the authenticity gate.
+/// against `key`. The manifest's own bytes are not sha-pinned ahead of time; the Ed25519 signature is
+/// the authenticity gate. The key is a parameter rather than read here, so the caller decides what the
+/// catalog is trusted against (a shipping caller passes the compiled-in one) and a test can drive this
+/// path with a signature it can produce.
 ///
 /// It downloads into a staging directory that is removed first, and that is load-bearing rather than
 /// tidiness. A catalog is fetched with no content pin and no declared length, and under those terms the
-/// fetcher treats any existing file at the destination as already satisfying the request — correctly,
+/// fetcher treats any existing file at the destination as already satisfying the request, correctly,
 /// since it has nothing to check it against. Downloading straight onto the cache path would therefore
 /// serve the first catalog ever fetched back forever, which is exactly the property "a runner bump is a
 /// manifest edit" denies. Publishing only after the signature verifies also means a failed or truncated
@@ -198,6 +200,7 @@ pub(crate) async fn fetch_catalog(
     manifest_url: &Url,
     signature_url: &Url,
     cache_dir: &Path,
+    key: &VerifyingKey,
     cancel: &CancellationToken,
 ) -> Result<Catalog, RuntimeError> {
     let staging = cache_dir.join(CATALOG_STAGING);
@@ -216,9 +219,7 @@ pub(crate) async fn fetch_catalog(
     let signature = tokio::fs::read(&signature_path)
         .await
         .map_err(|e| io_err(&signature_path, e))?;
-    let key =
-        VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).map_err(|_| CatalogError::BadSignature)?;
-    let catalog = Catalog::parse_and_verify(&manifest, &signature, &key)?;
+    let catalog = Catalog::parse_and_verify(&manifest, &signature, key)?;
 
     // Only bytes that verified reach the cache. Two renames rather than one, so a crash between them can
     // leave a manifest beside the previous signature; nothing reads the cache without verifying it, so
@@ -274,11 +275,13 @@ fn io_err(path: &Path, source: std::io::Error) -> RuntimeError {
 mod tests {
     use std::io::Write;
 
+    use apogee_fetch::FetchError;
     use apogee_test_support::chaos::{ChaosServer, generated_vec, sha256_of};
     use tokio_util::sync::CancellationToken;
 
     use super::install_runner;
     use crate::catalog::{ArchiveFormat, ArchiveLayout, Runner, RunnerKind};
+    use crate::error::RuntimeError;
     use crate::progress::Progress;
 
     /// A gzip'd tar with one file under `top/files/bin/`, carrying `payload`. These tests exercise the
@@ -400,6 +403,51 @@ mod tests {
             server.stats().requests(),
             after_first,
             "a completed install must not re-download"
+        );
+    }
+
+    /// Ctrl-C while a runner is downloading is the one stop that arrives from the fetcher rather than
+    /// from this crate's own spawn or prefix paths, and it comes back wrapped in [`RuntimeError`] like
+    /// any other transfer failure. A shell reading the variant alone therefore cannot tell a stopped
+    /// download from a broken mirror, so it reads the disposition off the error instead and this pins
+    /// what that answers.
+    ///
+    /// The token is fired before the install starts, so the stop lands at the transfer's first
+    /// cancellation check instead of at a chosen offset, and the outcome is the same on every run.
+    #[tokio::test]
+    async fn a_download_the_token_stopped_reads_as_a_cancellation() {
+        let tar = runner_targz("stopped-1", b"payload").expect("build archive");
+        let sha = sha256_of(&tar);
+        let server = ChaosServer::serving(tar).start().await.expect("server");
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let runners_root = root.path().join("runners");
+        let fetcher = apogee_fetch::Fetcher::builder().build().expect("fetcher");
+        let runner = Runner {
+            name: "stopped".to_owned(),
+            version: "1".to_owned(),
+            kind: RunnerKind::Wine,
+            url: server.url("stopped.tar.gz"),
+            sha256: sha,
+            archive: ArchiveLayout {
+                format: ArchiveFormat::TarGz,
+                strip_prefix: Some("stopped-1".to_owned()),
+            },
+        };
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = install_runner(&fetcher, &runner, &runners_root, &cancel, &Progress::none())
+            .await
+            .expect_err("a stopped download is not an install");
+
+        assert!(
+            matches!(err, RuntimeError::Download(FetchError::Cancelled)),
+            "{err:?}"
+        );
+        assert!(
+            err.is_cancellation(),
+            "a runner download the user stopped must not read as a failed install: {err:?}"
         );
     }
 }

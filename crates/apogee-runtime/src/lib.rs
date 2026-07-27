@@ -32,6 +32,9 @@ mod progress;
 mod registry;
 #[cfg(target_os = "linux")]
 mod session;
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod shim;
 #[cfg(target_os = "linux")]
 mod spawn;
 #[cfg(target_os = "linux")]
@@ -55,7 +58,9 @@ pub use env::{
     DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, SyncChoice, SyncStatus,
     compute_environment,
 };
-pub use error::{CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep};
+pub use error::{
+    CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep, StepCancelled,
+};
 pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
@@ -151,19 +156,57 @@ impl Runtime {
         }
     }
 
+    /// Where a verified catalog and its signature are published.
+    fn catalog_cache(&self) -> PathBuf {
+        self.inner.paths.runners.join(".catalog")
+    }
+
     /// Fetch the signed runner catalog and verify it against the compiled-in key.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Catalog`] if the manifest does not verify or does not parse, plus anything the
+    /// download raises.
     pub async fn fetch_catalog(
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
-        let cache = self.inner.paths.runners.join(".catalog");
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY)
+            .map_err(|_| CatalogError::BadSignature)?;
         install::fetch_catalog(
             &self.inner.fetcher,
             manifest_url,
             signature_url,
-            &cache,
+            &self.catalog_cache(),
+            &key,
+            cancel,
+        )
+        .await
+    }
+
+    /// The same fetch, verified against `key` instead of the compiled-in one, so a test can drive the
+    /// whole download-verify-publish path with a signature it can produce.
+    ///
+    /// Behind a feature, so a shipping build cannot fetch a catalog trusted against anything but the
+    /// key compiled into it.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_catalog`].
+    #[cfg(feature = "testing")]
+    pub async fn fetch_catalog_for_testing(
+        &self,
+        manifest_url: &url::Url,
+        signature_url: &url::Url,
+        key: &ed25519_dalek::VerifyingKey,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Catalog, RuntimeError> {
+        install::fetch_catalog(
+            &self.inner.fetcher,
+            manifest_url,
+            signature_url,
+            &self.catalog_cache(),
+            key,
             cancel,
         )
         .await
@@ -253,7 +296,7 @@ impl Runtime {
     }
 
     /// Destructively recreate a prefix: delete it and reinitialize from scratch. Explicit and
-    /// user-initiated — never the automatic response to a health problem.
+    /// user-initiated, never the automatic response to a health problem.
     pub async fn recreate_prefix(
         &self,
         prefix: &Prefix,
@@ -378,34 +421,42 @@ impl Runtime {
 
     /// Remove one registry value, or a key and everything under it, inside `prefix`.
     ///
-    /// Idempotent, and it takes two invocations to be so: `reg delete` on something absent exits
-    /// non-zero, and this crate reads exit status rather than output, so it asks whether the thing is
-    /// there before removing it. Nothing to remove is success.
+    /// Idempotent, and it takes more than one invocation to be so: `reg delete` on something absent
+    /// exits non-zero, and this crate reads exit status rather than output. The removal runs first, and
+    /// only a failed one is explained, by two further status-only probes: whether the thing is still
+    /// there, and whether `reg` answers at all for a key every prefix has. Absent while the registry
+    /// still answers is the one reading that counts as nothing to remove; a prefix that cannot answer
+    /// is an error, and so is a probe killed before it answered, because a removal reported as done is
+    /// one a caller records and never retries.
     ///
     /// # Errors
     /// [`RuntimeError::RegistryKey`] if the removal is not one this launcher will perform,
-    /// [`RuntimeError::PrefixInit`] if `reg` reported a failure, plus anything
-    /// [`Self::run_in_prefix`] raises.
+    /// [`RuntimeError::PrefixInit`] if `reg` reported a failure or the registry could not be read,
+    /// plus anything [`Self::run_in_prefix`] raises.
     pub async fn registry_delete(
         &self,
         prefix: &Prefix,
         delete: &RegistryDelete,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let probe = delete.probe()?;
-        if !self.run_in_prefix(prefix, &probe, cancel).await?.ok() {
-            return Ok(());
-        }
         let run = self
             .run_in_prefix(prefix, &delete.command()?, cancel)
             .await?;
         if run.ok() {
             return Ok(());
         }
+        let target = self.run_in_prefix(prefix, &delete.probe()?, cancel).await?;
+        let control = self
+            .run_in_prefix(prefix, &registry::readable_probe(), cancel)
+            .await?;
+        let reason = match registry::read_failed_delete(&target, &control) {
+            registry::DeleteVerdict::AlreadyAbsent => return Ok(()),
+            registry::DeleteVerdict::Failed(reason) => reason,
+        };
         Err(RuntimeError::PrefixInit {
             step: SetupStep::ApplyTweaks,
             source: Box::new(std::io::Error::other(format!(
-                "reg delete {} exited with {}: {}",
+                "reg delete {} exited with {} and {reason}: {}",
                 delete.key,
                 run.code
                     .map_or_else(|| "a signal".to_owned(), |c| c.to_string()),
@@ -486,6 +537,20 @@ impl Runtime {
         &self,
         _manifest_url: &url::Url,
         _signature_url: &url::Url,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Catalog, RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            what: "runner management is Linux-only at this phase",
+        })
+    }
+
+    /// Runner management is Linux-only at this phase.
+    #[cfg(feature = "testing")]
+    pub async fn fetch_catalog_for_testing(
+        &self,
+        _manifest_url: &url::Url,
+        _signature_url: &url::Url,
+        _key: &ed25519_dalek::VerifyingKey,
         _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
         Err(RuntimeError::Unsupported {

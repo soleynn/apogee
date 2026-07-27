@@ -1,4 +1,9 @@
-//! Writing one registry value inside a prefix.
+//! Writing and removing registry values inside a prefix.
+//!
+//! A removal is read rather than reported. `reg delete` exits non-zero both for a value that was not
+//! there and for a prefix that cannot answer at all, so a failed removal is followed by two status-only
+//! probes: one for the target, one for a key every prefix has. Only "the target is gone while the
+//! registry still answers" is success, because a removal reported as done is one a caller never retries.
 //!
 //! The component layer's prefix tweaks are registry writes, so they get a typed primitive rather than
 //! a hand-assembled command line at each call site. Two properties make it usable as the unit of an
@@ -7,7 +12,7 @@
 //! twice is the same as applying it once and no read-back is needed to decide.
 //!
 //! `/f` is not a nicety. Observed on wine 10.0: without it, `reg add` over a value that already exists
-//! asks whether to overwrite, and with stdin closed it re-asks in a tight loop rather than giving up —
+//! asks whether to overwrite, and with stdin closed it re-asks in a tight loop rather than giving up:
 //! 36 MB of prompts in twenty seconds. So the flag is part of the composed command rather than a
 //! caller's option, and the time budget and output cap in [`crate::exec`] are what bound that shape if
 //! anything else ever produces it.
@@ -17,7 +22,7 @@
 //! write a plausible-looking wrong value rather than failing; neither is added until a verb needs it.
 
 use crate::error::RuntimeError;
-use crate::exec::ProgramInPrefix;
+use crate::exec::{PrefixRun, ProgramInPrefix};
 
 /// Registry roots this launcher will write under, in both spellings `reg` accepts.
 const ROOTS: &[&str] = &[
@@ -90,6 +95,11 @@ impl RegistryValue {
 /// with it. Removing a single *value* is not held to this, since it names exactly what it removes.
 const MIN_KEY_DEPTH: usize = 3;
 
+/// A key every initialized prefix has, queried as the control when a removal fails. `reg query` on it
+/// answers if and only if the prefix's registry can be read at all, which is what makes a "not found"
+/// on the target readable as an absence rather than as a prefix that cannot answer anything.
+const ALWAYS_PRESENT_KEY: &str = r"HKCU\Software";
+
 /// A registry value or key to remove.
 ///
 /// Its own type rather than an option on [`RegistryEdit`], because removal is the one registry operation
@@ -113,11 +123,12 @@ impl RegistryDelete {
         self.check()
     }
 
-    /// The invocation that asks whether there is anything to remove.
+    /// The invocation that asks whether the thing is still there.
     ///
-    /// Asked first because `reg delete` on something absent exits non-zero, and this crate reads exit
-    /// status rather than output, so "it was not there" and "it could not be removed" are otherwise the
-    /// same answer. Two status-only invocations tell them apart without parsing anything.
+    /// Asked after a failed removal, not before one: `reg delete` on something absent exits non-zero,
+    /// and this crate reads exit status rather than output, so "it was not there" and "it could not be
+    /// removed" are otherwise the same answer. Status-only invocations tell them apart without parsing
+    /// anything (see [`read_failed_delete`]).
     pub(crate) fn probe(&self) -> Result<ProgramInPrefix, RuntimeError> {
         self.check().map_err(|reason| self.rejected(reason))?;
         let mut args = vec!["query".to_owned(), self.key.clone()];
@@ -165,6 +176,50 @@ impl RegistryDelete {
             },
             reason,
         }
+    }
+}
+
+/// The invocation that asks whether the prefix's registry answers at all, by querying a key every
+/// prefix has.
+pub(crate) fn readable_probe() -> ProgramInPrefix {
+    ProgramInPrefix::new(
+        "reg",
+        vec!["query".to_owned(), ALWAYS_PRESENT_KEY.to_owned()],
+    )
+}
+
+/// What a failed `reg delete` turned out to mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteVerdict {
+    /// The registry answered and does not have it: there was nothing to remove.
+    AlreadyAbsent,
+    /// The removal did not happen, described by the reading that says so.
+    Failed(&'static str),
+}
+
+/// Read a failed removal against two status-only probes: `target` asked whether the thing is still
+/// there, `control` whether `reg` answers at all.
+///
+/// The control is what makes an absent answer trustworthy. A non-zero `reg query` is "not found", but
+/// it is equally a half-created prefix, a runner whose builtin `reg` will not start, and a wine that
+/// aborts on startup. Reading any of those as a completed removal reports success for something that
+/// never happened, and a caller that records applied steps then never retries it. So an absence counts
+/// only when a key every prefix has still answers.
+///
+/// The target is read as a raw status rather than as pass/fail, because a probe killed by a signal
+/// never got to an answer at all: it is not "not found", it is nothing. The control cannot rescue that
+/// one, since it establishes that the registry is readable and not that this probe finished, so a
+/// target with no exit status is its own failure however well the control went.
+pub(crate) fn read_failed_delete(target: &PrefixRun, control: &PrefixRun) -> DeleteVerdict {
+    match (target.code, control.ok()) {
+        (Some(0), _) => DeleteVerdict::Failed("it is still in the registry afterwards"),
+        (None, _) => DeleteVerdict::Failed(
+            "the probe for it was killed before it answered, so whether it is still there is unknown",
+        ),
+        (Some(_), true) => DeleteVerdict::AlreadyAbsent,
+        (Some(_), false) => DeleteVerdict::Failed(
+            "the prefix registry answered nothing, so an absent value cannot be told from a prefix that cannot be read",
+        ),
     }
 }
 
@@ -417,5 +472,166 @@ mod tests {
     /// Reads back the argv a `ProgramInPrefix` was built with, which is the whole contract here.
     fn command_args(program: &ProgramInPrefix) -> Vec<String> {
         program.args().to_vec()
+    }
+
+    /// A run that ended with `code`. Only the status decides anything here.
+    fn exited(code: i32) -> PrefixRun {
+        PrefixRun {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// A run killed by a signal, which is how a wine that aborts on startup comes back.
+    fn signalled() -> PrefixRun {
+        PrefixRun {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// The reason each failed reading carries, written out here rather than shared with the source.
+    /// The text is the whole point of returning a string instead of a bool, and a test that named the
+    /// same constant the code names would pass however the readings were wired up.
+    const STILL_THERE: &str = "it is still in the registry afterwards";
+    const PROBE_KILLED: &str =
+        "the probe for it was killed before it answered, so whether it is still there is unknown";
+    const UNREADABLE: &str = "the prefix registry answered nothing, so an absent value cannot be told from a prefix that cannot be read";
+
+    /// The distinction the control probe exists for. "Not found", a half-created prefix and a runner
+    /// whose `reg` will not start are one and the same non-zero status, so an absence is only an
+    /// absence when a key every prefix has still answers.
+    #[test]
+    fn nothing_to_remove_needs_a_registry_that_still_answers() {
+        assert_eq!(
+            read_failed_delete(&exited(1), &exited(0)),
+            DeleteVerdict::AlreadyAbsent
+        );
+        assert_eq!(
+            read_failed_delete(&exited(1), &exited(1)),
+            DeleteVerdict::Failed(UNREADABLE)
+        );
+    }
+
+    /// The reading a pass/fail on the target cannot express. A killed probe never reached an answer,
+    /// and a healthy control does not supply one: it says the registry is readable, not that this probe
+    /// finished. Collapsed into "non-zero means not found", it reports a value that is still there as
+    /// removed.
+    #[test]
+    fn a_probe_that_was_killed_answered_nothing_however_well_the_control_went() {
+        assert_eq!(
+            read_failed_delete(&signalled(), &exited(0)),
+            DeleteVerdict::Failed(PROBE_KILLED)
+        );
+    }
+
+    /// A target still in the registry after the removal failed is that failure, whatever the control
+    /// says: the control only ever rescues an absence.
+    #[test]
+    fn a_target_that_is_still_there_is_never_read_as_removed() {
+        for control in [exited(0), exited(1)] {
+            assert_eq!(
+                read_failed_delete(&exited(0), &control),
+                DeleteVerdict::Failed(STILL_THERE)
+            );
+        }
+    }
+
+    const TEST_KEY: &str = r"HKCU\Software\Apogee\RegistryDeleteTest";
+
+    fn value_delete() -> RegistryDelete {
+        RegistryDelete {
+            key: TEST_KEY.to_owned(),
+            name: Some("Setting".to_owned()),
+        }
+    }
+
+    /// A prefix whose "runner" is a shell script standing in for `wine`, so the removal path can be
+    /// driven end to end without one. The script sees `reg <verb> <key> …` as its argv and answers
+    /// with a status, which is all this path reads.
+    #[cfg(target_os = "linux")]
+    fn scripted(body: &str) -> (tempfile::TempDir, crate::Runtime, crate::Prefix) {
+        let (dir, prefix) = crate::shim::scripted_prefix(body);
+        let runtime = crate::Runtime::new(
+            apogee_fetch::Fetcher::builder().build().expect("fetcher"),
+            crate::RuntimePaths {
+                runners: dir.path().join("runners"),
+                prefixes: dir.path().join("prefixes"),
+            },
+        );
+        (dir, runtime, prefix)
+    }
+
+    /// The message a failure carries, which is where the reading reaches whoever has to act on it.
+    #[cfg(target_os = "linux")]
+    fn failure_message(err: &RuntimeError) -> String {
+        match err {
+            RuntimeError::PrefixInit { source, .. } => source.to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// The regression: a prefix where nothing answers used to report a successful removal, so a caller
+    /// recorded a step that never ran and never came back to it. The message has to say which of the
+    /// two failures it was, since the fixes are different: this one is the prefix, not the value.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_prefix_that_answers_nothing_is_a_failure_not_a_removal() {
+        let (_dir, runtime, prefix) = scripted("exit 1");
+        let err = runtime
+            .registry_delete(
+                &prefix,
+                &value_delete(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("a prefix whose reg never runs cannot have removed anything");
+        assert!(matches!(err, RuntimeError::PrefixInit { .. }), "{err:?}");
+        let message = failure_message(&err);
+        assert!(message.contains(UNREADABLE), "{message}");
+    }
+
+    /// The same reading end to end: a probe that dies on its way to an answer is not an absence, even
+    /// though the prefix around it is healthy enough to answer the control.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_probe_the_runner_killed_is_a_failure_not_a_removal() {
+        let (_dir, runtime, prefix) = scripted(concat!(
+            "case \"$3\" in 'HKCU\\Software') exit 0 ;; esac\n",
+            "case \"$2\" in 'query') kill -9 $$ ;; esac\n",
+            "exit 1"
+        ));
+        let err = runtime
+            .registry_delete(
+                &prefix,
+                &value_delete(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("a probe that was killed said nothing about what is still there");
+        assert!(matches!(err, RuntimeError::PrefixInit { .. }), "{err:?}");
+        let message = failure_message(&err);
+        assert!(message.contains(PROBE_KILLED), "{message}");
+    }
+
+    /// And the case it must stay compatible with: the value really is gone, the registry says so, and
+    /// removing it again is success.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn removing_what_is_absent_from_a_working_registry_succeeds() {
+        let (_dir, runtime, prefix) = scripted(concat!(
+            "case \"$3\" in 'HKCU\\Software') exit 0 ;; esac\n",
+            "exit 1"
+        ));
+        runtime
+            .registry_delete(
+                &prefix,
+                &value_delete(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("nothing to remove is not a failure");
     }
 }
