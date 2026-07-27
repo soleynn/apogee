@@ -25,7 +25,7 @@ type R<T> = Result<T, Box<dyn Error>>;
 
 /// The hosted catalog's own row, so this drives the pointer that ships rather than one written here.
 fn dalamud(root: &Path) -> R<Dalamud> {
-    let manifest = ComponentManifest::verify_default(
+    let (manifest, _trusted) = ComponentManifest::verify_trusted(
         include_bytes!("../../../site/components/manifest.json"),
         include_bytes!("../../../site/components/manifest.json.sig"),
     )?;

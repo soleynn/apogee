@@ -42,6 +42,7 @@ pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, Selecti
 pub use rule::{EntryKind, Expect, NameMatch, Rule};
 
 /// Where a rule sits in the order each entry is tested in.
+// Exhaustive for the same reason as `RootLabel`: it is part of the archive record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleRole {

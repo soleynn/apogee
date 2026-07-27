@@ -253,18 +253,16 @@ impl Dalamud {
         })
     }
 
-    /// Say what the tier costs, and what the runner in front of it costs, before anything is fetched.
+    /// Say what this row's own caveats are, and what the runner in front of it costs, before anything is
+    /// fetched.
+    ///
+    /// The tier note is not said here. It is said for every injectable by the loop that installs them,
+    /// so a second one gets the warning by existing rather than by remembering to announce itself.
     fn announce(&self, prefix: &Prefix, events: &SetupEvents) {
         for caveat in &self.caveats {
             events.emit(SetupEvent::Caveat {
                 what: DALAMUD.to_owned(),
                 note: caveat.clone(),
-            });
-        }
-        if let Some(note) = self.tier.note() {
-            events.emit(SetupEvent::Caveat {
-                what: DALAMUD.to_owned(),
-                note: note.to_owned(),
             });
         }
         // Steering rather than gating. The injector's process handoff was written against a patched
@@ -391,8 +389,8 @@ impl Dalamud {
         // distribution lists `version` as an entry whose digest is the version string's, so a tree
         // without it is a tree that is one file short. Written with no trailing newline for the same
         // reason, since the digest is over the bare string.
-        write_atomic(&marker, version.as_bytes()).map_err(|source| AddonError::Install {
-            component: DALAMUD.to_owned(),
+        write_atomic(&marker, version.as_bytes()).map_err(|source| AddonError::Io {
+            what: DALAMUD.to_owned(),
             step: "seal the runtime",
             source: Box::new(source),
         })?;
@@ -476,8 +474,8 @@ impl Dalamud {
             &self.paths.assets.join("asset.ver"),
             meta.version.to_string().as_bytes(),
         )
-        .map_err(|source| AddonError::Install {
-            component: DALAMUD.to_owned(),
+        .map_err(|source| AddonError::Io {
+            what: DALAMUD.to_owned(),
             step: "record the asset version",
             source: Box::new(source),
         })?;
@@ -600,14 +598,14 @@ impl Dalamud {
     }
 
     fn write_record(&self, record: &Installed) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(record).map_err(|source| AddonError::Install {
-            component: DALAMUD.to_owned(),
-            step: "record the install",
+        let bytes = serde_json::to_vec_pretty(record).map_err(|source| AddonError::Io {
+            what: DALAMUD.to_owned(),
+            step: "record what it installed",
             source: Box::new(source),
         })?;
-        write_atomic(&self.paths.record(), &bytes).map_err(|source| AddonError::Install {
-            component: DALAMUD.to_owned(),
-            step: "record the install",
+        write_atomic(&self.paths.record(), &bytes).map_err(|source| AddonError::Io {
+            what: DALAMUD.to_owned(),
+            step: "record what it installed",
             source: Box::new(source),
         })
     }
@@ -630,8 +628,8 @@ impl Dalamud {
     }
 
     fn io_failed(&self, step: &'static str, path: &Path, source: std::io::Error) -> AddonError {
-        AddonError::Install {
-            component: DALAMUD.to_owned(),
+        AddonError::Io {
+            what: DALAMUD.to_owned(),
             step,
             source: Box::new(std::io::Error::new(
                 source.kind(),
@@ -762,7 +760,7 @@ impl Dalamud {
     #[cfg(not(target_os = "linux"))]
     fn wrap(&self, _prefix: &Prefix, _installed: &Installed, _plan: &mut LaunchPlan) -> Result<()> {
         Err(AddonError::Unsupported {
-            what: "injecting into a prefix is Linux-only at this phase",
+            what: "redirecting a launch through an injector is Linux-only",
         })
     }
 }
@@ -775,9 +773,8 @@ fn extract(archive: &Path, dest: &Path, what: &str) -> Result<u64> {
         format: apogee_runtime::ArchiveFormat::Zip,
         strip_prefix: None,
     };
-    apogee_runtime::extract_archive(archive, &layout, dest).map_err(|source| AddonError::Install {
-        component: what.to_owned(),
-        step: "extract",
+    apogee_runtime::extract_archive(archive, &layout, dest).map_err(|source| AddonError::Unpack {
+        what: what.to_owned(),
         source: Box::new(source),
     })
 }
@@ -785,7 +782,7 @@ fn extract(archive: &Path, dest: &Path, what: &str) -> Result<u64> {
 #[cfg(not(target_os = "linux"))]
 fn extract(_archive: &Path, _dest: &Path, _what: &str) -> Result<u64> {
     Err(AddonError::Unsupported {
-        what: "installing an injectable is Linux-only at this phase",
+        what: "unpacking an injectable goes through a prefix runner, which is Linux-only",
     })
 }
 

@@ -173,7 +173,7 @@ pub async fn start(
 
 /// Report a failure and turn it into an outcome, so the two never disagree.
 fn fail(err: &AddonError, program: &std::path::Path, events: &AddonEvents) -> Outcome {
-    let reason = err.to_string();
+    let reason = err.chain();
     events.emit(AddonEvent::Failed {
         program: program.to_path_buf(),
         reason: reason.clone(),
@@ -282,7 +282,7 @@ pub(crate) async fn run_to_completion(
             result = &mut wait => {
                 return match result {
                     Ok(exit) => Outcome::Completed { code: exit.code },
-                    Err(err) => Outcome::Failed { reason: err.to_string() },
+                    Err(err) => Outcome::Failed { reason: crate::chain_of(&err) },
                 };
             }
             () = tokio::time::sleep(STILL_WAITING_AFTER) => {

@@ -34,6 +34,21 @@ pub enum Outcome {
     Failed { reason: String },
 }
 
+impl std::fmt::Display for Outcome {
+    /// One clause each, so a shell can print an outcome without a rule of its own for what each arm
+    /// means. The arms carry process ids and exit statuses, which is exactly what a user reports back.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Started { pid } => write!(f, "started as process {pid}"),
+            Self::AlreadyRunning { pid } => write!(f, "already running as process {pid}"),
+            Self::Disabled => f.write_str("switched off"),
+            Self::Completed { code: Some(code) } => write!(f, "exited with status {code}"),
+            Self::Completed { code: None } => f.write_str("exited"),
+            Self::Failed { reason } => write!(f, "failed: {reason}"),
+        }
+    }
+}
+
 /// One entry and what became of it.
 #[derive(Debug, Clone)]
 pub struct AddonOutcome {
@@ -194,7 +209,7 @@ impl AddonSession {
         let outcome = match held.companion.stop(STOP_GRACE).await {
             Ok(()) => Outcome::Completed { code: None },
             Err(err) => Outcome::Failed {
-                reason: err.to_string(),
+                reason: crate::chain_of(&err),
             },
         };
         events.emit(AddonEvent::Stopped {

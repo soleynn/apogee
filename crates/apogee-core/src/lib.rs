@@ -24,9 +24,9 @@ mod transport;
 pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
 #[cfg(unix)]
 pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
-pub use apogee_addons::{
-    AddonEvent, ExternalAddon, Outcome as AddonOutcome, RunIn, SetupEvent, Trigger,
-};
+// Under its own name: the addon layer already has a public `AddonOutcome`, and re-exporting a second,
+// different type under that name gives a shell two things it cannot tell apart from the import alone.
+pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, Trigger};
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{BenchError, BenchStats, FrameLog};

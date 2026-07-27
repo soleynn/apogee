@@ -65,6 +65,10 @@ pub enum ForeignReason {
     /// Written by a newer build than this one. Deleting an archive we cannot read is the one
     /// unrecoverable mistake available here, so a version we do not understand is left alone.
     UnsupportedFormatVersion(u32),
+    /// Could not be examined at all: an open or a read that failed. Its own reason rather than "not an
+    /// archive", which would send whoever reads the plan to look at the file when the answer is its
+    /// permissions or the disk under it.
+    CouldNotRead,
 }
 
 /// What a prune would do, worked out without deleting anything.
@@ -189,6 +193,9 @@ fn identify(entry: &std::fs::DirEntry, path: &Path) -> Result<ArchiveRecord, For
         }
         Err(BackupError::Manifest { .. }) => Err(ForeignReason::UnreadableRecord),
         Err(BackupError::NotAnArchive { .. }) => Err(classify_unreadable(path)),
+        Err(BackupError::Io { .. }) => Err(ForeignReason::CouldNotRead),
+        // `inspect` raises nothing else. Kept as the safe direction if it ever does: every reason here
+        // means the file was left alone, so an imprecise one costs a line in the plan, never a file.
         Err(_) => Err(ForeignReason::NotAnArchive),
     }
 }

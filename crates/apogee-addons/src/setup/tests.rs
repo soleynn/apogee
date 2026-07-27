@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 use zip::write::SimpleFileOptions;
 
 use super::*;
-use crate::AddonPaths;
 
 /// An archive with one file in it, under a wrapping top directory.
 fn payload_zip(top: &str) -> Vec<u8> {
@@ -30,17 +29,16 @@ fn payload_zip(top: &str) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-/// A prefix handle over a scratch directory with a wine skeleton, plus the addon root beside it.
-fn scratch(root: &std::path::Path) -> (Prefix, AddonPaths) {
+/// A prefix handle over a scratch directory with a wine skeleton.
+fn scratch(root: &std::path::Path) -> Prefix {
     apogee_test_support::sandbox::write_prefix_skeleton(root).unwrap();
-    let prefix = Prefix::for_testing(
+    Prefix::for_testing(
         root,
         root.join("runner"),
         RunnerKind::Wine,
         "wine",
         "custom",
-    );
-    (prefix, AddonPaths::new(root.join("addons")))
+    )
 }
 
 fn runtime() -> Runtime {
@@ -144,7 +142,7 @@ async fn served() -> (ChaosServer, String) {
 async fn applying_a_verb_lands_its_files_and_records_it() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = only(&manifest(&server, &pin), "checked");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -174,7 +172,7 @@ async fn applying_a_verb_lands_its_files_and_records_it() {
 async fn a_second_pass_applies_nothing_and_downloads_nothing() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = only(&manifest(&server, &pin), "checked");
 
     apply(&prefix, &manifest, &SetupEvents::none())
@@ -203,7 +201,7 @@ async fn a_second_pass_applies_nothing_and_downloads_nothing() {
 async fn a_verb_that_did_not_produce_what_it_names_fails_and_is_not_recorded() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = only(&manifest(&server, &pin), "unproduced");
 
     let report = apply(&prefix, &manifest, &SetupEvents::none())
@@ -231,7 +229,7 @@ async fn a_verb_that_did_not_produce_what_it_names_fails_and_is_not_recorded() {
 async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = only(&manifest(&server, &pin), "checked");
 
     apply(&prefix, &manifest, &SetupEvents::none())
@@ -257,7 +255,7 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
 async fn one_failing_verb_does_not_stop_the_others() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = manifest(&server, &pin);
 
     let report = apply(&prefix, &manifest, &SetupEvents::none())
@@ -276,7 +274,7 @@ async fn one_failing_verb_does_not_stop_the_others() {
 async fn a_pin_that_does_not_match_is_an_integrity_failure_and_writes_nothing() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = only(&manifest(&server, &pin), "unfixable");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -291,7 +289,7 @@ async fn a_pin_that_does_not_match_is_an_integrity_failure_and_writes_nothing() 
     assert!(
         events.iter().any(|e| matches!(
             e,
-            SetupEvent::Failed { what, reason } if what == "unfixable" && reason.contains("integrity mismatch")
+            SetupEvent::Failed { what, reason } if what == "unfixable" && reason.contains("not the ones it pins")
         )),
         "a pin failure is reported as one: {events:?}"
     );
@@ -303,7 +301,7 @@ async fn a_pin_that_does_not_match_is_an_integrity_failure_and_writes_nothing() 
 async fn a_stopped_pass_is_a_cancellation_rather_than_a_set_of_failures() {
     let (server, pin) = served().await;
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = manifest(&server, &pin);
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -322,7 +320,7 @@ async fn a_stopped_pass_is_a_cancellation_rather_than_a_set_of_failures() {
 #[tokio::test]
 async fn a_manifest_with_no_verbs_does_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let (prefix, _paths) = scratch(dir.path());
+    let prefix = scratch(dir.path());
     let manifest = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#).expect("parse");
 
     let report = apply(&prefix, &manifest, &SetupEvents::none())

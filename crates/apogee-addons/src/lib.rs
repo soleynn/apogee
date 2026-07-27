@@ -24,6 +24,9 @@ pub mod external;
 pub mod manifest;
 pub mod setup;
 
+#[cfg(test)]
+mod tests;
+
 pub use backup::{BackupError, Selection};
 pub use dalamud::{ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadMode, PluginPolicy};
 pub use external::{
@@ -31,12 +34,10 @@ pub use external::{
     Outcome, RunIn, Running, Trigger,
 };
 pub use manifest::{
-    Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEY, ComponentManifest, ComponentPath,
-    InjectableEntry, InjectableKind, ManifestError, Verb, VerbOp,
+    Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
+    InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
 };
-pub use setup::{
-    PlanStep, SetupEvent, SetupEvents, SetupOutcome, SetupPlan, SetupReport, SetupState, StepAction,
-};
+pub use setup::{SetupEvent, SetupEvents, SetupOutcome, SetupReport, SetupState};
 
 /// Crate result over [`AddonError`].
 pub type Result<T> = std::result::Result<T, AddonError>;
@@ -61,6 +62,17 @@ impl SupportTier {
     }
 }
 
+impl std::fmt::Display for SupportTier {
+    /// The tier and not its note. The note is a caveat the user is shown before anything is fetched,
+    /// on its own event, and repeating a paragraph of it inside a one-line failure buries the failure.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::FirstClass => "first class",
+            Self::BestEffort { .. } => "best effort",
+        })
+    }
+}
+
 /// Prefix-setup and injection failures.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -69,24 +81,36 @@ pub enum AddonError {
     Download(#[from] FetchError),
     #[error("invalid download request")]
     Spec(#[from] apogee_fetch::SpecError),
-    #[error("the component manifest is not trustworthy")]
+    /// The signed catalog was refused. Transparent, because the reason is the inner variant and an
+    /// outer sentence over nine of them can only be vague enough to fit a schema slip and a forged
+    /// signature at once, which reads as tampering either way.
+    #[error(transparent)]
     Manifest(#[from] ManifestError),
-    #[error("no component named {name:?} in the manifest")]
-    UnknownComponent { name: String },
-    #[error("integrity mismatch for {component}: expected {expected}, got {got}")]
+    #[error("{verb}: the bytes fetched are not the ones it pins (expected {expected}, got {got})")]
     IntegrityMismatch {
-        component: String,
+        verb: String,
         expected: String,
         got: String,
     },
-    #[error("install of {component} failed at step {step}")]
-    Install {
-        component: String,
+    /// A filesystem step failed. `what` names what was being set up and `step` which part of it: the
+    /// io error underneath names a path and a kind, and nothing about why the launcher was there.
+    #[error("{what}: could not {step}")]
+    Io {
+        what: String,
         step: &'static str,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("injection of {injectable} failed ({tier:?})")]
+    /// An archive did not become the files it was meant to. Its own variant rather than an io failure:
+    /// the bytes already matched their pin, so what is wrong is the archive's shape or the layout
+    /// declared for it, and retrying the download fixes neither.
+    #[error("{what}: the archive did not unpack")]
+    Unpack {
+        what: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("injection of {injectable} failed ({tier} tier)")]
     Inject {
         injectable: String,
         tier: SupportTier,
@@ -126,7 +150,10 @@ pub enum AddonError {
         #[source]
         source: Box<apogee_runtime::RuntimeError>,
     },
-    #[error("config backup failed")]
+    /// Transparent for the same reason as [`Self::Manifest`], and one more: this arm carries restore
+    /// and pruning as well as capture, so any outer sentence naming one of the three is wrong about
+    /// the other two.
+    #[error(transparent)]
     Backup(#[from] BackupError),
     /// The cancellation token fired, so the work stopped where it was. Its own variant rather than a
     /// per-step failure: a caller counts what failed to decide whether it did what was asked, and a run
@@ -135,6 +162,47 @@ pub enum AddonError {
     Cancelled,
     #[error("unsupported: {what}")]
     Unsupported { what: &'static str },
+}
+
+impl AddonError {
+    /// This failure and its causes as one line.
+    ///
+    /// The outer message is routinely the least specific part of a chain: "could not stage a download"
+    /// over "no space left on device", or a transparent arm over the taxonomy that knows what happened.
+    /// Every seam this crate reports through carries a `String` rather than the error itself, so a
+    /// caller with only `Display` has already lost the useful half by the time it renders. This is what
+    /// those callers should render.
+    #[must_use]
+    pub fn chain(&self) -> String {
+        chain_of(self)
+    }
+
+    /// Whether this is the work stopping because it was asked to, rather than something going wrong.
+    ///
+    /// Answered here rather than by each consumer, because a stop reaches this taxonomy two ways: the
+    /// setup pass ends its own run as [`Self::Cancelled`], and a download the token interrupted arrives
+    /// spelled as the fetcher's cancellation, since the catalog is fetched before that loop begins. A
+    /// caller restating the list is a caller that will miss the second one.
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled | Self::Download(FetchError::Cancelled)
+        )
+    }
+}
+
+/// The same for any error, so the places this crate reports another crate's failure through a `String`
+/// do not have to lose its causes either.
+pub(crate) fn chain_of(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// A companion that installs onto the host and reaches the game by wrapping its launch.
@@ -238,7 +306,7 @@ impl Addons {
     ///
     /// # Errors
     /// [`AddonError::Download`] if either file cannot be fetched, or [`AddonError::Manifest`] if the
-    /// signature does not verify against the compiled-in key or the body violates the schema.
+    /// signature verifies against none of the compiled-in keys or the body violates the schema.
     pub async fn fetch_manifest(
         &self,
         manifest_url: &url::Url,
@@ -250,17 +318,19 @@ impl Addons {
             manifest_url,
             signature_url,
             &self.paths.catalog_cache(),
-            &manifest::default_key()?,
+            &manifest::default_keys()?,
             cancel,
         )
         .await
     }
 
-    /// The same fetch, verified against `key` instead of the compiled-in one, so a test can drive the
-    /// whole download-verify-publish path with a signature it can produce.
+    /// The same fetch, verified against `keys` instead of the compiled-in ones, so a test can drive the
+    /// whole download-verify-publish path with signatures it can produce. A slice rather than one key
+    /// for the same reason the shipping path takes one: an overlap window is only real if it is
+    /// exercised through the path a launch takes.
     ///
     /// Behind a feature, so a shipping build cannot fetch a manifest trusted against anything but the
-    /// key compiled into it.
+    /// keys compiled into it.
     ///
     /// # Errors
     /// As [`Self::fetch_manifest`].
@@ -269,7 +339,7 @@ impl Addons {
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
-        key: &ed25519_dalek::VerifyingKey,
+        keys: &[ed25519_dalek::VerifyingKey],
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<ComponentManifest> {
         setup::fetch_manifest(
@@ -277,7 +347,7 @@ impl Addons {
             manifest_url,
             signature_url,
             &self.paths.catalog_cache(),
-            key,
+            keys,
             cancel,
         )
         .await
@@ -295,19 +365,19 @@ impl Addons {
     /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
     /// cache rather than an absent one.
     pub async fn cached_manifest(&self) -> Result<Option<ComponentManifest>> {
-        setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_key()?).await
+        setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_keys()?).await
     }
 
-    /// The same read, verified against `key`, so a test can read back what a test-key fetch published.
+    /// The same read, verified against `keys`, so a test can read back what a test-key fetch published.
     ///
     /// # Errors
     /// As [`Self::cached_manifest`].
     #[cfg(feature = "testing")]
     pub async fn cached_manifest_for_testing(
         &self,
-        key: &ed25519_dalek::VerifyingKey,
+        keys: &[ed25519_dalek::VerifyingKey],
     ) -> Result<Option<ComponentManifest>> {
-        setup::cached_manifest(&self.paths.catalog_cache(), key).await
+        setup::cached_manifest(&self.paths.catalog_cache(), keys).await
     }
 
     /// Apply every prefix-setup verb the manifest defines that `prefix` is missing.
@@ -343,12 +413,25 @@ impl Addons {
     /// `None` rather than a compiled-in fallback: the row is where the distribution endpoint and the
     /// tier note live, so a build with no row has nothing honest to say about either and must not reach
     /// goatcorp on a guess.
+    ///
+    /// Narrates the `None` on `events` rather than leaving it to the caller. The user asked for this at
+    /// a launch and is owed a reason it did not happen, and a caller inventing one is a caller writing a
+    /// sentence about a decision it did not make.
     #[must_use]
-    pub fn dalamud(&self, manifest: &ComponentManifest, config: DalamudConfig) -> Option<Dalamud> {
-        let entry = manifest
-            .injectables
-            .iter()
-            .find(|entry| entry.kind == InjectableKind::Dalamud)?;
+    pub fn dalamud(
+        &self,
+        manifest: &ComponentManifest,
+        config: DalamudConfig,
+        events: &SetupEvents,
+    ) -> Option<Dalamud> {
+        let Some(entry) = manifest.injectable(InjectableKind::Dalamud) else {
+            events.emit(SetupEvent::Failed {
+                what: dalamud::DALAMUD.to_owned(),
+                reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
+                    .to_owned(),
+            });
+            return None;
+        };
         Some(Dalamud::new(
             self.paths.dalamud(),
             self.fetcher.clone(),
@@ -371,10 +454,19 @@ impl Addons {
     ) -> Vec<AddonError> {
         let mut failures = Vec::new();
         for injectable in injectables {
+            // The tier is said here rather than by each companion, so a second injectable gets the
+            // warning right by existing rather than by remembering to announce itself. A first-class
+            // tier has nothing to say and says nothing.
+            if let Some(note) = injectable.support_tier().note() {
+                events.emit(SetupEvent::Caveat {
+                    what: injectable.name().to_owned(),
+                    note: note.to_owned(),
+                });
+            }
             if let Err(err) = injectable.ensure(prefix, cancel, events).await {
                 events.emit(SetupEvent::Failed {
                     what: injectable.name().to_owned(),
-                    reason: setup::describe(&err),
+                    reason: err.chain(),
                 });
                 failures.push(err);
             }
@@ -399,7 +491,7 @@ impl Addons {
             if let Err(err) = injectable.prepare_launch(plan, events) {
                 events.emit(SetupEvent::Failed {
                     what: injectable.name().to_owned(),
-                    reason: setup::describe(&err),
+                    reason: err.chain(),
                 });
                 failures.push(err);
             }

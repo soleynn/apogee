@@ -65,6 +65,28 @@ pub enum RejectReason {
     NotInRecord,
 }
 
+impl std::fmt::Display for RejectReason {
+    /// Each reason as the thing that is wrong with the name, so the refusal reads as a sentence rather
+    /// than as an identifier. What is refused is attacker-chosen, so the reason is the only part of the
+    /// message worth reading.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotAFileOrDir => "it is neither a regular file nor a directory",
+            Self::Absolute => "it is rooted, so it would land outside the destination",
+            Self::Traversal => "it contains a parent reference",
+            Self::DriveLetter => "it carries a drive letter",
+            Self::Empty => "it resolves to nothing at all",
+            Self::UnknownRoot => "it starts at a root this archive does not declare",
+            Self::NameTooLong => "the whole name is too long",
+            Self::ComponentTooLong => "one part of the name is too long",
+            Self::TooDeep => "it nests deeper than a config tree ever does",
+            Self::WindowsHostile => "the destination would reinterpret it rather than store it",
+            Self::Collision => "another entry differs from it only in case",
+            Self::NotInRecord => "the archive's own record does not list it",
+        })
+    }
+}
+
 /// A name that has passed every check.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfinedName {
