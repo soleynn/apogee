@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, AddonEvent, BenchStats, Command, ComponentEvent, ComponentSelection,
-    Core, CoreConfig, Event, ExternalAddon, FrameLog, OtpSource, PatchProgress, Profile, Region,
-    RunIn, RunnerSelection, Secret, ToolKind, Trigger, Uuid,
+    Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
+    FrameLog, OtpSource, PatchProgress, Profile, Region, RunIn, RunnerSelection, Secret,
+    SetupEvent, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -65,35 +65,21 @@ enum Commands {
         #[command(subcommand)]
         action: BackupAction,
     },
-    /// Choose and install the companion components a profile runs with.
-    Component {
+    /// Load Dalamud into the game, or leave it out.
+    Dalamud {
         #[command(subcommand)]
-        action: ComponentAction,
+        action: DalamudAction,
     },
 }
 
 #[derive(Subcommand)]
-enum ComponentAction {
-    /// List the components a profile has chosen.
-    List(TargetArgs),
-    /// List what the signed catalog offers, and what each one will tell you at install time.
-    Available,
-    /// Choose a component for a profile. Nothing is installed until `ensure`.
-    Enable(ComponentNameArgs),
-    /// Leave a component out without discarding the choice.
-    Disable(ComponentNameArgs),
-    /// Install everything a profile has chosen into its prefix. Safe to re-run.
-    Ensure(TargetArgs),
-}
-
-#[derive(Args)]
-struct ComponentNameArgs {
-    /// Profile id or unique name.
-    #[arg(long)]
-    profile: String,
-    /// The component's name, as shown by `component available`.
-    #[arg(long)]
-    name: String,
+enum DalamudAction {
+    /// Say whether this profile loads it.
+    Status(TargetArgs),
+    /// Load it into the game from the next launch on. It is installed on that launch, not now.
+    Enable(TargetArgs),
+    /// Stop loading it. Nothing is deleted, and nothing contacts its distribution while it is off.
+    Disable(TargetArgs),
 }
 
 #[derive(Subcommand)]
@@ -330,99 +316,43 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             backup(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Component { action } => component(&core, action).await,
+        Commands::Dalamud { action } => {
+            dalamud(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
-/// The companion components a profile runs with: chosen offline, installed through the flow so the
-/// downloads and the caveats reach the event stream.
-async fn component(core: &Core, action: ComponentAction) -> Result<ExitCode, CliError> {
-    match action {
-        ComponentAction::List(args) => {
+/// The Dalamud toggle, read from and written back to the profile that owns it.
+///
+/// Nothing is installed here. The setting is what a launch reads, and a launch is the only thing that
+/// contacts the distribution, so switching it on offline stays offline.
+fn dalamud(core: &Core, action: DalamudAction) -> Result<(), CliError> {
+    let (args, on) = match action {
+        DalamudAction::Status(args) => {
             let profile = resolve_profile(core, &args.profile)?;
-            if profile.components.is_empty() {
-                println!("no components chosen");
-                return Ok(ExitCode::SUCCESS);
-            }
-            for component in &profile.components {
-                println!(
-                    "{:<9}  {}",
-                    if component.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                    component.id
-                );
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        ComponentAction::Available => {
-            let manifest = core.component_catalog().await?;
-            if manifest.names().is_empty() {
-                println!("the catalog offers nothing");
-                return Ok(ExitCode::SUCCESS);
-            }
-            // Every list the catalog carries, so what is printed and the emptiness check above agree. An
-            // injectable is listed even though this build installs none: what is on offer and what can be
-            // driven are different questions, and `ensure` answers the second one per component.
-            for entry in &manifest.injectables {
-                println!("{:<16}  {:<9}  injectable", entry.name, "-");
-                for caveat in &entry.caveats {
-                    println!("      note: {caveat}");
+            println!(
+                "dalamud is {}",
+                if profile.launch.dalamud {
+                    "enabled"
+                } else {
+                    "disabled"
                 }
-            }
-            for tool in &manifest.tools {
-                println!(
-                    "{:<16}  {:<9}  {}",
-                    tool.name,
-                    tool.version,
-                    render_kind(tool.kind)
-                );
-                for caveat in &tool.caveats {
-                    println!("      note: {caveat}");
-                }
-            }
-            for verb in &manifest.verbs {
-                println!("{:<16}  {:<9}  prefix setup", verb.name, "-");
-                println!("      why: {}", verb.reason);
-            }
-            Ok(ExitCode::SUCCESS)
+            );
+            return Ok(());
         }
-        ComponentAction::Enable(args) => set_component(core, &args, true),
-        ComponentAction::Disable(args) => set_component(core, &args, false),
-        ComponentAction::Ensure(args) => {
-            let profile = resolve_profile(core, &args.profile)?.id;
-            Ok(drive(core, Command::Components { profile }).await)
-        }
-    }
-}
-
-/// Choose or unchoose a component, keeping the entry either way so a disabled one is not forgotten.
-fn set_component(core: &Core, args: &ComponentNameArgs, on: bool) -> Result<ExitCode, CliError> {
+        DalamudAction::Enable(args) => (args, true),
+        DalamudAction::Disable(args) => (args, false),
+    };
     let mut profile = resolve_profile(core, &args.profile)?;
-    match profile.components.iter_mut().find(|c| c.id == args.name) {
-        Some(existing) => existing.enabled = on,
-        None => profile.components.push(ComponentSelection {
-            id: args.name.clone(),
-            enabled: on,
-        }),
-    }
+    profile.launch.dalamud = on;
     core.save_profile(&profile)?;
     println!(
-        "{} component {}",
+        "{} dalamud for {}",
         if on { "enabled" } else { "disabled" },
-        args.name
+        profile.name
     );
-    Ok(ExitCode::SUCCESS)
-}
-
-fn render_kind(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::PrefixTool => "in the prefix",
-        ToolKind::ExternalNative => "on the host",
-        _ => "?",
-    }
+    Ok(())
 }
 
 /// Frame-consistency analysis over MangoHud frametime logs. Offline: reads CSVs and prints a table;
@@ -878,7 +808,7 @@ fn render(event: &Event) -> String {
         Event::Progress(progress) => format!("progress: {}/{}", progress.completed, progress.total),
         Event::Patch(patch) => render_patch(patch),
         Event::Addon(addon) => render_addon(addon),
-        Event::Component(component) => render_component(component),
+        Event::Setup(setup) => render_setup(setup),
         Event::Frontier(_) => "frontier data received".to_owned(),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
@@ -910,56 +840,36 @@ fn render_addon(event: &AddonEvent) -> String {
     }
 }
 
-/// Render one component-install event as a plain line. A caveat is printed like everything else rather
-/// than saved for a summary, because being read while the thing is being set up is its whole purpose.
-fn render_component(event: &ComponentEvent) -> String {
+/// Render one prefix-setup event as a plain line. A caveat is printed like everything else rather than
+/// saved for a summary, because being read while the thing is being set up is its whole purpose.
+fn render_setup(event: &SetupEvent) -> String {
     match event {
-        ComponentEvent::Downloading {
-            component,
+        SetupEvent::Downloading {
+            what,
             bytes_done,
             total,
         } => format!(
-            "component: {component} downloading {bytes_done}/{}",
+            "setup: {what} downloading {bytes_done}/{}",
             total.map_or_else(|| "?".to_owned(), |t| t.to_string())
         ),
-        ComponentEvent::Installing { component, version } => {
-            format!("component: installing {component} {version}")
-        }
-        ComponentEvent::Installed { component } => format!("component: installed {component}"),
-        ComponentEvent::AlreadyPresent { component } => {
-            format!("component: {component} is already installed")
-        }
-        ComponentEvent::Applying { verb, reason } => {
-            format!("component: applying {verb} ({reason})")
-        }
-        ComponentEvent::Applied { verb } => format!("component: applied {verb}"),
-        ComponentEvent::Running { verb, program } => {
-            format!("component: {verb} is running {program} in the prefix, this can take minutes")
-        }
-        ComponentEvent::InstallerStatus { verb, code, detail } => format!(
-            "component: {verb}'s installer exited with {} ({detail}); its own check decides",
-            code.map_or_else(|| "a signal".to_owned(), |c| c.to_string())
-        ),
-        ComponentEvent::Caveat { component, note } => {
-            format!("component: {component} note: {note}")
-        }
-        ComponentEvent::Failed { component, reason } => {
-            format!("component: {component} failed: {reason}")
-        }
-        ComponentEvent::Unsupported { component, what } => {
-            format!("component: {component} not installed: {what}")
-        }
-        ComponentEvent::CatalogUnavailable {
+        SetupEvent::Installing { what, version } => format!("setup: installing {what} {version}"),
+        SetupEvent::Installed { what } => format!("setup: installed {what}"),
+        SetupEvent::AlreadyPresent { what } => format!("setup: {what} is already applied"),
+        SetupEvent::Applying { verb, reason } => format!("setup: applying {verb} ({reason})"),
+        SetupEvent::Applied { verb } => format!("setup: applied {verb}"),
+        SetupEvent::Caveat { what, note } => format!("setup: {what} note: {note}"),
+        SetupEvent::Failed { what, reason } => format!("setup: {what} failed: {reason}"),
+        SetupEvent::CatalogUnavailable {
             detail,
             using_cached,
         } => {
             if *using_cached {
-                format!("component: catalog unreachable, using the last one fetched ({detail})")
+                format!("setup: catalog unreachable, using the last one fetched ({detail})")
             } else {
-                format!("component: no catalog available, starting none ({detail})")
+                format!("setup: no catalog available, applying none ({detail})")
             }
         }
-        _ => "component: event".to_owned(),
+        _ => "setup: event".to_owned(),
     }
 }
 

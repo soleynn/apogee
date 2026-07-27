@@ -5,10 +5,10 @@
 //! launch is over.
 
 use apogee_addons::{
-    AddonEvents, AddonReport, AddonSession, Addons, ComponentEvent, ComponentEvents,
-    ComponentManifest, ComponentReport, ExternalAddon, GameContext, Outcome,
+    AddonEvents, AddonReport, AddonSession, Addons, ComponentManifest, DalamudConfig,
+    ExternalAddon, GameContext, Injectable, Outcome, SetupEvent, SetupEvents,
 };
-use apogee_runtime::Prefix;
+use apogee_runtime::{LaunchPlan, Prefix};
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -32,7 +32,7 @@ impl AddonsBackend {
     /// Where the signed component catalog lives, resolved when it is needed rather than at construction.
     ///
     /// Resolving it eagerly would make an unparseable override fail the whole launcher, including every
-    /// command that never touches a component. A misconfigured catalog should cost the component commands.
+    /// command that never touches a prefix. A misconfigured catalog should cost the prefix setup.
     fn catalog_urls(&self) -> Result<(Url, Url), CoreError> {
         super::catalog_urls()
     }
@@ -40,66 +40,45 @@ impl AddonsBackend {
 
 #[async_trait]
 impl AddonBackend for AddonsBackend {
-    async fn catalog(&self, cancel: &CancellationToken) -> Result<ComponentManifest, CoreError> {
-        let (manifest, signature) = self.catalog_urls()?;
-        Ok(self
-            .addons
-            .fetch_manifest(&manifest, &signature, cancel)
-            .await?)
-    }
-
-    async fn ensure(
+    async fn prepare_launch(
         &self,
         prefix: Option<Prefix>,
-        wanted: Vec<String>,
+        dalamud: Option<DalamudConfig>,
+        plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<ComponentReport, CoreError> {
+    ) {
         let Some(prefix) = prefix else {
-            return Ok(ComponentReport::default());
+            return;
         };
-        let (manifest_url, signature_url) = self.catalog_urls()?;
-        let manifest = self
-            .addons
-            .fetch_manifest(&manifest_url, &signature_url, cancel)
-            .await?;
-        let (component_events, relay) = relay_components(events);
-        let report = self
-            .addons
-            .ensure(&manifest, &prefix, &wanted, cancel, &component_events)
-            .await;
-        // Dropped before the relay is awaited: the relay ends when the channel closes, and the channel
-        // closes only when the last sender is gone.
-        drop(component_events);
-        let _ = relay.await;
-        report.map_err(CoreError::from)
-    }
+        let (setup, relay) = relay_setup(events);
+        let Some(manifest) = self.launch_manifest(cancel, &setup).await else {
+            finish(setup, relay).await;
+            return;
+        };
 
-    async fn registrations(
-        &self,
-        prefix: Option<Prefix>,
-        wanted: Vec<String>,
-        cancel: &CancellationToken,
-        events: &UnboundedSender<Event>,
-    ) -> Vec<ExternalAddon> {
-        let Some(prefix) = prefix else {
-            return Vec::new();
-        };
-        if wanted.is_empty() {
-            // A profile with no components pays nothing for the feature, including a network round trip.
-            return Vec::new();
-        }
-        let Some(manifest) = self.launch_manifest(cancel, events).await else {
-            return Vec::new();
-        };
-        match self.addons.registrations(&manifest, &prefix, &wanted) {
-            Ok(addons) => addons,
-            Err(err) => {
-                let _ = events.send(Event::Error(CoreError::Addons(err)));
-                Vec::new()
+        match self
+            .addons
+            .apply_setup(&manifest, &prefix, cancel, &setup)
+            .await
+        {
+            Ok(report) => {
+                tracing::debug!(applied = report.present().len(), "prefix setup complete");
             }
+            // Each verb that failed is already on the stream as the event that failed it, so a whole-call
+            // failure here is the prefix record being unreadable or the run being stopped. Neither is
+            // worth failing a launch over: the setup is hygiene, and a stopped run is about to be torn
+            // down anyway.
+            Err(err) => tracing::warn!(%err, "the prefix setup did not complete"),
         }
+
+        if let Some(config) = dalamud {
+            self.inject(&manifest, &prefix, config, plan, cancel, &setup)
+                .await;
+        }
+        finish(setup, relay).await;
     }
+
     async fn start(
         &self,
         game_pid: i32,
@@ -136,17 +115,52 @@ impl AddonBackend for AddonsBackend {
 }
 
 impl AddonsBackend {
-    /// The manifest to read a launch's companion registrations from: the hosted one, or the last one a
-    /// fetch verified when it cannot be reached.
+    /// Install whatever this launch loads into the game, and let it compose the launch.
     ///
-    /// Announced rather than silent, because which build of a companion started is exactly what somebody
+    /// Failures are narrated by the addon layer as they happen and dropped here. Turning one into an
+    /// [`Event::Error`] would make a shell exit non-zero for a game that started perfectly well without
+    /// its companion, which is exactly the report a best-effort tier exists to avoid.
+    async fn inject(
+        &self,
+        manifest: &ComponentManifest,
+        prefix: &Prefix,
+        config: DalamudConfig,
+        plan: &mut LaunchPlan,
+        cancel: &CancellationToken,
+        setup: &SetupEvents,
+    ) {
+        let Some(dalamud) = self.addons.dalamud(manifest, config) else {
+            setup.emit(SetupEvent::Failed {
+                what: apogee_addons::dalamud::DALAMUD.to_owned(),
+                reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
+                    .to_owned(),
+            });
+            return;
+        };
+        let enabled: [&dyn Injectable; 1] = [&dalamud];
+        for err in self
+            .addons
+            .ensure_injectables(&enabled, prefix, cancel, setup)
+            .await
+        {
+            tracing::warn!(%err, "an injectable could not be installed");
+        }
+        for err in self.addons.prepare_launch(&enabled, plan, setup) {
+            tracing::warn!(%err, "an injectable could not join the launch");
+        }
+    }
+
+    /// The manifest to read a launch's prefix setup from: the hosted one, or the last one a fetch
+    /// verified when it cannot be reached.
+    ///
+    /// Announced rather than silent, because which rows a launch applied is exactly what somebody
     /// debugging one needs to know. Announced as a *report* rather than an error, because falling back to
     /// a catalog that once verified is the correct outcome here, and a shell that turned it into a failed
     /// exit would report a game that started fine as a failure.
     async fn launch_manifest(
         &self,
         cancel: &CancellationToken,
-        events: &UnboundedSender<Event>,
+        setup: &SetupEvents,
     ) -> Option<ComponentManifest> {
         let fetch_error = match self.catalog_urls() {
             Ok((manifest_url, signature_url)) => match self
@@ -161,20 +175,27 @@ impl AddonsBackend {
         };
         let (manifest, detail) = match self.addons.cached_manifest().await {
             Ok(Some(manifest)) => (Some(manifest), fetch_error),
-            // Neither reachable nor usable: the launch goes ahead without the companions the profile
-            // enabled, and says so, because a game that starts beats one that does not.
+            // Neither reachable nor usable: the launch goes ahead with no prefix setup applied, and says
+            // so, because a game that starts beats one that does not.
             Ok(None) => (None, format!("{fetch_error}; nothing was cached")),
             Err(cache_error) => (
                 None,
                 format!("{fetch_error}; the cached one is unusable: {cache_error}"),
             ),
         };
-        let _ = events.send(Event::Component(ComponentEvent::CatalogUnavailable {
+        setup.emit(SetupEvent::CatalogUnavailable {
             detail,
             using_cached: manifest.is_some(),
-        }));
+        });
         manifest
     }
+}
+
+/// Drop the sender and wait for its relay, so the last setup event is delivered before the caller moves
+/// on. The relay ends when the channel closes, and the channel closes only when the last sender is gone.
+async fn finish(setup: SetupEvents, relay: JoinHandle<()>) {
+    drop(setup);
+    let _ = relay.await;
 }
 
 /// One launch's running companions, and the relay feeding their events onto the core stream.
@@ -255,16 +276,16 @@ fn relay(events: &UnboundedSender<Event>) -> (AddonEvents, JoinHandle<()>) {
     (AddonEvents::new(tx), handle)
 }
 
-/// The same, for the component-install stream.
-fn relay_components(events: &UnboundedSender<Event>) -> (ComponentEvents, JoinHandle<()>) {
+/// The same, for the prefix-setup stream.
+fn relay_setup(events: &UnboundedSender<Event>) -> (SetupEvents, JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let events = events.clone();
     let handle = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            let _ = events.send(Event::Component(event));
+            let _ = events.send(Event::Setup(event));
         }
     });
-    (ComponentEvents::new(tx), handle)
+    (SetupEvents::new(tx), handle)
 }
 
 #[cfg(test)]
@@ -276,8 +297,7 @@ mod tests {
     fn backend() -> Result<AddonsBackend, Box<dyn std::error::Error>> {
         let fetcher = apogee_fetch::Fetcher::builder().build()?;
         let runtime = Runtime::new(fetcher.clone(), RuntimePaths::default());
-        // No catalog is reached: these tests configure no components, and the launch path skips the
-        // catalog entirely when a profile wants none.
+        // No catalog is reached: these tests hand over no prefix, and the launch path stops there.
         Ok(AddonsBackend::new(Addons::new(
             runtime,
             fetcher,
@@ -338,6 +358,31 @@ mod tests {
         )
         .await
         .map_err(|_| "the teardown never finished")?;
+        Ok(())
+    }
+
+    /// A launch with no prefix has nothing to set up, and must not reach the catalog to discover that.
+    /// This is the shape a test double hands back, and the shape a Windows launch will.
+    #[tokio::test]
+    async fn a_launch_with_no_prefix_prepares_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::BTreeMap;
+
+        let backend = backend()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new());
+
+        backend
+            .prepare_launch(
+                None,
+                Some(DalamudConfig::default()),
+                &mut plan,
+                &CancellationToken::new(),
+                &tx,
+            )
+            .await;
+
+        assert!(plan.inserted_args().is_empty());
+        assert_eq!(plan.program(), "ffxiv_dx11.exe");
         Ok(())
     }
 }

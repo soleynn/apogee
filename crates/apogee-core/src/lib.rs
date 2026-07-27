@@ -25,8 +25,7 @@ pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
 #[cfg(unix)]
 pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
 pub use apogee_addons::{
-    AddonEvent, ComponentEvent, ComponentManifest, ComponentState, ExternalAddon,
-    Outcome as AddonOutcome, RunIn, ToolKind, Trigger,
+    AddonEvent, ExternalAddon, Outcome as AddonOutcome, RunIn, SetupEvent, Trigger,
 };
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
@@ -36,8 +35,8 @@ pub use command::{Command, Event, FirstRunStep, FlowState, FrontierData, Frontie
 pub use composition::{Core, CoreConfig};
 pub use error::CoreError;
 pub use model::{
-    Account, AccountKind, ComponentSelection, LaunchSettings, PrefixSelection, Profile, Region,
-    RunnerSelection, Settings,
+    Account, AccountKind, LaunchSettings, PrefixSelection, Profile, Region, RunnerSelection,
+    Settings,
 };
 pub use sqex_proto::Transport;
 pub use store::StoreError;

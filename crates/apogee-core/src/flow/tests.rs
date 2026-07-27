@@ -23,7 +23,7 @@ use crate::command::{Command, Event, FlowState};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, ComponentSelection, Profile, Settings};
+use crate::model::{Account, AccountKind, Profile, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::store::{Store, UidCacheEntry};
@@ -423,12 +423,17 @@ async fn a_current_game_launches_straight_through() {
 
     assert_eq!(
         states(&events),
-        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+        [
+            FlowState::PreparingPrefix,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
     );
-    let request = launch.last_request().unwrap();
-    assert!(request.program.ends_with("/game/ffxiv_dx11.exe"));
-    assert!(request.working_dir.ends_with("game"));
-    assert!(request.encrypted_args.starts_with("//**sqex0003"));
+    let plan = launch.last_plan().unwrap();
+    assert!(plan.program().ends_with("/game/ffxiv_dx11.exe"));
+    assert!(plan.working_dir().is_some_and(|dir| dir.ends_with("game")));
+    assert!(plan.args().starts_with("//**sqex0003"));
 }
 
 #[tokio::test]
@@ -476,7 +481,12 @@ async fn a_launch_inside_the_cache_window_skips_the_network() {
 
     assert_eq!(
         states(&events),
-        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+        [
+            FlowState::PreparingPrefix,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
     );
     assert_eq!(
         later_transport.recorded().len(),
@@ -601,9 +611,9 @@ async fn launch_carries_the_profile_env_and_wrappers() {
     let events = run(ctx, play_no_otp(h.profile)).await;
     assert_eq!(states(&events).last(), Some(&FlowState::Exited));
 
-    let request = launch.last_request().unwrap();
-    assert_eq!(request.env.get("DXVK_HUD").map(String::as_str), Some("fps"));
-    assert_eq!(request.wrappers, vec!["gamescope".to_string()]);
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("DXVK_HUD").map(String::as_str), Some("fps"));
+    assert_eq!(plan.wrappers(), ["gamescope".to_string()]);
 }
 
 #[tokio::test]
@@ -627,7 +637,14 @@ async fn close_after_launch_detaches_without_supervising() {
         .await
         .expect("close_after_launch must not block on supervision");
 
-    assert_eq!(states(&events), [FlowState::Launching, FlowState::Running]);
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::PreparingPrefix,
+            FlowState::Launching,
+            FlowState::Running
+        ]
+    );
     assert!(
         !launch.was_killed(),
         "a detached launch does not kill the game"
@@ -778,8 +795,11 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
     assert_eq!(
         addons.calls(),
         [
-            // The profile enables no components, so the seam is asked and contributes nothing.
-            AddonCall::Registrations { wanted: Vec::new() },
+            // The prefix is prepared before the game starts, and this profile does not ask for Dalamud.
+            AddonCall::Prepared {
+                prefix: false,
+                dalamud: false,
+            },
             AddonCall::Started {
                 game_pid: std::process::id().cast_signed(),
                 count: 1,
@@ -792,303 +812,17 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
     // says the ordering held.
     assert_eq!(
         states(&events),
-        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+        [
+            FlowState::PreparingPrefix,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
     );
     assert_eq!(
         addons.started_programs(),
         [std::path::PathBuf::from("/opt/act/act.sh")]
     );
-}
-
-/// A companion an installed component contributes runs ahead of the user's own tools, because a tool the
-/// user pointed at one of them expects it to already be up.
-#[tokio::test]
-async fn a_components_companion_starts_before_the_users_own_tools() {
-    let h = harness_customized(false, |profile| {
-        profile.components.push(ComponentSelection {
-            id: "ACT".to_owned(),
-            enabled: true,
-        });
-        // Switched off, so it must not reach the seam at all.
-        profile.components.push(ComponentSelection {
-            id: "Triggevent".to_owned(),
-            enabled: false,
-        });
-        profile.external.push(
-            ExternalAddon::new(
-                "/opt/mine/tool.sh",
-                vec![],
-                RunIn::Host,
-                Trigger::WithGame {
-                    keep_after_close: false,
-                },
-            )
-            .expect("a fixture tool"),
-        );
-    });
-
-    let contributed = ExternalAddon::new(
-        "/prefixes/act/Advanced Combat Tracker.exe",
-        vec!["-portable".into()],
-        RunIn::Prefix,
-        Trigger::WithGame {
-            keep_after_close: false,
-        },
-    )
-    .unwrap();
-    let addons = Arc::new(FakeAddons::new().contributing(contributed));
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new(login_then_current())),
-        Arc::new(FakePatchBackend::new()),
-        Arc::new(FakeLaunchBackend::exiting()),
-        addons.clone(),
-        NOW,
-    );
-
-    run(ctx, play_no_otp(h.profile)).await;
-
-    assert_eq!(
-        addons.calls(),
-        [
-            // Only the switched-on component is asked for.
-            AddonCall::Registrations {
-                wanted: vec!["ACT".to_owned()],
-            },
-            // Both the contributed companion and the user's own tool reached the launch.
-            AddonCall::Started {
-                game_pid: std::process::id().cast_signed(),
-                count: 2,
-            },
-            AddonCall::GameClosed,
-        ]
-    );
-    // The order, not just the count: the component's companion is started first, because the user's tool
-    // is pointed at it. A count alone would pass with the two swapped.
-    assert_eq!(
-        addons.started_programs(),
-        [
-            std::path::PathBuf::from("/prefixes/act/Advanced Combat Tracker.exe"),
-            std::path::PathBuf::from("/opt/mine/tool.sh"),
-        ]
-    );
-}
-
-/// Installing components is its own command, and it prepares the prefix first: a component installs into
-/// one, and requiring a launch before a companion can be set up would be an ordering nobody could guess.
-#[tokio::test]
-async fn installing_components_prepares_the_prefix_and_asks_only_for_the_enabled_ones() {
-    let h = harness_customized(false, |profile| {
-        profile.components.push(ComponentSelection {
-            id: "ACT".to_owned(),
-            enabled: true,
-        });
-        profile.components.push(ComponentSelection {
-            id: "OverlayPlugin".to_owned(),
-            enabled: false,
-        });
-    });
-    let launch = Arc::new(FakeLaunchBackend::exiting());
-    let addons = Arc::new(FakeAddons::new());
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new([])),
-        Arc::new(FakePatchBackend::new()),
-        launch.clone(),
-        addons.clone(),
-        NOW,
-    );
-
-    let events = run(ctx, Command::Components { profile: h.profile }).await;
-
-    assert_eq!(
-        addons.calls(),
-        [AddonCall::Ensured {
-            wanted: vec!["ACT".to_owned()],
-        }]
-    );
-    assert!(
-        states(&events).contains(&FlowState::InstallingComponents),
-        "the install is narrated: {:?}",
-        states(&events)
-    );
-    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
-    // The prefix was prepared, at the directory this profile's prefix resolves to. Without this the whole
-    // prepare step could be deleted and the test would still pass, since the fake install ignores it.
-    let profile = h.store.load_profile(h.profile).unwrap();
-    assert_eq!(
-        launch.prepared(),
-        [h.prefixes.path().join(super::prefix_name(&profile))]
-    );
-    // And nothing was launched: preparing a prefix is not launching a game.
-    assert_eq!(launch.launch_count(), 0);
-}
-
-/// A component that did not install must not end the same way as one that did, or a shell reports
-/// success for work that never happened.
-#[tokio::test]
-async fn installing_components_reports_a_failure_rather_than_finishing_quietly() {
-    let h = harness_customized(false, |profile| {
-        profile.components.push(ComponentSelection {
-            id: "ACT".to_owned(),
-            enabled: true,
-        });
-    });
-    let addons = Arc::new(FakeAddons::new().component_failure("ACT"));
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new([])),
-        Arc::new(FakePatchBackend::new()),
-        Arc::new(FakeLaunchBackend::exiting()),
-        addons,
-        NOW,
-    );
-
-    let events = run(ctx, Command::Components { profile: h.profile }).await;
-
-    // One summary, carrying a count rather than repeating the reason already on the stream.
-    assert_eq!(
-        errors(&events),
-        ["1 of 1 components could not be installed"]
-    );
-}
-
-/// Stopping an install is not the same as one that went wrong. The failure count exists to tell a shell
-/// that what it asked for did not happen, and a run the user stopped on purpose has nothing to count: it
-/// is narrated, and a shell that reads failures off the stream sees none.
-#[tokio::test]
-async fn a_cancelled_component_install_is_narrated_rather_than_counted_as_a_failure() {
-    let h = harness_customized(false, |profile| {
-        profile.components.push(ComponentSelection {
-            id: "ACT".to_owned(),
-            enabled: true,
-        });
-    });
-    let addons = Arc::new(FakeAddons::new().cancelling());
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new([])),
-        Arc::new(FakePatchBackend::new()),
-        Arc::new(FakeLaunchBackend::exiting()),
-        addons.clone(),
-        NOW,
-    );
-
-    let events = run(ctx, Command::Components { profile: h.profile }).await;
-
-    // The install was reached and stopped there: no "N of M could not be installed", and nothing on the
-    // stream a shell would turn into a non-zero exit.
-    assert_eq!(
-        addons.calls(),
-        [AddonCall::Ensured {
-            wanted: vec!["ACT".to_owned()],
-        }]
-    );
-    assert!(
-        errors(&events).is_empty(),
-        "a cancelled run is not a failure: {:?}",
-        errors(&events)
-    );
-    assert_eq!(
-        states(&events),
-        [FlowState::InstallingComponents, FlowState::Cancelled]
-    );
-}
-
-/// Ctrl-C during prefix creation. The prefix is made before anything is installed into it and it is the
-/// longest part of a first run, so it is the phase a user is most likely to stop, and the runner reports
-/// it as a setup step that did not finish rather than as a stopped download. Read as a failure, the one
-/// thing a user does deliberately ends in a failed install and a non-zero exit.
-#[tokio::test]
-async fn stopping_a_prefix_while_it_is_being_created_is_narrated_rather_than_failed() {
-    let h = harness_customized(false, |profile| {
-        profile.components.push(ComponentSelection {
-            id: "ACT".to_owned(),
-            enabled: true,
-        });
-    });
-    let launch = Arc::new(FakeLaunchBackend::cancelled_while_preparing());
-    let addons = Arc::new(FakeAddons::new());
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new([])),
-        Arc::new(FakePatchBackend::new()),
-        launch.clone(),
-        addons.clone(),
-        NOW,
-    );
-
-    let events = run(ctx, Command::Components { profile: h.profile }).await;
-
-    assert_eq!(
-        launch.prepared().len(),
-        1,
-        "the run has to have reached prefix preparation for this to be the path under test"
-    );
-    assert!(
-        errors(&events).is_empty(),
-        "a prefix the user stopped is not a failure: {:?}",
-        errors(&events)
-    );
-    assert_eq!(states(&events), [FlowState::Cancelled]);
-    // Nothing announced an install either: there is no prefix to install into.
-    assert!(addons.calls().is_empty(), "{:?}", addons.calls());
-}
-
-/// The same stop one step later. The catalog is fetched before the install loop that answers for a step
-/// the token interrupted, so a run stopped there is spelled by the download rather than by the addons,
-/// and a reading that knows only the loop's word for it calls the same Ctrl-C a failure.
-#[tokio::test]
-async fn stopping_the_component_catalog_download_is_narrated_rather_than_failed() {
-    let h = harness_customized(false, |profile| {
-        profile.components.push(ComponentSelection {
-            id: "ACT".to_owned(),
-            enabled: true,
-        });
-    });
-    let addons = Arc::new(FakeAddons::new().cancelling_in_the_catalog());
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new([])),
-        Arc::new(FakePatchBackend::new()),
-        Arc::new(FakeLaunchBackend::exiting()),
-        addons.clone(),
-        NOW,
-    );
-
-    let events = run(ctx, Command::Components { profile: h.profile }).await;
-
-    assert!(
-        errors(&events).is_empty(),
-        "a catalog fetch the user stopped is not a failure: {:?}",
-        errors(&events)
-    );
-    assert_eq!(
-        states(&events),
-        [FlowState::InstallingComponents, FlowState::Cancelled]
-    );
-}
-
-/// A profile with no components asks nothing of the seam and reaches no catalog, so the feature costs a
-/// user who does not use it nothing at all.
-#[tokio::test]
-async fn installing_components_with_none_enabled_does_nothing() {
-    let h = harness(false);
-    let addons = Arc::new(FakeAddons::new());
-    let ctx = context_with_addons(
-        &h,
-        Arc::new(FixtureTransport::new([])),
-        Arc::new(FakePatchBackend::new()),
-        Arc::new(FakeLaunchBackend::exiting()),
-        addons.clone(),
-        NOW,
-    );
-
-    let events = run(ctx, Command::Components { profile: h.profile }).await;
-
-    assert!(addons.calls().is_empty());
-    assert!(states(&events).is_empty());
-    assert!(errors(&events).is_empty());
 }
 
 /// A cancelled launch stops what was started but never runs the tools that expect a session which
@@ -1198,7 +932,14 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
         .await
         .expect("detaching must not block on supervision");
 
-    assert_eq!(states(&events), [FlowState::Launching, FlowState::Running]);
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::PreparingPrefix,
+            FlowState::Launching,
+            FlowState::Running
+        ]
+    );
     assert!(!addons.calls().contains(&AddonCall::GameClosed));
 }
 
@@ -1250,7 +991,12 @@ async fn cancelling_a_running_launch_kills_the_game_and_exits() {
 
     assert_eq!(
         states(&events),
-        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+        [
+            FlowState::PreparingPrefix,
+            FlowState::Launching,
+            FlowState::Running,
+            FlowState::Exited
+        ]
     );
     assert!(launch.was_killed(), "cancel must kill the running game");
 }
@@ -1373,6 +1119,7 @@ async fn patches_pending_continue_to_launch() {
         states(&events),
         [
             FlowState::Patching,
+            FlowState::PreparingPrefix,
             FlowState::Launching,
             FlowState::Running,
             FlowState::Exited
@@ -1416,6 +1163,7 @@ async fn a_boot_patch_re_registers_then_launches() {
         states(&events),
         [
             FlowState::Patching,
+            FlowState::PreparingPrefix,
             FlowState::Launching,
             FlowState::Running,
             FlowState::Exited
@@ -1463,6 +1211,7 @@ async fn install_from_nothing_reaches_launch() {
         states(&events),
         [
             FlowState::Patching,
+            FlowState::PreparingPrefix,
             FlowState::Launching,
             FlowState::Running,
             FlowState::Exited
@@ -1611,4 +1360,159 @@ fn launch_arguments_carry_the_fixed_set_in_order() {
         " DEV.DataPathType=1 DEV.MaxEntitledExpansionID=4 DEV.TestSID=UID-XYZ DEV.UseSqPack=1 \
          SYS.Region=7 language=3 resetConfig=0 ver=2024.03.28.0000.0000"
     );
+}
+
+/// The toggle is the whole of the opt-in. What the seam is handed decides whether the distribution is
+/// contacted at all, so a profile that leaves it off must not even ask for it: nothing downstream
+/// re-checks the setting, and a launch that asked would have already made the request.
+#[tokio::test]
+async fn a_profile_with_dalamud_off_never_asks_for_it() {
+    let h = harness(false);
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    assert!(
+        addons.calls().contains(&AddonCall::Prepared {
+            prefix: false,
+            dalamud: false,
+        }),
+        "the launch asked for an injectable nobody enabled: {:?}",
+        addons.calls()
+    );
+}
+
+/// And with it on, the launch says so. The prefix is still prepared either way: the setup the catalog
+/// publishes is hygiene, not something the toggle gates.
+#[tokio::test]
+async fn a_profile_with_dalamud_on_asks_for_it_on_every_launch() {
+    let h = harness_customized(false, |profile| profile.launch.dalamud = true);
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    assert!(
+        addons.calls().contains(&AddonCall::Prepared {
+            prefix: false,
+            dalamud: true,
+        }),
+        "{:?}",
+        addons.calls()
+    );
+}
+
+/// The prefix is brought up to date before the game is spawned, not after. A launch that started the
+/// game first would apply its own hygiene to a prefix the game was already running in.
+#[tokio::test]
+async fn the_prefix_is_prepared_before_the_game_is_spawned() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons.clone(),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    let profile = h.store.load_profile(h.profile).unwrap();
+    assert_eq!(
+        launch.prepared(),
+        [h.prefixes.path().join(super::prefix_name(&profile))],
+        "the launch prepared the profile's own prefix"
+    );
+    assert_eq!(
+        addons.calls().first(),
+        Some(&AddonCall::Prepared {
+            prefix: false,
+            dalamud: false,
+        }),
+        "the setup pass is the first thing the seam is asked for: {:?}",
+        addons.calls()
+    );
+}
+
+/// What an injectable composes onto the plan is what gets spawned. Without this the whole seam could be
+/// wired up and its result quietly dropped between the flow and the runner.
+#[tokio::test]
+async fn what_an_injectable_composes_reaches_the_spawn() {
+    let h = harness_customized(false, |profile| profile.launch.dalamud = true);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new().inserting("--mode=inject"));
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons,
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    let plan = launch.last_plan().expect("a launch happened");
+    assert_eq!(plan.inserted_args(), ["--mode=inject".to_owned()]);
+    assert!(
+        plan.args().starts_with("//**sqex0003"),
+        "the game's own argument string is still there and still last"
+    );
+}
+
+/// Ctrl-C while the prefix is being created. Preparing it is the longest part of a first launch, so it
+/// is the phase a user is most likely to stop, and the runner reports it as a setup step that did not
+/// finish rather than as a stopped download. Read as a failure, the one thing a user does deliberately
+/// ends in a non-zero exit.
+#[tokio::test]
+async fn stopping_a_prefix_while_it_is_being_created_is_narrated_rather_than_failed() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::cancelled_while_preparing());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+
+    assert_eq!(
+        launch.prepared().len(),
+        1,
+        "the run has to have reached prefix preparation for this to be the path under test"
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a prefix the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [FlowState::PreparingPrefix, FlowState::Cancelled]
+    );
+    // Nothing was spawned and nothing was set up: there is no prefix to do either in.
+    assert_eq!(launch.launch_count(), 0);
+    assert!(addons.calls().is_empty(), "{:?}", addons.calls());
 }

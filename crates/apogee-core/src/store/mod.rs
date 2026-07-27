@@ -92,7 +92,7 @@ trait Migrate: Sized {
 }
 
 impl Migrate for Profile {
-    const CURRENT_VERSION: u32 = 2;
+    const CURRENT_VERSION: u32 = 3;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -102,6 +102,21 @@ impl Migrate for Profile {
             1 => {
                 obj.entry("external")
                     .or_insert(serde_json::Value::Array(Vec::new()));
+            }
+            // Shed the curated companion set, and gained the Dalamud toggle beside the other launch
+            // settings. The set is removed rather than left to be ignored: what it named is not
+            // installable any more, and a field nothing reads is a field somebody will try to use.
+            2 => {
+                obj.remove("components");
+                let launch = obj
+                    .entry("launch")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                let launch = launch
+                    .as_object_mut()
+                    .ok_or_else(|| "profile launch settings are not a json object".to_string())?;
+                launch
+                    .entry("dalamud")
+                    .or_insert(serde_json::Value::Bool(false));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }

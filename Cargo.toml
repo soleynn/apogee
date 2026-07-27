@@ -20,6 +20,9 @@ reqwest          = { version = "0.12", default-features = false, features = ["ru
 serde            = { version = "1", features = ["derive"] }
 serde_json       = "1"
 sha1             = "0.11"
+# Dalamud's distribution authenticates its trees with an MD5 map and its assets with SHA1, so both
+# digests are needed to check what it serves. RustCrypto, same family as sha1/sha2.
+md-5             = "0.11"
 sha2             = "0.11"
 crc32fast        = "1"
 http             = "1"

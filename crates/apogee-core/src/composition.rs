@@ -54,9 +54,10 @@ pub struct CoreConfig {
     pub patch_store: PathBuf,
     /// Where config backups are written, one directory per profile.
     pub backups_dir: PathBuf,
-    /// Where natively-installed companion components are unpacked, one directory per component. Shared
-    /// across profiles, because a native tool runs on the host rather than in any one prefix.
-    pub components_dir: PathBuf,
+    /// Where the companion layer keeps what it installs outside a prefix: the last verified copy of the
+    /// signed catalog, and the trees an injectable unpacks into. Shared across profiles, because none of
+    /// it belongs to any one prefix.
+    pub addons_dir: PathBuf,
 }
 
 impl CoreConfig {
@@ -71,7 +72,7 @@ impl CoreConfig {
             prefixes_dir: base.join("prefixes"),
             patch_store: base.join("patches"),
             backups_dir: base.join("backups"),
-            components_dir: base.join("components"),
+            addons_dir: base.join("addons"),
         }
     }
 
@@ -93,9 +94,9 @@ impl CoreConfig {
             patch_store: xdg_dir("XDG_CACHE_HOME", ".cache")?.join("apogee/patches"),
             // Data, not cache: a backup that a cache cleaner may delete is not a backup.
             backups_dir: data.join("apogee/backups"),
-            // Data too: a component the launcher is configured to start is not a cache entry, and a
-            // cleaner removing one would leave a profile pointing at a program that is gone.
-            components_dir: data.join("apogee/components"),
+            // Data too: what a launch loads into the game is tens of megabytes and is fetched from a
+            // third party, so a cache cleaner removing it turns the next launch into a download.
+            addons_dir: data.join("apogee/addons"),
         })
     }
 }
@@ -191,7 +192,7 @@ impl Core {
             prefixes_dir,
             patch_store,
             backups_dir,
-            components_dir,
+            addons_dir,
         } = config;
         let store = Store::new(store_dir);
         // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
@@ -236,9 +237,7 @@ impl Core {
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),
-            AddonPaths {
-                components: components_dir,
-            },
+            AddonPaths::new(addons_dir),
         );
         let secrets = Secrets::new();
         let otp = Otp::new();
@@ -267,17 +266,6 @@ impl Core {
     /// corrupt.
     pub fn profiles(&self) -> Result<Vec<Profile>, CoreError> {
         Ok(self.store.list_profiles()?)
-    }
-
-    /// The signed catalog of installable companion components.
-    ///
-    /// Not a command, because there is nothing to narrate: it is one small signed fetch and the answer.
-    /// Installing what it offers is [`Command::Components`], which does have progress to report.
-    ///
-    /// # Errors
-    /// [`CoreError::Addons`] if it cannot be fetched or does not verify against the compiled-in key.
-    pub async fn component_catalog(&self) -> Result<apogee_addons::ComponentManifest, CoreError> {
-        self.addons.catalog(&CancellationToken::new()).await
     }
 
     /// The launcher-wide settings, defaulting when none is stored yet.

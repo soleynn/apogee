@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use apogee_addons::{ComponentReport, ExternalAddon};
+use apogee_addons::{DalamudConfig, ExternalAddon};
+use apogee_runtime::LaunchPlan;
 
 use super::{AddonBackend, AddonLifecycle};
 use crate::command::Event;
@@ -20,9 +21,15 @@ use crate::error::CoreError;
 /// What the flow did with the addon seam, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AddonCall {
-    Ensured { wanted: Vec<String> },
-    Registrations { wanted: Vec<String> },
-    Started { game_pid: i32, count: usize },
+    /// A launch asked for its prefix to be brought up to date, and said whether it wanted Dalamud.
+    Prepared {
+        prefix: bool,
+        dalamud: bool,
+    },
+    Started {
+        game_pid: i32,
+        count: usize,
+    },
     GameClosed,
     Abandoned,
 }
@@ -38,14 +45,8 @@ pub(crate) struct FakeAddons {
     has_work: bool,
     /// Failures the teardown reports, so a test can check they reach the event stream.
     failures: Vec<String>,
-    /// Records this seam contributes to a launch, so a test can check they run ahead of the user's own.
-    registrations: Vec<ExternalAddon>,
-    /// Components the install reports as failed.
-    component_failures: Vec<String>,
-    /// Whether the install stops on a cancellation instead of returning a report.
-    cancels: bool,
-    /// Whether it stops before the install, while the catalog is still being downloaded.
-    cancels_in_catalog: bool,
+    /// What this seam contributes to a launch's plan, so a test can check it reaches the spawn.
+    inserted_args: Vec<String>,
 }
 
 impl FakeAddons {
@@ -65,32 +66,9 @@ impl FakeAddons {
         self
     }
 
-    /// Contribute `addon` to a launch, as an installed component's registration would.
-    pub(crate) fn contributing(mut self, addon: ExternalAddon) -> Self {
-        self.registrations.push(addon);
-        self
-    }
-
-    /// Report `component` as having failed to install, so a test can check the flow does not call that a
-    /// success.
-    pub(crate) fn component_failure(mut self, component: &str) -> Self {
-        self.component_failures.push(component.to_owned());
-        self
-    }
-
-    /// Stop the install the way a cancelled one stops: fire the token, then answer the cancellation
-    /// rather than a report. The real seam has no report to give once the token has gone, since the step
-    /// that was in flight never finished and the ones behind it were never started.
-    pub(crate) fn cancelling(mut self) -> Self {
-        self.cancels = true;
-        self
-    }
-
-    /// Stop it a step earlier, while the signed catalog is still downloading. The install loop that
-    /// answers for a stopped step has not been reached yet, so what comes back is the download saying
-    /// it was stopped, which is a different sentence for the same thing.
-    pub(crate) fn cancelling_in_the_catalog(mut self) -> Self {
-        self.cancels_in_catalog = true;
+    /// Compose `arg` onto the launch, as an injectable that wraps one would.
+    pub(crate) fn inserting(mut self, arg: &str) -> Self {
+        self.inserted_args.push(arg.to_owned());
         self
     }
 
@@ -116,54 +94,21 @@ impl FakeAddons {
 
 #[async_trait]
 impl AddonBackend for FakeAddons {
-    async fn catalog(
+    async fn prepare_launch(
         &self,
-        _cancel: &CancellationToken,
-    ) -> Result<apogee_addons::ComponentManifest, CoreError> {
-        Ok(apogee_addons::ComponentManifest::default())
-    }
-
-    async fn ensure(
-        &self,
-        _prefix: Option<Prefix>,
-        wanted: Vec<String>,
-        cancel: &CancellationToken,
-        _events: &UnboundedSender<Event>,
-    ) -> Result<ComponentReport, CoreError> {
-        self.record(AddonCall::Ensured { wanted });
-        if self.cancels_in_catalog {
-            cancel.cancel();
-            return Err(CoreError::Addons(apogee_addons::AddonError::Download(
-                apogee_fetch::FetchError::Cancelled,
-            )));
-        }
-        if self.cancels {
-            cancel.cancel();
-            return Err(CoreError::Addons(apogee_addons::AddonError::Cancelled));
-        }
-        Ok(ComponentReport {
-            outcomes: self
-                .component_failures
-                .iter()
-                .map(|name| apogee_addons::ComponentOutcome {
-                    name: name.clone(),
-                    state: apogee_addons::ComponentState::Failed {
-                        reason: "the fake refused it".to_owned(),
-                    },
-                })
-                .collect(),
-        })
-    }
-
-    async fn registrations(
-        &self,
-        _prefix: Option<Prefix>,
-        wanted: Vec<String>,
+        prefix: Option<Prefix>,
+        dalamud: Option<DalamudConfig>,
+        plan: &mut LaunchPlan,
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
-    ) -> Vec<ExternalAddon> {
-        self.record(AddonCall::Registrations { wanted });
-        self.registrations.clone()
+    ) {
+        self.record(AddonCall::Prepared {
+            prefix: prefix.is_some(),
+            dalamud: dalamud.is_some(),
+        });
+        if !self.inserted_args.is_empty() {
+            plan.set_inserted_args(self.inserted_args.clone());
+        }
     }
 
     async fn start(

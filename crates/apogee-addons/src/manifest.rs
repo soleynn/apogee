@@ -10,12 +10,11 @@
 //! passes; [`ComponentManifest::verify_default`] binds the two for a caller that holds both halves and
 //! wants neither decision.
 //!
-//! Everything a component installation needs is in a row, so adding a companion, moving where its files
-//! land, or changing the arguments it runs with is a manifest edit. That is load-bearing rather than
-//! aspirational: where a Windows program looks for its own plugins is frequently a guess, and a guess
-//! that lives in signed data can be corrected without shipping a build.
+//! Everything the launcher sets up is in a row, so adding a prefix-setup verb, correcting where a
+//! verb's files land, or repointing an injectable's distribution is a manifest edit rather than a
+//! release.
 //!
-//! Two shapes of row, because two kinds of bytes. A [`ToolEntry`] pins what it installs by `sha256`,
+//! Two lists, because two kinds of bytes. A verb's [`VerbOp::Files`] pins what it places by `sha256`,
 //! since Apogee names the archive it fetches. An [`InjectableEntry`] carries a distribution endpoint
 //! instead, for a component whose own versioned, integrity-checked distribution is the thing that
 //! authenticates its bytes and whose current version this manifest is in no position to pin.
@@ -30,7 +29,6 @@ use url::Url;
 use apogee_runtime::{ArchiveFormat, ArchiveLayout, RegistryDelete, RegistryEdit, RegistryValue};
 
 use crate::SupportTier;
-use crate::external::Trigger;
 
 /// The manifest schema version this build understands.
 pub const COMPONENT_MANIFEST_VERSION: u32 = 1;
@@ -91,9 +89,9 @@ pub enum ManifestError {
         path: String,
         reason: &'static str,
     },
-    /// A name or version that would not survive being part of a filename. Both end up in one: a
-    /// component's scratch file and its install marker are named after them, so they are held to the
-    /// same standard as the destinations, which are validated a few lines away.
+    /// A name that would not survive being part of a filename. It ends up in one, since a verb's
+    /// scratch file is named after it, so it is held to the same standard as the destinations, which
+    /// are validated a few lines away.
     #[error("{field} {value:?} is not usable: {reason}")]
     BadIdentifier {
         field: &'static str,
@@ -106,50 +104,23 @@ pub enum ManifestError {
         key: String,
         reason: &'static str,
     },
-    /// Two rows offering the same name, anywhere across the three lists. A component name is what a
-    /// profile stores and what `prefix.json` records, so a duplicate would make "is it installed?"
-    /// ambiguous.
+    /// Two rows offering the same name, in either list. A component name is what `prefix.json`
+    /// records, so a duplicate would make "is it applied?" ambiguous.
     #[error("two components are both named {name:?}")]
     DuplicateName { name: String },
-    /// A verb that runs an opaque installer without saying what should exist afterwards.
-    #[error("verb {verb:?} runs an installer but names nothing to verify afterwards")]
-    UnverifiableVerb { verb: String },
-    /// A tool naming a verb no row defines. Caught here rather than at install time, because a tool
-    /// that installs and then cannot be set up is worse than one that was never offered.
-    #[error("{component} requires verb {verb:?}, which the manifest does not define")]
-    UnknownVerb { component: String, verb: String },
 }
 
-/// Which companion a component name refers to, and what installing it means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ToolKind {
-    /// A Windows program installed into the prefix and run through its runner.
-    PrefixTool,
-    /// A native program installed outside the prefix and run directly on the host.
-    ExternalNative,
-}
-
-/// The injection-shaped companions. Modelled here so the schema does not change when the code that
-/// drives them lands; nothing consumes these rows yet.
+/// The injection-shaped companions: the ones that reach the game by wrapping its launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InjectableKind {
     Dalamud,
 }
 
-/// How a companion reaches an already-running game.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Attach {
-    /// Its loader takes the resolved game process id.
-    GamePid,
-}
-
-/// A relative path a component's files may be written to, already confined.
+/// A relative path a verb's files may be written to, already confined.
 ///
-/// Rooted at the prefix's `C:` for a prefix tool and at the host component directory for a native one.
-/// Validated when the manifest is parsed, so nothing downstream re-derives a path from a string.
+/// Rooted at the prefix's `C:`. Validated when the manifest is parsed, so nothing downstream
+/// re-derives a path from a string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentPath(PathBuf);
 
@@ -222,39 +193,6 @@ pub struct Artifact {
     pub archive: ArchiveLayout,
 }
 
-/// How an installed component joins a launch.
-#[derive(Debug, Clone)]
-pub struct Registration {
-    /// The program to run, relative to the component's install directory.
-    pub program: ComponentPath,
-    /// Its arguments, passed verbatim.
-    pub args: Vec<String>,
-    /// When it runs and what the game's exit does to it.
-    pub trigger: Trigger,
-}
-
-/// One companion tool.
-#[derive(Debug, Clone)]
-pub struct ToolEntry {
-    pub name: String,
-    pub version: String,
-    pub kind: ToolKind,
-    pub artifact: Artifact,
-    /// Where its files land, under the prefix's `C:` or the host component directory.
-    pub into: ComponentPath,
-    /// Verbs the prefix needs before this tool is installed, in order.
-    pub verbs: Vec<String>,
-    /// What the user is told at install time. Not a log line: these are the things that otherwise show
-    /// up later as "it installed fine and does nothing".
-    pub caveats: Vec<String>,
-    /// How it joins a launch, if it does. A component may be worth installing without being worth
-    /// starting automatically.
-    pub register: Option<Registration>,
-    /// Set for a companion whose loader takes the resolved game process id. Carried for the phase that
-    /// drives it; nothing reads it yet.
-    pub attach: Option<Attach>,
-}
-
 /// One injectable companion. Its bytes come from its own distribution, so there is no pin here.
 #[derive(Debug, Clone)]
 pub struct InjectableEntry {
@@ -267,14 +205,11 @@ pub struct InjectableEntry {
     pub caveats: Vec<String>,
 }
 
-/// The longest a verb's `run` op may be given, and the default when the row does not say.
-///
-/// A vendor installer that unpacks a runtime takes minutes, so the ordinary in-prefix budget is far too
-/// short; the ceiling is there so a row cannot describe a step that hangs a launcher indefinitely.
-const MAX_RUN_SECS: u64 = 3600;
-const DEFAULT_RUN_SECS: u64 = 900;
-
 /// One step of a verb.
+///
+/// Every kind is idempotent by construction: the write overwrites, the removal treats "it was not
+/// there" as success, and the placement overwrites. That is the selection criterion, not a happy
+/// accident, because the only thing between a re-apply and a re-run is the prefix's own record.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum VerbOp {
@@ -286,24 +221,6 @@ pub enum VerbOp {
     Files {
         artifact: Artifact,
         into: ComponentPath,
-    },
-    /// Run a pinned program inside the prefix.
-    ///
-    /// The escape hatch for the one thing the other ops cannot express: a vendor runtime whose install
-    /// is an opaque executable. Deliberately narrow. The program is a pinned download and nothing else
-    /// (it cannot invoke something already in the prefix, and there is no shell), and a verb containing one
-    /// is refused unless it also carries a [`Verb::verify`], because an opaque installer's own exit status
-    /// is not evidence that anything landed.
-    Run {
-        artifact: Artifact,
-        /// Named so the downloaded file lands under a name the installer will accept; several vendor
-        /// installers inspect their own filename.
-        file_name: String,
-        args: Vec<String>,
-        /// Extra environment for the installer, which is how a `WINEDLLOVERRIDES` an install needs is
-        /// stated as data rather than assumed.
-        env: Vec<(String, String)>,
-        timeout: std::time::Duration,
     },
 }
 
@@ -323,8 +240,7 @@ pub struct Verb {
     /// the same evidence a health check would want.
     ///
     /// Empty is allowed and means "the record is the only evidence there is", which is the honest answer
-    /// for a verb whose whole effect is a registry value: there is no file to look for. A verb with a
-    /// `Run` op may not be empty.
+    /// for a verb whose whole effect is a registry value: there is no file to look for.
     pub verify: Vec<ComponentPath>,
     pub ops: Vec<VerbOp>,
 }
@@ -334,7 +250,6 @@ pub struct Verb {
 pub struct ComponentManifest {
     pub version: u32,
     pub injectables: Vec<InjectableEntry>,
-    pub tools: Vec<ToolEntry>,
     pub verbs: Vec<Verb>,
 }
 
@@ -377,12 +292,6 @@ impl ComponentManifest {
         Self::parse_and_verify(manifest_json, signature, &default_key()?)
     }
 
-    /// The tool row named `name`.
-    #[must_use]
-    pub fn tool(&self, name: &str) -> Option<&ToolEntry> {
-        self.tools.iter().find(|t| t.name == name)
-    }
-
     /// The verb row named `name`.
     #[must_use]
     pub fn verb(&self, name: &str) -> Option<&Verb> {
@@ -395,14 +304,13 @@ impl ComponentManifest {
         self.injectables.iter().find(|i| i.name == name)
     }
 
-    /// Every component name the manifest offers, sorted. What a "what can I enable?" listing reads.
+    /// Every name the manifest offers, sorted. What the duplicate check reads.
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .injectables
             .iter()
             .map(|i| i.name.as_str())
-            .chain(self.tools.iter().map(|t| t.name.as_str()))
             .chain(self.verbs.iter().map(|v| v.name.as_str()))
             .collect();
         names.sort_unstable();
@@ -418,8 +326,6 @@ struct RawManifest {
     #[serde(default)]
     injectables: Vec<RawInjectable>,
     #[serde(default)]
-    tools: Vec<RawTool>,
-    #[serde(default)]
     verbs: Vec<RawVerb>,
 }
 
@@ -433,33 +339,6 @@ struct RawInjectable {
     note: Option<String>,
     #[serde(default)]
     caveats: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct RawTool {
-    name: String,
-    version: String,
-    kind: String,
-    url: String,
-    sha256: String,
-    archive: RawArchive,
-    into: String,
-    #[serde(default)]
-    verbs: Vec<String>,
-    #[serde(default)]
-    caveats: Vec<String>,
-    #[serde(default)]
-    register: Option<RawRegister>,
-    #[serde(default)]
-    attach: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawRegister {
-    program: String,
-    #[serde(default)]
-    args: Vec<String>,
-    trigger: String,
 }
 
 #[derive(Deserialize)]
@@ -487,7 +366,6 @@ enum RawOp {
     Registry(RawRegistry),
     RegistryDelete(RawRegistryDelete),
     Files(RawFiles),
-    Run(RawRun),
 }
 
 #[derive(Deserialize)]
@@ -496,20 +374,6 @@ struct RawRegistryDelete {
     /// Absent removes the key and its subtree; present removes just that value.
     #[serde(default)]
     name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawRun {
-    url: String,
-    sha256: String,
-    /// What the download is saved as before it is run. Several vendor installers inspect their own name.
-    file_name: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: Vec<(String, String)>,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -545,11 +409,6 @@ impl TryFrom<RawManifest> for ComponentManifest {
             .into_iter()
             .map(build_injectable)
             .collect::<Result<Vec<_>, _>>()?;
-        let tools = raw
-            .tools
-            .into_iter()
-            .map(build_tool)
-            .collect::<Result<Vec<_>, _>>()?;
         let verbs = raw
             .verbs
             .into_iter()
@@ -559,7 +418,6 @@ impl TryFrom<RawManifest> for ComponentManifest {
         let manifest = Self {
             version: raw.version,
             injectables,
-            tools,
             verbs,
         };
         manifest.check_names()?;
@@ -568,10 +426,9 @@ impl TryFrom<RawManifest> for ComponentManifest {
 }
 
 impl ComponentManifest {
-    /// Every name is unique across the three lists, and every verb a tool asks for exists.
+    /// Every name is unique across both lists.
     ///
-    /// Both are cross-row properties, so they are checked once the rows are built rather than while
-    /// building one.
+    /// A cross-row property, so it is checked once the rows are built rather than while building one.
     fn check_names(&self) -> Result<(), ManifestError> {
         let mut seen: Vec<&str> = Vec::new();
         for name in self.names() {
@@ -582,27 +439,16 @@ impl ComponentManifest {
             }
             seen.push(name);
         }
-        for tool in &self.tools {
-            for verb in &tool.verbs {
-                if self.verb(verb).is_none() {
-                    return Err(ManifestError::UnknownVerb {
-                        component: tool.name.clone(),
-                        verb: verb.clone(),
-                    });
-                }
-            }
-        }
         Ok(())
     }
 }
 
-/// Refuse a name or version that would not survive being part of a filename.
+/// Refuse a name that would not survive being part of a filename.
 ///
-/// Both become one: a component's scratch file is named after it, and a native component's install marker
-/// is `<name>-<version>`. Everything else derived from manifest data is confined by [`ComponentPath`], so
-/// leaving these two unchecked would be the one place a row could name a path component the rest of the
-/// parser exists to prevent. The manifest is signed, so this is depth rather than a boundary, but a
-/// signed row can still be a mistaken one.
+/// A name becomes one: a verb's scratch file is named after it. Everything else derived from manifest
+/// data is confined by [`ComponentPath`], so leaving this unchecked would be the one place a row could
+/// name a path component the rest of the parser exists to prevent. The manifest is signed, so this is
+/// depth rather than a boundary, but a signed row can still be a mistaken one.
 fn check_identifier(field: &'static str, value: &str) -> Result<(), ManifestError> {
     let bad = |reason: &'static str| ManifestError::BadIdentifier {
         field,
@@ -652,49 +498,6 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
     })
 }
 
-fn build_tool(raw: RawTool) -> Result<ToolEntry, ManifestError> {
-    check_identifier("component name", &raw.name)?;
-    check_identifier("component version", &raw.version)?;
-    let kind = match raw.kind.as_str() {
-        "prefix_tool" => ToolKind::PrefixTool,
-        "external_native" => ToolKind::ExternalNative,
-        _ => return Err(unknown(&raw.name, "tool kind", raw.kind)),
-    };
-    let attach = match raw.attach.as_deref() {
-        None => None,
-        Some("game_pid") => Some(Attach::GamePid),
-        Some(other) => return Err(unknown(&raw.name, "attach", other)),
-    };
-    let register = match raw.register {
-        None => None,
-        Some(register) => Some(Registration {
-            program: ComponentPath::parse(&register.program, &raw.name)?,
-            args: register.args,
-            trigger: match register.trigger.as_str() {
-                "with_game" => Trigger::WithGame {
-                    keep_after_close: false,
-                },
-                "with_game_keep_running" => Trigger::WithGame {
-                    keep_after_close: true,
-                },
-                "on_close" => Trigger::OnClose,
-                other => return Err(unknown(&raw.name, "trigger", other)),
-            },
-        }),
-    };
-    Ok(ToolEntry {
-        artifact: build_artifact(&raw.name, &raw.url, &raw.sha256, raw.archive)?,
-        into: ComponentPath::parse(&raw.into, &raw.name)?,
-        name: raw.name,
-        version: raw.version,
-        kind,
-        verbs: raw.verbs,
-        caveats: raw.caveats,
-        register,
-        attach,
-    })
-}
-
 fn build_verb(raw: RawVerb) -> Result<Verb, ManifestError> {
     check_identifier("verb name", &raw.name)?;
     let ops = raw
@@ -707,14 +510,6 @@ fn build_verb(raw: RawVerb) -> Result<Verb, ManifestError> {
         .iter()
         .map(|path| ComponentPath::parse(path, &raw.name))
         .collect::<Result<Vec<_>, _>>()?;
-    // An opaque installer's own exit status is not evidence that anything landed, so a verb that runs one
-    // has to say what to look for afterwards. Refused here rather than at apply time, because a row that
-    // cannot be checked should never have been published.
-    if verify.is_empty() && ops.iter().any(|op| matches!(op, VerbOp::Run { .. })) {
-        return Err(ManifestError::UnverifiableVerb {
-            verb: raw.name.clone(),
-        });
-    }
     Ok(Verb {
         name: raw.name,
         reason: raw.reason,
@@ -781,31 +576,6 @@ fn build_op(component: &str, raw: RawOp) -> Result<VerbOp, ManifestError> {
             artifact: build_artifact(component, &files.url, &files.sha256, files.archive)?,
             into: ComponentPath::parse(&files.into, component)?,
         }),
-        RawOp::Run(run) => {
-            // The saved name becomes a filename, so it is held to the same standard as a component name.
-            check_identifier("run file name", &run.file_name)?;
-            let secs = run.timeout_secs.unwrap_or(DEFAULT_RUN_SECS);
-            if secs == 0 || secs > MAX_RUN_SECS {
-                return Err(unknown(component, "run timeout", secs.to_string()));
-            }
-            Ok(VerbOp::Run {
-                artifact: build_artifact(
-                    component,
-                    &run.url,
-                    &run.sha256,
-                    RawArchive {
-                        // A run op names one executable, not an archive. The layout field exists on
-                        // `Artifact` for the ops that do extract; here it is never consulted.
-                        format: "zip".to_owned(),
-                        strip_prefix: None,
-                    },
-                )?,
-                file_name: run.file_name,
-                args: run.args,
-                env: run.env,
-                timeout: std::time::Duration::from_secs(secs),
-            })
-        }
     }
 }
 
@@ -886,31 +656,30 @@ mod tests {
 
     const GOOD_PIN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-    /// A manifest with one prefix tool, one native tool, and the verb the first one asks for.
+    /// A manifest with the injectable the launcher drives and two verbs, one of them placing a pinned
+    /// tree, so the pointer row and the pinned row both have a subject.
     fn manifest() -> String {
         format!(
             r#"{{
               "version": 1,
-              "tools": [
-                {{ "name": "ACT", "version": "3.8.5.288", "kind": "prefix_tool",
-                   "url": "https://example.invalid/ACTv3.zip", "sha256": "{GOOD_PIN}",
-                   "archive": {{ "format": "zip" }},
-                   "into": "apogee/ACT",
-                   "verbs": ["no-desktop-integration"],
-                   "caveats": ["It needs a .NET Framework this launcher does not install."],
-                   "register": {{ "program": "Advanced Combat Tracker.exe",
-                                  "args": ["-portable"], "trigger": "with_game" }} }},
-                {{ "name": "Triggevent", "version": "1.0-10", "kind": "external_native",
-                   "url": "https://example.invalid/triggevent-linux.zip", "sha256": "{GOOD_PIN}",
-                   "archive": {{ "format": "zip", "strip_prefix": "triggevent" }},
-                   "into": "Triggevent",
-                   "register": {{ "program": "triggevent.sh", "args": [], "trigger": "with_game" }} }}
+              "injectables": [
+                {{ "name": "Dalamud", "kind": "dalamud",
+                   "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
+                   "tier": "best_effort", "note": "Best with the wine-xiv runner.",
+                   "caveats": ["Third-party code is loaded into the game client."] }}
               ],
               "verbs": [
                 {{ "name": "no-desktop-integration", "reason": "Keeps installs out of the host menu.",
                    "ops": [
                      {{ "registry": {{ "key": "HKCU\\Software\\Wine\\DllOverrides",
                                        "name": "winemenubuilder.exe", "type": "disabled" }} }}
+                   ] }},
+                {{ "name": "placed-files", "reason": "It lays a pinned tree under the prefix.",
+                   "verify": ["apogee/placed/thing.dll"],
+                   "ops": [
+                     {{ "files": {{ "url": "https://example.invalid/files.zip", "sha256": "{GOOD_PIN}",
+                                    "archive": {{ "format": "zip", "strip_prefix": "top" }},
+                                    "into": "apogee/placed" }} }}
                    ] }}
               ]
             }}"#
@@ -921,6 +690,20 @@ mod tests {
         ComponentManifest::from_json_bytes(json.as_bytes())
     }
 
+    /// The pinned artifact of the fixture's file-placing verb.
+    fn placed_artifact(parsed: &ComponentManifest) -> &Artifact {
+        match parsed
+            .verb("placed-files")
+            .expect("row")
+            .ops
+            .first()
+            .expect("one op")
+        {
+            VerbOp::Files { artifact, .. } => artifact,
+            other => panic!("expected a files op, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_signed_manifest_parses_every_row() {
         let json = manifest();
@@ -929,31 +712,11 @@ mod tests {
             ComponentManifest::parse_and_verify(json.as_bytes(), &sig, &test_verifying_key())
                 .expect("valid signature");
 
-        let act = parsed.tool("ACT").expect("ACT row");
-        assert_eq!(act.kind, ToolKind::PrefixTool);
-        assert_eq!(act.artifact.archive.format, ArchiveFormat::Zip);
-        assert_eq!(act.into.as_path(), Path::new("apogee/ACT"));
-        assert_eq!(act.verbs, ["no-desktop-integration"]);
-        assert_eq!(act.caveats.len(), 1);
-        let register = act.register.as_ref().expect("registered");
-        assert_eq!(
-            register.program.as_path(),
-            Path::new("Advanced Combat Tracker.exe")
-        );
-        assert_eq!(register.args, ["-portable"]);
-        assert_eq!(
-            register.trigger,
-            Trigger::WithGame {
-                keep_after_close: false
-            }
-        );
-
-        let triggevent = parsed.tool("Triggevent").expect("Triggevent row");
-        assert_eq!(triggevent.kind, ToolKind::ExternalNative);
-        assert_eq!(
-            triggevent.artifact.archive.strip_prefix.as_deref(),
-            Some("triggevent")
-        );
+        let dalamud = parsed.injectable("Dalamud").expect("Dalamud row");
+        assert_eq!(dalamud.kind, InjectableKind::Dalamud);
+        assert_eq!(dalamud.distribution.host_str(), Some("kamori.goats.dev"));
+        assert!(matches!(dalamud.tier, SupportTier::BestEffort { .. }));
+        assert_eq!(dalamud.caveats.len(), 1);
 
         let verb = parsed.verb("no-desktop-integration").expect("verb row");
         assert!(!verb.reason.is_empty());
@@ -964,9 +727,19 @@ mod tests {
             }
             other => panic!("expected one registry op, got {other:?}"),
         }
+
+        let placed = parsed.verb("placed-files").expect("verb row");
+        assert_eq!(
+            placed.verify.first().map(ComponentPath::as_path),
+            Some(Path::new("apogee/placed/thing.dll"))
+        );
+        let artifact = placed_artifact(&parsed);
+        assert_eq!(artifact.archive.format, ArchiveFormat::Zip);
+        assert_eq!(artifact.archive.strip_prefix.as_deref(), Some("top"));
+
         assert_eq!(
             parsed.names(),
-            ["ACT", "Triggevent", "no-desktop-integration"]
+            ["Dalamud", "no-desktop-integration", "placed-files"]
         );
     }
 
@@ -1033,18 +806,17 @@ mod tests {
         let upper = lower.to_uppercase();
         let of = |pin: &str| {
             let json = manifest().replace(GOOD_PIN, pin);
-            parse(&json).expect("parse").tools[0].artifact.sha256
+            placed_artifact(&parse(&json).expect("parse")).sha256
         };
         assert_eq!(of(&lower), of(&upper));
         assert_eq!(of(&lower)[0], 0x01);
     }
 
     #[test]
-    fn an_unknown_kind_format_trigger_or_attach_is_a_typed_error() {
+    fn an_unknown_kind_format_or_registry_type_is_a_typed_error() {
         for (from, to) in [
-            ("\"kind\": \"prefix_tool\"", "\"kind\": \"prefix_flatpak\""),
+            ("\"kind\": \"dalamud\"", "\"kind\": \"telepathy\""),
             ("\"format\": \"zip\"", "\"format\": \"tar.brotli\""),
-            ("\"trigger\": \"with_game\"", "\"trigger\": \"whenever\""),
             ("\"type\": \"disabled\"", "\"type\": \"reg_binary\""),
         ] {
             let json = manifest().replace(from, to);
@@ -1053,80 +825,55 @@ mod tests {
                 "{to} must be refused"
             );
         }
-        let json = manifest().replace(
-            "\"into\": \"Triggevent\"",
-            "\"into\": \"Triggevent\", \"attach\": \"telepathy\"",
-        );
-        assert!(matches!(
-            parse(&json),
-            Err(ManifestError::UnknownValue { .. })
-        ));
     }
 
-    /// A name is what a profile stores and what the prefix records, so two rows sharing one would make
-    /// "is it installed?" unanswerable.
+    /// A name is what the prefix records, so two rows sharing one would make "is it applied?"
+    /// unanswerable.
     #[test]
     fn two_rows_with_one_name_are_refused_across_every_list() {
-        let json = manifest().replace("\"name\": \"Triggevent\"", "\"name\": \"ACT\"");
+        let json = manifest().replace("\"name\": \"placed-files\"", "\"name\": \"Dalamud\"");
         assert!(matches!(
             parse(&json),
             Err(ManifestError::DuplicateName { .. })
         ));
-        // Also across lists, not only within one.
-        let json = manifest().replace("\"name\": \"no-desktop-integration\"", "\"name\": \"ACT\"");
-        assert!(matches!(
-            parse(&json),
-            Err(ManifestError::DuplicateName { .. })
-        ));
-    }
-
-    /// A tool that installs and then cannot be set up is worse than one that was never offered, so the
-    /// dangling reference is caught before anything is downloaded.
-    #[test]
-    fn a_tool_requiring_a_verb_that_does_not_exist_is_refused() {
+        // Also within one list, not only across two.
         let json = manifest().replace(
-            "\"verbs\": [\"no-desktop-integration\"]",
-            "\"verbs\": [\"dotnet48\"]",
+            "\"name\": \"placed-files\"",
+            "\"name\": \"no-desktop-integration\"",
         );
-        match parse(&json) {
-            Err(ManifestError::UnknownVerb { verb, component }) => {
-                assert_eq!(verb, "dotnet48");
-                assert_eq!(component, "ACT");
-            }
-            other => panic!("expected UnknownVerb, got {other:?}"),
-        }
+        assert!(matches!(
+            parse(&json),
+            Err(ManifestError::DuplicateName { .. })
+        ));
     }
 
-    /// A name and a version both become part of a filename: a component's scratch file is named after it
-    /// and a native install marker is `<name>-<version>`. Leaving them unchecked would be the one place a
-    /// row could name a path component the rest of this parser exists to refuse.
+    /// A name becomes part of a filename: a verb's scratch file is named after it. Leaving it unchecked
+    /// would be the one place a row could name a path component the rest of this parser exists to
+    /// refuse.
     #[test]
-    fn a_name_or_version_that_would_not_survive_a_filename_is_refused() {
-        for (from, to) in [
-            ("\"name\": \"ACT\"", "\"name\": \"../../etc/x\""),
-            ("\"name\": \"ACT\"", "\"name\": \"..\""),
-            ("\"name\": \"ACT\"", "\"name\": \"a/b\""),
-            ("\"name\": \"ACT\"", r#""name": "a\\b""#),
-            ("\"name\": \"ACT\"", "\"name\": \"\""),
-            ("\"version\": \"3.8.5.288\"", "\"version\": \"../../etc\""),
-            ("\"version\": \"3.8.5.288\"", "\"version\": \"\""),
+    fn a_name_that_would_not_survive_a_filename_is_refused() {
+        for to in [
+            "\"name\": \"../../etc/x\"",
+            "\"name\": \"..\"",
+            "\"name\": \"a/b\"",
+            r#""name": "a\\b""#,
+            "\"name\": \"\"",
         ] {
-            let json = manifest().replacen(from, to, 1);
+            let json = manifest().replacen("\"name\": \"Dalamud\"", to, 1);
             assert!(
                 matches!(parse(&json), Err(ManifestError::BadIdentifier { .. })),
-                "{to} must be refused"
+                "{to} must be refused as an injectable name"
+            );
+            let json = manifest().replacen("\"name\": \"placed-files\"", to, 1);
+            assert!(
+                matches!(parse(&json), Err(ManifestError::BadIdentifier { .. })),
+                "{to} must be refused as a verb name"
             );
         }
-        // A verb's name reaches the same places.
-        let json = manifest().replace("\"name\": \"no-desktop-integration\"", "\"name\": \"../x\"");
-        assert!(matches!(
-            parse(&json),
-            Err(ManifestError::BadIdentifier { .. })
-        ));
     }
 
-    /// The destination is where a component's bytes land, so it is the one field a hostile row would
-    /// most want to control.
+    /// The destination is where a verb's bytes land, so it is the one field a hostile row would most
+    /// want to control.
     #[test]
     fn a_destination_that_escapes_its_root_is_refused() {
         for path in [
@@ -1138,8 +885,10 @@ mod tests {
             "",
             ".",
         ] {
-            let json =
-                manifest().replace("\"into\": \"apogee/ACT\"", &format!("\"into\": {path:?}"));
+            let json = manifest().replace(
+                "\"into\": \"apogee/placed\"",
+                &format!("\"into\": {path:?}"),
+            );
             assert!(
                 matches!(parse(&json), Err(ManifestError::BadPath { .. })),
                 "{path:?} must be refused"
@@ -1152,17 +901,19 @@ mod tests {
     #[test]
     fn a_backslash_destination_is_folded_before_it_is_checked() {
         let json = manifest().replace(
-            "\"into\": \"apogee/ACT\"",
-            r#""into": "apogee\\ACT\\Plugins""#,
+            "\"into\": \"apogee/placed\"",
+            r#""into": "apogee\\placed\\Plugins""#,
         );
         let parsed = parse(&json).expect("a windows-shaped path is still a path");
-        assert_eq!(
-            parsed.tool("ACT").expect("row").into.as_path(),
-            Path::new("apogee/ACT/Plugins")
-        );
+        match parsed.verb("placed-files").expect("row").ops.as_slice() {
+            [VerbOp::Files { into, .. }] => {
+                assert_eq!(into.as_path(), Path::new("apogee/placed/Plugins"));
+            }
+            other => panic!("expected one files op, got {other:?}"),
+        }
 
         let json = manifest().replace(
-            "\"into\": \"apogee/ACT\"",
+            "\"into\": \"apogee/placed\"",
             r#""into": "apogee\\..\\..\\etc""#,
         );
         assert!(matches!(parse(&json), Err(ManifestError::BadPath { .. })));
@@ -1199,77 +950,21 @@ mod tests {
     /// costs, which is the opposite of what tiering it is for.
     #[test]
     fn a_best_effort_injectable_must_say_what_it_costs() {
-        let with_note = r#"{ "version": 1, "injectables": [
-            { "name": "Dalamud", "kind": "dalamud",
-              "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
-              "tier": "best_effort", "note": "Best with the wine-xiv runner." } ] }"#;
-        let parsed = parse(with_note).expect("parse");
+        let parsed = parse(&manifest()).expect("parse");
         let entry = parsed.injectable("Dalamud").expect("row");
-        assert_eq!(entry.kind, InjectableKind::Dalamud);
         assert!(matches!(entry.tier, SupportTier::BestEffort { .. }));
 
-        let without = with_note.replace(r#", "note": "Best with the wine-xiv runner.""#, "");
+        let without = manifest().replace(r#", "note": "Best with the wine-xiv runner.""#, "");
         assert!(matches!(
             parse(&without),
             Err(ManifestError::UnknownValue { .. })
         ));
     }
 
-    /// A verb carrying a `run` op, with the verify it is refused without.
-    fn run_verb(verify: &str, timeout: &str) -> String {
-        format!(
-            r#"{{ "version": 1, "verbs": [
-                {{ "name": "runner-verb", "reason": "why", {verify}
-                   "ops": [ {{ "run": {{ "url": "https://example.invalid/setup.exe",
-                                         "sha256": "{GOOD_PIN}", "file_name": "setup.exe",
-                                         "args": ["/q"], "timeout_secs": {timeout} }} }} ] }} ] }}"#
-        )
-    }
-
-    /// The escape hatch is only allowed with evidence attached. An opaque installer's exit status says it
-    /// ran, not that anything landed, so a row that cannot be checked should never have been published.
+    /// A verb whose whole effect is a registry value has nothing on disk to look for, so it names
+    /// nothing to verify and the prefix's record is the only evidence there is.
     #[test]
-    fn a_verb_that_runs_an_installer_must_say_what_to_verify() {
-        let parsed = parse(&run_verb(r#""verify": ["windows/thing.dll"],"#, "600")).expect("parse");
-        let verb = parsed.verb("runner-verb").expect("row");
-        assert_eq!(verb.verify.len(), 1);
-        match verb.ops.as_slice() {
-            [
-                VerbOp::Run {
-                    file_name,
-                    args,
-                    timeout,
-                    ..
-                },
-            ] => {
-                assert_eq!(file_name, "setup.exe");
-                assert_eq!(args, &["/q".to_owned()]);
-                assert_eq!(timeout.as_secs(), 600);
-            }
-            other => panic!("expected one run op, got {other:?}"),
-        }
-
-        assert!(matches!(
-            parse(&run_verb("", "600")),
-            Err(ManifestError::UnverifiableVerb { .. })
-        ));
-
-        // A budget of zero, or one past the ceiling, is a typed error rather than a hang.
-        for timeout in ["0", "100000"] {
-            assert!(
-                matches!(
-                    parse(&run_verb(r#""verify": ["windows/thing.dll"],"#, timeout)),
-                    Err(ManifestError::UnknownValue { .. })
-                ),
-                "a budget of {timeout} must be refused"
-            );
-        }
-    }
-
-    /// A verb with no `run` op needs no verify: its whole effect may be a registry value, and there would
-    /// be nothing on disk to look for.
-    #[test]
-    fn a_verb_without_an_installer_needs_no_verify() {
+    fn a_verb_whose_effect_is_a_registry_value_names_nothing_to_verify() {
         let parsed = parse(&manifest()).expect("parse");
         let verb = parsed.verb("no-desktop-integration").expect("row");
         assert!(verb.verify.is_empty());
@@ -1341,11 +1036,21 @@ mod tests {
     }
 
     /// An empty manifest is well-formed: a build with nothing to offer is a valid state, and refusing it
-    /// would make "no components yet" indistinguishable from a broken manifest.
+    /// would make "no rows yet" indistinguishable from a broken manifest.
     #[test]
     fn a_manifest_with_no_rows_parses() {
         let parsed = parse(r#"{ "version": 1 }"#).expect("parse");
         assert!(parsed.names().is_empty());
+    }
+
+    /// A key the schema no longer defines is ignored rather than refused, which is what lets a manifest
+    /// serve an older build while a newer one stops reading a list it has retired.
+    #[test]
+    fn a_list_this_build_no_longer_reads_is_ignored() {
+        let json = r#"{ "version": 1, "tools": [ { "name": "gone" } ],
+                        "verbs": [ { "name": "v", "reason": "why", "ops": [] } ] }"#;
+        let parsed = parse(json).expect("parse");
+        assert_eq!(parsed.names(), ["v"]);
     }
 
     #[test]
@@ -1357,12 +1062,9 @@ mod tests {
     /// compiled-in key. This catches a mistyped key, a manifest reformatted after signing, or a row
     /// dropped by an edit.
     ///
-    /// The catalog currently offers prefix setup and nothing else. The combat-data companions it used to
-    /// carry (ACT, OverlayPlugin, Triggevent) were withdrawn: ACT is a .NET Framework application, and on
-    /// the runners available to us the framework installs but cannot host managed code, because Wine's
-    /// `mscoree.dll` only ever loads Wine Mono and no artifact supplies a genuine one. Everything
-    /// downstream of ACT went with it. So this asserts what is true now, that every row parses and
-    /// nothing is advertised that this build cannot drive, rather than naming rows.
+    /// It asserts what every row has to carry rather than naming rows, so the file stays editable: a
+    /// verb without a reason is one nobody can review, and an injectable without a distribution has
+    /// nowhere to fetch from.
     #[test]
     fn the_hosted_manifest_verifies_against_the_compiled_in_key() {
         let manifest = include_bytes!("../../../site/components/manifest.json");
@@ -1370,7 +1072,6 @@ mod tests {
         let parsed = ComponentManifest::verify_default(manifest, signature)
             .expect("the hosted manifest verifies and parses against the compiled-in key");
 
-        // Every verb has to say why it exists, since that is what a reviewer reads.
         assert!(!parsed.verbs.is_empty(), "the catalog offers prefix setup");
         for verb in &parsed.verbs {
             assert!(
@@ -1379,17 +1080,15 @@ mod tests {
                 verb.name
             );
         }
-        // Nothing may be offered that this build cannot drive.
+        // The row behind the Dalamud launch setting. Without it the setting has no endpoint to reach
+        // and no tier note to state, so a build that dropped it would silently offer nothing.
+        let dalamud = parsed
+            .injectable("Dalamud")
+            .expect("the Dalamud row is what the launch setting reads");
+        assert_eq!(dalamud.kind, InjectableKind::Dalamud);
         assert!(
-            parsed.injectables.is_empty(),
-            "an injectable row would advertise a component nothing installs yet"
+            matches!(&dalamud.tier, SupportTier::BestEffort { note } if !note.is_empty()),
+            "the tier has to say what it costs"
         );
-        for tool in &parsed.tools {
-            assert!(
-                !tool.caveats.is_empty(),
-                "tool {:?} cannot be offered without stating what it needs",
-                tool.name
-            );
-        }
     }
 }

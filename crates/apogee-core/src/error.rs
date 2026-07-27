@@ -51,9 +51,4 @@ pub enum CoreError {
     PatchIncomplete { detail: String },
     #[error("preparing the repair failed: {detail}")]
     Repair { detail: String },
-    /// Some of the components asked for did not install. A count rather than the reasons: each one is
-    /// already on the event stream as the event that failed it, and repeating them here makes one problem
-    /// look like two. This exists so a shell can tell that what it asked for did not entirely happen.
-    #[error("{failed} of {total} components could not be installed")]
-    Components { failed: usize, total: usize },
 }

@@ -6,22 +6,22 @@
 //! verb that has already run, but a record can be lost and a run can be interrupted halfway, so the ops
 //! have to converge when they are repeated instead of relying on never being repeated.
 //!
-//! A verb that runs an installer is checked rather than trusted. An opaque installer's exit status says
-//! it ran, not that anything landed, and the one here can be undone from outside by a runner upgrade. So a
-//! verb states what should exist afterwards ([`Verb::verify`]), that is what decides whether the apply
-//! succeeded, and the same evidence is what makes a later run notice the effect has gone.
+//! A verb's effect is checked rather than assumed. Its ops returning success is not evidence that
+//! anything landed, and what it wrote can be undone from outside by a runner upgrade. So a verb states
+//! what should exist afterwards ([`Verb::verify`]), that is what decides whether the apply succeeded,
+//! and the same evidence is what makes a later run notice the effect has gone.
 
 use std::path::Path;
 
 use apogee_fetch::Fetcher;
-use apogee_runtime::{Prefix, ProgramInPrefix, Runtime};
+use apogee_runtime::{Prefix, Runtime};
 use tokio_util::sync::CancellationToken;
 
 use crate::manifest::{Verb, VerbOp};
 use crate::{AddonError, Result};
 
 use super::artifact;
-use super::event::{ComponentEvent, ComponentEvents};
+use super::event::SetupEvents;
 
 /// Apply every op in `verb` against `prefix`, in order, then check what it claimed would exist.
 ///
@@ -33,7 +33,7 @@ pub(super) async fn apply(
     verb: &Verb,
     work: &Path,
     cancel: &CancellationToken,
-    events: &ComponentEvents,
+    events: &SetupEvents,
 ) -> Result<()> {
     for op in &verb.ops {
         run_op(runtime, fetcher, prefix, verb, op, work, cancel, events).await?;
@@ -71,7 +71,7 @@ async fn run_op(
     op: &VerbOp,
     work: &Path,
     cancel: &CancellationToken,
-    events: &ComponentEvents,
+    events: &SetupEvents,
 ) -> Result<()> {
     let failed = |source: Box<dyn std::error::Error + Send + Sync>| AddonError::VerbFailed {
         verb: verb.name.clone(),
@@ -97,41 +97,6 @@ async fn run_op(
                 .await
                 .map(|_entries| ())
                 .map_err(|source| failed(Box::new(source)))
-        }
-        VerbOp::Run {
-            artifact: art,
-            file_name,
-            args,
-            env,
-            timeout,
-        } => {
-            let installer =
-                artifact::fetch_file(fetcher, art, &verb.name, work, file_name, cancel, events)
-                    .await
-                    .map_err(|source| failed(Box::new(source)))?;
-            events.emit(ComponentEvent::Running {
-                verb: verb.name.clone(),
-                program: file_name.clone(),
-            });
-            let program =
-                ProgramInPrefix::new(installer.to_string_lossy().into_owned(), args.clone())
-                    .env(env.iter().cloned().collect())
-                    .timeout(*timeout);
-            let run = runtime
-                .run_in_prefix(prefix, &program, cancel)
-                .await
-                .map_err(|source| failed(Box::new(source)))?;
-            // A non-zero status is reported, but the verify is what actually decides: several vendor
-            // installers exit non-zero for reasons that do not stop them working, and several exit zero
-            // having done nothing. Neither is evidence on its own.
-            if !run.ok() {
-                events.emit(ComponentEvent::InstallerStatus {
-                    verb: verb.name.clone(),
-                    code: run.code,
-                    detail: run.diagnostic().to_owned(),
-                });
-            }
-            Ok(())
         }
     }
 }

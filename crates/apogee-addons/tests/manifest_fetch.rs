@@ -39,9 +39,9 @@ const MANIFEST: &str = r#"{ "version": 1, "verbs": [
     { "name": "a-verb", "reason": "why it exists", "ops": [] } ] }"#;
 
 /// Where a verified manifest and its signature are published, which is the crate's own layout: a
-/// `.catalog` directory beside the components.
+/// `.catalog` directory under the addon root.
 fn published(root: &Path) -> (PathBuf, PathBuf) {
-    let cache = root.join("components").join(".catalog");
+    let cache = root.join(".catalog");
     (
         cache.join("components.json"),
         cache.join("components.json.sig"),
@@ -86,13 +86,7 @@ impl Servers {
         let (m, g, b) = (der(&self.manifest)?, der(&self.good)?, der(&self.bad)?);
         let fetcher = Fetcher::from_client(client_trusting(&[&m, &g, &b])?);
         let runtime = Runtime::new(fetcher.clone(), RuntimePaths::default());
-        Ok(Addons::new(
-            runtime,
-            fetcher,
-            AddonPaths {
-                components: root.join("components"),
-            },
-        ))
+        Ok(Addons::new(runtime, fetcher, AddonPaths::new(root)))
     }
 }
 

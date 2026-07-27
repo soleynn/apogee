@@ -315,3 +315,55 @@ fn a_directory_left_readable_by_an_earlier_build_is_narrowed() {
         .mode();
     assert_eq!(mode & 0o077, 0, "still group/other readable: {mode:o}");
 }
+
+#[rstest]
+#[case(1)]
+#[case(2)]
+fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) {
+    let (dir, store) = store();
+    let id = uuid::Uuid::new_v4();
+    let account = uuid::Uuid::new_v4();
+    let launch = serde_json::json!({
+        "region": "Global", "extra_args": [], "extra_env": [], "wrappers": []
+    });
+    // Each historical shape carries only the fields that existed at that version. Both carried the
+    // curated component set the launcher no longer offers.
+    let data = match version {
+        1 => serde_json::json!({
+            "id": id, "name": "Main", "account": account, "game_path": "/games/ffxiv",
+            "runner": "SystemWine", "prefix": { "name": "" },
+            "components": [{ "id": "ACT", "enabled": true }],
+            "launch": launch,
+        }),
+        _ => serde_json::json!({
+            "id": id, "name": "Main", "account": account, "game_path": "/games/ffxiv",
+            "runner": "SystemWine", "prefix": { "name": "" },
+            "components": [{ "id": "ACT", "enabled": true }],
+            "external": [],
+            "launch": launch,
+        }),
+    };
+    let envelope = serde_json::json!({ "schema_version": version, "data": data });
+    let path = dir.path().join("profiles").join(format!("{id}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let loaded = store.load_profile(id).unwrap();
+    assert_eq!(loaded.name, "Main");
+    assert!(loaded.external.is_empty());
+    // The toggle a profile did not have yet arrives off. Defaulting it on would load third-party code
+    // into the client of every profile that predates the setting.
+    assert!(!loaded.launch.dalamud);
+
+    // A re-save rewrites the envelope at the current schema version, without the set it shed.
+    store.save_profile(&loaded).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        raw["schema_version"],
+        serde_json::json!(Profile::CURRENT_VERSION)
+    );
+    assert!(
+        raw["data"].get("components").is_none(),
+        "the component set survived the migration: {raw}"
+    );
+}

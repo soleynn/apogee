@@ -12,7 +12,7 @@ use std::time::Duration;
 use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Validator, VerifiedFile};
 use tokio_util::sync::CancellationToken;
 
-use super::event::{ComponentEvent, ComponentEvents};
+use super::event::{SetupEvent, SetupEvents};
 use crate::manifest::Artifact;
 use crate::{AddonError, Result};
 
@@ -34,7 +34,7 @@ pub(super) async fn install(
     work: &Path,
     dest: &Path,
     cancel: &CancellationToken,
-    events: &ComponentEvents,
+    events: &SetupEvents,
 ) -> Result<u64> {
     let cache = work.join(format!("{component}.archive"));
     let verified = download(fetcher, artifact, component, &cache, cancel, events).await?;
@@ -85,32 +85,14 @@ fn extract(
     })
 }
 
-/// Download one pinned artifact and leave it at `file_name` inside `work`, without extracting it.
-///
-/// For the one op that runs a program rather than laying out a tree. The name is the row's, because
-/// several vendor installers inspect their own filename, and it is validated when the manifest is parsed.
-pub(super) async fn fetch_file(
-    fetcher: &Fetcher,
-    artifact: &Artifact,
-    component: &str,
-    work: &Path,
-    file_name: &str,
-    cancel: &CancellationToken,
-    events: &ComponentEvents,
-) -> Result<PathBuf> {
-    let dest = work.join(file_name);
-    let verified = download(fetcher, artifact, component, &dest, cancel, events).await?;
-    Ok(verified.path().to_path_buf())
-}
-
-/// Download and verify one artifact, relaying progress onto the component event stream.
+/// Download and verify one artifact, relaying progress onto the setup event stream.
 async fn download(
     fetcher: &Fetcher,
     artifact: &Artifact,
     component: &str,
     dest: &Path,
     cancel: &CancellationToken,
-    events: &ComponentEvents,
+    events: &SetupEvents,
 ) -> Result<VerifiedFile> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
@@ -129,8 +111,8 @@ async fn download(
     let name = component.to_owned();
     let relay = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
-            sink.emit(ComponentEvent::Downloading {
-                component: name.clone(),
+            sink.emit(SetupEvent::Downloading {
+                what: name.clone(),
                 bytes_done: progress.bytes_done,
                 total: progress.total,
             });
