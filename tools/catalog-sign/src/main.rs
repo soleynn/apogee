@@ -1,4 +1,8 @@
-//! Sign the runner catalog manifest with an offline Ed25519 key.
+//! Sign a catalog manifest with an offline Ed25519 key.
+//!
+//! One tool for all three catalogs (runners, repair indexes, components), each with its own seed
+//! and its own compiled-in verifying key: the file to sign is an argument, so nothing here knows or
+//! cares which catalog it is.
 //!
 //! Two modes:
 //!   catalog-sign keygen <seed-out>

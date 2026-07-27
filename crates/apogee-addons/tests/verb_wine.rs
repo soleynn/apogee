@@ -95,9 +95,9 @@ fn recorded(prefix: &Prefix) -> Result<Vec<String>, Box<dyn Error>> {
         .collect())
 }
 
-/// Rewrite the prefix's record without its component list, standing in for a record lost or truncated
+/// Rewrite the prefix's record with nothing applied, standing in for a record lost or truncated
 /// between two runs.
-fn forget_components(prefix: &Prefix) -> Result<(), Box<dyn Error>> {
+fn forget_applied_verbs(prefix: &Prefix) -> Result<(), Box<dyn Error>> {
     let path = prefix.metadata_path();
     let mut meta =
         apogee_runtime::PrefixMetadata::load(&path)?.ok_or("the prefix has no record to edit")?;
@@ -166,7 +166,7 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
     // With the record cleared, the ops themselves still have to converge rather than failing on a value
     // that is already set. That is what keeps an interrupted apply recoverable, and it is the part the
     // record cannot stand in for.
-    forget_components(&prefix).expect("clear the record");
+    forget_applied_verbs(&prefix).expect("clear the record");
     let third = addons
         .apply_setup(&manifest, &prefix, &cancel, &events)
         .await

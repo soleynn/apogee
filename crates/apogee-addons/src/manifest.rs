@@ -315,9 +315,12 @@ pub struct Verb {
 }
 
 /// A verified component manifest.
+///
+/// It carries no schema version, because a parsed manifest can only ever be
+/// [`COMPONENT_MANIFEST_VERSION`]: anything else is refused before this is built. A field holding one
+/// reachable value would also have made `Default` produce a version the parser rejects.
 #[derive(Debug, Clone, Default)]
 pub struct ComponentManifest {
-    pub version: u32,
     pub injectables: Vec<InjectableEntry>,
     pub verbs: Vec<Verb>,
 }
@@ -500,11 +503,7 @@ impl TryFrom<RawManifest> for ComponentManifest {
             .map(build_verb)
             .collect::<Result<Vec<_>, _>>()?;
 
-        let manifest = Self {
-            version: raw.version,
-            injectables,
-            verbs,
-        };
+        let manifest = Self { injectables, verbs };
         manifest.check_names()?;
         Ok(manifest)
     }
@@ -565,7 +564,12 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
         _ => return Err(unknown(&raw.name, "injectable kind", raw.kind)),
     };
     let tier = match (raw.tier.as_str(), raw.note) {
-        ("first_class", _) => SupportTier::FirstClass,
+        ("first_class", None) => SupportTier::FirstClass,
+        // Refused rather than dropped. A first-class tier has nothing to warn about, so a note on one
+        // would never be shown, and a row that carries one is a row whose author expected it to be.
+        ("first_class", Some(_)) => {
+            return Err(unknown(&raw.name, "tier", "first_class with a note"));
+        }
         ("best_effort", Some(note)) => SupportTier::BestEffort { note },
         // A best-effort tier with no note would present as "not first class" with no statement of what
         // that costs, which is the opposite of the point of tiering it.
@@ -1046,6 +1050,27 @@ mod tests {
         assert!(matches!(
             parse(&without),
             Err(ManifestError::UnknownValue { .. })
+        ));
+    }
+
+    /// The symmetric refusal. A first-class tier has nothing to warn about, so its note would never be
+    /// shown, and silently dropping one leaves the author of the row believing it was.
+    #[test]
+    fn a_first_class_injectable_may_not_carry_a_note_that_would_be_dropped() {
+        let with_note = manifest().replace(r#""tier": "best_effort""#, r#""tier": "first_class""#);
+        assert!(matches!(
+            parse(&with_note),
+            Err(ManifestError::UnknownValue { .. })
+        ));
+
+        let without = with_note.replace(r#", "note": "Best with the wine-xiv runner.""#, "");
+        let parsed = parse(&without).expect("a first-class row with no note is fine");
+        assert!(matches!(
+            parsed
+                .injectable(InjectableKind::Dalamud)
+                .expect("row")
+                .tier,
+            SupportTier::FirstClass
         ));
     }
 

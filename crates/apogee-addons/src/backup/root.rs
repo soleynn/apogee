@@ -8,6 +8,8 @@ use super::error::BackupError;
 use super::rule::{Expect, NameMatch, Rule};
 
 /// The namespace a root's entries live under in the archive, and the unit a restore works in.
+// Deliberately exhaustive: it is written into the archive record, so a variant added here changes a
+// persisted format and every reader has to be taught it rather than allowed to skip it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootLabel {
@@ -30,6 +32,7 @@ impl RootLabel {
 
 /// Whether a root that is absent from disk is a fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Presence {
     /// Absent fails the backup.
     Required,

@@ -11,6 +11,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// The kind of directory entry a rule matches, and the kind a walk found.
+// Exhaustive for the same reason as `RootLabel`: it is written into the archive record, so a variant
+// added here changes a persisted format rather than widening an in-memory one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
@@ -23,6 +25,7 @@ pub enum EntryKind {
 /// How a rule tests one filename component. Every variant folds ASCII case on both sides, and there
 /// is no case-sensitive variant to reach for.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NameMatch {
     /// Every name, leaving the rule's kind as the only test.
     Any,
@@ -67,6 +70,7 @@ impl fmt::Display for NameMatch {
 
 /// What zero matches for a rule means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Expect {
     /// Zero matches fails the backup, naming the rule.
     Required,
