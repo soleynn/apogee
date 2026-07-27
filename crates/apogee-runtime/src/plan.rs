@@ -210,11 +210,13 @@ impl Prefix {
 pub struct LaunchPlan {
     program: String,
     args: String,
+    inserted_args: Vec<String>,
     env: BTreeMap<String, String>,
     wrappers: Vec<String>,
     dpi_aware: bool,
     prefix: Option<Prefix>,
     working_dir: Option<PathBuf>,
+    supervised: Option<String>,
 }
 
 impl LaunchPlan {
@@ -229,11 +231,13 @@ impl LaunchPlan {
         Self {
             program: program.into(),
             args: encrypted_args.into(),
+            inserted_args: Vec::new(),
             env,
             wrappers: Vec::new(),
             dpi_aware: false,
             prefix: None,
             working_dir: None,
+            supervised: None,
         }
     }
 
@@ -283,6 +287,43 @@ impl LaunchPlan {
         &self.args
     }
 
+    /// Set the argv tokens that go between the program and the opaque argument string.
+    ///
+    /// An injectable that redirects the launch through a loader puts the loader's own flags here. They
+    /// are separate from [`Self::args`] because that string is one token the game parses itself:
+    /// appending to it would hand the game flags meant for the loader, and prepending would hand the
+    /// loader the game's arguments as its own.
+    pub fn set_inserted_args(&mut self, args: Vec<String>) {
+        self.inserted_args = args;
+    }
+
+    /// The argv tokens placed between the program and the argument string.
+    #[must_use]
+    pub fn inserted_args(&self) -> &[String] {
+        &self.inserted_args
+    }
+
+    /// Name the PE basename to supervise when it is not the program's own.
+    ///
+    /// A launch redirected through a loader spawns the game as a separate process, so the launcher
+    /// must track the game rather than the loader: without this it would report a launch as over the
+    /// moment the loader exited.
+    pub fn set_supervised(&mut self, basename: impl Into<String>) {
+        self.supervised = Some(basename.into());
+    }
+
+    /// The PE basename to supervise, when one was named instead of the program's own.
+    #[must_use]
+    pub fn supervised(&self) -> Option<&str> {
+        self.supervised.as_deref()
+    }
+
+    /// The launch environment, as it will be applied on top of the prefix's own.
+    #[must_use]
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
     /// Mutable access to the environment, for an injectable to add variables.
     pub fn env_mut(&mut self) -> &mut BTreeMap<String, String> {
         &mut self.env
@@ -293,16 +334,18 @@ impl LaunchPlan {
         self.wrappers.push(wrapper.into());
     }
 
+    /// The prefix this plan launches into, if it has one.
+    #[must_use]
+    pub fn prefix_of(&self) -> Option<&Prefix> {
+        self.prefix.as_ref()
+    }
+
     pub(crate) fn prefix_ref(&self) -> Option<&Prefix> {
         self.prefix.as_ref()
     }
 
     pub(crate) fn working_dir_ref(&self) -> Option<&Path> {
         self.working_dir.as_deref()
-    }
-
-    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
-        &self.env
     }
 
     pub(crate) fn wrapper_list(&self) -> &[String] {
@@ -316,6 +359,8 @@ impl fmt::Debug for LaunchPlan {
         f.debug_struct("LaunchPlan")
             .field("program", &self.program)
             .field("args", &"<redacted>")
+            .field("inserted_args", &self.inserted_args)
+            .field("supervised", &self.supervised)
             .field("env", &self.env)
             .field("wrappers", &self.wrappers)
             .field("dpi_aware", &self.dpi_aware)
