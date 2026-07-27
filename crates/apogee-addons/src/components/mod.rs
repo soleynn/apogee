@@ -8,7 +8,9 @@
 //!
 //! One component failing costs the user that component. The call fails as a whole only for something
 //! structural, like a name no row offers; a download that breaks or a verb that a wine refuses is
-//! recorded against its own name and the rest of the set continues.
+//! recorded against its own name and the rest of the set continues. Cancellation is the other whole-call
+//! failure, and deliberately not a set of failed components: what is missing after it is missing because
+//! it was asked to stop.
 //!
 //! A component's caveats reach the caller as events while it installs, not as a field on the report.
 //! The whole reason they exist is to be read at the moment the thing is set up.
@@ -22,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, Runtime};
+use ed25519_dalek::VerifyingKey;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -96,14 +99,18 @@ const SIGNATURE_FILE: &str = "components.json.sig";
 /// Where a fetch in progress writes, cleared before every attempt.
 const STAGING_DIR: &str = ".fetching";
 
-/// Fetch the signed manifest and its detached signature over HTTPS, then verify against the compiled-in
-/// key. The manifest's own bytes are not pinned ahead of time; the signature is the authenticity gate.
+/// Fetch the signed manifest and its detached signature over HTTPS, then verify against `key`. The
+/// manifest's own bytes are not pinned ahead of time; the signature is the authenticity gate.
+///
+/// The key is passed in rather than read here, so the shipping entry point can hand over the compiled-in
+/// one while a test hands over a key it can also sign with. Nothing else about the path changes: whatever
+/// key arrives is the only thing that can admit a manifest.
 ///
 /// Two things about *where* it downloads are load-bearing rather than tidiness.
 ///
 /// It downloads into a staging directory that is removed first. A manifest is fetched with no content
 /// pin and no declared length, and under those terms the fetcher treats any existing file at the
-/// destination as already satisfying the request — correctly, since it has nothing to check it against.
+/// destination as already satisfying the request (correctly, since it has nothing to check it against).
 /// Downloading straight onto the cache path would therefore serve the first manifest ever fetched back
 /// forever, and a manifest edit would never reach this build. That is the opposite of the point of
 /// keeping components in signed data.
@@ -116,6 +123,7 @@ pub(crate) async fn fetch_manifest(
     manifest_url: &Url,
     signature_url: &Url,
     cache_dir: &Path,
+    key: &VerifyingKey,
     cancel: &CancellationToken,
 ) -> Result<ComponentManifest> {
     let staging = cache_dir.join(STAGING_DIR);
@@ -134,7 +142,7 @@ pub(crate) async fn fetch_manifest(
     let signature = tokio::fs::read(&signature_path)
         .await
         .map_err(|source| artifact::io_failed("manifest", "read", &signature_path, source))?;
-    let parsed = ComponentManifest::verify_default(&manifest, &signature)?;
+    let parsed = ComponentManifest::parse_and_verify(&manifest, &signature, key)?;
 
     publish(&staging, cache_dir).await?;
     Ok(parsed)
@@ -160,13 +168,17 @@ async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The last manifest a fetch verified and left in `cache_dir`, re-verified before it is handed back.
+/// The last manifest a fetch verified and left in `cache_dir`, re-verified against `key` before it is
+/// handed back.
 ///
 /// `None` when nothing has been fetched yet. A signature check stands between the cache and every caller,
 /// so this is a freshness fallback and never a trust one: the worst it can serve is yesterday's rows,
 /// which for a launch beats starting no companions at all. Whether that trade is the right one is the
 /// caller's to make, which is why fetching and reading the cache are separate calls.
-pub(crate) async fn cached_manifest(cache_dir: &Path) -> Result<Option<ComponentManifest>> {
+pub(crate) async fn cached_manifest(
+    cache_dir: &Path,
+    key: &VerifyingKey,
+) -> Result<Option<ComponentManifest>> {
     let manifest_path = cache_dir.join(MANIFEST_FILE);
     let signature_path = cache_dir.join(SIGNATURE_FILE);
     let (Ok(manifest), Ok(signature)) = (
@@ -175,8 +187,8 @@ pub(crate) async fn cached_manifest(cache_dir: &Path) -> Result<Option<Component
     ) else {
         return Ok(None);
     };
-    Ok(Some(ComponentManifest::verify_default(
-        &manifest, &signature,
+    Ok(Some(ComponentManifest::parse_and_verify(
+        &manifest, &signature, key,
     )?))
 }
 
@@ -200,14 +212,15 @@ async fn download_unverified(
 ///
 /// A tool whose prerequisite verb failed in this run is not installed. A verb a tool declares is the
 /// prefix setup that tool needs, so installing it anyway would leave a component in place that cannot
-/// work while the prefix records it as installed — which is worse than not having it, because the next
+/// work while the prefix records it as installed, which is worse than not having it, because the next
 /// run would skip both.
 ///
 /// # Errors
 /// [`AddonError::UnknownComponent`] if a name is in no list, or [`AddonError::Install`] wrapping the
 /// runtime's error if the prefix's record cannot be read: without it there is no way to tell an install
 /// that is needed from one that is not, and re-running everything against a live prefix is worse than
-/// stopping.
+/// stopping. [`AddonError::Cancelled`] if the token fired, which ends the run rather than failing the
+/// components it did not get to.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ensure(
     runtime: &Runtime,
@@ -235,8 +248,18 @@ pub(crate) async fn ensure(
     let mut report = ComponentReport::default();
     // What failed so far, so a tool is not installed over prefix setup that did not apply.
     let mut failed: Vec<String> = Vec::new();
+    let mut cancelled = false;
 
     for step in plan.steps() {
+        // Cancellation ends the run here rather than being left to each step to notice. Every remaining
+        // step would otherwise be attempted and fail: a download returns cancelled the moment it starts,
+        // and a verb's run op spawns a process before it races the token. The report would then be a set
+        // of failures, which is what a caller counts to decide the install did not work, for a run the
+        // user stopped themselves.
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         match &step.action {
             StepAction::AlreadyPresent => {
                 events.emit(ComponentEvent::AlreadyPresent {
@@ -281,6 +304,24 @@ pub(crate) async fn ensure(
                         }
                     },
                 };
+                // The step that was in flight when the token fired is the one the check above cannot
+                // catch: it ran before the step started. So the token is read again here, ahead of
+                // whatever the step made of being interrupted, and for both ways a step can come back
+                // rather than only the failing one. A half-finished download reports an error and a
+                // step that got as far as its last write reports success, but neither is evidence
+                // about the component: the reason the run stopped is the same one either way. Reading
+                // only the error is how a run stopped during its last step ends as a full report of
+                // installed components, which is precisely the "it worked" a stopped run must not say.
+                //
+                // A step that did finish keeps what it recorded in the prefix. That record is written
+                // by the step itself, out of work that landed, and from here there is no telling a
+                // step that ran to the end from one a callee cut short and called done, so taking it
+                // back would throw away real installs on every stop. What this loop can answer for is
+                // the run, and a run somebody stopped is stopped however far it got.
+                if cancel.is_cancelled() {
+                    cancelled = true;
+                    break;
+                }
                 let state = match outcome {
                     Ok(()) => ComponentState::Installed,
                     Err(err) => {
@@ -301,7 +342,12 @@ pub(crate) async fn ensure(
         }
     }
 
+    // The scratch directory goes either way: a run that stopped early has no more claim on it than one
+    // that finished.
     let _ = tokio::fs::remove_dir_all(&work).await;
+    if cancelled {
+        return Err(AddonError::Cancelled);
+    }
     Ok(report)
 }
 
@@ -444,9 +490,10 @@ async fn install_tool(
                 ),
             ));
         }
-        // A host program the launcher execs itself has to be executable, and these archives are built on
-        // Windows: the one native companion in the hosted manifest ships its launcher at mode 644. A
-        // program inside the prefix needs nothing, since the runner is what executes it.
+        // A host program the launcher execs itself has to be executable, and a component archive is built
+        // on Windows, where nothing carries an executable bit: whatever mode its entry point arrives at
+        // is not one this side can run. A program inside the prefix needs nothing, since the runner is
+        // what executes it.
         if tool.kind == ToolKind::ExternalNative {
             make_executable(&program, &tool.name)?;
         }
@@ -468,6 +515,11 @@ async fn install_tool(
 /// `required` is the program the caller will go on to register, when there is one. The skip has to be at
 /// least as strict as what the caller then demands, or a directory that lost that one file would be
 /// skipped, fail the registration check, and take the same path on every retry forever.
+///
+/// The skip consults the token too, which the paths that download get for free. What it stands between
+/// is a cancelled run and the prefix record: `ensure` re-reads the token after every step and stops
+/// before an outcome is pushed, so a skip cannot reach the report either way, but nothing else keeps it
+/// out of a record that outlives the run that wrote it. Doing no work is not having done the work.
 #[allow(clippy::too_many_arguments)]
 async fn install_native(
     fetcher: &Fetcher,
@@ -483,6 +535,9 @@ async fn install_native(
     let marker = marker_dir.join(format!("{}-{}", tool.name, tool.version));
     let intact = dest.is_dir() && required.is_none_or(Path::is_file);
     if marker.is_file() && intact {
+        if cancel.is_cancelled() {
+            return Err(AddonError::Cancelled);
+        }
         return Ok(());
     }
     artifact::install(

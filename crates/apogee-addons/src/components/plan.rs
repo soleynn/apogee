@@ -56,8 +56,8 @@ impl EnsurePlan {
     ///
     /// A tool is already present only if the version the record carries is the version the row now
     /// offers, so a bumped row is an install rather than a no-op. That is the whole point of a
-    /// version living in a manifest. A record with no version at all — a verb, or something an older
-    /// build wrote — counts as present, because there is nothing to compare and re-installing on every
+    /// version living in a manifest. A record with no version at all (a verb, or something an older
+    /// build wrote) counts as present, because there is nothing to compare and re-installing on every
     /// run would be worse than a stale entry.
     ///
     /// `stale` names components the record claims but whose effect has been checked and is gone, which
@@ -95,7 +95,9 @@ impl EnsurePlan {
                 push(&mut steps, name, None, StepKind::Verb, installed, stale);
             } else if manifest.injectable(name).is_some() {
                 // Offered by the schema so a manifest does not need a new version when the code that
-                // drives these lands. Until then, saying so beats installing nothing quietly.
+                // drives these lands. Until then, saying so beats installing nothing quietly. The kind
+                // is only read for a step that installs, and this one never does, so it carries the
+                // nearest existing variant rather than a new one nothing would dispatch on.
                 push_step(
                     &mut steps,
                     PlanStep {

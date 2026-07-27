@@ -42,7 +42,7 @@ having installs through its plugin repository, in-process and patch-aware, with 
 wrong. A second catalog curating Windows desktop applications into a prefix competes with that instead of
 adding to it. So this file documents a schema whose tool rows have no consumer, and whether the manifest
 should remain a signed hosted file at all (rather than the verbs becoming compiled-in constants) is an
-open question. See m3-wine.md §5 and §11.
+open question.
 
 ## Schema
 

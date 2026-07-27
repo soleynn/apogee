@@ -3,16 +3,22 @@
 //! Same discipline as the runner and index catalogs, with its own key: a JSON manifest whose Ed25519
 //! signature is verified against a compiled-in verifying key **before** any `sha256` pin inside it is
 //! trusted. [`ComponentManifest::from_json_bytes`] is a pure, total parser over untrusted input (the
-//! fuzz entry point) and carries no authenticity guarantee on its own;
-//! [`ComponentManifest::verify_default`] is what a caller should reach for.
+//! fuzz entry point) and carries no authenticity guarantee on its own.
+//! [`ComponentManifest::parse_and_verify`] is what gates it behind the signature, and it takes the key
+//! it checks against rather than reaching for one, so the fetch path and a test can drive the same code
+//! with different keys. `default_key` supplies the compiled-in key, which is what every shipping caller
+//! passes; [`ComponentManifest::verify_default`] binds the two for a caller that holds both halves and
+//! wants neither decision.
 //!
 //! Everything a component installation needs is in a row, so adding a companion, moving where its files
 //! land, or changing the arguments it runs with is a manifest edit. That is load-bearing rather than
-//! aspirational here: several of these placements are educated guesses about where a Windows program
-//! looks for its own plugins, and a guess that lives in signed data can be corrected without a release.
+//! aspirational: where a Windows program looks for its own plugins is frequently a guess, and a guess
+//! that lives in signed data can be corrected without shipping a build.
 //!
-//! Dalamud is the one row that is a pointer rather than a pin, because its bytes come from goatcorp's
-//! own versioned, integrity-checked distribution and Apogee never hosts them.
+//! Two shapes of row, because two kinds of bytes. A [`ToolEntry`] pins what it installs by `sha256`,
+//! since Apogee names the archive it fetches. An [`InjectableEntry`] carries a distribution endpoint
+//! instead, for a component whose own versioned, integrity-checked distribution is the thing that
+//! authenticates its bytes and whose current version this manifest is in no position to pin.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -38,6 +44,18 @@ pub const COMPONENT_PUBLIC_KEY: [u8; 32] = [
     0x6d, 0x35, 0x68, 0x49, 0x3e, 0x56, 0x73, 0xb1, 0xa3, 0x10, 0xfa, 0xe7, 0x20, 0x1b, 0xec, 0xd2,
     0x21, 0xd6, 0x70, 0xb9, 0x28, 0x6a, 0xa9, 0xfd, 0x3f, 0xc7, 0x6c, 0xdf, 0xc7, 0xb9, 0x94, 0x00,
 ];
+
+/// The compiled-in key as a usable one, decompressed from its 32 bytes.
+///
+/// One place, so every path that admits a manifest against the shipping key goes through the same
+/// constant and there is no field anywhere holding a key that could have been substituted.
+///
+/// # Errors
+/// [`ManifestError::BadSignature`] if the constant is not a point on the curve, which a build with a
+/// mistyped key would be.
+pub(crate) fn default_key() -> Result<VerifyingKey, ManifestError> {
+    VerifyingKey::from_bytes(&COMPONENT_PUBLIC_KEY).map_err(|_| ManifestError::BadSignature)
+}
 
 /// Components a name may nest, and bytes one component may hold. A real destination is two or three
 /// deep; these only exist so a hostile row cannot describe a path no filesystem would take.
@@ -272,8 +290,8 @@ pub enum VerbOp {
     /// Run a pinned program inside the prefix.
     ///
     /// The escape hatch for the one thing the other ops cannot express: a vendor runtime whose install
-    /// is an opaque executable. Deliberately narrow. The program is a pinned download and nothing else —
-    /// it cannot invoke something already in the prefix, and there is no shell — and a verb containing one
+    /// is an opaque executable. Deliberately narrow. The program is a pinned download and nothing else
+    /// (it cannot invoke something already in the prefix, and there is no shell), and a verb containing one
     /// is refused unless it also carries a [`Verb::verify`], because an opaque installer's own exit status
     /// is not evidence that anything landed.
     Run {
@@ -323,7 +341,7 @@ pub struct ComponentManifest {
 impl ComponentManifest {
     /// Parse a manifest from untrusted JSON. Pure and total: any byte sequence yields a manifest or a
     /// typed [`ManifestError`], never a panic. This is the fuzz target and carries **no** authenticity
-    /// guarantee — callers must have verified the signature.
+    /// guarantee: callers must have verified the signature.
     ///
     /// # Errors
     /// Any [`ManifestError`] except [`ManifestError::BadSignature`].
@@ -349,14 +367,14 @@ impl ComponentManifest {
         Self::from_json_bytes(manifest_json)
     }
 
-    /// [`Self::parse_and_verify`] against the compiled-in key. What the composition root calls.
+    /// [`Self::parse_and_verify`] against the compiled-in key, for a caller that already holds both
+    /// halves. A fetch takes its key as an argument instead, so the download path can be driven against
+    /// a key a test can sign with; this is the same check with nothing to choose.
     ///
     /// # Errors
     /// As [`Self::parse_and_verify`].
     pub fn verify_default(manifest_json: &[u8], signature: &[u8]) -> Result<Self, ManifestError> {
-        let key = VerifyingKey::from_bytes(&COMPONENT_PUBLIC_KEY)
-            .map_err(|_| ManifestError::BadSignature)?;
-        Self::parse_and_verify(manifest_json, signature, &key)
+        Self::parse_and_verify(manifest_json, signature, &default_key()?)
     }
 
     /// The tool row named `name`.
@@ -583,7 +601,7 @@ impl ComponentManifest {
 /// Both become one: a component's scratch file is named after it, and a native component's install marker
 /// is `<name>-<version>`. Everything else derived from manifest data is confined by [`ComponentPath`], so
 /// leaving these two unchecked would be the one place a row could name a path component the rest of the
-/// parser exists to prevent. The manifest is signed, so this is depth rather than a boundary — but a
+/// parser exists to prevent. The manifest is signed, so this is depth rather than a boundary, but a
 /// signed row can still be a mistaken one.
 fn check_identifier(field: &'static str, value: &str) -> Result<(), ManifestError> {
     let bad = |reason: &'static str| ManifestError::BadIdentifier {
@@ -989,7 +1007,7 @@ mod tests {
 
     /// Both halves of the pin decoder: the length, and the digits. A pin of the right length made of
     /// wrong characters is the one that would otherwise decode to a silently wrong 32 bytes, and it is
-    /// also the likelier mistake — a typo'd digit, or a digest in the wrong encoding.
+    /// also the likelier mistake: a typo'd digit, or a digest in the wrong encoding.
     #[test]
     fn a_bad_pin_is_refused() {
         for bad in [

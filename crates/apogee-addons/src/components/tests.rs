@@ -6,6 +6,7 @@
 //! that does not match stops before anything is written.
 
 use std::io::{Cursor, Write};
+use std::time::Duration;
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, RunnerKind, Runtime, RuntimePaths};
@@ -21,8 +22,8 @@ fn component_zip(top: &str) -> Vec<u8> {
     let plain = SimpleFileOptions::DEFAULT.last_modified_time(zip::DateTime::default());
     writer.start_file(format!("{top}/tool.exe"), plain).unwrap();
     writer.write_all(b"MZ").unwrap();
-    // Left non-executable on purpose: the one native companion in the hosted manifest ships its
-    // launcher script exactly this way, so the install is what has to make it runnable.
+    // Left non-executable on purpose, which is how a script comes out of an archive built on Windows:
+    // the install is what has to make it runnable.
     writer.start_file(format!("{top}/run.sh"), plain).unwrap();
     writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
     writer.finish().unwrap().into_inner()
@@ -101,6 +102,25 @@ async fn ensure_all(
     wanted: &[&str],
     events: &ComponentEvents,
 ) -> Result<ComponentReport> {
+    ensure_with(
+        prefix,
+        paths,
+        manifest,
+        wanted,
+        &CancellationToken::new(),
+        events,
+    )
+    .await
+}
+
+async fn ensure_with(
+    prefix: &Prefix,
+    paths: &AddonPaths,
+    manifest: &ComponentManifest,
+    wanted: &[&str],
+    cancel: &CancellationToken,
+    events: &ComponentEvents,
+) -> Result<ComponentReport> {
     let fetcher = Fetcher::builder().build().unwrap();
     let wanted: Vec<String> = wanted.iter().map(|s| (*s).to_owned()).collect();
     ensure(
@@ -110,7 +130,7 @@ async fn ensure_all(
         manifest,
         prefix,
         &wanted,
-        &CancellationToken::new(),
+        cancel,
         events,
     )
     .await
@@ -307,8 +327,9 @@ async fn a_native_component_is_fetched_once_across_prefixes() {
     );
 }
 
-/// A native companion is exec'd by the launcher itself, and these archives are built on Windows: the one
-/// in the hosted manifest ships its launcher script without an executable bit.
+/// A native companion is exec'd by the launcher itself, and a component archive is built on Windows,
+/// where nothing carries an executable bit: an entry point arrives unrunnable unless the install says
+/// otherwise.
 #[tokio::test]
 async fn a_native_companions_entry_point_is_made_executable() {
     use std::os::unix::fs::PermissionsExt;
@@ -332,6 +353,253 @@ async fn a_native_companions_entry_point_is_made_executable() {
     let program = paths.components.join("Native/run.sh");
     let mode = std::fs::metadata(&program).unwrap().permissions().mode();
     assert_ne!(mode & 0o100, 0, "the launcher script is executable");
+}
+
+/// A run somebody stopped is not a run that failed. Every step left over would fail on its own once the
+/// token fires (a download returns cancelled, a verb's process is killed the moment it starts), and the
+/// caller counts failures to decide the install did not work: recording them would tell a user who
+/// pressed ctrl-c that their components could not be installed.
+#[tokio::test]
+async fn a_cancelled_run_ends_rather_than_failing_every_step_that_is_left() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    // "InPrefix" is two steps: the verb it requires, which needs nothing and would otherwise apply
+    // happily, and the tool itself, whose download is what returns cancelled.
+    let err = ensure_with(
+        &prefix,
+        &paths,
+        &manifest(&server, &pin),
+        &["InPrefix"],
+        &cancel,
+        &ComponentEvents::new(tx),
+    )
+    .await
+    .expect_err("a cancelled run is not a report of failures");
+
+    assert!(matches!(err, AddonError::Cancelled), "{err:?}");
+    assert_eq!(
+        server.stats().requests(),
+        0,
+        "nothing was fetched after the token fired"
+    );
+    assert!(
+        recorded(&prefix).is_empty(),
+        "a run that stopped before doing anything leaves the prefix as it found it"
+    );
+    let events = collect(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ComponentEvent::Failed { .. })),
+        "no component failed; the run stopped: {events:?}"
+    );
+}
+
+/// Ctrl-c does not wait for a step boundary. The step that was running when the token fired is the one
+/// that comes back with an error, and the check at the top of the loop cannot have seen it: it ran before
+/// the step started. Letting that error fall through to the ordinary failure path would put a
+/// `Failed` event and a failed outcome against a component nothing is wrong with, which is the same
+/// "your components could not be installed" the step-boundary check exists to avoid.
+///
+/// The token fires once the server has actually written body bytes, so the download is genuinely open
+/// rather than refused at the start; the server then hangs, so it cannot finish while the test is
+/// arranging that.
+#[tokio::test]
+async fn a_step_cancelled_while_it_was_running_is_not_a_component_that_failed() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    // A chunk, then a hang with no more data and no EOF: the download is in flight and stays there.
+    let slow = ChaosServer::serving(zip.clone())
+        .chunk(32)
+        .throttle(Duration::from_millis(50))
+        .stall_after(32)
+        .start()
+        .await
+        .unwrap();
+    // The step after it lives on its own server, so "never attempted" is a request count rather than an
+    // inference from the report.
+    let later = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let json = format!(
+        r#"{{
+          "version": 1,
+          "tools": [
+            {{ "name": "InPrefix", "version": "1", "kind": "prefix_tool",
+               "url": "{slow_url}", "sha256": "{pin}",
+               "archive": {{ "format": "zip", "strip_prefix": "top" }},
+               "into": "apogee/InPrefix", "verbs": ["marker"] }},
+            {{ "name": "Native", "version": "1", "kind": "external_native",
+               "url": "{later_url}", "sha256": "{pin}",
+               "archive": {{ "format": "zip", "strip_prefix": "top" }},
+               "into": "Native" }}
+          ],
+          "verbs": [
+            {{ "name": "marker", "reason": "Recorded without touching anything.", "ops": [] }}
+          ]
+        }}"#,
+        slow_url = slow.url("component.zip"),
+        later_url = later.url("component.zip"),
+    );
+    let manifest = ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let events = ComponentEvents::new(tx);
+    let cancel = CancellationToken::new();
+
+    // Joined rather than spawned so the canceller can watch this server's counters by reference, and
+    // timed out so a token the download does not honor fails the test instead of hanging on the stall.
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            ensure_with(
+                &prefix,
+                &paths,
+                &manifest,
+                &["InPrefix", "Native"],
+                &cancel,
+                &events,
+            ),
+            async {
+                while slow.stats().bytes_served() == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                cancel.cancel();
+            }
+        )
+    })
+    .await
+    .expect("a cancelled install must not sit on the stalled download");
+
+    let err = result.expect_err("a run somebody stopped is not a report of failures");
+    assert!(matches!(err, AddonError::Cancelled), "{err:?}");
+    let emitted = collect(&mut rx);
+    assert!(
+        !emitted
+            .iter()
+            .any(|e| matches!(e, ComponentEvent::Failed { .. })),
+        "the step the token interrupted is not a component that failed: {emitted:?}"
+    );
+    assert_eq!(
+        recorded(&prefix),
+        ["marker"],
+        "the verb ahead of it applied; the interrupted tool is not remembered as installed"
+    );
+    assert_eq!(
+        later.stats().requests(),
+        0,
+        "the run stopped at the interrupted step rather than working through what was left"
+    );
+}
+
+/// The other half of the same problem, and the worse half: a step that answers success in the instant
+/// the token fires. There is no error to read, so a run stopped during its last step falls off the end of
+/// the plan and hands back a report of installed components, telling a user who pressed ctrl-c that the
+/// install they stopped worked. Whether the step really finished or a callee cut it short and called it
+/// done is not something this layer can see, which is why it reads the token rather than trusting the
+/// answer.
+///
+/// The token is fired from the artifact's own progress, on the frame the fetcher emits once the body is
+/// in and it turns to hashing it. Past that point the transfer consults the token no more, so the step
+/// runs on to a genuine success with the token already gone: the ordering this needs, arrived at by
+/// construction rather than by waiting for it.
+#[tokio::test]
+async fn a_step_that_finished_as_the_token_fired_stops_the_run_rather_than_reporting_success() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let manifest = manifest(&server, &pin);
+    let cancel = CancellationToken::new();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    // Left to run rather than awaited: it ends when the sink closes, and its result is the token.
+    let _watcher = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let ComponentEvent::Downloading {
+                    bytes_done,
+                    total: Some(total),
+                    ..
+                } = event
+                    && bytes_done > 0
+                    && bytes_done == total
+                {
+                    cancel.cancel();
+                }
+            }
+        })
+    };
+
+    // One step, so its outcome is the last thing the loop reads: the run ends on this step's answer or
+    // it ends on the plan running out.
+    let err = ensure_with(
+        &prefix,
+        &paths,
+        &manifest,
+        &["Native"],
+        &cancel,
+        &ComponentEvents::new(tx),
+    )
+    .await
+    .expect_err("a run stopped while its last step was running did not install what was asked for");
+    assert!(matches!(err, AddonError::Cancelled), "{err:?}");
+    // And the step's own record stands: the files are there, the work happened, and a stop is not a
+    // reason to make the next run do it again.
+    assert_eq!(recorded(&prefix), ["Native"]);
+    assert!(paths.components.join("Native/run.sh").is_file());
+}
+
+/// The one install path that does no work: a native component already on this machine is skipped rather
+/// than fetched. Skipping is not the same as having installed it, so a cancelled run must not return
+/// success from here, which is what would get the component recorded in the prefix and reported
+/// installed by a run that installed nothing.
+#[tokio::test]
+async fn a_skipped_native_component_is_not_reported_installed_after_cancellation() {
+    let zip = component_zip("top");
+    let pin = hex(&sha256_of(&zip));
+    let server = ChaosServer::serving(zip).start().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prefix, paths) = scratch(dir.path());
+    let manifest = manifest(&server, &pin);
+    // A first run puts the files on the host and seals the marker a later run skips on.
+    ensure_all(
+        &prefix,
+        &paths,
+        &manifest,
+        &["Native"],
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect("first ensure");
+
+    let dest = paths.components.join("Native");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let err = install_native(
+        &Fetcher::builder().build().unwrap(),
+        &paths,
+        manifest.tool("Native").expect("the fixture row"),
+        &dest,
+        Some(&dest.join("run.sh")),
+        &dir.path().join("work"),
+        &cancel,
+        &ComponentEvents::none(),
+    )
+    .await
+    .expect_err("a skip that outlives the run is the one thing cancellation must not leave behind");
+    assert!(matches!(err, AddonError::Cancelled), "{err:?}");
 }
 
 /// The pin is what authenticates the bytes, so a mismatch has to stop before anything is laid down, and

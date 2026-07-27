@@ -39,11 +39,9 @@ testing = ["apogee-fetch/testing", "dep:reqwest"]
 [dev-dependencies]
 insta.workspace = true
 apogee-test-support = { path = "../apogee-test-support" }
-tokio-util.workspace = true
 serial_test.workspace = true
 # A prefix handle over a scratch directory, so the install tests need no real wine.
 apogee-runtime = { path = "../apogee-runtime", features = ["testing"] }
-zip.workspace = true
 
 [[test]]
 name = "verb_wine"

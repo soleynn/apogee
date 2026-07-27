@@ -103,6 +103,11 @@ pub enum AddonError {
     },
     #[error("config backup failed")]
     Backup(#[from] BackupError),
+    /// The cancellation token fired, so the work stopped where it was. Its own variant rather than a
+    /// per-component failure: a caller counts what failed to decide whether it did what was asked, and
+    /// a run somebody stopped on purpose has nothing to count.
+    #[error("cancelled")]
+    Cancelled,
     #[error("unsupported: {what}")]
     Unsupported { what: &'static str },
 }
@@ -177,6 +182,34 @@ impl Addons {
             manifest_url,
             signature_url,
             &self.catalog_cache(),
+            &manifest::default_key()?,
+            cancel,
+        )
+        .await
+    }
+
+    /// The same fetch, verified against `key` instead of the compiled-in one, so a test can drive the
+    /// whole download-verify-publish path with a signature it can produce.
+    ///
+    /// Behind a feature, so a shipping build cannot fetch a manifest trusted against anything but the
+    /// key compiled into it.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_manifest`].
+    #[cfg(feature = "testing")]
+    pub async fn fetch_manifest_for_testing(
+        &self,
+        manifest_url: &url::Url,
+        signature_url: &url::Url,
+        key: &ed25519_dalek::VerifyingKey,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<ComponentManifest> {
+        components::fetch_manifest(
+            &self.fetcher,
+            manifest_url,
+            signature_url,
+            &self.catalog_cache(),
+            key,
             cancel,
         )
         .await
@@ -194,7 +227,19 @@ impl Addons {
     /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
     /// cache rather than an absent one.
     pub async fn cached_manifest(&self) -> Result<Option<ComponentManifest>> {
-        components::cached_manifest(&self.catalog_cache()).await
+        components::cached_manifest(&self.catalog_cache(), &manifest::default_key()?).await
+    }
+
+    /// The same read, verified against `key`, so a test can read back what a test-key fetch published.
+    ///
+    /// # Errors
+    /// As [`Self::cached_manifest`].
+    #[cfg(feature = "testing")]
+    pub async fn cached_manifest_for_testing(
+        &self,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<Option<ComponentManifest>> {
+        components::cached_manifest(&self.catalog_cache(), key).await
     }
 
     fn catalog_cache(&self) -> PathBuf {

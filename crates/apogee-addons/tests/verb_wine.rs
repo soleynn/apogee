@@ -4,7 +4,7 @@
 //!
 //! The hermetic install tests use a verb with no ops, because a registry write needs a wine. This is the
 //! other half: the verb the hosted manifest actually ships, applied to a `wineboot`-initialized prefix,
-//! three times over. What it proves is the gate's property — that applying a verb again is a no-op that
+//! three times over. What it proves is the gate's property: that applying a verb again is a no-op that
 //! succeeds rather than a program waiting on a prompt, and that the prefix records it once either way.
 
 use std::error::Error;

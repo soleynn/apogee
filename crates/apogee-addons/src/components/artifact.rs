@@ -3,7 +3,7 @@
 //! One path for every *pinned* download, so the sha256 pin is checked in exactly one place and nothing
 //! downstream is handed a path to bytes that failed it: the fetcher returns a `VerifiedFile`, which only
 //! it can mint, and that is what reaches extraction. The signed manifest itself is the one download that
-//! does not come through here, because it has no pin to check — an Ed25519 signature stands in its place
+//! does not come through here, because it has no pin to check: an Ed25519 signature stands in its place
 //! and its fetch lives beside the verification that gates it.
 
 use std::path::{Path, PathBuf};
@@ -42,7 +42,8 @@ pub(super) async fn install(
     let archive = verified.path().to_path_buf();
     let layout = artifact.archive.clone();
     let target = dest.to_path_buf();
-    let entries = tokio::task::spawn_blocking(move || extract(&archive, &layout, &target))
+    let named = component.to_owned();
+    let entries = tokio::task::spawn_blocking(move || extract(&archive, &layout, &target, &named))
         .await
         .map_err(|_| install_failed(component, "extract", "the extraction task panicked"))??;
     if entries == 0 {
@@ -59,16 +60,26 @@ pub(super) async fn install(
 /// Extract on a blocking thread. Split out so the non-Linux build has somewhere to say no: the
 /// extractor is part of the runner surface, which is Linux-first.
 #[cfg(target_os = "linux")]
-fn extract(archive: &Path, layout: &apogee_runtime::ArchiveLayout, dest: &Path) -> Result<u64> {
+fn extract(
+    archive: &Path,
+    layout: &apogee_runtime::ArchiveLayout,
+    dest: &Path,
+    component: &str,
+) -> Result<u64> {
     apogee_runtime::extract_archive(archive, layout, dest).map_err(|source| AddonError::Install {
-        component: dest.display().to_string(),
+        component: component.to_owned(),
         step: "extract",
         source: Box::new(source),
     })
 }
 
 #[cfg(not(target_os = "linux"))]
-fn extract(_archive: &Path, _layout: &apogee_runtime::ArchiveLayout, _dest: &Path) -> Result<u64> {
+fn extract(
+    _archive: &Path,
+    _layout: &apogee_runtime::ArchiveLayout,
+    _dest: &Path,
+    _component: &str,
+) -> Result<u64> {
     Err(AddonError::Unsupported {
         what: "installing components is Linux-only at this phase",
     })
