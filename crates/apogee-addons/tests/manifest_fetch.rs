@@ -104,7 +104,7 @@ async fn a_signature_that_does_not_verify_publishes_nothing() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.bad.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key()],
             &CancellationToken::new(),
         )
         .await
@@ -132,7 +132,7 @@ async fn a_verified_fetch_is_what_the_cache_holds() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key()],
             &CancellationToken::new(),
         )
         .await
@@ -151,7 +151,7 @@ async fn a_verified_fetch_is_what_the_cache_holds() {
 
     // And the fallback path reads that pair back rather than reporting an empty cache.
     let cached = addons
-        .cached_manifest_for_testing(&test_verifying_key())
+        .cached_manifest_for_testing(&[test_verifying_key()])
         .await
         .expect("the published pair verifies")
         .expect("a fetch published one");
@@ -175,7 +175,7 @@ async fn a_failed_fetch_leaves_the_last_good_manifest_in_place() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key()],
             &cancel,
         )
         .await
@@ -185,7 +185,7 @@ async fn a_failed_fetch_leaves_the_last_good_manifest_in_place() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.bad.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key()],
             &cancel,
         )
         .await
@@ -201,7 +201,7 @@ async fn a_failed_fetch_leaves_the_last_good_manifest_in_place() {
     );
     assert!(
         addons
-            .cached_manifest_for_testing(&test_verifying_key())
+            .cached_manifest_for_testing(&[test_verifying_key()])
             .await
             .expect("the surviving pair verifies")
             .is_some(),
@@ -231,7 +231,7 @@ async fn a_cache_rewritten_after_it_was_published_is_refused() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key()],
             &CancellationToken::new(),
         )
         .await
@@ -244,7 +244,7 @@ async fn a_cache_rewritten_after_it_was_published_is_refused() {
     std::fs::write(&manifest_path, TAMPERED).expect("rewrite the published manifest in place");
 
     let err = addons
-        .cached_manifest_for_testing(&test_verifying_key())
+        .cached_manifest_for_testing(&[test_verifying_key()])
         .await
         .expect_err("rows the key never signed must not reach a launch");
     assert!(
@@ -268,7 +268,7 @@ async fn a_second_fetch_goes_back_to_the_server() {
             .fetch_manifest_for_testing(
                 &servers.manifest.url("manifest.json"),
                 &servers.good.url("manifest.json.sig"),
-                &test_verifying_key(),
+                &[test_verifying_key()],
                 &cancel,
             )
             .await
@@ -279,4 +279,64 @@ async fn a_second_fetch_goes_back_to_the_server() {
             "fetch {attempt} must go back to the server rather than reuse a cached file"
         );
     }
+}
+
+/// The whole point of trusting a list of keys rather than one: during a rotation the hosted file is
+/// still signed by the key being retired, and a client that already carries its successor has to keep
+/// applying prefix setup regardless. Driven through the fetch rather than the verifier alone, because
+/// what is being claimed is that a launch works across the window, not that a signature checks out.
+///
+/// The successor is first in the list, which is the order a shipping build would carry mid-rotation:
+/// the new key is added ahead of the re-sign, so the one that actually verifies is the second.
+#[tokio::test]
+async fn a_key_inside_its_overlap_window_still_admits_the_catalog() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let servers = Servers::start().await.expect("servers");
+    let addons = servers.addons(dir.path()).expect("addons");
+    let successor = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+
+    let fetched = addons
+        .fetch_manifest_for_testing(
+            &servers.manifest.url("manifest.json"),
+            &servers.good.url("manifest.json.sig"),
+            &[successor, test_verifying_key()],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a build that has taken on the next key still accepts the one in the file");
+    assert!(fetched.verb("a-verb").is_some(), "the row that was served");
+
+    // And the fallback the launch path leans on reads it back the same way, so a client mid-rotation
+    // is not left with a cache it published and can no longer open.
+    assert!(
+        addons
+            .cached_manifest_for_testing(&[successor, test_verifying_key()])
+            .await
+            .expect("the published pair still verifies")
+            .is_some()
+    );
+}
+
+/// The other half: a key that was never accepted is refused, so the list is an overlap window rather
+/// than a way for any key to admit a catalog.
+#[tokio::test]
+async fn a_key_that_was_never_trusted_admits_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let servers = Servers::start().await.expect("servers");
+    let addons = servers.addons(dir.path()).expect("addons");
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+
+    let err = addons
+        .fetch_manifest_for_testing(
+            &servers.manifest.url("manifest.json"),
+            &servers.good.url("manifest.json.sig"),
+            &[stranger],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("a signature from outside the list cannot be admitted by it");
+    assert!(
+        matches!(err, AddonError::Manifest(ManifestError::BadSignature)),
+        "{err:?}"
+    );
 }

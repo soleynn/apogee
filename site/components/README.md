@@ -7,10 +7,10 @@ are, with its own key:
 - Each artifact the launcher itself fetches is **sha256-pinned**, so the bytes are authenticated whoever
   serves them.
 - The manifest carrying the pins is **Ed25519-signed** (`manifest.json.sig`, detached, 64 bytes) and
-  verified against a key compiled into the client (`apogee_addons::COMPONENT_PUBLIC_KEY`) before any pin
-  or pointer is trusted.
+  verified against the keys compiled into the client (`apogee_addons::COMPONENT_PUBLIC_KEYS`) before any
+  pin or pointer is trusted.
 
-Its own key rather than the runner catalog's: the two are published by different steps on different
+Its own keys rather than the runner catalog's: the two are published by different steps on different
 cadences, and one compromised signer should not authenticate both.
 
 Signed with a **staging** key for development; the production key ceremony is separate.
@@ -138,3 +138,37 @@ automated here.
    Any reformatting after signing invalidates the signature, and a test in `apogee-addons` embeds both
    files and will fail if they disagree.
 4. **Publish** `manifest.json` and `manifest.json.sig`.
+
+## Rotating the signing key
+
+`COMPONENT_PUBLIC_KEYS` is a list, current key first, and the list is what makes a rotation possible
+without an outage. With a single key one of the two sides has to move first and the other is broken
+until it catches up: re-sign first and every client in the field rejects the catalog until it updates,
+ship the new key first and every updated client rejects the catalog until the re-sign. Neither is
+acceptable for a file every launch reads.
+
+Three releases, in this order, and no step may be skipped or reordered:
+
+1. **Add** the new public key to `COMPONENT_PUBLIC_KEYS` **after** the current one, and release. The
+   catalog is still signed by the old key, and nothing about client behaviour changes. Generate the new
+   seed with `catalog-sign keygen`, which prints the array body to paste; keep the seed offline beside
+   the old one.
+2. **Promote and re-sign**, once that release has had time to reach the field. Move the new key to the
+   front of the list, re-sign `manifest.json` with the new seed, and publish both. Clients from step 1
+   accept it because it is still in their list; older clients accept it because... they do not: this is
+   the step that requires step 1 to have shipped, and how long to wait between the two is the only real
+   decision in this procedure.
+3. **Drop** the retired key from the list, and release. Rotation complete.
+
+Two guardrails. `the_hosted_manifest_is_signed_by_the_key_in_use_today` fails if the hosted file is
+still signed by anything but the first key in the list, so a rotation stuck between steps 2 and 3 is
+loud rather than silent, which is precisely the failure the overlap window would otherwise hide until
+step 3 broke everyone at once. And an entry that is not a valid key fails as
+`ManifestError::TrustedKeyUnusable` naming its position, rather than as a signature that did not
+verify, so a mistyped paste points at the binary instead of at this file.
+
+A retired key is dropped rather than kept, because the window exists to finish a rotation and not to
+keep an old signer trusted. If the old key is being rotated out because it was *compromised*, there is
+no window: go straight to step 2 with a release that carries only the new key, and accept that older
+clients stop applying prefix setup until they update. That is the correct trade, since the alternative
+is continuing to trust a signer somebody else also holds.

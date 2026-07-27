@@ -31,8 +31,8 @@ pub use external::{
     Outcome, RunIn, Running, Trigger,
 };
 pub use manifest::{
-    Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEY, ComponentManifest, ComponentPath,
-    InjectableEntry, InjectableKind, ManifestError, Verb, VerbOp,
+    Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
+    InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
 };
 pub use setup::{
     PlanStep, SetupEvent, SetupEvents, SetupOutcome, SetupPlan, SetupReport, SetupState, StepAction,
@@ -264,7 +264,7 @@ impl Addons {
     ///
     /// # Errors
     /// [`AddonError::Download`] if either file cannot be fetched, or [`AddonError::Manifest`] if the
-    /// signature does not verify against the compiled-in key or the body violates the schema.
+    /// signature verifies against none of the compiled-in keys or the body violates the schema.
     pub async fn fetch_manifest(
         &self,
         manifest_url: &url::Url,
@@ -276,17 +276,19 @@ impl Addons {
             manifest_url,
             signature_url,
             &self.paths.catalog_cache(),
-            &manifest::default_key()?,
+            &manifest::default_keys()?,
             cancel,
         )
         .await
     }
 
-    /// The same fetch, verified against `key` instead of the compiled-in one, so a test can drive the
-    /// whole download-verify-publish path with a signature it can produce.
+    /// The same fetch, verified against `keys` instead of the compiled-in ones, so a test can drive the
+    /// whole download-verify-publish path with signatures it can produce. A slice rather than one key
+    /// for the same reason the shipping path takes one: an overlap window is only real if it is
+    /// exercised through the path a launch takes.
     ///
     /// Behind a feature, so a shipping build cannot fetch a manifest trusted against anything but the
-    /// key compiled into it.
+    /// keys compiled into it.
     ///
     /// # Errors
     /// As [`Self::fetch_manifest`].
@@ -295,7 +297,7 @@ impl Addons {
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
-        key: &ed25519_dalek::VerifyingKey,
+        keys: &[ed25519_dalek::VerifyingKey],
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<ComponentManifest> {
         setup::fetch_manifest(
@@ -303,7 +305,7 @@ impl Addons {
             manifest_url,
             signature_url,
             &self.paths.catalog_cache(),
-            key,
+            keys,
             cancel,
         )
         .await
@@ -321,19 +323,19 @@ impl Addons {
     /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
     /// cache rather than an absent one.
     pub async fn cached_manifest(&self) -> Result<Option<ComponentManifest>> {
-        setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_key()?).await
+        setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_keys()?).await
     }
 
-    /// The same read, verified against `key`, so a test can read back what a test-key fetch published.
+    /// The same read, verified against `keys`, so a test can read back what a test-key fetch published.
     ///
     /// # Errors
     /// As [`Self::cached_manifest`].
     #[cfg(feature = "testing")]
     pub async fn cached_manifest_for_testing(
         &self,
-        key: &ed25519_dalek::VerifyingKey,
+        keys: &[ed25519_dalek::VerifyingKey],
     ) -> Result<Option<ComponentManifest>> {
-        setup::cached_manifest(&self.paths.catalog_cache(), key).await
+        setup::cached_manifest(&self.paths.catalog_cache(), keys).await
     }
 
     /// Apply every prefix-setup verb the manifest defines that `prefix` is missing.

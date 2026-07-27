@@ -111,7 +111,7 @@ pub(crate) async fn fetch_manifest(
     manifest_url: &Url,
     signature_url: &Url,
     cache_dir: &Path,
-    key: &VerifyingKey,
+    keys: &[VerifyingKey],
     cancel: &CancellationToken,
 ) -> Result<ComponentManifest> {
     let staging = cache_dir.join(STAGING_DIR);
@@ -132,7 +132,10 @@ pub(crate) async fn fetch_manifest(
     let signature = tokio::fs::read(&signature_path).await.map_err(|source| {
         artifact::io_failed(CATALOG, "read what it downloaded", &signature_path, source)
     })?;
-    let parsed = ComponentManifest::parse_and_verify(&manifest, &signature, key)?;
+    // Which key admitted it is deliberately dropped here. An overlap window exists so that a launch
+    // does not have to care which side of a rotation it is on; the re-sign it is waiting for is a
+    // maintainer's business and is asserted where the hosted file is embedded, not on a user's machine.
+    let (parsed, _trusted) = ComponentManifest::parse_and_verify(&manifest, &signature, keys)?;
 
     publish(&staging, cache_dir).await?;
     Ok(parsed)
@@ -169,7 +172,7 @@ async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
 /// caller's to make, which is why fetching and reading the cache are separate calls.
 pub(crate) async fn cached_manifest(
     cache_dir: &Path,
-    key: &VerifyingKey,
+    keys: &[VerifyingKey],
 ) -> Result<Option<ComponentManifest>> {
     let manifest_path = cache_dir.join(MANIFEST_FILE);
     let signature_path = cache_dir.join(SIGNATURE_FILE);
@@ -179,9 +182,8 @@ pub(crate) async fn cached_manifest(
     ) else {
         return Ok(None);
     };
-    Ok(Some(ComponentManifest::parse_and_verify(
-        &manifest, &signature, key,
-    )?))
+    let (parsed, _trusted) = ComponentManifest::parse_and_verify(&manifest, &signature, keys)?;
+    Ok(Some(parsed))
 }
 
 /// Download `url` to `dest` over HTTPS with no content pin, because the caller authenticates these bytes
