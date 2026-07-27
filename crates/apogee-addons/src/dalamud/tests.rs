@@ -195,10 +195,13 @@ fn nothing_installed_leaves_the_launch_alone() {
     assert!(plan.inserted_args().is_empty());
 }
 
-/// The tier is stated every time, and the runner in front of it is named when it is not the one the
-/// injector was written against. Steering, not gating: it is still the user's prefix.
+/// The row's caveats are stated every time, and the runner in front of it is named when it is not the
+/// one the injector was written against. Steering, not gating: it is still the user's prefix.
+///
+/// The tier note is not among them and must not be: it is said for every injectable by the loop that
+/// installs them, and said twice it reads as two different warnings.
 #[test]
-fn the_tier_and_the_runner_are_both_stated_before_anything_is_fetched() {
+fn the_caveats_and_the_runner_are_both_stated_before_anything_is_fetched() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "system-wine");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -208,16 +211,18 @@ fn the_tier_and_the_runner_are_both_stated_before_anything_is_fetched() {
     let events = drain(&mut rx);
     let notes = notes(&events);
     assert!(
-        notes.iter().any(|note| note.contains("wine-xiv runner")),
-        "the tier note from the manifest row has to be said: {notes:?}"
-    );
-    assert!(
         notes.iter().any(|note| note.contains("system-wine")),
         "the runner it is about to run under has to be named: {notes:?}"
     );
     assert!(
         notes.iter().any(|note| note.contains("Third-party code")),
         "the row's own caveats have to be said: {notes:?}"
+    );
+    let tier = dalamud.support_tier();
+    let tier_note = tier.note().expect("the shipped row is best effort");
+    assert!(
+        !notes.contains(&tier_note),
+        "the tier note belongs to the loop that installs injectables, not to one of them: {notes:?}"
     );
 }
 

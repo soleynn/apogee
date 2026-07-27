@@ -69,7 +69,7 @@ impl AddonBackend for AddonsBackend {
             // failure here is the prefix record being unreadable or the run being stopped. Neither is
             // worth failing a launch over: the setup is hygiene, and a stopped run is about to be torn
             // down anyway.
-            Err(err) => tracing::warn!(%err, "the prefix setup did not complete"),
+            Err(err) => tracing::warn!(reason = err.chain(), "the prefix setup did not complete"),
         }
 
         if let Some(config) = dalamud {
@@ -129,12 +129,9 @@ impl AddonsBackend {
         cancel: &CancellationToken,
         setup: &SetupEvents,
     ) {
-        let Some(dalamud) = self.addons.dalamud(manifest, config) else {
-            setup.emit(SetupEvent::Failed {
-                what: apogee_addons::dalamud::DALAMUD.to_owned(),
-                reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
-                    .to_owned(),
-            });
+        // The layer narrates its own `None`: which row is missing and what that costs is its sentence
+        // to write, and a shell that had to invent one would be writing about a decision it did not make.
+        let Some(dalamud) = self.addons.dalamud(manifest, config, setup) else {
             return;
         };
         let enabled: [&dyn Injectable; 1] = [&dalamud];
@@ -143,10 +140,13 @@ impl AddonsBackend {
             .ensure_injectables(&enabled, prefix, cancel, setup)
             .await
         {
-            tracing::warn!(%err, "an injectable could not be installed");
+            tracing::warn!(reason = err.chain(), "an injectable could not be installed");
         }
         for err in self.addons.prepare_launch(&enabled, plan, setup) {
-            tracing::warn!(%err, "an injectable could not join the launch");
+            tracing::warn!(
+                reason = err.chain(),
+                "an injectable could not join the launch"
+            );
         }
     }
 
@@ -169,7 +169,9 @@ impl AddonsBackend {
                 .await
             {
                 Ok(manifest) => return Some(manifest),
-                Err(err) => err.to_string(),
+                // The chain, not the outer sentence: the reason a catalog could not be reached is
+                // always in the cause, and this string is the only thing anybody debugging one sees.
+                Err(err) => err.chain(),
             },
             Err(err) => err.to_string(),
         };
@@ -180,7 +182,10 @@ impl AddonsBackend {
             Ok(None) => (None, format!("{fetch_error}; nothing was cached")),
             Err(cache_error) => (
                 None,
-                format!("{fetch_error}; the cached one is unusable: {cache_error}"),
+                format!(
+                    "{fetch_error}; the cached one is unusable: {}",
+                    cache_error.chain()
+                ),
             ),
         };
         setup.emit(SetupEvent::CatalogUnavailable {

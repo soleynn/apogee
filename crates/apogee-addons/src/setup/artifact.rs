@@ -18,38 +18,39 @@ use crate::{AddonError, Result};
 
 /// How many times to (re)start a download before giving up. The fetcher has no internal retry, so a
 /// dropped connection resumes from its journal on the next attempt. Worth having here because the
-/// artifacts are tens of megabytes and a component install is not something to make a user restart.
+/// artifacts are tens of megabytes and prefix setup is not something to make a user restart.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Download `artifact` into `work`, verify its sha256, and extract it into `dest`.
 ///
+/// `what` names whatever the caller is setting up, and is what every failure is reported against.
+///
 /// Returns the number of entries written. Zero is a failure rather than an empty success: an archive
 /// that yields nothing under its declared strip prefix means the row's layout is wrong, and sealing
-/// that as installed would leave an empty directory that never gets fixed.
+/// that as applied would leave an empty directory that never gets fixed.
 pub(super) async fn install(
     fetcher: &Fetcher,
     artifact: &Artifact,
-    component: &str,
+    what: &str,
     work: &Path,
     dest: &Path,
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<u64> {
-    let cache = work.join(format!("{component}.archive"));
-    let verified = download(fetcher, artifact, component, &cache, cancel, events).await?;
+    let cache = work.join(format!("{what}.archive"));
+    let verified = download(fetcher, artifact, what, &cache, cancel, events).await?;
 
     let archive = verified.path().to_path_buf();
     let layout = artifact.archive.clone();
     let target = dest.to_path_buf();
-    let named = component.to_owned();
+    let named = what.to_owned();
     let entries = tokio::task::spawn_blocking(move || extract(&archive, &layout, &target, &named))
         .await
-        .map_err(|_| install_failed(component, "extract", "the extraction task panicked"))??;
+        .map_err(|_| unpack_failed(what, "the extraction task panicked"))??;
     if entries == 0 {
-        return Err(install_failed(
-            component,
-            "extract",
+        return Err(unpack_failed(
+            what,
             "the archive held nothing under the layout the manifest describes",
         ));
     }
@@ -64,11 +65,10 @@ fn extract(
     archive: &Path,
     layout: &apogee_runtime::ArchiveLayout,
     dest: &Path,
-    component: &str,
+    what: &str,
 ) -> Result<u64> {
-    apogee_runtime::extract_archive(archive, layout, dest).map_err(|source| AddonError::Install {
-        component: component.to_owned(),
-        step: "extract",
+    apogee_runtime::extract_archive(archive, layout, dest).map_err(|source| AddonError::Unpack {
+        what: what.to_owned(),
         source: Box::new(source),
     })
 }
@@ -78,10 +78,10 @@ fn extract(
     _archive: &Path,
     _layout: &apogee_runtime::ArchiveLayout,
     _dest: &Path,
-    _component: &str,
+    _what: &str,
 ) -> Result<u64> {
     Err(AddonError::Unsupported {
-        what: "installing components is Linux-only at this phase",
+        what: "placing a verb's files goes through a prefix runner, which is Linux-only",
     })
 }
 
@@ -89,7 +89,7 @@ fn extract(
 async fn download(
     fetcher: &Fetcher,
     artifact: &Artifact,
-    component: &str,
+    what: &str,
     dest: &Path,
     cancel: &CancellationToken,
     events: &SetupEvents,
@@ -97,7 +97,7 @@ async fn download(
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|source| io_failed(component, "download", parent, source))?;
+            .map_err(|source| io_failed(what, "stage a download", parent, source))?;
     }
     let spec = DownloadSpec::builder(
         artifact.url.clone(),
@@ -108,7 +108,7 @@ async fn download(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();
     let sink = events.clone();
-    let name = component.to_owned();
+    let name = what.to_owned();
     let relay = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
             sink.emit(SetupEvent::Downloading {
@@ -142,7 +142,7 @@ async fn download(
         // A pin that does not match is its own thing, not a download problem: the bytes arrived, they
         // are just not the bytes the signed manifest promised.
         Err(FetchError::FileVerifyFailed { expected, got }) => Err(AddonError::IntegrityMismatch {
-            component: component.to_owned(),
+            verb: what.to_owned(),
             expected,
             got,
         }),
@@ -157,26 +157,24 @@ fn is_transient(e: &FetchError) -> bool {
     )
 }
 
-pub(super) fn install_failed(
-    component: &str,
-    step: &'static str,
-    detail: impl Into<String>,
-) -> AddonError {
-    AddonError::Install {
-        component: component.to_owned(),
-        step,
+/// An archive that arrived intact and still did not produce files.
+pub(super) fn unpack_failed(what: &str, detail: impl Into<String>) -> AddonError {
+    AddonError::Unpack {
+        what: what.to_owned(),
         source: Box::new(std::io::Error::other(detail.into())),
     }
 }
 
+/// A filesystem step, with the path folded into the source: `io::Error` names a kind and nothing
+/// about which file raised it, and the path is the first thing anyone reading this wants.
 pub(super) fn io_failed(
-    component: &str,
+    what: &str,
     step: &'static str,
     path: &Path,
     source: std::io::Error,
 ) -> AddonError {
-    AddonError::Install {
-        component: component.to_owned(),
+    AddonError::Io {
+        what: what.to_owned(),
         step,
         source: Box::new(std::io::Error::new(
             source.kind(),
@@ -185,7 +183,20 @@ pub(super) fn io_failed(
     }
 }
 
-/// A scratch directory for one component's download and staging, removed by the caller.
+/// A scratch directory for one verb's download and staging, removed by the caller.
 pub(super) fn work_dir(root: &Path) -> PathBuf {
-    root.join(".apogee-component-work")
+    root.join(WORK_DIR)
+}
+
+/// Named for what it holds rather than for the withdrawn feature that first wrote it. A prefix an
+/// older build touched can still hold the old directory; it is scratch either way, so it is swept
+/// alongside the current one rather than left to accumulate.
+const WORK_DIR: &str = ".apogee-setup-work";
+const LEGACY_WORK_DIR: &str = ".apogee-component-work";
+
+/// Remove this prefix's scratch directories, whichever build wrote them.
+pub(super) async fn clear_work_dirs(root: &Path) {
+    for name in [WORK_DIR, LEGACY_WORK_DIR] {
+        let _ = tokio::fs::remove_dir_all(root.join(name)).await;
+    }
 }

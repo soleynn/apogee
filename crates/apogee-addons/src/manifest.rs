@@ -1,13 +1,13 @@
 //! The signed component manifest: what companions and prefix verbs exist, as data.
 //!
-//! Same discipline as the runner and index catalogs, with its own key: a JSON manifest whose Ed25519
-//! signature is verified against a compiled-in verifying key **before** any `sha256` pin inside it is
+//! Same discipline as the runner and index catalogs, with its own keys: a JSON manifest whose Ed25519
+//! signature is verified against compiled-in verifying keys **before** any `sha256` pin inside it is
 //! trusted. [`ComponentManifest::from_json_bytes`] is a pure, total parser over untrusted input (the
 //! fuzz entry point) and carries no authenticity guarantee on its own.
-//! [`ComponentManifest::parse_and_verify`] is what gates it behind the signature, and it takes the key
-//! it checks against rather than reaching for one, so the fetch path and a test can drive the same code
-//! with different keys. `default_key` supplies the compiled-in key, which is what every shipping caller
-//! passes; [`ComponentManifest::verify_default`] binds the two for a caller that holds both halves and
+//! [`ComponentManifest::parse_and_verify`] is what gates it behind the signature, and it takes the keys
+//! it checks against rather than reaching for them, so the fetch path and a test can drive the same code
+//! with different keys. `default_keys` supplies the compiled-in ones, which is what every shipping caller
+//! passes; [`ComponentManifest::verify_trusted`] binds the two for a caller that holds both halves and
 //! wants neither decision.
 //!
 //! Everything the launcher sets up is in a row, so adding a prefix-setup verb, correcting where a
@@ -33,26 +33,91 @@ use crate::SupportTier;
 /// The manifest schema version this build understands.
 pub const COMPONENT_MANIFEST_VERSION: u32 = 1;
 
-/// The compiled-in public key component manifests are authenticated against.
+/// The public keys a component manifest may be authenticated against, the one it is signed with today
+/// first.
 ///
-/// Its own key, not the runner catalog's: the two are published on different cadences by different
-/// steps, and one compromised signer should not authenticate both. The matching private key is held
-/// offline; rotating it is a change to this constant plus a re-sign.
-pub const COMPONENT_PUBLIC_KEY: [u8; 32] = [
+/// Its own keys, not the runner catalog's: the two are published on different cadences by different
+/// steps, and one compromised signer should not authenticate both. The matching private seeds are held
+/// offline.
+///
+/// **A list, because a single constant cannot be rotated without an outage.** With one key, replacing
+/// it means re-signing the hosted file and shipping a build that trusts the new key, and one of those
+/// has to happen first: re-sign first and every client in the field rejects the catalog until it
+/// updates, ship first and every updated client rejects it until the re-sign. A list removes the
+/// ordering. The new key is added here and released, the file is re-signed once that build is in the
+/// field, and the retired key is dropped from the list in a later release. Every client in the window
+/// holds a key that matches whatever it is served.
+///
+/// It widens nothing. Every entry was compiled into this binary by the same build, so anyone who can
+/// append one can already replace the first, and a retired key is dropped rather than kept forever:
+/// the window is for finishing a rotation, not for keeping an old signer trusted.
+pub const COMPONENT_PUBLIC_KEYS: &[[u8; 32]] = &[[
     0x6d, 0x35, 0x68, 0x49, 0x3e, 0x56, 0x73, 0xb1, 0xa3, 0x10, 0xfa, 0xe7, 0x20, 0x1b, 0xec, 0xd2,
     0x21, 0xd6, 0x70, 0xb9, 0x28, 0x6a, 0xa9, 0xfd, 0x3f, 0xc7, 0x6c, 0xdf, 0xc7, 0xb9, 0x94, 0x00,
-];
+]];
 
-/// The compiled-in key as a usable one, decompressed from its 32 bytes.
+// A build with no key admits nothing, and would say so as a signature that did not verify, at a
+// launch, on a user's machine. It is a typo, so it is caught here instead.
+const _: () = assert!(
+    !COMPONENT_PUBLIC_KEYS.is_empty(),
+    "a build with no trusted key can admit no catalog at all"
+);
+
+/// Which of the trusted keys admitted a manifest.
 ///
-/// One place, so every path that admits a manifest against the shipping key goes through the same
+/// The answer stops being uninteresting the moment [`COMPONENT_PUBLIC_KEYS`] holds more than one. A
+/// manifest that only ever verifies against a retired key is a rotation whose re-sign never happened,
+/// and the release that drops that key from the list is where it becomes an outage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrustedKey {
+    /// The key the catalog is signed with today.
+    Current,
+    /// A key still inside its overlap window. Whatever served this manifest has not been re-signed
+    /// since the rotation started.
+    Retired { position: usize },
+}
+
+impl TrustedKey {
+    fn at(position: usize) -> Self {
+        if position == 0 {
+            Self::Current
+        } else {
+            Self::Retired { position }
+        }
+    }
+
+    /// Whether the signature came from the key in use today.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        matches!(self, Self::Current)
+    }
+}
+
+/// The compiled-in keys as usable ones, decompressed from their 32 bytes each.
+///
+/// One place, so every path that admits a manifest against a shipping key goes through the same
 /// constant and there is no field anywhere holding a key that could have been substituted.
 ///
 /// # Errors
-/// [`ManifestError::BadSignature`] if the constant is not a point on the curve, which a build with a
-/// mistyped key would be.
-pub(crate) fn default_key() -> Result<VerifyingKey, ManifestError> {
-    VerifyingKey::from_bytes(&COMPONENT_PUBLIC_KEY).map_err(|_| ManifestError::BadSignature)
+/// [`ManifestError::TrustedKeyUnusable`] if an entry is not a point on the curve, which a build with a
+/// mistyped key would be. Its own variant rather than a bad signature: the hosted file is the one thing
+/// that is not wrong here, and reporting it as a signature failure sends whoever reads it to go and
+/// check it.
+pub(crate) fn default_keys() -> Result<Vec<VerifyingKey>, ManifestError> {
+    trusted_keys(COMPONENT_PUBLIC_KEYS)
+}
+
+/// The same over any list, so the failure and the position it names are testable without a build whose
+/// own constant is broken.
+fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, ManifestError> {
+    raw.iter()
+        .enumerate()
+        .map(|(position, bytes)| {
+            VerifyingKey::from_bytes(bytes)
+                .map_err(|_| ManifestError::TrustedKeyUnusable { position })
+        })
+        .collect()
 }
 
 /// Components a name may nest, and bytes one component may hold. A real destination is two or three
@@ -69,8 +134,12 @@ const MAX_NAME_BYTES: usize = 255;
 pub enum ManifestError {
     #[error("manifest is not valid JSON or violates the schema")]
     Malformed(#[source] serde_json::Error),
-    #[error("manifest signature did not verify against the trusted key")]
+    #[error("manifest signature did not verify against any trusted key")]
     BadSignature,
+    /// A key compiled into this build is not a point on the curve, so it can admit nothing. A build
+    /// problem, and the one failure on this path that the hosted file cannot be the cause of.
+    #[error("the trusted key at position {position} in this build is not a usable ed25519 key")]
+    TrustedKeyUnusable { position: usize },
     #[error("unsupported manifest version {found} (expected {expected})")]
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("{component}: unknown {field} {value:?}")]
@@ -246,9 +315,12 @@ pub struct Verb {
 }
 
 /// A verified component manifest.
+///
+/// It carries no schema version, because a parsed manifest can only ever be
+/// [`COMPONENT_MANIFEST_VERSION`]: anything else is refused before this is built. A field holding one
+/// reachable value would also have made `Default` produce a version the parser rejects.
 #[derive(Debug, Clone, Default)]
 pub struct ComponentManifest {
-    pub version: u32,
     pub injectables: Vec<InjectableEntry>,
     pub verbs: Vec<Verb>,
 }
@@ -265,31 +337,44 @@ impl ComponentManifest {
         Self::try_from(raw)
     }
 
-    /// Verify `signature` over the exact `manifest_json` bytes against `key`, then parse. The signature
-    /// is checked **first**, so no `sha256` pin is trusted before authenticity is established.
+    /// Verify `signature` over the exact `manifest_json` bytes against `keys`, in order, then parse.
+    /// The signature is checked **first**, so no `sha256` pin is trusted before authenticity is
+    /// established.
+    ///
+    /// Returns which key admitted it, so a caller that cares whether a rotation is finished can ask.
+    /// Most do not: the point of an overlap window is that a launch works either way.
     ///
     /// # Errors
-    /// [`ManifestError::BadSignature`] if the signature is not exactly 64 bytes or does not verify,
-    /// then anything [`Self::from_json_bytes`] raises.
+    /// [`ManifestError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
+    /// none of `keys`, then anything [`Self::from_json_bytes`] raises.
     pub fn parse_and_verify(
         manifest_json: &[u8],
         signature: &[u8],
-        key: &VerifyingKey,
-    ) -> Result<Self, ManifestError> {
+        keys: &[VerifyingKey],
+    ) -> Result<(Self, TrustedKey), ManifestError> {
         let sig = Signature::from_slice(signature).map_err(|_| ManifestError::BadSignature)?;
-        key.verify_strict(manifest_json, &sig)
-            .map_err(|_| ManifestError::BadSignature)?;
-        Self::from_json_bytes(manifest_json)
+        let position = keys
+            .iter()
+            .position(|key| key.verify_strict(manifest_json, &sig).is_ok())
+            .ok_or(ManifestError::BadSignature)?;
+        Ok((
+            Self::from_json_bytes(manifest_json)?,
+            TrustedKey::at(position),
+        ))
     }
 
-    /// [`Self::parse_and_verify`] against the compiled-in key, for a caller that already holds both
-    /// halves. A fetch takes its key as an argument instead, so the download path can be driven against
-    /// a key a test can sign with; this is the same check with nothing to choose.
+    /// [`Self::parse_and_verify`] against the keys compiled into this build, for a caller that already
+    /// holds both halves. A fetch takes its keys as an argument instead, so the download path can be
+    /// driven against a key a test can sign with; this is the same check with nothing to choose.
     ///
     /// # Errors
-    /// As [`Self::parse_and_verify`].
-    pub fn verify_default(manifest_json: &[u8], signature: &[u8]) -> Result<Self, ManifestError> {
-        Self::parse_and_verify(manifest_json, signature, &default_key()?)
+    /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
+    /// [`Self::parse_and_verify`] raises.
+    pub fn verify_trusted(
+        manifest_json: &[u8],
+        signature: &[u8],
+    ) -> Result<(Self, TrustedKey), ManifestError> {
+        Self::parse_and_verify(manifest_json, signature, &default_keys()?)
     }
 
     /// The verb row named `name`.
@@ -298,15 +383,18 @@ impl ComponentManifest {
         self.verbs.iter().find(|v| v.name == name)
     }
 
-    /// The injectable row named `name`.
+    /// The injectable row of `kind`.
+    ///
+    /// By kind rather than by name, because the kind is what selects which built-in pipeline runs and a
+    /// name is a label on it. Two lookup keys for one list would let a caller find a row the launch path
+    /// would not.
     #[must_use]
-    pub fn injectable(&self, name: &str) -> Option<&InjectableEntry> {
-        self.injectables.iter().find(|i| i.name == name)
+    pub fn injectable(&self, kind: InjectableKind) -> Option<&InjectableEntry> {
+        self.injectables.iter().find(|i| i.kind == kind)
     }
 
     /// Every name the manifest offers, sorted. What the duplicate check reads.
-    #[must_use]
-    pub fn names(&self) -> Vec<&str> {
+    fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .injectables
             .iter()
@@ -415,11 +503,7 @@ impl TryFrom<RawManifest> for ComponentManifest {
             .map(build_verb)
             .collect::<Result<Vec<_>, _>>()?;
 
-        let manifest = Self {
-            version: raw.version,
-            injectables,
-            verbs,
-        };
+        let manifest = Self { injectables, verbs };
         manifest.check_names()?;
         Ok(manifest)
     }
@@ -480,7 +564,12 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
         _ => return Err(unknown(&raw.name, "injectable kind", raw.kind)),
     };
     let tier = match (raw.tier.as_str(), raw.note) {
-        ("first_class", _) => SupportTier::FirstClass,
+        ("first_class", None) => SupportTier::FirstClass,
+        // Refused rather than dropped. A first-class tier has nothing to warn about, so a note on one
+        // would never be shown, and a row that carries one is a row whose author expected it to be.
+        ("first_class", Some(_)) => {
+            return Err(unknown(&raw.name, "tier", "first_class with a note"));
+        }
         ("best_effort", Some(note)) => SupportTier::BestEffort { note },
         // A best-effort tier with no note would present as "not first class" with no statement of what
         // that costs, which is the opposite of the point of tiering it.
@@ -708,11 +797,14 @@ mod tests {
     fn a_signed_manifest_parses_every_row() {
         let json = manifest();
         let sig = sign_manifest(json.as_bytes());
-        let parsed =
-            ComponentManifest::parse_and_verify(json.as_bytes(), &sig, &test_verifying_key())
+        let (parsed, trusted) =
+            ComponentManifest::parse_and_verify(json.as_bytes(), &sig, &[test_verifying_key()])
                 .expect("valid signature");
+        assert_eq!(trusted, TrustedKey::Current);
 
-        let dalamud = parsed.injectable("Dalamud").expect("Dalamud row");
+        let dalamud = parsed
+            .injectable(InjectableKind::Dalamud)
+            .expect("Dalamud row");
         assert_eq!(dalamud.kind, InjectableKind::Dalamud);
         assert_eq!(dalamud.distribution.host_str(), Some("kamori.goats.dev"));
         assert!(matches!(dalamud.tier, SupportTier::BestEffort { .. }));
@@ -751,7 +843,7 @@ mod tests {
         // Flip a byte in the body; the detached signature no longer matches.
         tampered[40] ^= 0x01;
         assert!(matches!(
-            ComponentManifest::parse_and_verify(&tampered, &sig, &test_verifying_key()),
+            ComponentManifest::parse_and_verify(&tampered, &sig, &[test_verifying_key()]),
             Err(ManifestError::BadSignature)
         ));
     }
@@ -762,7 +854,7 @@ mod tests {
         let sig = sign_manifest(json.as_bytes());
         // The compiled-in key is a different key than the test signer.
         assert!(matches!(
-            ComponentManifest::verify_default(json.as_bytes(), &sig),
+            ComponentManifest::verify_trusted(json.as_bytes(), &sig),
             Err(ManifestError::BadSignature)
         ));
     }
@@ -772,7 +864,7 @@ mod tests {
         let json = manifest();
         for sig in [b"".as_slice(), b"too-short".as_slice()] {
             assert!(matches!(
-                ComponentManifest::parse_and_verify(json.as_bytes(), sig, &test_verifying_key()),
+                ComponentManifest::parse_and_verify(json.as_bytes(), sig, &[test_verifying_key()]),
                 Err(ManifestError::BadSignature)
             ));
         }
@@ -951,13 +1043,34 @@ mod tests {
     #[test]
     fn a_best_effort_injectable_must_say_what_it_costs() {
         let parsed = parse(&manifest()).expect("parse");
-        let entry = parsed.injectable("Dalamud").expect("row");
+        let entry = parsed.injectable(InjectableKind::Dalamud).expect("row");
         assert!(matches!(entry.tier, SupportTier::BestEffort { .. }));
 
         let without = manifest().replace(r#", "note": "Best with the wine-xiv runner.""#, "");
         assert!(matches!(
             parse(&without),
             Err(ManifestError::UnknownValue { .. })
+        ));
+    }
+
+    /// The symmetric refusal. A first-class tier has nothing to warn about, so its note would never be
+    /// shown, and silently dropping one leaves the author of the row believing it was.
+    #[test]
+    fn a_first_class_injectable_may_not_carry_a_note_that_would_be_dropped() {
+        let with_note = manifest().replace(r#""tier": "best_effort""#, r#""tier": "first_class""#);
+        assert!(matches!(
+            parse(&with_note),
+            Err(ManifestError::UnknownValue { .. })
+        ));
+
+        let without = with_note.replace(r#", "note": "Best with the wine-xiv runner.""#, "");
+        let parsed = parse(&without).expect("a first-class row with no note is fine");
+        assert!(matches!(
+            parsed
+                .injectable(InjectableKind::Dalamud)
+                .expect("row")
+                .tier,
+            SupportTier::FirstClass
         ));
     }
 
@@ -1053,24 +1166,98 @@ mod tests {
         assert_eq!(parsed.names(), ["v"]);
     }
 
+    /// Every key this build would accept has to be one, or it can admit nothing and the build says so
+    /// as a signature failure on a user's machine instead.
     #[test]
-    fn the_compiled_in_key_parses() {
-        assert!(VerifyingKey::from_bytes(&COMPONENT_PUBLIC_KEY).is_ok());
+    fn every_compiled_in_key_parses() {
+        default_keys().expect("every trusted key in this build is a usable ed25519 key");
+    }
+
+    /// A key that is not a point on the curve is this build's problem, and has to read as one. Reported
+    /// as a bad signature it would send whoever hits it to go and check the hosted file, which is the
+    /// one thing that cannot be at fault. The position matters too: with a list, "which entry" is the
+    /// only part of the message that locates the typo.
+    #[test]
+    fn a_key_that_is_not_a_key_is_a_build_problem_rather_than_a_bad_signature() {
+        // Not a decompressable compressed Edwards point, so it can never verify anything.
+        let mut unusable = [0u8; 32];
+        unusable[0] = 0x02;
+
+        assert!(matches!(
+            trusted_keys(&[test_verifying_key().to_bytes(), unusable]),
+            Err(ManifestError::TrustedKeyUnusable { position: 1 })
+        ));
+    }
+
+    /// The property the overlap window buys: a manifest signed by a key that has been retired but is
+    /// still accepted verifies, and says which one admitted it. Without the second half a rotation
+    /// nobody finished looks exactly like one that is done, right up until the retiring release.
+    #[test]
+    fn a_retired_key_still_admits_a_manifest_and_says_it_did() {
+        let json = manifest();
+        let sig = sign_manifest(json.as_bytes());
+        let successor = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+
+        let (_, trusted) = ComponentManifest::parse_and_verify(
+            json.as_bytes(),
+            &sig,
+            &[successor, test_verifying_key()],
+        )
+        .expect("a key inside its overlap window still admits the catalog");
+        assert_eq!(trusted, TrustedKey::Retired { position: 1 });
+        assert!(!trusted.is_current());
+    }
+
+    /// The order is the whole design: position zero is what the publisher signs with today, and a
+    /// retired key must never be reported as the current one.
+    #[test]
+    fn the_first_accepted_key_is_the_current_one() {
+        let json = manifest();
+        let sig = sign_manifest(json.as_bytes());
+        let retired = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+
+        let (_, trusted) = ComponentManifest::parse_and_verify(
+            json.as_bytes(),
+            &sig,
+            &[test_verifying_key(), retired],
+        )
+        .expect("valid signature");
+        assert!(trusted.is_current());
+    }
+
+    /// An empty accepted list admits nothing. It cannot be reached from a shipping build (a const
+    /// assertion refuses one), so what this pins is that the loop does not fall through to success.
+    #[test]
+    fn a_build_that_trusts_no_key_admits_nothing() {
+        let json = manifest();
+        let sig = sign_manifest(json.as_bytes());
+        assert!(matches!(
+            ComponentManifest::parse_and_verify(json.as_bytes(), &sig, &[]),
+            Err(ManifestError::BadSignature)
+        ));
     }
 
     /// The hosted manifest and its detached signature, embedded at build time, must verify against the
-    /// compiled-in key. This catches a mistyped key, a manifest reformatted after signing, or a row
-    /// dropped by an edit.
+    /// key this build signs with **today**, not merely against one it still accepts. This catches a
+    /// mistyped key, a manifest reformatted after signing, a row dropped by an edit, and the rotation
+    /// failure an accepted-key list otherwise hides: a new key added and released while the hosted file
+    /// was never re-signed, which works everywhere until the retired key is dropped and then works
+    /// nowhere.
     ///
     /// It asserts what every row has to carry rather than naming rows, so the file stays editable: a
     /// verb without a reason is one nobody can review, and an injectable without a distribution has
     /// nowhere to fetch from.
     #[test]
-    fn the_hosted_manifest_verifies_against_the_compiled_in_key() {
+    fn the_hosted_manifest_is_signed_by_the_key_in_use_today() {
         let manifest = include_bytes!("../../../site/components/manifest.json");
         let signature = include_bytes!("../../../site/components/manifest.json.sig");
-        let parsed = ComponentManifest::verify_default(manifest, signature)
-            .expect("the hosted manifest verifies and parses against the compiled-in key");
+        let (parsed, trusted) = ComponentManifest::verify_trusted(manifest, signature)
+            .expect("the hosted manifest verifies and parses against a trusted key");
+        assert_eq!(
+            trusted,
+            TrustedKey::Current,
+            "the hosted catalog is still signed by a retired key: finish the rotation by re-signing it"
+        );
 
         assert!(!parsed.verbs.is_empty(), "the catalog offers prefix setup");
         for verb in &parsed.verbs {
@@ -1083,7 +1270,7 @@ mod tests {
         // The row behind the Dalamud launch setting. Without it the setting has no endpoint to reach
         // and no tier note to state, so a build that dropped it would silently offer nothing.
         let dalamud = parsed
-            .injectable("Dalamud")
+            .injectable(InjectableKind::Dalamud)
             .expect("the Dalamud row is what the launch setting reads");
         assert_eq!(dalamud.kind, InjectableKind::Dalamud);
         assert!(

@@ -828,7 +828,7 @@ fn render_addon(event: &AddonEvent) -> String {
             format!("addon: stopped {} (pid {pid})", program.display())
         }
         AddonEvent::Finished { program, outcome } => {
-            format!("addon: {} finished ({outcome:?})", program.display())
+            format!("addon: {} finished, {outcome}", program.display())
         }
         AddonEvent::Failed { program, reason } => {
             format!("addon: {} failed: {reason}", program.display())

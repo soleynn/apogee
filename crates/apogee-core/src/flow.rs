@@ -156,11 +156,12 @@ pub(crate) async fn drive(
 /// query on the token: a run can be cancelled and still fail for an unrelated reason first, and that
 /// failure is the one worth reporting.
 ///
-/// The ones that spell it one way are read here. The runtime spells it four ways (a stopped download, a
-/// `wineboot` the token interrupted, a setup program killed mid-run, a wait for the game process that
-/// gave up because it was asked to), and restating that list here is how one of them gets missed: a
-/// first run spends most of its time creating a prefix, so the one it costs is the one a user is most
-/// likely to stop. It answers for itself instead.
+/// The one that spells it a single way is read here. The other two spell it several ways each and
+/// answer for themselves, because restating their lists here is how one of them gets missed: the
+/// runtime has four spellings (a stopped download, a `wineboot` the token interrupted, a setup program
+/// killed mid-run, a wait for the game that gave up because it was asked to), and a first run spends
+/// most of its time creating a prefix, so the one it would cost is the one a user is most likely to
+/// stop. The addon layer has two, for the same shape of reason.
 ///
 /// There is no arm for a bare [`CoreError::Fetch`]. Every download a command makes belongs to a
 /// subsystem and arrives in that subsystem's taxonomy; the one place fetch's own error reaches this
@@ -168,14 +169,9 @@ pub(crate) async fn drive(
 /// before there is a command to stop.
 fn is_cancellation(error: &CoreError) -> bool {
     match error {
-        CoreError::Patch(apogee_patcher::PatchError::Cancelled)
-        | CoreError::Addons(apogee_addons::AddonError::Cancelled)
-        // The signed catalog is fetched before the loop that turns a stopped step into the addons'
-        // own cancellation, so a run stopped during that download arrives spelled as the fetch.
-        | CoreError::Addons(apogee_addons::AddonError::Download(
-            apogee_fetch::FetchError::Cancelled,
-        )) => true,
+        CoreError::Patch(apogee_patcher::PatchError::Cancelled) => true,
         CoreError::Runtime(error) => error.is_cancellation(),
+        CoreError::Addons(error) => error.is_cancellation(),
         _ => false,
     }
 }

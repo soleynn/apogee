@@ -92,11 +92,14 @@ async fn run_op(
         } => {
             // Under the prefix's C: drive, never the prefix root: the root holds `prefix.json` and the
             // runner's own relocation, and neither is a verb's business.
+            //
+            // Passed through rather than wrapped: `install` is already told the verb's name and reports
+            // against it, so wrapping would produce a chain that names the verb twice and says nothing
+            // more the second time.
             let dest = prefix.drive_c().join(into.as_path());
             artifact::install(fetcher, art, &verb.name, work, &dest, cancel, events)
                 .await
                 .map(|_entries| ())
-                .map_err(|source| failed(Box::new(source)))
         }
     }
 }

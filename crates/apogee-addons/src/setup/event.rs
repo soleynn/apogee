@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedSender;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SetupEvent {
-    /// An archive is being fetched. Byte counts only; the shell supplies the label.
+    /// An archive is being fetched. `what` is what it is for, named by whatever is fetching it.
     Downloading {
         what: String,
         bytes_done: u64,

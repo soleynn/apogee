@@ -13,7 +13,7 @@ tools/*/target/
 .env
 .env.*
 
-# Offline signing key for the runner catalog: the private seed stays on the maintainer's machine
+# Offline signing seeds, one per signed catalog: they stay on the maintainer's machine
 /.catalog-signing/
 
 # Corpus cache: boot patches fetched by URL+SHA256 on demand, keyed by digest, never checked in
