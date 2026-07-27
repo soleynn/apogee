@@ -350,6 +350,18 @@ impl Dalamud {
     }
 
     /// Bring the bundled runtime to `version`, which is two archives overlaid into one tree.
+    ///
+    /// The marker beside the tree is a **seal**, not a note: it is written only once both archives have
+    /// extracted *and* the result has matched the digest map published for that version. So a marker
+    /// naming the version being asked for is a tree this launcher verified, and a later pass trusts it
+    /// rather than hashing it again.
+    ///
+    /// That trade is deliberate and it is where most of a no-op pass's cost went: the runtime is 481
+    /// files and about 170 MiB of stock Microsoft redistributable, and hashing it on every launch buys
+    /// nothing the seal does not already say. What it would have caught is damage done after a verified
+    /// install by something other than this launcher, and the answer to that is to install it again. The
+    /// version directory Dalamud itself lives in is still swept every pass, because that is the code
+    /// being loaded into the game and it is the tree the digest map is really for.
     async fn ensure_runtime(
         &self,
         version: &str,
@@ -357,8 +369,7 @@ impl Dalamud {
         cancel: &CancellationToken,
     ) -> Result<()> {
         let marker = self.paths.runtime.join("version");
-        let local = std::fs::read_to_string(&marker).unwrap_or_default();
-        if local.trim() == version && self.runtime_is_intact(version, cancel).await {
+        if std::fs::read_to_string(&marker).unwrap_or_default().trim() == version {
             return Ok(());
         }
         let endpoints = self.endpoints()?;
@@ -369,28 +380,39 @@ impl Dalamud {
             what: "Dalamud runtime".to_owned(),
             version: version.to_owned(),
         });
-        // Both archives before the marker, so an interrupted update is indistinguishable from no
-        // install rather than from a complete one.
+        // The marker goes first, so a pass interrupted anywhere below leaves a tree that reads as
+        // unsealed rather than as one that verified.
         let _ = std::fs::remove_file(&marker);
         for url in [dotnet, desktop] {
             self.lay_down(&url, &self.paths.runtime, "Dalamud runtime", events, cancel)
                 .await?;
         }
+        // The marker is written *before* the check, because the published map describes it: the
+        // distribution lists `version` as an entry whose digest is the version string's, so a tree
+        // without it is a tree that is one file short. Written with no trailing newline for the same
+        // reason, since the digest is over the bare string.
         write_atomic(&marker, version.as_bytes()).map_err(|source| AddonError::Install {
             component: DALAMUD.to_owned(),
-            step: "record the runtime version",
+            step: "seal the runtime",
             source: Box::new(source),
         })?;
+        if !self.runtime_matches(version, cancel).await {
+            // Unsealed rather than left behind: the next pass lays it down again instead of trusting a
+            // marker for a tree that did not verify.
+            let _ = std::fs::remove_file(&marker);
+            return Err(
+                self.failed("the runtime that was downloaded does not match its own hashes")
+            );
+        }
         Ok(())
     }
 
     /// Whether the runtime on disk matches the digest map published for `version`.
     ///
-    /// The map is cached beside the tree, so a launch after the first one costs no request. A map that
-    /// cannot be fetched and was never cached answers "no", which lays the runtime down again: there is
-    /// no third answer, and re-extracting is cheaper than running the game against a tree nothing
-    /// checked.
-    async fn runtime_is_intact(&self, version: &str, cancel: &CancellationToken) -> bool {
+    /// The map is cached beside the tree so a re-install costs no second request. A map that cannot be
+    /// fetched and was never cached answers "no", which refuses the seal: there is no third answer, and
+    /// an unsealed tree is laid down again next pass rather than trusted.
+    async fn runtime_matches(&self, version: &str, cancel: &CancellationToken) -> bool {
         let cache = self.paths.runtime.join(format!("hashes-{version}.json"));
         let cached = std::fs::read(&cache)
             .ok()
