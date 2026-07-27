@@ -292,7 +292,16 @@ async fn a_broken_entry_does_not_stop_the_others() -> Result<(), Fallible> {
     .await;
 
     let report = session.report().clone();
-    assert!(matches!(report.outcomes[0].outcome, Outcome::Failed { .. }));
+    // Not just that it failed: the reason a shell prints is a `String`, so whatever built it had to
+    // walk the cause chain. "failed to start /x/not-here.sh" on its own tells a user nothing they did
+    // not already know, and the part that says the file is missing lives two levels down.
+    let Outcome::Failed { reason } = &report.outcomes[0].outcome else {
+        panic!("the missing program has to fail: {:?}", report.outcomes[0]);
+    };
+    assert!(
+        reason.contains("not-here.sh") && reason.contains("No such file or directory"),
+        "the reported reason drops the cause chain: {reason}"
+    );
     assert!(matches!(
         report.outcomes[1].outcome,
         Outcome::Started { .. }

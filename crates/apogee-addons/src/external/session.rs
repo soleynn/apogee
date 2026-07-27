@@ -209,7 +209,7 @@ impl AddonSession {
         let outcome = match held.companion.stop(STOP_GRACE).await {
             Ok(()) => Outcome::Completed { code: None },
             Err(err) => Outcome::Failed {
-                reason: err.to_string(),
+                reason: crate::chain_of(&err),
             },
         };
         events.emit(AddonEvent::Stopped {

@@ -163,6 +163,33 @@ pub enum AddonError {
     Unsupported { what: &'static str },
 }
 
+impl AddonError {
+    /// This failure and its causes as one line.
+    ///
+    /// The outer message is routinely the least specific part of a chain: "could not stage a download"
+    /// over "no space left on device", or a transparent arm over the taxonomy that knows what happened.
+    /// Every seam this crate reports through carries a `String` rather than the error itself, so a
+    /// caller with only `Display` has already lost the useful half by the time it renders. This is what
+    /// those callers should render.
+    #[must_use]
+    pub fn chain(&self) -> String {
+        chain_of(self)
+    }
+}
+
+/// The same for any error, so the places this crate reports another crate's failure through a `String`
+/// do not have to lose its causes either.
+pub(crate) fn chain_of(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// A companion that installs onto the host and reaches the game by wrapping its launch.
 ///
 /// One method does the installing and one contributes to the launch, which is the whole seam: the
@@ -402,7 +429,7 @@ impl Addons {
             if let Err(err) = injectable.ensure(prefix, cancel, events).await {
                 events.emit(SetupEvent::Failed {
                     what: injectable.name().to_owned(),
-                    reason: setup::describe(&err),
+                    reason: err.chain(),
                 });
                 failures.push(err);
             }
@@ -427,7 +454,7 @@ impl Addons {
             if let Err(err) = injectable.prepare_launch(plan, events) {
                 events.emit(SetupEvent::Failed {
                     what: injectable.name().to_owned(),
-                    reason: setup::describe(&err),
+                    reason: err.chain(),
                 });
                 failures.push(err);
             }

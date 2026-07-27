@@ -275,7 +275,7 @@ pub(crate) async fn apply_verbs(
                 let state = match outcome {
                     Ok(()) => SetupState::Applied,
                     Err(err) => {
-                        let reason = describe(&err);
+                        let reason = err.chain();
                         events.emit(SetupEvent::Failed {
                             what: step.verb.name.clone(),
                             reason: reason.clone(),
@@ -345,19 +345,6 @@ async fn apply_verb(
         verb: row.name.clone(),
     });
     Ok(())
-}
-
-/// A failure as one line, with its cause chain, because the outer message alone is usually the least
-/// specific part of it.
-pub(crate) fn describe(err: &AddonError) -> String {
-    let mut text = err.to_string();
-    let mut source = std::error::Error::source(err);
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    text
 }
 
 #[cfg(test)]
