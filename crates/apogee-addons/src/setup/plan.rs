@@ -12,7 +12,7 @@ use crate::manifest::{ComponentManifest, Verb};
 /// What the setup pass will do about one verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum StepAction {
+pub(crate) enum StepAction {
     /// Apply it.
     Apply,
     /// The prefix already records it.
@@ -25,14 +25,14 @@ pub enum StepAction {
 /// look a name back up and find nothing: the manifest a step came from is the manifest it is applied
 /// against, and holding the row is what says so in the types.
 #[derive(Debug, Clone)]
-pub struct PlanStep<'m> {
+pub(crate) struct PlanStep<'m> {
     pub verb: &'m Verb,
     pub action: StepAction,
 }
 
 /// The ordered decision a setup pass is about to carry out.
 #[derive(Debug, Clone)]
-pub struct SetupPlan<'m> {
+pub(crate) struct SetupPlan<'m> {
     steps: Vec<PlanStep<'m>>,
 }
 
@@ -68,15 +68,6 @@ impl<'m> SetupPlan<'m> {
     #[must_use]
     pub fn steps(&self) -> &[PlanStep<'m>] {
         &self.steps
-    }
-
-    /// Whether anything would actually be done.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        !self
-            .steps
-            .iter()
-            .any(|step| step.action == StepAction::Apply)
     }
 }
 
@@ -128,7 +119,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
-        assert!(!plan.is_empty());
+        assert!(actions(&plan).iter().all(|a| **a == StepAction::Apply));
     }
 
     /// The prefix's own record is what makes a second pass a no-op. There is no second list of what a
@@ -144,7 +135,12 @@ mod tests {
         );
 
         let all = SetupPlan::build(&manifest, &[recorded("first"), recorded("second")], &[]);
-        assert!(all.is_empty(), "a fully-applied prefix has nothing to do");
+        assert!(
+            actions(&all)
+                .iter()
+                .all(|a| **a == StepAction::AlreadyPresent),
+            "a fully-applied prefix has nothing to do"
+        );
     }
 
     /// A verb whose effect has gone has to be applied again, whatever the record says. Without this, one
@@ -168,6 +164,6 @@ mod tests {
     fn a_manifest_with_no_verbs_plans_nothing() {
         let manifest = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#)
             .expect("an empty manifest parses");
-        assert!(SetupPlan::build(&manifest, &[], &[]).is_empty());
+        assert!(SetupPlan::build(&manifest, &[], &[]).steps().is_empty());
     }
 }

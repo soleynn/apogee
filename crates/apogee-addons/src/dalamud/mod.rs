@@ -253,18 +253,16 @@ impl Dalamud {
         })
     }
 
-    /// Say what the tier costs, and what the runner in front of it costs, before anything is fetched.
+    /// Say what this row's own caveats are, and what the runner in front of it costs, before anything is
+    /// fetched.
+    ///
+    /// The tier note is not said here. It is said for every injectable by the loop that installs them,
+    /// so a second one gets the warning by existing rather than by remembering to announce itself.
     fn announce(&self, prefix: &Prefix, events: &SetupEvents) {
         for caveat in &self.caveats {
             events.emit(SetupEvent::Caveat {
                 what: DALAMUD.to_owned(),
                 note: caveat.clone(),
-            });
-        }
-        if let Some(note) = self.tier.note() {
-            events.emit(SetupEvent::Caveat {
-                what: DALAMUD.to_owned(),
-                note: note.to_owned(),
             });
         }
         // Steering rather than gating. The injector's process handoff was written against a patched

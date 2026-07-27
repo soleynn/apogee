@@ -28,7 +28,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub use event::{SetupEvent, SetupEvents};
-pub use plan::{PlanStep, SetupPlan, StepAction};
+
+// The plan is how this module decides, not something a caller composes: it borrows rows out of the
+// manifest it was built from, and every consumer of the decision reads the report instead.
+pub(crate) use plan::{SetupPlan, StepAction};
 
 use crate::manifest::{ComponentManifest, Verb};
 use crate::{AddonError, Result};

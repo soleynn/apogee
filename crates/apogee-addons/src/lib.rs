@@ -37,9 +37,7 @@ pub use manifest::{
     Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
     InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
 };
-pub use setup::{
-    PlanStep, SetupEvent, SetupEvents, SetupOutcome, SetupPlan, SetupReport, SetupState, StepAction,
-};
+pub use setup::{SetupEvent, SetupEvents, SetupOutcome, SetupReport, SetupState};
 
 /// Crate result over [`AddonError`].
 pub type Result<T> = std::result::Result<T, AddonError>;
@@ -403,10 +401,7 @@ impl Addons {
     /// goatcorp on a guess.
     #[must_use]
     pub fn dalamud(&self, manifest: &ComponentManifest, config: DalamudConfig) -> Option<Dalamud> {
-        let entry = manifest
-            .injectables
-            .iter()
-            .find(|entry| entry.kind == InjectableKind::Dalamud)?;
+        let entry = manifest.injectable(InjectableKind::Dalamud)?;
         Some(Dalamud::new(
             self.paths.dalamud(),
             self.fetcher.clone(),
@@ -429,6 +424,15 @@ impl Addons {
     ) -> Vec<AddonError> {
         let mut failures = Vec::new();
         for injectable in injectables {
+            // The tier is said here rather than by each companion, so a second injectable gets the
+            // warning right by existing rather than by remembering to announce itself. A first-class
+            // tier has nothing to say and says nothing.
+            if let Some(note) = injectable.support_tier().note() {
+                events.emit(SetupEvent::Caveat {
+                    what: injectable.name().to_owned(),
+                    note: note.to_owned(),
+                });
+            }
             if let Err(err) = injectable.ensure(prefix, cancel, events).await {
                 events.emit(SetupEvent::Failed {
                     what: injectable.name().to_owned(),

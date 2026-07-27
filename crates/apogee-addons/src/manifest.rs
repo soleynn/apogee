@@ -380,15 +380,18 @@ impl ComponentManifest {
         self.verbs.iter().find(|v| v.name == name)
     }
 
-    /// The injectable row named `name`.
+    /// The injectable row of `kind`.
+    ///
+    /// By kind rather than by name, because the kind is what selects which built-in pipeline runs and a
+    /// name is a label on it. Two lookup keys for one list would let a caller find a row the launch path
+    /// would not.
     #[must_use]
-    pub fn injectable(&self, name: &str) -> Option<&InjectableEntry> {
-        self.injectables.iter().find(|i| i.name == name)
+    pub fn injectable(&self, kind: InjectableKind) -> Option<&InjectableEntry> {
+        self.injectables.iter().find(|i| i.kind == kind)
     }
 
     /// Every name the manifest offers, sorted. What the duplicate check reads.
-    #[must_use]
-    pub fn names(&self) -> Vec<&str> {
+    fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .injectables
             .iter()
@@ -795,7 +798,9 @@ mod tests {
                 .expect("valid signature");
         assert_eq!(trusted, TrustedKey::Current);
 
-        let dalamud = parsed.injectable("Dalamud").expect("Dalamud row");
+        let dalamud = parsed
+            .injectable(InjectableKind::Dalamud)
+            .expect("Dalamud row");
         assert_eq!(dalamud.kind, InjectableKind::Dalamud);
         assert_eq!(dalamud.distribution.host_str(), Some("kamori.goats.dev"));
         assert!(matches!(dalamud.tier, SupportTier::BestEffort { .. }));
@@ -1034,7 +1039,7 @@ mod tests {
     #[test]
     fn a_best_effort_injectable_must_say_what_it_costs() {
         let parsed = parse(&manifest()).expect("parse");
-        let entry = parsed.injectable("Dalamud").expect("row");
+        let entry = parsed.injectable(InjectableKind::Dalamud).expect("row");
         assert!(matches!(entry.tier, SupportTier::BestEffort { .. }));
 
         let without = manifest().replace(r#", "note": "Best with the wine-xiv runner.""#, "");
@@ -1240,7 +1245,7 @@ mod tests {
         // The row behind the Dalamud launch setting. Without it the setting has no endpoint to reach
         // and no tier note to state, so a build that dropped it would silently offer nothing.
         let dalamud = parsed
-            .injectable("Dalamud")
+            .injectable(InjectableKind::Dalamud)
             .expect("the Dalamud row is what the launch setting reads");
         assert_eq!(dalamud.kind, InjectableKind::Dalamud);
         assert!(
