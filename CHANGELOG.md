@@ -21,6 +21,7 @@ is tagged with its change type. Versioning aims to follow
 - Drive companion tools from the launch flow and the command line (#73) _(added)_
 - Back up, restore, and prune the game's settings from the launcher (#74) _(added)_
 - Keep the launcher store private, and capture settings before a patch (#75) _(added)_
+- Prefix verbs, a signed component manifest, and the withdrawal of the catalog (#76) _(added)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
