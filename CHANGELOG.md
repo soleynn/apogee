@@ -6,6 +6,9 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-addons
+- A frozen error taxonomy, an audited Dalamud boundary, and rotatable signing keys (#78) _(added)_
+
 ### workspace
 - Fix changelog and release-notes generation for stable releases _(ci)_
 - Pin the fuzz nightly to dodge a rustc ICE (#63) _(ci)_
