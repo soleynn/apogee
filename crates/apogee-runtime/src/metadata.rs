@@ -71,6 +71,43 @@ impl SetupRecord {
     }
 }
 
+/// A component or verb a prefix records as present.
+///
+/// Serializes as a bare string when it carries no version, which is what a verb is and what an older
+/// build wrote for everything. That is also how it deserializes, so a `prefix.json` from before versions
+/// were kept still loads.
+///
+/// The version is what makes "already installed" answerable when a manifest row is bumped. Without it,
+/// the name matching would report a prefix as up to date against a row it has never seen, which would
+/// make a version bump a no-op instead of an install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InstalledComponent {
+    /// A verb, or a component an older build recorded without a version.
+    Name(String),
+    /// A component and the version that was installed.
+    Versioned { name: String, version: String },
+}
+
+impl InstalledComponent {
+    /// The component's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Name(name) | Self::Versioned { name, .. } => name,
+        }
+    }
+
+    /// The version recorded, if the record carries one.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            Self::Name(_) => None,
+            Self::Versioned { version, .. } => Some(version),
+        }
+    }
+}
+
 /// A prefix's `prefix.json` contents: the source of truth for what the prefix is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrefixMetadata {
@@ -78,7 +115,7 @@ pub struct PrefixMetadata {
     #[serde(default)]
     pub dxvk: Option<DxvkRef>,
     #[serde(default)]
-    pub components: Vec<String>,
+    pub components: Vec<InstalledComponent>,
     #[serde(default)]
     pub setup_history: Vec<SetupRecord>,
 }
@@ -140,6 +177,51 @@ impl PrefixMetadata {
     pub(crate) fn record(&mut self, step: SetupRecord) {
         self.setup_history.push(step);
     }
+}
+
+/// Note `component` as present in the prefix whose record lives at `path`, appending `step` (carrying
+/// `detail`) to the history. Returns whether the component was newly added.
+///
+/// The component list is keyed on the name, so a re-apply or an upgrade replaces the entry rather than
+/// adding one, while the history shows both runs: what is installed and what was done to get there are
+/// different questions, and conflating them loses the second one.
+///
+/// Read-modify-write against one file, so two installs into the *same* prefix at the same time can
+/// lose a record. Nothing in the launcher does that, and the alternative (a lock file inside the
+/// prefix) buys a failure mode of its own.
+pub(crate) fn record_component(
+    path: &Path,
+    fallback_runner: RunnerRef,
+    component: &str,
+    version: Option<&str>,
+    step: SetupStep,
+    detail: &str,
+) -> Result<bool, RuntimeError> {
+    let mut meta =
+        PrefixMetadata::load(path)?.unwrap_or_else(|| PrefixMetadata::new(fallback_runner));
+    let entry = match version {
+        Some(version) => InstalledComponent::Versioned {
+            name: component.to_owned(),
+            version: version.to_owned(),
+        },
+        None => InstalledComponent::Name(component.to_owned()),
+    };
+    let added = match meta.components.iter_mut().find(|c| c.name() == component) {
+        // Replaced rather than left alone, so an upgraded component's record says which version is
+        // actually on disk. Reporting "already there" for a different version is what would make a
+        // manifest bump invisible.
+        Some(existing) => {
+            *existing = entry;
+            false
+        }
+        None => {
+            meta.components.push(entry);
+            true
+        }
+    };
+    meta.record(SetupRecord::ok_with(step, detail));
+    meta.save(path)?;
+    Ok(added)
 }
 
 /// The current time as an RFC 3339 UTC string (`YYYY-MM-DDTHH:MM:SSZ`). A clock that is before the
@@ -227,5 +309,143 @@ mod tests {
         assert_eq!(json, "\"wineboot_init\"");
         let json = serde_json::to_string(&SetupStep::DxvkInstall).expect("serialize");
         assert_eq!(json, "\"dxvk_install\"");
+        let json = serde_json::to_string(&SetupStep::VerbApply).expect("serialize");
+        assert_eq!(json, "\"verb_apply\"");
+        let json = serde_json::to_string(&SetupStep::ComponentInstall).expect("serialize");
+        assert_eq!(json, "\"component_install\"");
+    }
+
+    /// What is installed and what was done to get there are different questions. The component list is
+    /// a set, so a re-apply is one entry; the history is a log, so a re-apply is two lines. Collapsing
+    /// them either duplicates the list or hides that a step ran twice.
+    #[test]
+    fn recording_the_same_component_twice_lists_it_once_and_logs_it_twice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PREFIX_JSON);
+        let runner = RunnerRef {
+            name: "wine".to_owned(),
+            version: "custom".to_owned(),
+        };
+        PrefixMetadata::new(runner.clone())
+            .save(&path)
+            .expect("seed");
+
+        assert!(
+            record_component(
+                &path,
+                runner.clone(),
+                "corefonts",
+                None,
+                SetupStep::VerbApply,
+                "corefonts"
+            )
+            .expect("first"),
+            "the first record adds it"
+        );
+        assert!(
+            !record_component(
+                &path,
+                runner,
+                "corefonts",
+                None,
+                SetupStep::VerbApply,
+                "corefonts"
+            )
+            .expect("second"),
+            "the second record reports it was already there"
+        );
+
+        let meta = PrefixMetadata::load(&path).expect("load").expect("present");
+        assert_eq!(
+            meta.components,
+            [InstalledComponent::Name("corefonts".to_owned())]
+        );
+        assert_eq!(
+            meta.setup_history
+                .iter()
+                .filter(|r| r.step == SetupStep::VerbApply)
+                .count(),
+            2
+        );
+    }
+
+    /// A prefix whose record was lost still records what is installed into it now, rather than
+    /// refusing until someone re-runs a repair.
+    #[test]
+    fn recording_into_a_prefix_with_no_record_writes_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PREFIX_JSON);
+        let runner = RunnerRef {
+            name: "GE-Proton".to_owned(),
+            version: "11-1".to_owned(),
+        };
+
+        record_component(
+            &path,
+            runner.clone(),
+            "ACT",
+            Some("3.9.0"),
+            SetupStep::ComponentInstall,
+            "ACT 3.9.0",
+        )
+        .expect("record");
+        let meta = PrefixMetadata::load(&path).expect("load").expect("present");
+        assert_eq!(meta.runner, runner);
+        assert_eq!(meta.components[0].name(), "ACT");
+        assert_eq!(meta.components[0].version(), Some("3.9.0"));
+        assert_eq!(meta.setup_history[0].detail.as_deref(), Some("ACT 3.9.0"));
+    }
+
+    /// A bumped row has to replace the entry rather than sit beside it, or the record would claim two
+    /// versions of one component and "which is on disk" would have no answer.
+    #[test]
+    fn recording_an_upgrade_replaces_the_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PREFIX_JSON);
+        let runner = RunnerRef {
+            name: "wine".to_owned(),
+            version: "custom".to_owned(),
+        };
+
+        for version in ["3.9.0", "3.9.1"] {
+            record_component(
+                &path,
+                runner.clone(),
+                "ACT",
+                Some(version),
+                SetupStep::ComponentInstall,
+                &format!("ACT {version}"),
+            )
+            .expect("record");
+        }
+
+        let meta = PrefixMetadata::load(&path).expect("load").expect("present");
+        assert_eq!(meta.components.len(), 1);
+        assert_eq!(meta.components[0].version(), Some("3.9.1"));
+        // Both installs are in the history: the list says what is there, the log says how it got there.
+        assert_eq!(meta.setup_history.len(), 2);
+    }
+
+    /// A `prefix.json` written before versions were kept has to keep loading, and a bare name is also how
+    /// a verb is written now, so the two spellings both have to round-trip.
+    #[test]
+    fn a_record_without_versions_still_loads_and_a_versioned_one_round_trips() {
+        let json = br#"{
+          "runner": { "name": "wine", "version": "custom" },
+          "components": ["corefonts", { "name": "ACT", "version": "3.9.0" }]
+        }"#;
+        let meta: PrefixMetadata = serde_json::from_slice(json).expect("an older record loads");
+        assert_eq!(
+            meta.components[0],
+            InstalledComponent::Name("corefonts".to_owned())
+        );
+        assert_eq!(meta.components[1].version(), Some("3.9.0"));
+
+        let round_tripped: PrefixMetadata =
+            serde_json::from_slice(&serde_json::to_vec(&meta).expect("serialize")).expect("parse");
+        assert_eq!(round_tripped.components, meta.components);
+        // A verb still serializes as a bare string, so nothing older chokes on reading it back.
+        let text = serde_json::to_string(&meta).expect("serialize");
+        assert!(text.contains("\"corefonts\""), "{text}");
     }
 }

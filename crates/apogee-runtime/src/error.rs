@@ -52,16 +52,61 @@ pub enum RuntimeError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{program} did not finish inside the prefix: {reason}")]
+    InPrefixIncomplete {
+        program: String,
+        reason: &'static str,
+    },
+    #[error("registry key {key:?} is not one this launcher will write: {reason}")]
+    RegistryKey { key: String, reason: &'static str },
     #[error("invalid launch plan: {reason}")]
     InvalidLaunchPlan { reason: &'static str },
     #[error("game process not found after {waited:?}")]
     GameProcessNotFound { waited: Duration },
+    /// The wait for the game process to appear ended because the run was stopped. Its own variant
+    /// rather than a flag on [`Self::GameProcessNotFound`]: nothing was found either way, but one is a
+    /// launch that failed and the other is a user who changed their mind, and only the first is worth
+    /// telling them about.
+    #[error("the wait for the game process was stopped after {waited:?}")]
+    GameWaitCancelled { waited: Duration },
     #[error("path mapping failed for {path:?}: {reason}")]
     PathMapping { path: PathBuf, reason: &'static str },
     #[error("missing host tool: {tool:?}")]
     MissingHostTool { tool: HostTool },
     #[error("unsupported: {what}")]
     Unsupported { what: &'static str },
+}
+
+/// The `reason` an [`RuntimeError::InPrefixIncomplete`] carries when the cancellation token, rather
+/// than the time budget, ended the run. Named once and read once: the alternative is the same word
+/// spelled in two crates, where a typo in either silently stops a stopped run from reading as one.
+pub(crate) const CANCELLED_REASON: &str = "cancelled";
+
+/// The source a prefix setup step carries when the cancellation token ended it, so a stopped
+/// `wineboot` and a broken one stay one [`RuntimeError::PrefixInit`] variant and are still told apart
+/// by a type rather than by parsing a message.
+#[derive(Debug, Error)]
+#[error("the step was stopped before it finished")]
+pub struct StepCancelled;
+
+impl RuntimeError {
+    /// Whether this is the run stopping because it was asked to, rather than something going wrong.
+    ///
+    /// Cancellation reaches this taxonomy by four routes: a runner download the token stopped, a
+    /// `wineboot` it interrupted, a setup program killed mid-run, and a wait for the game process that
+    /// gave up because it was asked to. A consumer deciding between "the user pressed Ctrl-C" and "the
+    /// prefix is broken" would otherwise have to know all four and be re-edited whenever a fifth
+    /// appears, from a crate that cannot see them being added. Answered here, beside the code that
+    /// constructs them.
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        match self {
+            Self::Download(FetchError::Cancelled) | Self::GameWaitCancelled { .. } => true,
+            Self::InPrefixIncomplete { reason, .. } => *reason == CANCELLED_REASON,
+            Self::PrefixInit { source, .. } => source.downcast_ref::<StepCancelled>().is_some(),
+            _ => false,
+        }
+    }
 }
 
 /// Why a signed runner catalog was rejected. Kept separate so the pure parser (fuzzed,
@@ -99,6 +144,10 @@ pub enum SetupStep {
     DxvkInstall,
     /// A registry or configuration tweak.
     ApplyTweaks,
+    /// A curated prefix-setup verb was applied. `detail` names the verb.
+    VerbApply,
+    /// A companion component was installed into the prefix. `detail` names it and its version.
+    ComponentInstall,
 }
 
 /// A prefix health problem found by [`Runtime::check_prefix`](crate::Runtime::check_prefix). Each

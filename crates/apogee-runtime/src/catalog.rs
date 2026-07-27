@@ -32,13 +32,16 @@ pub enum RunnerKind {
     Custom,
 }
 
-/// The archive container a runner/tool ships in.
+/// The archive container a runner, tool, or component ships in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ArchiveFormat {
     TarGz,
     TarXz,
     TarZst,
+    /// What the Windows-side companions publish. Never a runner container, but the same extractor
+    /// lays it down, so a component row picks it like any other format.
+    Zip,
 }
 
 /// How to lay a downloaded archive onto disk.
@@ -333,6 +336,7 @@ fn parse_format(format: Option<&str>) -> Result<ArchiveFormat, CatalogError> {
         "tar.gz" => Ok(ArchiveFormat::TarGz),
         "tar.xz" => Ok(ArchiveFormat::TarXz),
         "tar.zst" => Ok(ArchiveFormat::TarZst),
+        "zip" => Ok(ArchiveFormat::Zip),
         other => Err(CatalogError::UnknownArchiveFormat {
             format: other.to_owned(),
         }),

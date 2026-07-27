@@ -1,10 +1,15 @@
-//! Streaming, in-process extraction of runner/tool tarballs.
+//! Streaming, in-process extraction of runner, tool, and component archives.
 //!
 //! Pure-Rust decoders (`flate2`/`ruzstd`/`lzma-rs`) feed `tar` entry by entry, so peak memory stays
 //! bounded by the decoder window, never the tarball size. Every entry is confined to the
 //! destination before it is written: an archive comes from the signed catalog, but its bytes are
 //! still treated as hostile. Directory components are never traversed through a symlink, so a
 //! crafted archive cannot plant a link that redirects a later write outside the tree.
+//!
+//! Zip is here for the Windows-side companions, which is all anyone publishes them as. It shares the
+//! confinement, and differs in two ways the container forces: entries are addressed through a central
+//! directory rather than streamed, and a symlink entry is refused outright rather than recreated,
+//! because a zip encodes its target as file content and no companion archive contains one.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -46,6 +51,74 @@ pub fn extract_archive(
             unpack(dec, layout.strip_prefix.as_deref(), dest, archive)
         }
         ArchiveFormat::TarXz => extract_xz(reader, layout.strip_prefix.as_deref(), dest, archive),
+        ArchiveFormat::Zip => unpack_zip(reader, layout.strip_prefix.as_deref(), dest, archive),
+    }
+}
+
+/// Extract a zip, entry by entry, with the same confinement the tar path applies.
+///
+/// Permissions are the one deliberate divergence. A runner tarball is built on Unix and its modes are
+/// meaningful, so the tar path takes them as they are. A zip's are not dependable: an entry may carry no
+/// external attributes at all, and one written by Windows tooling gets a mode synthesised from the MS-DOS
+/// attribute bits, which is a plausible-looking number rather than an intended one. So the low nine bits
+/// are taken where there are any, the owner's read and write are forced on so an install is never
+/// unreadable, and an entry with no attributes at all gets the ordinary file default.
+fn unpack_zip(
+    reader: BufReader<File>,
+    strip_prefix: Option<&str>,
+    dest: &Path,
+    archive: &Path,
+) -> Result<u64, RuntimeError> {
+    let mut zip = zip::ZipArchive::new(reader).map_err(|e| decode_err(archive, &e))?;
+    let mut count = 0u64;
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(|e| decode_err(archive, &e))?;
+        // A zip name is specified to use `/`, so a `\` in one is either Windows tooling being loose
+        // or someone hand-building an escape. Folded before the walk either way: on Linux a backslash
+        // is an ordinary character, so `..\..\x` would otherwise survive as one opaque component.
+        let raw = PathBuf::from(entry.name().replace('\\', "/"));
+        let rel = match resolve(&raw, strip_prefix) {
+            Resolved::Path(p) => p,
+            Resolved::Skip => continue,
+            Resolved::Reject => {
+                return Err(confined(
+                    archive,
+                    "entry path escapes the component directory",
+                ));
+            }
+        };
+        // Checked before the directory test, because a symlink entry can carry a directory's name.
+        if entry.is_symlink() {
+            return Err(confined(archive, "zip symlink entries are not extracted"));
+        }
+        let out = dest.join(&rel);
+        safe_make_dirs(dest, &rel, archive)?;
+
+        if entry.is_dir() {
+            unlink_if_symlink(&out, archive)?;
+            fs::create_dir_all(&out).map_err(|e| io_err(archive, e))?;
+        } else {
+            unlink_if_symlink(&out, archive)?;
+            let file = File::create(&out).map_err(|e| io_err(archive, e))?;
+            let mut sink = BufWriter::with_capacity(COPY_BUF, file);
+            io::copy(&mut entry, &mut sink).map_err(|e| io_err(archive, e))?;
+            sink.flush().map_err(|e| io_err(archive, e))?;
+            fs::set_permissions(
+                &out,
+                fs::Permissions::from_mode(zip_mode(entry.unix_mode())),
+            )
+            .map_err(|e| io_err(archive, e))?;
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// The mode to write for a zip entry, given whatever the container claimed.
+fn zip_mode(claimed: Option<u32>) -> u32 {
+    match claimed.map(|mode| mode & 0o777).filter(|mode| *mode != 0) {
+        Some(mode) => mode | 0o600,
+        None => 0o644,
     }
 }
 
@@ -355,6 +428,20 @@ mod tests {
             Path::new("bin/x"),
             Path::new("/etc/passwd")
         ));
+    }
+
+    /// A zip built by Windows tooling routinely carries no mode, or a mode of zero, and taking either
+    /// verbatim lands an install the launcher cannot read back.
+    #[test]
+    fn a_zip_entry_without_a_usable_mode_still_lands_readable() {
+        assert_eq!(zip_mode(None), 0o644);
+        assert_eq!(zip_mode(Some(0)), 0o644);
+        // A real mode is kept, including the executable bit a native launcher script needs.
+        assert_eq!(zip_mode(Some(0o755)), 0o755);
+        // Owner read/write is forced, so a read-only entry is still replaceable by a reinstall.
+        assert_eq!(zip_mode(Some(0o444)), 0o644);
+        // The file-type and setuid/setgid/sticky bits above the low nine are dropped.
+        assert_eq!(zip_mode(Some(0o104755)), 0o755);
     }
 
     #[test]

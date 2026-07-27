@@ -23,7 +23,7 @@ use crate::command::{Command, Event, FlowState};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, Profile, Settings};
+use crate::model::{Account, AccountKind, ComponentSelection, Profile, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::store::{Store, UidCacheEntry};
@@ -778,6 +778,8 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
     assert_eq!(
         addons.calls(),
         [
+            // The profile enables no components, so the seam is asked and contributes nothing.
+            AddonCall::Registrations { wanted: Vec::new() },
             AddonCall::Started {
                 game_pid: std::process::id().cast_signed(),
                 count: 1,
@@ -785,12 +787,308 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
             AddonCall::GameClosed,
         ]
     );
-    // The profile's list reached the seam, and the game was up before it did.
-    let running = states(&events)
-        .iter()
-        .position(|s| *s == FlowState::Running)
-        .expect("the game ran");
-    assert!(running < states(&events).len());
+    // The profile's list reached the seam, and the game was up before it did: `Running` is emitted from
+    // `launch_game` between the launch and the companion start, so its position among the states is what
+    // says the ordering held.
+    assert_eq!(
+        states(&events),
+        [FlowState::Launching, FlowState::Running, FlowState::Exited]
+    );
+    assert_eq!(
+        addons.started_programs(),
+        [std::path::PathBuf::from("/opt/act/act.sh")]
+    );
+}
+
+/// A companion an installed component contributes runs ahead of the user's own tools, because a tool the
+/// user pointed at one of them expects it to already be up.
+#[tokio::test]
+async fn a_components_companion_starts_before_the_users_own_tools() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+        // Switched off, so it must not reach the seam at all.
+        profile.components.push(ComponentSelection {
+            id: "Triggevent".to_owned(),
+            enabled: false,
+        });
+        profile.external.push(
+            ExternalAddon::new(
+                "/opt/mine/tool.sh",
+                vec![],
+                RunIn::Host,
+                Trigger::WithGame {
+                    keep_after_close: false,
+                },
+            )
+            .expect("a fixture tool"),
+        );
+    });
+
+    let contributed = ExternalAddon::new(
+        "/prefixes/act/Advanced Combat Tracker.exe",
+        vec!["-portable".into()],
+        RunIn::Prefix,
+        Trigger::WithGame {
+            keep_after_close: false,
+        },
+    )
+    .unwrap();
+    let addons = Arc::new(FakeAddons::new().contributing(contributed));
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    assert_eq!(
+        addons.calls(),
+        [
+            // Only the switched-on component is asked for.
+            AddonCall::Registrations {
+                wanted: vec!["ACT".to_owned()],
+            },
+            // Both the contributed companion and the user's own tool reached the launch.
+            AddonCall::Started {
+                game_pid: std::process::id().cast_signed(),
+                count: 2,
+            },
+            AddonCall::GameClosed,
+        ]
+    );
+    // The order, not just the count: the component's companion is started first, because the user's tool
+    // is pointed at it. A count alone would pass with the two swapped.
+    assert_eq!(
+        addons.started_programs(),
+        [
+            std::path::PathBuf::from("/prefixes/act/Advanced Combat Tracker.exe"),
+            std::path::PathBuf::from("/opt/mine/tool.sh"),
+        ]
+    );
+}
+
+/// Installing components is its own command, and it prepares the prefix first: a component installs into
+/// one, and requiring a launch before a companion can be set up would be an ordering nobody could guess.
+#[tokio::test]
+async fn installing_components_prepares_the_prefix_and_asks_only_for_the_enabled_ones() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+        profile.components.push(ComponentSelection {
+            id: "OverlayPlugin".to_owned(),
+            enabled: false,
+        });
+    });
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert_eq!(
+        addons.calls(),
+        [AddonCall::Ensured {
+            wanted: vec!["ACT".to_owned()],
+        }]
+    );
+    assert!(
+        states(&events).contains(&FlowState::InstallingComponents),
+        "the install is narrated: {:?}",
+        states(&events)
+    );
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    // The prefix was prepared, at the directory this profile's prefix resolves to. Without this the whole
+    // prepare step could be deleted and the test would still pass, since the fake install ignores it.
+    let profile = h.store.load_profile(h.profile).unwrap();
+    assert_eq!(
+        launch.prepared(),
+        [h.prefixes.path().join(super::prefix_name(&profile))]
+    );
+    // And nothing was launched: preparing a prefix is not launching a game.
+    assert_eq!(launch.launch_count(), 0);
+}
+
+/// A component that did not install must not end the same way as one that did, or a shell reports
+/// success for work that never happened.
+#[tokio::test]
+async fn installing_components_reports_a_failure_rather_than_finishing_quietly() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let addons = Arc::new(FakeAddons::new().component_failure("ACT"));
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons,
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    // One summary, carrying a count rather than repeating the reason already on the stream.
+    assert_eq!(
+        errors(&events),
+        ["1 of 1 components could not be installed"]
+    );
+}
+
+/// Stopping an install is not the same as one that went wrong. The failure count exists to tell a shell
+/// that what it asked for did not happen, and a run the user stopped on purpose has nothing to count: it
+/// is narrated, and a shell that reads failures off the stream sees none.
+#[tokio::test]
+async fn a_cancelled_component_install_is_narrated_rather_than_counted_as_a_failure() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let addons = Arc::new(FakeAddons::new().cancelling());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    // The install was reached and stopped there: no "N of M could not be installed", and nothing on the
+    // stream a shell would turn into a non-zero exit.
+    assert_eq!(
+        addons.calls(),
+        [AddonCall::Ensured {
+            wanted: vec!["ACT".to_owned()],
+        }]
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a cancelled run is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [FlowState::InstallingComponents, FlowState::Cancelled]
+    );
+}
+
+/// Ctrl-C during prefix creation. The prefix is made before anything is installed into it and it is the
+/// longest part of a first run, so it is the phase a user is most likely to stop, and the runner reports
+/// it as a setup step that did not finish rather than as a stopped download. Read as a failure, the one
+/// thing a user does deliberately ends in a failed install and a non-zero exit.
+#[tokio::test]
+async fn stopping_a_prefix_while_it_is_being_created_is_narrated_rather_than_failed() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let launch = Arc::new(FakeLaunchBackend::cancelled_while_preparing());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert_eq!(
+        launch.prepared().len(),
+        1,
+        "the run has to have reached prefix preparation for this to be the path under test"
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a prefix the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(states(&events), [FlowState::Cancelled]);
+    // Nothing announced an install either: there is no prefix to install into.
+    assert!(addons.calls().is_empty(), "{:?}", addons.calls());
+}
+
+/// The same stop one step later. The catalog is fetched before the install loop that answers for a step
+/// the token interrupted, so a run stopped there is spelled by the download rather than by the addons,
+/// and a reading that knows only the loop's word for it calls the same Ctrl-C a failure.
+#[tokio::test]
+async fn stopping_the_component_catalog_download_is_narrated_rather_than_failed() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let addons = Arc::new(FakeAddons::new().cancelling_in_the_catalog());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert!(
+        errors(&events).is_empty(),
+        "a catalog fetch the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [FlowState::InstallingComponents, FlowState::Cancelled]
+    );
+}
+
+/// A profile with no components asks nothing of the seam and reaches no catalog, so the feature costs a
+/// user who does not use it nothing at all.
+#[tokio::test]
+async fn installing_components_with_none_enabled_does_nothing() {
+    let h = harness(false);
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert!(addons.calls().is_empty());
+    assert!(states(&events).is_empty());
+    assert!(errors(&events).is_empty());
 }
 
 /// A cancelled launch stops what was started but never runs the tools that expect a session which
@@ -1208,6 +1506,34 @@ async fn patch_applies_pending_without_launching() {
     );
     assert_eq!(patch.installed_repos(), [Repo::Game]);
     assert_eq!(launch.launch_count(), 0, "patch does not launch");
+}
+
+/// Ctrl-C during a patch. Patching is the longest stretch of a real run, so it is the phase a user is
+/// most likely to stop, and the patcher spells the stop in its own taxonomy. Read as anything but a
+/// cancellation it becomes an error on the stream and a non-zero exit, which tells a user who stopped
+/// the download themselves that their install is broken.
+#[tokio::test]
+async fn stopping_a_patch_is_narrated_rather_than_failed() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(login_then_patch()));
+    let patch = Arc::new(FakePatchBackend::new().cancelling());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport, patch.clone(), launch.clone(), NOW);
+
+    let events = run(ctx, patch_cmd(h.profile)).await;
+
+    assert_eq!(
+        patch.installs().len(),
+        1,
+        "the run has to have reached the patcher for this to be the path under test"
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a patch the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(states(&events), [FlowState::Patching, FlowState::Cancelled]);
+    assert_eq!(launch.launch_count(), 0);
 }
 
 #[tokio::test]

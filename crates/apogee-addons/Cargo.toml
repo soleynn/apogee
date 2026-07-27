@@ -13,18 +13,43 @@ serde_json.workspace = true
 sha2.workspace = true
 zip.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tempfile.workspace = true
+url.workspace = true
+# The signed component manifest: parse its JSON and verify the Ed25519 signature against the compiled-in
+# key before any sha256 pin inside is trusted.
+ed25519-dalek.workspace = true
 apogee-runtime = { path = "../apogee-runtime" }
 apogee-fetch = { path = "../apogee-fetch" }
+# Only under `testing`, to build a client that trusts the test server's certificate.
+reqwest = { workspace = true, optional = true }
 
 # openat/mkdirat against a held directory descriptor for restore, and signalling a process group from
 # a drop for companion teardown. Both keep #![forbid(unsafe_code)].
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 
+[features]
+# Gates tests that need a real host `wine`; run only in the wine-present CI job.
+wine-integration = []
+# Gates the manifest-fetch tests, which need a client that trusts the test server's loopback
+# certificate. Dependency injection, not a certificate bypass.
+testing = ["apogee-fetch/testing", "dep:reqwest"]
+
 [dev-dependencies]
 insta.workspace = true
-apogee-fetch = { path = "../apogee-fetch" }
+apogee-test-support = { path = "../apogee-test-support" }
+serial_test.workspace = true
+# A prefix handle over a scratch directory, so the install tests need no real wine.
+apogee-runtime = { path = "../apogee-runtime", features = ["testing"] }
+
+[[test]]
+name = "verb_wine"
+required-features = ["wine-integration"]
+
+[[test]]
+name = "manifest_fetch"
+required-features = ["testing"]
 
 [lints]
 workspace = true

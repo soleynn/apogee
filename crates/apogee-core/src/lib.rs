@@ -24,7 +24,10 @@ mod transport;
 pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
 #[cfg(unix)]
 pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
-pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome as AddonOutcome, RunIn, Trigger};
+pub use apogee_addons::{
+    AddonEvent, ComponentEvent, ComponentManifest, ComponentState, ExternalAddon,
+    Outcome as AddonOutcome, RunIn, ToolKind, Trigger,
+};
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{BenchError, BenchStats, FrameLog};

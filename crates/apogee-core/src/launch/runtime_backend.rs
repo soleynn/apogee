@@ -88,6 +88,20 @@ impl RuntimeLauncher {
 
 #[async_trait::async_trait]
 impl LaunchBackend for RuntimeLauncher {
+    async fn prepare(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<Prefix>, CoreError> {
+        let progress = relay_progress(events);
+        Ok(Some(
+            self.prepare_prefix(runner, prefix_dir, cancel, &progress)
+                .await?,
+        ))
+    }
+
     async fn launch(
         &self,
         req: LaunchRequest,

@@ -41,8 +41,10 @@ jobs:
             echo "fuzz=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # The crates behind the fuzz targets, plus the fuzz workspace itself.
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-cryptography|apogee-sqpack|apogee-zipatch|apogee-runtime)/)'; then
+          # The crates behind the fuzz targets, plus the fuzz workspace itself. Every name has to be a
+          # real directory: `crates/sqex-cryptography` matched nothing, and a crate left off this list
+          # means a change to it skips the target that covers it.
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons)/)'; then
             echo "fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "fuzz=false" >> "$GITHUB_OUTPUT"
@@ -110,6 +112,13 @@ jobs:
       # The unverified-download-over-TLS test needs a client that trusts a loopback test certificate,
       # exposed only behind apogee-fetch's test-only `testing` feature, so it runs as its own step.
       - run: cargo test -p apogee-fetch --features testing --test none_over_tls
+      # Same reason: the component-manifest fetch is checked over TLS against a loopback certificate. It
+      # is what pins the property that a manifest edit reaches the client at all.
+      - run: cargo test -p apogee-addons --features testing --test manifest_fetch
+      # The runner catalog's equivalent. This one already rides along with the workspace run above,
+      # because apogee-addons dev-depends on apogee-runtime with `testing` on and that resolves
+      # workspace-wide. Named anyway so the coverage does not rest on another crate's dev-dependency.
+      - run: cargo test -p apogee-runtime --features testing --test catalog_fetch
       # The corpus fetcher lives behind the `corpus` feature (off by default so it stays out of the
       # plain and cross builds); its self-test is hermetic (chaos-server-backed, no network).
       - run: cargo test -p apogee-test-support --features corpus corpus
@@ -155,6 +164,18 @@ jobs:
         env:
           WINEDEBUG: "-all"
         run: cargo test -p apogee-runtime --features wine-integration --test prefix_wine -- --test-threads=1
+      # Running a setup program inside a prefix: `reg` resolves as a program there, a write is visible to
+      # a later read, and repeating it succeeds rather than blocking on an overwrite prompt.
+      - name: Prefix setup programs under stock wine
+        env:
+          WINEDEBUG: "-all"
+        run: cargo test -p apogee-runtime --features wine-integration --test prefix_program_wine -- --test-threads=1
+      # The shipped prefix verb applied to a real prefix three times: applied, a no-op, and applied again
+      # over a value already set, which is the part the prefix's own record cannot stand in for.
+      - name: Prefix verbs under stock wine
+        env:
+          WINEDEBUG: "-all"
+        run: cargo test -p apogee-addons --features wine-integration --test verb_wine -- --test-threads=1
       # End-to-end: the CLI logs in against scripted fixtures and launches a stub game through system
       # wine, resolving the real process and killing it. This is the login → register → launch proof
       # and the output leak detector.
@@ -264,6 +285,8 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz run fetch_journal --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build index_manifest --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run index_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build component_manifest --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run component_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
 
   # The one live call: an unauthenticated GET to SE's boot endpoint, confirming the patchlist parser
   # handles genuinely-current output. An amber canary (continue-on-error) with one retry, so an SE CDN

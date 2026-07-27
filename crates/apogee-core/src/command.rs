@@ -64,6 +64,11 @@ pub enum Command {
     Repair {
         profile: Uuid,
     },
+    /// Install the companion components the profile has enabled into its prefix, applying the prefix
+    /// setup they ask for. Idempotent, and does not launch.
+    Components {
+        profile: Uuid,
+    },
     FirstRun(FirstRunStep),
     ImportXivLauncher(PathBuf),
     /// Fetch pre-login display data (news, gate status, banners).
@@ -104,6 +109,10 @@ impl fmt::Debug for Command {
             Command::Repair { profile } => {
                 f.debug_struct("Repair").field("profile", profile).finish()
             }
+            Command::Components { profile } => f
+                .debug_struct("Components")
+                .field("profile", profile)
+                .finish(),
             Command::FirstRun(step) => f.debug_tuple("FirstRun").field(step).finish(),
             Command::ImportXivLauncher(path) => {
                 f.debug_tuple("ImportXivLauncher").field(path).finish()
@@ -134,6 +143,10 @@ pub enum Event {
     Patch(PatchProgress),
     /// One of the user's own tools started, stopped, or failed. Relayed verbatim, like `Patch`.
     Addon(apogee_addons::AddonEvent),
+    /// A companion component being installed, or a caveat about one. Relayed verbatim; the caveats in
+    /// particular are the reason this is a stream rather than a report, since they are only useful while
+    /// the thing is being set up.
+    Component(apogee_addons::ComponentEvent),
     Frontier(FrontierData),
     Error(CoreError),
 }
@@ -158,6 +171,8 @@ pub enum FlowState {
     VersionNotServiced,
     /// The game's settings are being captured before patches are applied.
     BackingUp,
+    /// Companion components are being installed into the prefix.
+    InstallingComponents,
     /// Patches are being applied.
     Patching,
     /// The install is being verified and repaired against its block index.
@@ -171,6 +186,13 @@ pub enum FlowState {
     SupervisingAddons,
     /// The game process has exited (no exit status is available for a non-child descendant).
     Exited,
+    /// The run stopped because the cancellation token fired, so whatever was left is not done.
+    ///
+    /// A disposition rather than an [`Event::Error`]: a shell counts failures to decide whether it got
+    /// what it asked for, and a run the user stopped on purpose has nothing to count. A supervised
+    /// launch already ends this way (killing the game and narrating its exit), so a cancelled patch or
+    /// component install ending in a failure would be the same act reported two ways.
+    Cancelled,
 }
 
 /// A completion ratio relayed from a subsystem. Numeric only: the shell supplies any label.

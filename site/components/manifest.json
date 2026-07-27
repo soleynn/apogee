@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "tools": [],
+  "verbs": [
+    {
+      "name": "no-desktop-integration",
+      "reason": "Wine writes desktop entries and file associations into the host session when a program in the prefix creates a shortcut. A prefix the launcher manages has no business adding entries to the user's application menu, so this is applied before any Windows component is installed into one.",
+      "ops": [
+        {
+          "registry": {
+            "key": "HKCU\\Software\\Wine\\DllOverrides",
+            "name": "winemenubuilder.exe",
+            "type": "disabled"
+          }
+        }
+      ]
+    }
+  ]
+}
