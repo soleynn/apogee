@@ -953,6 +953,122 @@ async fn installing_components_reports_a_failure_rather_than_finishing_quietly()
     );
 }
 
+/// Stopping an install is not the same as one that went wrong. The failure count exists to tell a shell
+/// that what it asked for did not happen, and a run the user stopped on purpose has nothing to count: it
+/// is narrated, and a shell that reads failures off the stream sees none.
+#[tokio::test]
+async fn a_cancelled_component_install_is_narrated_rather_than_counted_as_a_failure() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let addons = Arc::new(FakeAddons::new().cancelling());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    // The install was reached and stopped there: no "N of M could not be installed", and nothing on the
+    // stream a shell would turn into a non-zero exit.
+    assert_eq!(
+        addons.calls(),
+        [AddonCall::Ensured {
+            wanted: vec!["ACT".to_owned()],
+        }]
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a cancelled run is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [FlowState::InstallingComponents, FlowState::Cancelled]
+    );
+}
+
+/// Ctrl-C during prefix creation. The prefix is made before anything is installed into it and it is the
+/// longest part of a first run, so it is the phase a user is most likely to stop, and the runner reports
+/// it as a setup step that did not finish rather than as a stopped download. Read as a failure, the one
+/// thing a user does deliberately ends in a failed install and a non-zero exit.
+#[tokio::test]
+async fn stopping_a_prefix_while_it_is_being_created_is_narrated_rather_than_failed() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let launch = Arc::new(FakeLaunchBackend::cancelled_while_preparing());
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert_eq!(
+        launch.prepared().len(),
+        1,
+        "the run has to have reached prefix preparation for this to be the path under test"
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a prefix the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(states(&events), [FlowState::Cancelled]);
+    // Nothing announced an install either: there is no prefix to install into.
+    assert!(addons.calls().is_empty(), "{:?}", addons.calls());
+}
+
+/// The same stop one step later. The catalog is fetched before the install loop that answers for a step
+/// the token interrupted, so a run stopped there is spelled by the download rather than by the addons,
+/// and a reading that knows only the loop's word for it calls the same Ctrl-C a failure.
+#[tokio::test]
+async fn stopping_the_component_catalog_download_is_narrated_rather_than_failed() {
+    let h = harness_customized(false, |profile| {
+        profile.components.push(ComponentSelection {
+            id: "ACT".to_owned(),
+            enabled: true,
+        });
+    });
+    let addons = Arc::new(FakeAddons::new().cancelling_in_the_catalog());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Components { profile: h.profile }).await;
+
+    assert!(
+        errors(&events).is_empty(),
+        "a catalog fetch the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(
+        states(&events),
+        [FlowState::InstallingComponents, FlowState::Cancelled]
+    );
+}
+
 /// A profile with no components asks nothing of the seam and reaches no catalog, so the feature costs a
 /// user who does not use it nothing at all.
 #[tokio::test]
@@ -1390,6 +1506,34 @@ async fn patch_applies_pending_without_launching() {
     );
     assert_eq!(patch.installed_repos(), [Repo::Game]);
     assert_eq!(launch.launch_count(), 0, "patch does not launch");
+}
+
+/// Ctrl-C during a patch. Patching is the longest stretch of a real run, so it is the phase a user is
+/// most likely to stop, and the patcher spells the stop in its own taxonomy. Read as anything but a
+/// cancellation it becomes an error on the stream and a non-zero exit, which tells a user who stopped
+/// the download themselves that their install is broken.
+#[tokio::test]
+async fn stopping_a_patch_is_narrated_rather_than_failed() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(login_then_patch()));
+    let patch = Arc::new(FakePatchBackend::new().cancelling());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport, patch.clone(), launch.clone(), NOW);
+
+    let events = run(ctx, patch_cmd(h.profile)).await;
+
+    assert_eq!(
+        patch.installs().len(),
+        1,
+        "the run has to have reached the patcher for this to be the path under test"
+    );
+    assert!(
+        errors(&events).is_empty(),
+        "a patch the user stopped is not a failure: {:?}",
+        errors(&events)
+    );
+    assert_eq!(states(&events), [FlowState::Patching, FlowState::Cancelled]);
+    assert_eq!(launch.launch_count(), 0);
 }
 
 #[tokio::test]

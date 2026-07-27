@@ -42,6 +42,10 @@ pub(crate) struct FakeAddons {
     registrations: Vec<ExternalAddon>,
     /// Components the install reports as failed.
     component_failures: Vec<String>,
+    /// Whether the install stops on a cancellation instead of returning a report.
+    cancels: bool,
+    /// Whether it stops before the install, while the catalog is still being downloaded.
+    cancels_in_catalog: bool,
 }
 
 impl FakeAddons {
@@ -71,6 +75,22 @@ impl FakeAddons {
     /// success.
     pub(crate) fn component_failure(mut self, component: &str) -> Self {
         self.component_failures.push(component.to_owned());
+        self
+    }
+
+    /// Stop the install the way a cancelled one stops: fire the token, then answer the cancellation
+    /// rather than a report. The real seam has no report to give once the token has gone, since the step
+    /// that was in flight never finished and the ones behind it were never started.
+    pub(crate) fn cancelling(mut self) -> Self {
+        self.cancels = true;
+        self
+    }
+
+    /// Stop it a step earlier, while the signed catalog is still downloading. The install loop that
+    /// answers for a stopped step has not been reached yet, so what comes back is the download saying
+    /// it was stopped, which is a different sentence for the same thing.
+    pub(crate) fn cancelling_in_the_catalog(mut self) -> Self {
+        self.cancels_in_catalog = true;
         self
     }
 
@@ -107,10 +127,20 @@ impl AddonBackend for FakeAddons {
         &self,
         _prefix: Option<Prefix>,
         wanted: Vec<String>,
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Result<ComponentReport, CoreError> {
         self.record(AddonCall::Ensured { wanted });
+        if self.cancels_in_catalog {
+            cancel.cancel();
+            return Err(CoreError::Addons(apogee_addons::AddonError::Download(
+                apogee_fetch::FetchError::Cancelled,
+            )));
+        }
+        if self.cancels {
+            cancel.cancel();
+            return Err(CoreError::Addons(apogee_addons::AddonError::Cancelled));
+        }
         Ok(ComponentReport {
             outcomes: self
                 .component_failures

@@ -66,7 +66,8 @@ pub(crate) struct FlowContext {
     pub(crate) backups_dir: std::path::PathBuf,
 }
 
-/// Run `cmd` to completion, emitting its events on `tx`. A failure becomes an [`Event::Error`].
+/// Run `cmd` to completion, emitting its events on `tx`. A failure becomes an [`Event::Error`]; a run
+/// the token stopped becomes [`FlowState::Cancelled`], which is not one.
 pub(crate) async fn drive(
     ctx: FlowContext,
     cmd: Command,
@@ -138,8 +139,44 @@ pub(crate) async fn drive(
         Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
         Command::SupportBundle => todo!("collect a redacted diagnostic bundle"),
     };
-    if let Err(error) = outcome {
-        let _ = tx.send(Event::Error(error));
+    match outcome {
+        Ok(()) => {}
+        // Read here rather than at each call site, so every flow that carries the token reports being
+        // stopped the same way: one disposition on the stream, and nothing a shell counts as a failure.
+        Err(error) if is_cancellation(&error) => emit(&tx, FlowState::Cancelled),
+        Err(error) => {
+            let _ = tx.send(Event::Error(error));
+        }
+    }
+}
+
+/// Whether `error` is the run stopping because it was asked to, rather than something going wrong.
+///
+/// Each subsystem spells cancellation in its own taxonomy, so the reading is per-variant rather than a
+/// query on the token: a run can be cancelled and still fail for an unrelated reason first, and that
+/// failure is the one worth reporting.
+///
+/// The ones that spell it one way are read here. The runtime spells it four ways (a stopped download, a
+/// `wineboot` the token interrupted, a setup program killed mid-run, a wait for the game process that
+/// gave up because it was asked to), and restating that list here is how one of them gets missed: a
+/// first run spends most of its time creating a prefix, so the one it costs is the one a user is most
+/// likely to stop. It answers for itself instead.
+///
+/// There is no arm for a bare [`CoreError::Fetch`]. Every download a command makes belongs to a
+/// subsystem and arrives in that subsystem's taxonomy; the one place fetch's own error reaches this
+/// type unwrapped is building the HTTP client while a [`FlowContext`] is assembled, which happens
+/// before there is a command to stop.
+fn is_cancellation(error: &CoreError) -> bool {
+    match error {
+        CoreError::Patch(apogee_patcher::PatchError::Cancelled)
+        | CoreError::Addons(apogee_addons::AddonError::Cancelled)
+        // The component catalog is fetched before the install loop that turns a stopped step into the
+        // addons' own cancellation, so a run stopped during that download arrives spelled as the fetch.
+        | CoreError::Addons(apogee_addons::AddonError::Download(
+            apogee_fetch::FetchError::Cancelled,
+        )) => true,
+        CoreError::Runtime(error) => error.is_cancellation(),
+        _ => false,
     }
 }
 

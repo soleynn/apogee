@@ -12,11 +12,15 @@ pub(crate) mod addons_backend;
 #[cfg(test)]
 pub(crate) mod fake;
 
+use apogee_addons::{ComponentReport, ExternalAddon};
 use apogee_runtime::Prefix;
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+use crate::command::Event;
+use crate::error::CoreError;
 
 /// Resolve the component catalog manifest and signature URLs. Hosted at a fixed HTTPS location with the
 /// detached signature beside it under the same name plus `.sig`. `APOGEE_COMPONENT_CATALOG_URL` overrides
@@ -38,11 +42,6 @@ fn parse_url(raw: &str) -> Result<Url, CoreError> {
         },
     })
 }
-
-use apogee_addons::{ComponentReport, ExternalAddon};
-
-use crate::command::Event;
-use crate::error::CoreError;
 
 /// Drives `apogee-addons` for one launch, relaying its events onto the core event stream.
 #[async_trait]

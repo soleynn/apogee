@@ -186,6 +186,13 @@ pub enum FlowState {
     SupervisingAddons,
     /// The game process has exited (no exit status is available for a non-child descendant).
     Exited,
+    /// The run stopped because the cancellation token fired, so whatever was left is not done.
+    ///
+    /// A disposition rather than an [`Event::Error`]: a shell counts failures to decide whether it got
+    /// what it asked for, and a run the user stopped on purpose has nothing to count. A supervised
+    /// launch already ends this way (killing the game and narrating its exit), so a cancelled patch or
+    /// component install ending in a failure would be the same act reported two ways.
+    Cancelled,
 }
 
 /// A completion ratio relayed from a subsystem. Numeric only: the shell supplies any label.

@@ -102,6 +102,8 @@ pub(crate) mod fake {
         /// doing anything else can be checked on rather than taken on trust.
         prepared: Mutex<Vec<std::path::PathBuf>>,
         auto_exit: bool,
+        /// Whether `prepare` stops the way a runner does when the token fires mid-`wineboot`.
+        cancel_prepare: bool,
         killed: Arc<AtomicBool>,
     }
 
@@ -116,11 +118,22 @@ pub(crate) mod fake {
             Self::with_auto_exit(false)
         }
 
+        /// A backend whose `prepare` never finishes creating the prefix because the run was stopped.
+        /// It hands back the error the real runner does, rather than a stand-in, because what is being
+        /// checked is whether that error reads as a cancellation once it reaches the flow.
+        pub(crate) fn cancelled_while_preparing() -> Self {
+            Self {
+                cancel_prepare: true,
+                ..Self::with_auto_exit(true)
+            }
+        }
+
         fn with_auto_exit(auto_exit: bool) -> Self {
             Self {
                 recorded: Mutex::new(Vec::new()),
                 prepared: Mutex::new(Vec::new()),
                 auto_exit,
+                cancel_prepare: false,
                 killed: Arc::new(AtomicBool::new(false)),
             }
         }
@@ -169,6 +182,13 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(prefix_dir.to_path_buf());
+            if self.cancel_prepare {
+                return Err(apogee_runtime::RuntimeError::PrefixInit {
+                    step: apogee_runtime::SetupStep::WinebootInit,
+                    source: Box::new(apogee_runtime::StepCancelled),
+                }
+                .into());
+            }
             // No prefix: a fake runner has no wine to initialize one with, and the flows that consume
             // one are written to treat its absence as nothing to do.
             Ok(None)

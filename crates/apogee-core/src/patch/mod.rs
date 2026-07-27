@@ -125,11 +125,21 @@ pub(crate) mod fake {
     pub(crate) struct FakePatchBackend {
         installs: Mutex<Vec<InstallRequest>>,
         repairs: Mutex<Vec<RepairPlan>>,
+        /// Whether an install stops on a cancellation instead of returning a version.
+        cancels: bool,
     }
 
     impl FakePatchBackend {
         pub(crate) fn new() -> Self {
             Self::default()
+        }
+
+        /// Stop the patch the way a cancelled one stops: fire the token, then answer the patcher's
+        /// cancellation rather than an installed version. The request is still recorded, since the
+        /// work was asked for and started; what is missing is a repo brought up to a new version.
+        pub(crate) fn cancelling(mut self) -> Self {
+            self.cancels = true;
+            self
         }
 
         /// The install requests received, in order.
@@ -159,7 +169,7 @@ pub(crate) mod fake {
         async fn install(
             &self,
             request: InstallRequest,
-            _cancel: &CancellationToken,
+            cancel: &CancellationToken,
             events: &UnboundedSender<Event>,
         ) -> Result<Installed, CoreError> {
             let repo = request.repo;
@@ -169,20 +179,26 @@ pub(crate) mod fake {
                 .last()
                 .map(|p| bare_version(&p.version_id))
                 .unwrap_or_default();
-
-            materialize(&request.game_root, repo, &new_version);
-
+            let game_root = request.game_root.clone();
             let index = u32::try_from(request.patches.len().saturating_sub(1)).unwrap_or(0);
+            // Recorded before the outcome is decided, so a request that was asked for and then stopped
+            // is one a test can still see.
+            self.installs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request);
+
+            if self.cancels {
+                cancel.cancel();
+                return Err(CoreError::Patch(apogee_patcher::PatchError::Cancelled));
+            }
+
+            materialize(&game_root, repo, &new_version);
             let _ = events.send(Event::Patch(PatchProgress::Applied {
                 repo,
                 index,
                 version: new_version.clone(),
             }));
-
-            self.installs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(request);
             Ok(Installed { repo, new_version })
         }
 
