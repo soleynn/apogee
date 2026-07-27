@@ -76,12 +76,13 @@ dependencies = [
  "apogee-test-support",
  "async-trait",
  "ed25519-dalek",
- "insta",
+ "md-5",
  "reqwest",
  "rustix",
  "serde",
  "serde_json",
  "serial_test",
+ "sha1",
  "sha2",
  "tempfile",
  "thiserror",
@@ -1264,6 +1265,16 @@ checksum = "297e814c836ae64db86b36cf2a557ba54368d03f6afcd7d947c266692f71115e"
 dependencies = [
  "byteorder",
  "crc",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
 ]
 
 [[package]]
