@@ -29,10 +29,20 @@ directory, ACT's update check turned off, a parser plugin that ships nowhere but
 wizard, and a 220 MB Chromium bundle OverlayPlugin fetches at runtime, unpinned, and re-fetches whenever
 it is missing.
 
-Nothing in the catalog replaces them. The remaining intended scope is XivAlexander and Dalamud; combat
-data is IINACT, a Dalamud plugin that needs no wine, no .NET, no mono, no CEF and no injection, installed through
-Dalamud's own plugin installer, and Triggevent consumes its port-10501 WebSocket the same way it consumed
-OverlayPlugin's. Both are out of scope here and are the user's own business.
+Nothing in the catalog replaces them. Combat data is IINACT, a Dalamud plugin that needs no wine, no
+.NET, no mono, no CEF and no injection, installed through Dalamud's own plugin installer, and Triggevent
+consumes its port-10501 WebSocket the same way it consumed OverlayPlugin's. Both are out of scope here
+and are the user's own business.
+
+**This catalog is being dismantled** (decided 2026-07-26, after the withdrawal above). There is no
+user-facing component catalog: Dalamud becomes a launch setting rather than a row, the verbs become
+prefix setup the launch path applies on its own, and a user-supplied program is `addon add`'s job. The
+reasoning is that Dalamud already is the addon manager, since IINACT, NoClippy and everything else worth
+having installs through its plugin repository, in-process and patch-aware, with no wine specifics to get
+wrong. A second catalog curating Windows desktop applications into a prefix competes with that instead of
+adding to it. So this file documents a schema whose tool rows have no consumer, and whether the manifest
+should remain a signed hosted file at all (rather than the verbs becoming compiled-in constants) is an
+open question. See m3-wine.md §5 and §11.
 
 ## Schema
 
