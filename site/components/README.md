@@ -13,6 +13,27 @@ cadences, and one compromised signer should not authenticate both.
 
 Signed with a **staging** key for development; the production key ceremony is separate.
 
+## What it carries now
+
+One verb, `no-desktop-integration`. `tools` is empty and there are no injectables.
+
+The combat-data companions it used to carry (ACT, OverlayPlugin, Triggevent, and the `dotnet48` verb they
+named) were withdrawn on 2026-07-26. The verb worked: Microsoft's pinned .NET Framework 4.8 installer
+exits 0 in about 72 seconds and lands 760 files, reproduced on five throwaway prefixes across stock wine
+10.0 and wine-xiv-staging 10.8. It was the wrong dependency. .NET Framework cannot host managed code under
+any wine available, because wine's `mscoree.dll` only ever loads Wine Mono and Microsoft's installer never
+ships an `mscoree.dll` of its own (it is an OS component from Windows 7 on). ACT does run on wine-mono
+9.4.0, which self-reports as ".NET v4.8.1+", but only behind a stack of workarounds no row here can
+express: a patched `Advanced Combat Tracker.exe.config`, `MONO_PATH` pointed at a plugin's own libs
+directory, ACT's update check turned off, a parser plugin that ships nowhere but ACT's own first-run
+wizard, and a 220 MB Chromium bundle OverlayPlugin fetches at runtime, unpinned, and re-fetches whenever
+it is missing.
+
+Nothing in the catalog replaces them. The remaining intended scope is XivAlexander and Dalamud; combat
+data is IINACT, a Dalamud plugin that needs no wine, no .NET, no mono, no CEF and no injection, installed through
+Dalamud's own plugin installer, and Triggevent consumes its port-10501 WebSocket the same way it consumed
+OverlayPlugin's. Both are out of scope here and are the user's own business.
+
 ## Schema
 
 ```jsonc
@@ -73,8 +94,8 @@ those and is not read yet.
 
 ## Why the destinations are data
 
-Several `into` values are informed guesses about where a Windows program looks for its own plugins. That
-is exactly why they are rows rather than constants: correcting one is an edit here plus a re-sign, not a
+An `into` value is an informed guess about where a Windows program looks for its own plugins. That is
+exactly why it is a row rather than a constant: correcting one is an edit here plus a re-sign, not a
 release.
 
 ## Why a verb states what it produces
@@ -85,31 +106,36 @@ jobs at once:
 - A verb whose ops "succeeded" without producing these paths is a **failure**, so a half-finished install
   is not remembered as done and the next `ensure` tries again.
 - A verb the prefix records but whose paths have since **gone** is applied again. That is not theoretical:
-  Proton removes a `Microsoft.NET` directory it judges broken on a prefix upgrade, so without this the
-  record would say .NET is installed while it is not, forever.
+  Proton removes a `Microsoft.NET` directory it judges broken on a prefix upgrade, so without this a record
+  of a framework install would outlive the files, forever.
 - It is the same evidence a health view would want.
 
-It is optional, and empty is the honest answer for a verb whose whole effect is a registry value — there
+It is optional, and empty is the honest answer for a verb whose whole effect is a registry value: there
 is no file to look for, and the prefix's record is the only evidence there is. A verb with a `run` op may
 **not** be empty, and is refused at parse time if it is.
+
+What it does not do is decide that what arrived works, and the withdrawn `dotnet48` is the lesson. Both of
+its paths were genuinely present on prefixes where nothing managed could load, so a file existence check
+reported success for an install that was useless. File existence is a weak predicate. Treat a `verify` as
+the floor of a component's evidence, and put anything that exercises the component in a functional check
+rather than here.
 
 ## Why the op list is four, and why `run` is the shape it is
 
 Three of the ops are idempotent by construction: a registry write overwrites rather than adds, a removal
 treats "it was not there" as success, and a file placement overwrites. That is the selection criterion,
-not a coincidence — anything a verb does has to be safe to do twice, because the only thing between a
+not a coincidence: anything a verb does has to be safe to do twice, because the only thing between a
 re-apply and a re-run is the prefix's own record.
 
 `run` is the exception and is deliberately narrow. It runs a **pinned download and nothing else**: it
 cannot invoke something already in the prefix, there is no shell, and its verb must carry a `verify`. An
-opaque installer's exit status is not evidence — several vendor installers exit non-zero having worked and
-several exit zero having done nothing — so the status is reported and the `verify` is what decides.
+opaque installer's exit status is not evidence (several vendor installers exit non-zero having worked and
+several exit zero having done nothing), so the status is reported and the `verify` is what decides.
 
-The one row that uses it is `dotnet48`, for ACT. It is the least certain thing in this catalog: six ops,
-one of which is a 120 MB Microsoft installer, and the sequence has **not yet been observed to complete on a
-real runner**. Its `verify` is what makes that a reported failure with a retry rather than a silent one,
-and the ACT row still names `winetricks`/`protontricks` as the fallback. Apogee is not a winetricks: the op
-set stays at four, and a component needing something these cannot express states it as a caveat instead.
+No row uses it. Its only consumer was `dotnet48`, withdrawn with the companions that named it, and whether
+`run` stays at all is undecided. The narrowness argument does not depend on having a consumer: Apogee is
+not a winetricks, the op set stays at four, and a component needing something these four cannot express
+states it as a caveat and names `winetricks` or `protontricks` as the fallback against that prefix.
 
 ## Adding or updating a row
 

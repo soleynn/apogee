@@ -1336,8 +1336,15 @@ mod tests {
     }
 
     /// The hosted manifest and its detached signature, embedded at build time, must verify against the
-    /// compiled-in key and expose the components the launcher offers. This catches a mistyped key, a
-    /// manifest reformatted after signing, or a row dropped by an edit.
+    /// compiled-in key. This catches a mistyped key, a manifest reformatted after signing, or a row
+    /// dropped by an edit.
+    ///
+    /// The catalog currently offers prefix setup and nothing else. The combat-data companions it used to
+    /// carry (ACT, OverlayPlugin, Triggevent) were withdrawn: ACT is a .NET Framework application, and on
+    /// the runners available to us the framework installs but cannot host managed code, because Wine's
+    /// `mscoree.dll` only ever loads Wine Mono and no artifact supplies a genuine one. Everything
+    /// downstream of ACT went with it. So this asserts what is true now, that every row parses and
+    /// nothing is advertised that this build cannot drive, rather than naming rows.
     #[test]
     fn the_hosted_manifest_verifies_against_the_compiled_in_key() {
         let manifest = include_bytes!("../../../site/components/manifest.json");
@@ -1345,18 +1352,26 @@ mod tests {
         let parsed = ComponentManifest::verify_default(manifest, signature)
             .expect("the hosted manifest verifies and parses against the compiled-in key");
 
-        let act = parsed.tool("ACT").expect("ACT is offered");
-        assert_eq!(act.kind, ToolKind::PrefixTool);
-        assert!(
-            !act.caveats.is_empty(),
-            "ACT cannot be offered without stating what it needs"
-        );
-        let triggevent = parsed.tool("Triggevent").expect("Triggevent is offered");
-        assert_eq!(triggevent.kind, ToolKind::ExternalNative);
+        // Every verb has to say why it exists, since that is what a reviewer reads.
+        assert!(!parsed.verbs.is_empty(), "the catalog offers prefix setup");
+        for verb in &parsed.verbs {
+            assert!(
+                !verb.reason.is_empty(),
+                "verb {:?} is offered without a reason",
+                verb.name
+            );
+        }
         // Nothing may be offered that this build cannot drive.
         assert!(
             parsed.injectables.is_empty(),
             "an injectable row would advertise a component nothing installs yet"
         );
+        for tool in &parsed.tools {
+            assert!(
+                !tool.caveats.is_empty(),
+                "tool {:?} cannot be offered without stating what it needs",
+                tool.name
+            );
+        }
     }
 }
