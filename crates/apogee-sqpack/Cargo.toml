@@ -20,6 +20,8 @@ tempfile.workspace = true
 # install; serde_json reads them, sha2 re-hashes the live header in the install-gated test.
 serde_json.workspace = true
 sha2.workspace = true
+# The lookup-agrees-with-a-linear-scan property over synthetic index containers.
+proptest.workspace = true
 
 [lints]
 workspace = true
