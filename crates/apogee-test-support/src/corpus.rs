@@ -3,7 +3,7 @@
 //! Large reference inputs (the boot patch corpus) are never checked in; they are fetched once into a
 //! cache directory, keyed by digest, and verified against a pinned SHA256 before any test reads them.
 //! Boot patches are served over plain HTTP and carry no upstream per-file hash, so the pin is a
-//! trust-on-first-download digest the maintainer records once (§the milestone runbook).
+//! trust-on-first-download digest the maintainer records once.
 //!
 //! The fetch reuses [`apogee_fetch`]'s verified downloader rather than a second HTTP client: the pin
 //! then covers the on-wire bytes (that client disables transparent gzip/deflate), and resume, retry,

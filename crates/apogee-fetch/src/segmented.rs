@@ -681,7 +681,7 @@ async fn stream_segment(
     }
     match content_range(&resp) {
         // The range must start where we asked, and the server's total (when concrete) must match the
-        // caller's declared length - the §3.7 cross-check the single-connection path also enforces.
+        // caller's declared length - the same cross-check the single-connection path also enforces.
         Some((first, total)) => {
             if first != range.start {
                 return SegmentResult::Fatal(FetchError::Http {
