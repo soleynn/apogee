@@ -61,6 +61,17 @@ impl SupportTier {
     }
 }
 
+impl std::fmt::Display for SupportTier {
+    /// The tier and not its note. The note is a caveat the user is shown before anything is fetched,
+    /// on its own event, and repeating a paragraph of it inside a one-line failure buries the failure.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::FirstClass => "first class",
+            Self::BestEffort { .. } => "best effort",
+        })
+    }
+}
+
 /// Prefix-setup and injection failures.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -86,7 +97,7 @@ pub enum AddonError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("injection of {injectable} failed ({tier:?})")]
+    #[error("injection of {injectable} failed ({tier} tier)")]
     Inject {
         injectable: String,
         tier: SupportTier,

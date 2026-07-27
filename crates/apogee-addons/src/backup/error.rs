@@ -53,7 +53,7 @@ pub enum BackupError {
     TooManyEntries { found: usize, limit: usize },
     #[error("{found} bytes selected, more than the {limit} an archive may hold")]
     TooLarge { found: u64, limit: u64 },
-    #[error("archive entry {entry} refused: {reason:?}")]
+    #[error("archive entry {entry} refused: {reason}")]
     RejectedEntry { entry: String, reason: RejectReason },
     #[error("archive entry {entry} does not match the hash the archive recorded for it")]
     ContentMismatch { entry: String },
