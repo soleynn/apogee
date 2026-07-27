@@ -115,6 +115,10 @@ jobs:
       # Same reason: the component-manifest fetch is checked over TLS against a loopback certificate. It
       # is what pins the property that a manifest edit reaches the client at all.
       - run: cargo test -p apogee-addons --features testing --test manifest_fetch
+      # Dalamud's whole install pipeline against a distribution served entirely from loopback, for the
+      # same reason. Its own step because a gated test that nothing runs still compiles under clippy and
+      # so passes silently, which is the one failure mode a feature gate introduces.
+      - run: cargo test -p apogee-addons --features testing --test dalamud_fetch
       # The runner catalog's equivalent. This one already rides along with the workspace run above,
       # because apogee-addons dev-depends on apogee-runtime with `testing` on and that resolves
       # workspace-wide. Named anyway so the coverage does not rest on another crate's dev-dependency.

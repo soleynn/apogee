@@ -1,10 +1,22 @@
 {
   "version": 1,
-  "tools": [],
+  "injectables": [
+    {
+      "name": "Dalamud",
+      "kind": "dalamud",
+      "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
+      "tier": "best_effort",
+      "note": "Best with the wine-xiv runner: the injector's process handoff was written against its patches, and behind another runner the launcher's grip on the game it started is weaker.",
+      "caveats": [
+        "Third-party code is loaded into the game client. It is not Square Enix's and it is not this launcher's.",
+        "A game patch usually leaves it behind for a day or two. Until it catches up it is not loaded, and the game starts without it."
+      ]
+    }
+  ],
   "verbs": [
     {
       "name": "no-desktop-integration",
-      "reason": "Wine writes desktop entries and file associations into the host session when a program in the prefix creates a shortcut. A prefix the launcher manages has no business adding entries to the user's application menu, so this is applied before any Windows component is installed into one.",
+      "reason": "Wine writes desktop entries and file associations into the host session when a program in the prefix creates a shortcut. A prefix the launcher manages has no business adding entries to the user's application menu, so this is applied before any Windows program is run in one.",
       "ops": [
         {
           "registry": {

@@ -11,6 +11,10 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Dalamud's distribution publishes an MD5 map for its trees and a SHA1 per asset; these check what it
+# served against what it said it served.
+md-5.workspace = true
+sha1.workspace = true
 zip.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -37,7 +41,6 @@ wine-integration = []
 testing = ["apogee-fetch/testing", "dep:reqwest"]
 
 [dev-dependencies]
-insta.workspace = true
 apogee-test-support = { path = "../apogee-test-support" }
 serial_test.workspace = true
 # A prefix handle over a scratch directory, so the install tests need no real wine.
@@ -49,6 +52,10 @@ required-features = ["wine-integration"]
 
 [[test]]
 name = "manifest_fetch"
+required-features = ["testing"]
+
+[[test]]
+name = "dalamud_fetch"
 required-features = ["testing"]
 
 [lints]

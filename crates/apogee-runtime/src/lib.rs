@@ -348,11 +348,17 @@ impl Runtime {
             source,
         })?;
 
+        // What to look for in `/proc` is the game, which is not always the program that was spawned: a
+        // launch redirected through a loader starts the game as a separate process, and tracking the
+        // loader would report the launch as over the moment it handed off.
         let program = plan.program().to_owned();
-        let basename = std::path::Path::new(&program)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(program.as_str());
+        let basename = match plan.supervised() {
+            Some(named) => named,
+            None => std::path::Path::new(&program)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(program.as_str()),
+        };
         // The spawned runner process is the wine loader; it renames itself to the PE basename, so the
         // scanner must prefer the real game process over it.
         let wrapper_pid = child.id().map(|id| id as i32);

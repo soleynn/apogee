@@ -14,7 +14,7 @@ use crate::supervise::{successor, terminate_pid, wait_exit, watch_exit};
 #[non_exhaustive]
 pub struct GameExit {}
 
-/// A resolved, running game process, handed to injectables' `attach`.
+/// A resolved, running game process.
 pub struct GameSession {
     /// The currently-tracked pid. Wine and Proton rename a short-lived loader to the PE basename, run
     /// the game, and exit; `wait` follows that handoff so the tracked pid advances from a loader to

@@ -2,7 +2,7 @@
 //! Applying a real verb to a real prefix (feature `wine-integration`, run only in the wine-present CI
 //! job).
 //!
-//! The hermetic install tests use a verb with no ops, because a registry write needs a wine. This is the
+//! The hermetic tests apply verbs that place files, because a registry write needs a wine. This is the
 //! other half: the verb the hosted manifest actually ships, applied to a `wineboot`-initialized prefix,
 //! three times over. What it proves is the gate's property: that applying a verb again is a no-op that
 //! succeeds rather than a program waiting on a prompt, and that the prefix records it once either way.
@@ -11,7 +11,7 @@ use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use apogee_addons::{AddonPaths, Addons, ComponentEvents, ComponentManifest, ComponentState};
+use apogee_addons::{AddonPaths, Addons, ComponentManifest, SetupEvents, SetupState};
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, ProgramInPrefix, Progress, RunnerKind, Runtime, RuntimePaths};
 use serial_test::serial;
@@ -49,9 +49,7 @@ async fn prepared(root: &Path) -> Result<(Runtime, Addons, Prefix), Box<dyn Erro
     let addons = Addons::new(
         runtime.clone(),
         fetcher,
-        AddonPaths {
-            components: root.join("components"),
-        },
+        AddonPaths::new(root.join("addons")),
     );
     let runner_dir = root.join("runner");
     wine_runner(&runner_dir)?;
@@ -113,9 +111,8 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
     let root = tempfile::tempdir().expect("tempdir");
     let (runtime, addons, prefix) = prepared(root.path()).await.expect("prepare under wine");
     let manifest = hosted().expect("the hosted manifest verifies");
-    let wanted = vec!["no-desktop-integration".to_owned()];
     let cancel = CancellationToken::new();
-    let events = ComponentEvents::none();
+    let events = SetupEvents::none();
 
     assert!(
         !override_present(&runtime, &prefix)
@@ -125,7 +122,7 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
     );
 
     let first = addons
-        .ensure(&manifest, &prefix, &wanted, &cancel, &events)
+        .apply_setup(&manifest, &prefix, &cancel, &events)
         .await
         .expect("first apply");
     assert_eq!(first.present(), ["no-desktop-integration"]);
@@ -133,7 +130,7 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
         first
             .outcomes
             .iter()
-            .all(|o| o.state == ComponentState::Installed),
+            .all(|o| o.state == SetupState::Applied),
         "{first:?}"
     );
     assert!(
@@ -150,14 +147,14 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
     // The gate's property: applying again succeeds and does nothing, and the record does not grow a
     // second entry for the same verb.
     let second = addons
-        .ensure(&manifest, &prefix, &wanted, &cancel, &events)
+        .apply_setup(&manifest, &prefix, &cancel, &events)
         .await
         .expect("second apply");
     assert!(
         second
             .outcomes
             .iter()
-            .all(|o| o.state == ComponentState::AlreadyPresent),
+            .all(|o| o.state == SetupState::AlreadyPresent),
         "{second:?}"
     );
     assert_eq!(
@@ -170,14 +167,14 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
     // record cannot stand in for.
     forget_components(&prefix).expect("clear the record");
     let third = addons
-        .ensure(&manifest, &prefix, &wanted, &cancel, &events)
+        .apply_setup(&manifest, &prefix, &cancel, &events)
         .await
         .expect("apply over a value that is already set");
     assert!(
         third
             .outcomes
             .iter()
-            .all(|o| o.state == ComponentState::Installed),
+            .all(|o| o.state == SetupState::Applied),
         "{third:?}"
     );
     assert!(

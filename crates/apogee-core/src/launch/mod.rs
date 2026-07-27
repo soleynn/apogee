@@ -5,10 +5,12 @@
 //! process. The real backend ([`runtime_backend::RuntimeLauncher`]) wraps `apogee-runtime`; the
 //! opaque exit marker it returns is normalized to a code-less "the game exited" here (the game is a
 //! non-child descendant of the runner, so no exit status can be reaped).
+//!
+//! Preparing and launching are two calls rather than one. What a launch runs is decided between them:
+//! the prefix is brought up to date, and whatever loads into the game composes itself onto the plan.
+//! Folding them back together would mean the flow could not see the prefix it is about to launch into.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-
+use apogee_runtime::LaunchPlan;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
@@ -17,26 +19,6 @@ use crate::error::CoreError;
 use crate::model::RunnerSelection;
 
 pub(crate) mod runtime_backend;
-
-/// Everything needed to spawn one supervised game: which runner, into which prefix, the program and
-/// its working directory, the opaque encrypted argument string, and the launch environment.
-#[derive(Clone)]
-pub(crate) struct LaunchRequest {
-    /// Which runner to prepare and launch through.
-    pub(crate) runner: RunnerSelection,
-    /// The `WINEPREFIX` to launch into.
-    pub(crate) prefix_dir: PathBuf,
-    /// The absolute path to the game executable (`<game>/game/ffxiv_dx11.exe`).
-    pub(crate) program: String,
-    /// The child working directory (`<game>/game`), so the game resolves its data relative to itself.
-    pub(crate) working_dir: PathBuf,
-    /// The opaque `//**sqex0003…**//` argument string. Never logged; not carried in `Debug`.
-    pub(crate) encrypted_args: String,
-    /// Extra launch environment (region/DXVK passthrough, etc.).
-    pub(crate) env: BTreeMap<String, String>,
-    /// Wrapper commands composed around the launch (gamescope/gamemode/…).
-    pub(crate) wrappers: Vec<String>,
-}
 
 /// A prepared-and-spawned game the flow supervises.
 #[async_trait::async_trait]
@@ -67,11 +49,11 @@ pub(crate) trait LaunchBackend: Send + Sync {
         events: &UnboundedSender<Event>,
     ) -> Result<Option<apogee_runtime::Prefix>, CoreError>;
 
-    /// Prepare the runner named by `req` and spawn the game, relaying download/extract progress onto
-    /// `events` as [`Event::Progress`]. Returns a handle to the running game.
+    /// Spawn `plan` and supervise the game, relaying download/extract progress onto `events` as
+    /// [`Event::Progress`]. Returns a handle to the running game.
     async fn launch(
         &self,
-        req: LaunchRequest,
+        plan: LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<Box<dyn GameHandle>, CoreError>;
@@ -79,7 +61,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
 
 #[cfg(test)]
 pub(crate) mod fake {
-    //! An in-memory launch backend for the headless flow tests: it records the request and returns a
+    //! An in-memory launch backend for the headless flow tests: it records the plan and returns a
     //! handle whose exit is test-controlled, so the `Launching`/`Running`/`Exited` sequence is
     //! assertable without a runner or a real process.
 
@@ -89,7 +71,7 @@ pub(crate) mod fake {
     use tokio::sync::Notify;
 
     use super::{
-        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchRequest,
+        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchPlan,
         RunnerSelection, UnboundedSender,
     };
 
@@ -97,7 +79,7 @@ pub(crate) mod fake {
     /// `running` returns handles that stay running until killed. `was_killed` reports whether any
     /// launched game's `kill()` ran (the Ctrl-C path).
     pub(crate) struct FakeLaunchBackend {
-        recorded: Mutex<Vec<LaunchRequest>>,
+        recorded: Mutex<Vec<LaunchPlan>>,
         /// The prefix directories `prepare` was asked for, so a flow that has to prepare one before
         /// doing anything else can be checked on rather than taken on trust.
         prepared: Mutex<Vec<std::path::PathBuf>>,
@@ -146,8 +128,8 @@ pub(crate) mod fake {
                 .clone()
         }
 
-        /// The most recently launched request, if any.
-        pub(crate) fn last_request(&self) -> Option<LaunchRequest> {
+        /// The most recently launched plan, if any.
+        pub(crate) fn last_plan(&self) -> Option<LaunchPlan> {
             self.recorded
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -196,14 +178,14 @@ pub(crate) mod fake {
 
         async fn launch(
             &self,
-            req: LaunchRequest,
+            plan: LaunchPlan,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
         ) -> Result<Box<dyn GameHandle>, CoreError> {
             self.recorded
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(req);
+                .push(plan);
             let handle = FakeHandle {
                 exited: Arc::new(Notify::new()),
                 killed: self.killed.clone(),
@@ -247,39 +229,35 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::Path;
     use std::time::Duration;
 
     use tokio::sync::mpsc;
 
     use super::fake::FakeLaunchBackend;
-    use super::{CancellationToken, LaunchBackend, LaunchRequest};
+    use super::{CancellationToken, LaunchBackend, LaunchPlan};
     use crate::model::RunnerSelection;
-    use std::path::Path;
 
-    fn request() -> LaunchRequest {
-        LaunchRequest {
-            runner: RunnerSelection::SystemWine,
-            prefix_dir: "/tmp/apogee-prefix".into(),
-            program: "/games/ffxiv/game/ffxiv_dx11.exe".into(),
-            working_dir: "/games/ffxiv/game".into(),
-            encrypted_args: "//**sqex0003redacted**//".into(),
-            env: BTreeMap::new(),
-            wrappers: Vec::new(),
-        }
+    fn plan() -> LaunchPlan {
+        LaunchPlan::new(
+            "/games/ffxiv/game/ffxiv_dx11.exe",
+            "//**sqex0003redacted**//",
+            BTreeMap::new(),
+        )
     }
 
     #[tokio::test]
-    async fn a_fake_backend_records_the_request_and_exits() {
+    async fn a_fake_backend_records_the_plan_and_exits() {
         let backend = FakeLaunchBackend::exiting();
         let (tx, _rx) = mpsc::unbounded_channel();
         let handle = backend
-            .launch(request(), &CancellationToken::new(), &tx)
+            .launch(plan(), &CancellationToken::new(), &tx)
             .await
             .unwrap();
 
         assert_eq!(backend.launch_count(), 1);
         assert_eq!(
-            backend.last_request().unwrap().program,
+            backend.last_plan().unwrap().program(),
             "/games/ffxiv/game/ffxiv_dx11.exe"
         );
         // An exiting handle resolves its wait immediately.
@@ -309,7 +287,7 @@ mod tests {
         let backend = FakeLaunchBackend::running();
         let (tx, _rx) = mpsc::unbounded_channel();
         let handle = backend
-            .launch(request(), &CancellationToken::new(), &tx)
+            .launch(plan(), &CancellationToken::new(), &tx)
             .await
             .unwrap();
 

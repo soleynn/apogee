@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use apogee_addons::ExternalAddon;
 
-/// A launch configuration: one account, one game path, one runner and prefix, a component set.
+/// A launch configuration: one account, one game path, one runner and prefix, and the tools to run
+/// beside the game.
 ///
 /// Not `Eq`: an external addon keeps the keys a newer build might add, and those are arbitrary JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,7 +26,6 @@ pub struct Profile {
     pub game_path: PathBuf,
     pub runner: RunnerSelection,
     pub prefix: PrefixSelection,
-    pub components: Vec<ComponentSelection>,
     /// The user's own tools, run alongside the game in list order.
     #[serde(default)]
     pub external: Vec<ExternalAddon>,
@@ -43,7 +43,6 @@ impl Profile {
             game_path,
             runner: RunnerSelection::SystemWine,
             prefix: PrefixSelection::default(),
-            components: Vec::new(),
             external: Vec::new(),
             launch: LaunchSettings::default(),
         }
@@ -98,13 +97,6 @@ pub struct PrefixSelection {
     pub name: String,
 }
 
-/// A companion component a profile enables, referenced by catalog id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ComponentSelection {
-    pub id: String,
-    pub enabled: bool,
-}
-
 /// Region and per-launch overrides applied when the game starts.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LaunchSettings {
@@ -112,6 +104,12 @@ pub struct LaunchSettings {
     pub extra_args: Vec<String>,
     pub extra_env: Vec<(String, String)>,
     pub wrappers: Vec<String>,
+    /// Load Dalamud into the game.
+    ///
+    /// Off by default and per profile, because it is third-party code injected into the client and
+    /// because one account's raiding profile and another's are not the same decision. While it is off,
+    /// nothing here contacts its distribution.
+    pub dalamud: bool,
 }
 
 /// The service region a profile connects to.
