@@ -176,6 +176,20 @@ impl AddonError {
     pub fn chain(&self) -> String {
         chain_of(self)
     }
+
+    /// Whether this is the work stopping because it was asked to, rather than something going wrong.
+    ///
+    /// Answered here rather than by each consumer, because a stop reaches this taxonomy two ways: the
+    /// setup pass ends its own run as [`Self::Cancelled`], and a download the token interrupted arrives
+    /// spelled as the fetcher's cancellation, since the catalog is fetched before that loop begins. A
+    /// caller restating the list is a caller that will miss the second one.
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled | Self::Download(FetchError::Cancelled)
+        )
+    }
 }
 
 /// The same for any error, so the places this crate reports another crate's failure through a `String`
@@ -399,9 +413,25 @@ impl Addons {
     /// `None` rather than a compiled-in fallback: the row is where the distribution endpoint and the
     /// tier note live, so a build with no row has nothing honest to say about either and must not reach
     /// goatcorp on a guess.
+    ///
+    /// Narrates the `None` on `events` rather than leaving it to the caller. The user asked for this at
+    /// a launch and is owed a reason it did not happen, and a caller inventing one is a caller writing a
+    /// sentence about a decision it did not make.
     #[must_use]
-    pub fn dalamud(&self, manifest: &ComponentManifest, config: DalamudConfig) -> Option<Dalamud> {
-        let entry = manifest.injectable(InjectableKind::Dalamud)?;
+    pub fn dalamud(
+        &self,
+        manifest: &ComponentManifest,
+        config: DalamudConfig,
+        events: &SetupEvents,
+    ) -> Option<Dalamud> {
+        let Some(entry) = manifest.injectable(InjectableKind::Dalamud) else {
+            events.emit(SetupEvent::Failed {
+                what: dalamud::DALAMUD.to_owned(),
+                reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
+                    .to_owned(),
+            });
+            return None;
+        };
         Some(Dalamud::new(
             self.paths.dalamud(),
             self.fetcher.clone(),

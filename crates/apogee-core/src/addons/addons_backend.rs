@@ -129,12 +129,9 @@ impl AddonsBackend {
         cancel: &CancellationToken,
         setup: &SetupEvents,
     ) {
-        let Some(dalamud) = self.addons.dalamud(manifest, config) else {
-            setup.emit(SetupEvent::Failed {
-                what: apogee_addons::dalamud::DALAMUD.to_owned(),
-                reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
-                    .to_owned(),
-            });
+        // The layer narrates its own `None`: which row is missing and what that costs is its sentence
+        // to write, and a shell that had to invent one would be writing about a decision it did not make.
+        let Some(dalamud) = self.addons.dalamud(manifest, config, setup) else {
             return;
         };
         let enabled: [&dyn Injectable; 1] = [&dalamud];

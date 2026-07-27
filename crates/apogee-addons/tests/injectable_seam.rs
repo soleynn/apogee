@@ -142,7 +142,7 @@ async fn a_new_injectable_and_dalamud_go_through_the_same_calls() -> Result<(), 
     let prefix = prefix(&root.path().join("prefix"))?;
     let manifest = manifest()?;
     let dalamud = addons
-        .dalamud(&manifest, DalamudConfig::default())
+        .dalamud(&manifest, DalamudConfig::default(), &SetupEvents::none())
         .ok_or("the manifest offers no Dalamud row")?;
     let framework = Framework::new(false);
     let both: [&dyn Injectable; 2] = [&framework, &dalamud];
@@ -212,5 +212,34 @@ async fn an_injectable_that_fails_is_reported_with_its_tier_and_does_not_stop_th
         }
     }
     assert!(reported, "the failure reached the event stream");
+    Ok(())
+}
+
+/// A build whose catalog carries no row for an injectable has nothing honest to say about where to
+/// fetch it or what the tier costs, so it declines. The user asked for it at a launch, so the decline
+/// is narrated, and the sentence is this layer's: a caller writing one would be describing a decision
+/// it did not make.
+#[tokio::test]
+async fn a_catalog_with_no_row_declines_and_says_so() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let addons = addons(root.path())?;
+    let empty = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#)?;
+    let (sink, rx) = events();
+
+    let declined = addons.dalamud(&empty, DalamudConfig::default(), &sink);
+
+    assert!(declined.is_none(), "there is no row to build it from");
+    drop(sink);
+    let mut rx = rx.into_inner()?;
+    let mut reasons = Vec::new();
+    while let Ok(SetupEvent::Failed { what, reason }) = rx.try_recv() {
+        reasons.push(format!("{what}: {reason}"));
+    }
+    assert_eq!(
+        reasons.len(),
+        1,
+        "the decline is said once, and by the layer that decided it: {reasons:?}"
+    );
+    assert!(reasons[0].contains("no row"), "{reasons:?}");
     Ok(())
 }
