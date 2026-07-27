@@ -24,6 +24,9 @@ pub mod external;
 pub mod manifest;
 pub mod setup;
 
+#[cfg(test)]
+mod tests;
+
 pub use backup::{BackupError, Selection};
 pub use dalamud::{ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadMode, PluginPolicy};
 pub use external::{
