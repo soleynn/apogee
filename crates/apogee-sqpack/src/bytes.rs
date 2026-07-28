@@ -10,6 +10,12 @@ pub fn u32_le(bytes: [u8; 4]) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
+/// Read a `u16` from two little-endian bytes (a dat entry's block sizes).
+#[must_use]
+pub fn u16_le(bytes: [u8; 2]) -> u16 {
+    u16::from_le_bytes(bytes)
+}
+
 /// Read a `u64` from eight little-endian bytes (an index1 entry's folder/file hash pair).
 #[must_use]
 pub fn u64_le(bytes: [u8; 8]) -> u64 {
@@ -22,12 +28,17 @@ pub fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32_le([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
-/// Write a `u32` as four little-endian bytes. Only container, index and block *fixtures* need to
-/// write (the crate is read-only), so this stays test-only while keeping their byte order defined
-/// here too.
-#[cfg(test)]
+/// Write a `u32` as four little-endian bytes. The crate reads archives and never writes them; what
+/// needs this is the header a model extraction has to put back (the packer folds it into the entry
+/// header), plus the container fixtures the tests build.
 #[must_use]
 pub fn write_u32_le(v: u32) -> [u8; 4] {
+    v.to_le_bytes()
+}
+
+/// Write a `u16` as two little-endian bytes, for the same reason as [`write_u32_le`].
+#[must_use]
+pub fn write_u16_le(v: u16) -> [u8; 2] {
     v.to_le_bytes()
 }
 
@@ -55,10 +66,11 @@ impl<'a> Cursor<'a> {
         Self { buf, pos: 0, base }
     }
 
-    /// The absolute file offset of the next unread byte.
+    /// The absolute file offset of the next unread byte. Saturating, because the base is a
+    /// caller-supplied file position at the public parse entry points and only ever reported.
     #[must_use]
     pub fn offset(&self) -> u64 {
-        self.base + self.pos as u64
+        self.base.saturating_add(self.pos as u64)
     }
 
     /// How many bytes remain unread.
@@ -90,6 +102,16 @@ impl<'a> Cursor<'a> {
             })?;
         self.pos += N;
         Ok(out)
+    }
+
+    /// Read a single byte.
+    pub fn u8(&mut self) -> Result<u8> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    /// Read a little-endian `u16`.
+    pub fn u16_le(&mut self) -> Result<u16> {
+        Ok(u16_le(self.array()?))
     }
 
     /// Read a little-endian `u32`.
