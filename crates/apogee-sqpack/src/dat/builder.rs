@@ -27,14 +27,27 @@ pub(crate) enum Packing {
 #[derive(Debug, Clone)]
 pub(crate) enum EntrySpec {
     /// A placeholder whose leftover words describe a slot that is no longer there.
-    Empty { raw_size: u32, allocated_units: u32 },
+    Empty {
+        raw_size: u32,
+        allocated_units: u32,
+        /// The word a standard entry spends on its block count. A real empty entry carries whatever
+        /// its previous occupant left there, which is what a reader must not frame a table from.
+        leftover_word: u32,
+    },
     /// A standard file, one block per chunk given.
     Standard {
         chunks: Vec<Vec<u8>>,
         packing: Packing,
     },
-    /// A texture: the uncompressed format header, then one chunk per mip level.
-    Texture { header: Vec<u8>, mips: Vec<Vec<u8>> },
+    /// A texture: the uncompressed format header, then one mip level per group of chunks (a mip
+    /// spans as many blocks as the packer needed, so a group of more than one is the ordinary case).
+    Texture {
+        header: Vec<u8>,
+        mips: Vec<Vec<Vec<u8>>>,
+        /// A file length to declare instead of the bytes laid down, which is how a volume texture
+        /// declares padding between mip surfaces that the archive does not store.
+        declares: Option<u32>,
+    },
     /// A model: the eleven sections in the order an extraction writes them, and the fields the
     /// written file header carries. Boxed so one arm does not set the size of every spec.
     Model(Box<ModelSpec>),
@@ -45,7 +58,8 @@ pub(crate) enum EntrySpec {
 /// A model entry's sections and the fields its written file header carries.
 #[derive(Debug, Clone)]
 pub(crate) struct ModelSpec {
-    pub(crate) sections: [Vec<u8>; 2 + 3 * MODEL_LOD_COUNT],
+    /// Each section as the blocks it is stored in, in the order an extraction writes them.
+    pub(crate) sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT],
     pub(crate) version: u32,
     pub(crate) vertex_declaration_count: u16,
     pub(crate) material_count: u16,
@@ -70,21 +84,60 @@ impl EntrySpec {
     }
 
     /// An empty entry whose remaining words still describe its slot's previous occupant.
-    pub(crate) fn empty_with_leftovers(raw_size: u32, allocated_units: u32) -> Self {
+    pub(crate) fn empty_with_leftovers(
+        raw_size: u32,
+        allocated_units: u32,
+        leftover_word: u32,
+    ) -> Self {
         EntrySpec::Empty {
             raw_size,
             allocated_units,
+            leftover_word,
         }
     }
 
     /// A texture entry: an uncompressed format header and one block per mip level.
     pub(crate) fn texture(header: Vec<u8>, mips: Vec<Vec<u8>>) -> Self {
-        EntrySpec::Texture { header, mips }
+        EntrySpec::Texture {
+            header,
+            mips: mips.into_iter().map(|mip| vec![mip]).collect(),
+            declares: None,
+        }
+    }
+
+    /// A texture entry whose mips span several blocks each, the way a real one over 16 KiB does.
+    pub(crate) fn texture_blocks(header: Vec<u8>, mips: Vec<Vec<Vec<u8>>>) -> Self {
+        EntrySpec::Texture {
+            header,
+            mips,
+            declares: None,
+        }
+    }
+
+    /// A texture entry that declares a longer file than it stores, the way a volume texture whose
+    /// mip surfaces are padded in the file does.
+    pub(crate) fn texture_declaring(header: Vec<u8>, mips: Vec<Vec<u8>>, declares: u32) -> Self {
+        EntrySpec::Texture {
+            header,
+            mips: mips.into_iter().map(|mip| vec![mip]).collect(),
+            declares: Some(declares),
+        }
     }
 
     /// A model entry whose sections are given in the order an extraction writes them: the stack, the
     /// runtime block, then each level of detail's vertex, edge-geometry and index buffers.
     pub(crate) fn model(sections: [Vec<u8>; 2 + 3 * MODEL_LOD_COUNT]) -> Self {
+        Self::model_blocks(sections.map(|section| {
+            if section.is_empty() {
+                Vec::new()
+            } else {
+                vec![section]
+            }
+        }))
+    }
+
+    /// A model entry whose sections span several blocks each.
+    pub(crate) fn model_blocks(sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT]) -> Self {
         EntrySpec::Model(Box::new(ModelSpec {
             sections,
             version: 0x0100_0006,
@@ -245,9 +298,10 @@ impl DatBuilder {
             EntrySpec::Empty {
                 raw_size,
                 allocated_units,
+                leftover_word,
             } => {
                 let mut head = entry_head(1, *raw_size, *allocated_units, 0);
-                head.extend_from_slice(&bytes::write_u32_le(0));
+                head.extend_from_slice(&bytes::write_u32_le(*leftover_word));
                 (head, Vec::new(), Vec::new())
             }
             EntrySpec::Unknown { word } => {
@@ -276,25 +330,36 @@ impl DatBuilder {
                 head.extend_from_slice(&table);
                 (head, data, content)
             }
-            EntrySpec::Texture { header, mips } => {
+            EntrySpec::Texture {
+                header,
+                mips,
+                declares,
+            } => {
                 let mut table = Vec::new();
                 let mut sizes = Vec::new();
                 let mut data = header.clone();
                 let mut content = header.clone();
-                for (n, mip) in mips.iter().enumerate() {
-                    let block = block_bytes(mip, Packing::Deflate);
-                    table.extend_from_slice(&bytes::write_u32_le(data.len() as u32));
-                    table.extend_from_slice(&bytes::write_u32_le(block.len() as u32));
+                let mut first_block = 0u32;
+                for mip in mips {
+                    let start = data.len() as u32;
+                    let mut decompressed = 0u32;
+                    for chunk in mip {
+                        let block = block_bytes(chunk, Packing::Deflate);
+                        sizes.extend_from_slice(&bytes::write_u16_le(block.len() as u16));
+                        data.extend_from_slice(&block);
+                        content.extend_from_slice(chunk);
+                        decompressed += chunk.len() as u32;
+                    }
+                    table.extend_from_slice(&bytes::write_u32_le(start));
+                    table.extend_from_slice(&bytes::write_u32_le(data.len() as u32 - start));
+                    table.extend_from_slice(&bytes::write_u32_le(decompressed));
+                    table.extend_from_slice(&bytes::write_u32_le(first_block));
                     table.extend_from_slice(&bytes::write_u32_le(mip.len() as u32));
-                    table.extend_from_slice(&bytes::write_u32_le(n as u32));
-                    table.extend_from_slice(&bytes::write_u32_le(1));
-                    sizes.extend_from_slice(&bytes::write_u16_le(block.len() as u16));
-                    data.extend_from_slice(&block);
-                    content.extend_from_slice(mip);
+                    first_block += mip.len() as u32;
                 }
                 let mut head = entry_head(
                     4,
-                    content.len() as u32,
+                    declares.unwrap_or(content.len() as u32),
                     units(data.len()) + self.slack_units,
                     units(data.len()),
                 );
@@ -317,15 +382,13 @@ impl DatBuilder {
                 let mut body = Vec::new();
                 for section in sections {
                     let first = sizes.len() as u16;
-                    if section.is_empty() {
-                        runs.push((first, 0u16));
-                        continue;
+                    for chunk in section {
+                        let block = block_bytes(chunk, Packing::Deflate);
+                        sizes.push(block.len() as u16);
+                        data.extend_from_slice(&block);
+                        body.extend_from_slice(chunk);
                     }
-                    let block = block_bytes(section, Packing::Deflate);
-                    sizes.push(block.len() as u16);
-                    data.extend_from_slice(&block);
-                    body.extend_from_slice(section);
-                    runs.push((first, 1));
+                    runs.push((first, section.len() as u16));
                 }
                 let mut content = model_file_header(
                     *version,
@@ -397,18 +460,19 @@ fn model_file_header(
     vertex_declaration_count: u16,
     material_count: u16,
     lod_count: u8,
-    sections: &[Vec<u8>; 2 + 3 * MODEL_LOD_COUNT],
+    sections: &[Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT],
 ) -> Vec<u8> {
+    let length = |section: &Vec<Vec<u8>>| section.iter().map(Vec::len).sum::<usize>() as u32;
     let mut at = 68u32;
     let mut offsets = [0u32; 2 + 3 * MODEL_LOD_COUNT];
     for (i, section) in sections.iter().enumerate() {
-        offsets[i] = if section.is_empty() { 0 } else { at };
-        at += section.len() as u32;
+        offsets[i] = if length(section) == 0 { 0 } else { at };
+        at += length(section);
     }
     let mut out = vec![0u8; 68];
     out[0x00..0x04].copy_from_slice(&bytes::write_u32_le(version));
-    out[0x04..0x08].copy_from_slice(&bytes::write_u32_le(sections[0].len() as u32));
-    out[0x08..0x0C].copy_from_slice(&bytes::write_u32_le(sections[1].len() as u32));
+    out[0x04..0x08].copy_from_slice(&bytes::write_u32_le(length(&sections[0])));
+    out[0x08..0x0C].copy_from_slice(&bytes::write_u32_le(length(&sections[1])));
     out[0x0C..0x0E].copy_from_slice(&bytes::write_u16_le(vertex_declaration_count));
     out[0x0E..0x10].copy_from_slice(&bytes::write_u16_le(material_count));
     for lod in 0..MODEL_LOD_COUNT {
@@ -417,9 +481,9 @@ fn model_file_header(
         out[0x10 + lod * 4..0x14 + lod * 4].copy_from_slice(&bytes::write_u32_le(offsets[vertex]));
         out[0x1C + lod * 4..0x20 + lod * 4].copy_from_slice(&bytes::write_u32_le(offsets[index]));
         out[0x28 + lod * 4..0x2C + lod * 4]
-            .copy_from_slice(&bytes::write_u32_le(sections[vertex].len() as u32));
+            .copy_from_slice(&bytes::write_u32_le(length(&sections[vertex])));
         out[0x34 + lod * 4..0x38 + lod * 4]
-            .copy_from_slice(&bytes::write_u32_le(sections[index].len() as u32));
+            .copy_from_slice(&bytes::write_u32_le(length(&sections[index])));
     }
     out[0x40] = lod_count;
     out

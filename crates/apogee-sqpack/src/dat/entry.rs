@@ -486,7 +486,7 @@ mod tests {
     fn an_empty_entry_carries_its_leftover_words_without_acting_on_them() {
         // A real install has empty entries whose size and block-count words still describe the slot's
         // previous occupant. Reading them would frame a table that is not there.
-        let entry = entry_of(EntrySpec::empty_with_leftovers(83952, 453));
+        let entry = entry_of(EntrySpec::empty_with_leftovers(83952, 453, 57472));
         assert_eq!(entry.content_type(), ContentType::Empty);
         assert_eq!(entry.header().raw_size, 83952);
         assert_eq!(entry.header().allocated_units, 453);

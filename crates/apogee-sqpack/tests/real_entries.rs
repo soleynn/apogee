@@ -16,9 +16,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use apogee_sqpack::{
-    ContentType, DATA_HEADER_LEN, DATA_HEADER_OFFSET, DATA_UNIT, Dat, ENTRY_HEADER_LEN, Entry,
-    EntryBody, GameData, MIP_LEVEL_LEN, MODEL_FILE_HEADER_LEN, MODEL_TABLE_OFFSET,
-    STANDARD_BLOCK_LEN,
+    ArchiveId, ContentType, DATA_HEADER_LEN, DATA_HEADER_OFFSET, DATA_UNIT, Dat, ENTRY_HEADER_LEN,
+    Entry, EntryBody, GameData, IndexKind, MIP_LEVEL_LEN, MODEL_FILE_HEADER_LEN,
+    MODEL_TABLE_OFFSET, ModelTable, Repo, STANDARD_BLOCK_LEN,
 };
 use serde_json::Value;
 
@@ -247,6 +247,7 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
     for record in rows(&doc, "dats")? {
         let name = field_str(record, "path")?;
         let dat = Dat::open(root.join("sqpack").join(name))?;
+        let _ = &game;
         let header = dat.data_header();
         assert_eq!(dat.len(), field_u64(record, "file_len")?, "{name} length");
         assert_eq!(
@@ -292,14 +293,15 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
     }
 
     for record in rows(&doc, "entries")? {
-        let dir = root.join("sqpack").join(field_str(record, "repo")?);
-        let name = format!(
-            "{}.win32.dat{}",
-            field_str(record, "archive")?,
-            field_u64(record, "dat")?
-        );
-        let where_ = format!("{}/{name}", field_str(record, "repo")?);
-        let dat = Dat::open(dir.join(&name))?;
+        let stem = field_str(record, "archive")?;
+        let archive = ArchiveId::parse_stem(stem).ok_or_else(|| format!("{stem}: archive stem"))?;
+        let repo = repo_of(record)?;
+        let info = game
+            .archive(repo, archive)
+            .ok_or_else(|| format!("{} was not enumerated", archive.stem()))?;
+        let dat_number = u8::try_from(field_u64(record, "dat")?)?;
+        let where_ = format!("{}/{}", repo.dir_name(), archive.stem());
+        let dat = game.dat_of(info, dat_number)?;
         let offset = field_u64(record, "offset")?;
         let entry = dat.entry_at(offset)?;
 
@@ -370,6 +372,106 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
                 .ok_or_else(|| format!("{path} does not read"))?;
             assert_eq!(read, bytes, "{path} bytes");
         }
+    }
+    Ok(())
+}
+
+/// Every word the fixed table carries, against the recording. The reader and the synthetic builder
+/// share their idea of where these sit, so only a real container can say whether that idea is right:
+/// a group moved in the struct would tile just as well and mean something else entirely.
+fn check_model_table(table: &ModelTable, record: &Value, where_: &str) -> R<()> {
+    let words = &record["table_words"];
+    let word = |key: &str| field_u64(words, key);
+    let triple = |key: &str| -> R<[u64; 3]> {
+        let row = words[key]
+            .as_array()
+            .ok_or_else(|| format!("{where_}: {key} is not an array"))?;
+        let mut out = [0u64; 3];
+        for (slot, value) in out.iter_mut().zip(row) {
+            *slot = value.as_u64().ok_or_else(|| format!("{where_}: {key}"))?;
+        }
+        Ok(out)
+    };
+    let spread = |values: [u32; 3]| values.map(u64::from);
+
+    assert_eq!(u64::from(table.stack_size), word("stack_size")?, "{where_}");
+    assert_eq!(
+        u64::from(table.runtime_size),
+        word("runtime_size")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.vertex_size),
+        triple("vertex_size")?,
+        "{where_}"
+    );
+    assert_eq!(spread(table.edge_size), triple("edge_size")?, "{where_}");
+    assert_eq!(spread(table.index_size), triple("index_size")?, "{where_}");
+    assert_eq!(
+        u64::from(table.compressed_stack_size),
+        word("compressed_stack_size")?,
+        "{where_}"
+    );
+    assert_eq!(
+        u64::from(table.compressed_runtime_size),
+        word("compressed_runtime_size")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.compressed_vertex_size),
+        triple("compressed_vertex_size")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.compressed_edge_size),
+        triple("compressed_edge_size")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.compressed_index_size),
+        triple("compressed_index_size")?,
+        "{where_}"
+    );
+    assert_eq!(
+        u64::from(table.stack_offset),
+        word("stack_offset")?,
+        "{where_}"
+    );
+    assert_eq!(
+        u64::from(table.runtime_offset),
+        word("runtime_offset")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.vertex_offset),
+        triple("vertex_offset")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.edge_offset),
+        triple("edge_offset")?,
+        "{where_}"
+    );
+    assert_eq!(
+        spread(table.index_offset),
+        triple("index_offset")?,
+        "{where_}"
+    );
+
+    // The runs in the order an extraction walks them, which is not the order the table writes them.
+    let recorded = rows(record, "section_runs")?;
+    let walked = table.sections();
+    assert_eq!(walked.len(), recorded.len(), "{where_}: sections");
+    for (n, ((_, run), row)) in walked.iter().zip(recorded).enumerate() {
+        let pair = row.as_array().ok_or_else(|| format!("{where_}: run {n}"))?;
+        assert_eq!(
+            [u64::from(run.first), u64::from(run.count)],
+            [
+                pair[0].as_u64().unwrap_or_default(),
+                pair[1].as_u64().unwrap_or_default()
+            ],
+            "{where_}: section {n}"
+        );
     }
     Ok(())
 }
@@ -466,6 +568,7 @@ fn check_body(entry: &Entry, record: &Value, where_: &str) -> R<()> {
             );
         }
         EntryBody::Model(table) => {
+            check_model_table(table, record, where_)?;
             assert_eq!(
                 u64::from(table.version),
                 field_u64(record, "model_version")?,
@@ -501,42 +604,75 @@ fn check_body(entry: &Entry, record: &Value, where_: &str) -> R<()> {
     Ok(())
 }
 
-/// Extract every entry of one archive, which is what says the recorded handful is not a lucky
-/// sample: each has to decode, and the length it produces has to be the one it declares.
+/// Extract every entry of four archives, which is what says the recorded handful is not a lucky
+/// sample: each entry has to decode, and the length it produces has to be the one it declares.
+///
+/// One archive of each shape, because the four content types share almost no code below the header:
+/// `exd` is all standard entries, `ui` is mostly textures, `chara` carries the models, and
+/// `bgcommon` holds every volume texture in the game, which is the one shape allowed to come out
+/// shorter than it declares.
 #[test]
 #[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
 fn every_entry_of_an_archive_extracts_to_the_length_it_declares() -> R<()> {
-    use apogee_sqpack::{ArchiveId, IndexKind, Repo};
-
     let root = std::env::var("APOGEE_SQPACK_REAL_INSTALL")?;
     let game = GameData::open(Path::new(&root))?;
-    let id = ArchiveId::new(0x0a, 0, 0);
-    let info = game
-        .archive(Repo::Base, id)
-        .ok_or("the install has no exd archive")?;
-    let index = game
-        .index_of(info, IndexKind::Index1)?
-        .ok_or("the exd archive has no index")?;
 
-    let mut read = 0usize;
-    let mut bytes = 0u64;
-    for location in index.entries().iter().filter_map(|e| e.location()) {
-        let dat = Dat::open(info.dat_path(location.dat))?;
-        let entry = dat.entry_at(location.offset)?;
-        let out = dat.read(&entry)?;
-        assert_eq!(
-            out.len() as u64,
-            entry.declared_len(),
-            "{:?} @{}",
-            info.dat_path(location.dat),
-            location.offset
-        );
-        read += 1;
-        bytes += out.len() as u64;
+    let mut seen = std::collections::BTreeMap::new();
+    for category in [0x0a, 0x06, 0x04, 0x01] {
+        let id = ArchiveId::new(category, 0, 0);
+        let info = game
+            .archive(Repo::Base, id)
+            .ok_or_else(|| format!("the install has no {} archive", id.stem()))?;
+        let index = game
+            .index_of(info, IndexKind::Index1)?
+            .ok_or_else(|| format!("{} has no index", id.stem()))?;
+
+        let mut read = 0usize;
+        for location in index.entries().iter().filter_map(|e| e.location()) {
+            let dat = game.dat_of(info, location.dat)?;
+            let entry = dat.entry_at(location.offset)?;
+            let out = dat.read(&entry)?;
+            let where_ = format!("{} dat{} @{}", id.stem(), location.dat, location.offset);
+            match entry.content_type() {
+                // A volume texture declares padding between mip surfaces that is not stored, so the
+                // bound is what its own table says, never more than the declared size.
+                ContentType::Texture => {
+                    assert!(out.len() as u64 <= entry.declared_len(), "{where_}");
+                    assert_eq!(Some(out.len() as u64), entry.stored_len(), "{where_}");
+                }
+                // An empty entry holds nothing however large a file its leftover word names; the
+                // `chara` archive has one declaring nearly three megabytes.
+                ContentType::Empty => assert!(out.is_empty(), "{where_}"),
+                _ => assert_eq!(out.len() as u64, entry.declared_len(), "{where_}"),
+            }
+            *seen
+                .entry(format!("{:?}", entry.content_type()))
+                .or_insert(0usize) += 1;
+            read += 1;
+        }
+        assert!(read > 1_000, "{} has entries to read: {read}", id.stem());
     }
-    assert!(read > 1_000, "the exd archive has entries to read: {read}");
-    assert!(bytes > 0);
+
+    // Every content type this crate reads was met in bulk, not just in the recorded handful.
+    for kind in ["Empty", "Standard", "Model", "Texture"] {
+        assert!(
+            seen.get(kind).is_some_and(|n| *n > 0),
+            "no {kind} entry in the sweep: {seen:?}"
+        );
+    }
     Ok(())
+}
+
+/// The repository a record was captured from.
+fn repo_of(record: &Value) -> R<Repo> {
+    match field_str(record, "repo")? {
+        "ffxiv" => Ok(Repo::Base),
+        other => other
+            .strip_prefix("ex")
+            .and_then(|n| n.parse::<u8>().ok())
+            .map(Repo::Ex)
+            .ok_or_else(|| format!("unknown repository {other}").into()),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

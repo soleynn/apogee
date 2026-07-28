@@ -248,6 +248,105 @@
     18520,
     0,
     3120
+   ],
+   "table_words": {
+    "stack_size": 896,
+    "runtime_size": 2304,
+    "vertex_size": [
+     30976,
+     28160,
+     18560
+    ],
+    "edge_size": [
+     0,
+     0,
+     0
+    ],
+    "index_size": [
+     5632,
+     5632,
+     3200
+    ],
+    "compressed_stack_size": 128,
+    "compressed_runtime_size": 1152,
+    "compressed_vertex_size": [
+     15232,
+     13056,
+     8832
+    ],
+    "compressed_edge_size": [
+     0,
+     0,
+     0
+    ],
+    "compressed_index_size": [
+     2944,
+     2944,
+     1664
+    ],
+    "stack_offset": 0,
+    "runtime_offset": 128,
+    "vertex_offset": [
+     1280,
+     19456,
+     35456
+    ],
+    "edge_offset": [
+     0,
+     0,
+     0
+    ],
+    "index_offset": [
+     16512,
+     32512,
+     44288
+    ]
+   },
+   "section_runs": [
+    [
+     0,
+     1
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     2
+    ],
+    [
+     4,
+     0
+    ],
+    [
+     4,
+     1
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     7,
+     0
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     2
+    ],
+    [
+     10,
+     0
+    ],
+    [
+     10,
+     1
+    ]
    ]
   },
   {
@@ -281,6 +380,105 @@
     13200,
     0,
     1424
+   ],
+   "table_words": {
+    "stack_size": 896,
+    "runtime_size": 6144,
+    "vertex_size": [
+     33024,
+     24832,
+     13312
+    ],
+    "edge_size": [
+     0,
+     0,
+     0
+    ],
+    "index_size": [
+     4992,
+     3712,
+     1536
+    ],
+    "compressed_stack_size": 128,
+    "compressed_runtime_size": 3328,
+    "compressed_vertex_size": [
+     16128,
+     10880,
+     4864
+    ],
+    "compressed_edge_size": [
+     0,
+     0,
+     0
+    ],
+    "compressed_index_size": [
+     2688,
+     2048,
+     896
+    ],
+    "stack_offset": 0,
+    "runtime_offset": 128,
+    "vertex_offset": [
+     3456,
+     22272,
+     35200
+    ],
+    "edge_offset": [
+     0,
+     0,
+     0
+    ],
+    "index_offset": [
+     19584,
+     33152,
+     40064
+    ]
+   },
+   "section_runs": [
+    [
+     0,
+     1
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     5,
+     0
+    ],
+    [
+     5,
+     1
+    ],
+    [
+     6,
+     2
+    ],
+    [
+     8,
+     0
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     1
+    ],
+    [
+     10,
+     0
+    ],
+    [
+     10,
+     1
+    ]
    ]
   },
   {
@@ -314,6 +512,105 @@
     34720,
     0,
     4800
+   ],
+   "table_words": {
+    "stack_size": 512,
+    "runtime_size": 2688,
+    "vertex_size": [
+     119040,
+     68608,
+     34816
+    ],
+    "edge_size": [
+     0,
+     0,
+     0
+    ],
+    "index_size": [
+     24064,
+     12032,
+     4864
+    ],
+    "compressed_stack_size": 128,
+    "compressed_runtime_size": 1408,
+    "compressed_vertex_size": [
+     53120,
+     28160,
+     13440
+    ],
+    "compressed_edge_size": [
+     0,
+     0,
+     0
+    ],
+    "compressed_index_size": [
+     13312,
+     6784,
+     2944
+    ],
+    "stack_offset": 0,
+    "runtime_offset": 128,
+    "vertex_offset": [
+     1536,
+     67968,
+     102912
+    ],
+    "edge_offset": [
+     0,
+     0,
+     0
+    ],
+    "index_offset": [
+     54656,
+     96128,
+     116352
+    ]
+   },
+   "section_runs": [
+    [
+     0,
+     1
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     10,
+     0
+    ],
+    [
+     10,
+     2
+    ],
+    [
+     12,
+     5
+    ],
+    [
+     17,
+     0
+    ],
+    [
+     17,
+     1
+    ],
+    [
+     18,
+     3
+    ],
+    [
+     21,
+     0
+    ],
+    [
+     21,
+     1
+    ]
    ]
   },
   {
@@ -347,6 +644,105 @@
     12040,
     0,
     992
+   ],
+   "table_words": {
+    "stack_size": 512,
+    "runtime_size": 1024,
+    "vertex_size": [
+     17920,
+     17024,
+     12160
+    ],
+    "edge_size": [
+     0,
+     0,
+     0
+    ],
+    "index_size": [
+     2176,
+     2048,
+     1024
+    ],
+    "compressed_stack_size": 128,
+    "compressed_runtime_size": 512,
+    "compressed_vertex_size": [
+     5888,
+     5632,
+     3712
+    ],
+    "compressed_edge_size": [
+     0,
+     0,
+     0
+    ],
+    "compressed_index_size": [
+     1408,
+     1280,
+     768
+    ],
+    "stack_offset": 0,
+    "runtime_offset": 128,
+    "vertex_offset": [
+     640,
+     7936,
+     14848
+    ],
+    "edge_offset": [
+     0,
+     0,
+     0
+    ],
+    "index_offset": [
+     6528,
+     13568,
+     18560
+    ]
+   },
+   "section_runs": [
+    [
+     0,
+     1
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     2
+    ],
+    [
+     4,
+     0
+    ],
+    [
+     4,
+     1
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     7,
+     0
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     0
+    ],
+    [
+     9,
+     1
+    ]
    ]
   },
   {
