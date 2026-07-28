@@ -559,7 +559,7 @@ fn read_version_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dat::build::EntrySpec;
+    use crate::dat::builder::EntrySpec;
     use crate::hash::hash_path;
     use crate::index::build::{IndexBuilder, packed};
     use std::fs;
@@ -974,7 +974,7 @@ mod tests {
 
     /// An archive whose index really points at entries in a dat file beside it.
     fn archive_with_data(dir: &Path, id: ArchiveId, files: &[(&str, EntrySpec)]) -> Vec<Vec<u8>> {
-        use crate::dat::build::DatBuilder;
+        use crate::dat::builder::DatBuilder;
         fs::create_dir_all(dir).unwrap();
         let mut dat = DatBuilder::new();
         for (_, spec) in files {

@@ -32,7 +32,7 @@ mod model;
 mod source;
 
 #[cfg(test)]
-pub(crate) mod build;
+pub(crate) mod builder;
 
 use std::io::Write;
 use std::path::Path;
@@ -557,7 +557,7 @@ fn parse_data_header(buf: &[u8], offset: u64) -> Result<DataHeader> {
 
 #[cfg(test)]
 mod tests {
-    use super::build::{DatBuilder, EntrySpec, Packing, block_bytes};
+    use super::builder::{DatBuilder, EntrySpec, Packing, block_bytes};
     use super::*;
     use crate::bytes;
 

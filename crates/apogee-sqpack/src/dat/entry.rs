@@ -451,7 +451,7 @@ fn parse_texture(head: &[u8], offset: u64) -> Result<TextureTable> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::build::{DatBuilder, EntrySpec};
+    use super::super::builder::{DatBuilder, EntrySpec};
     use super::super::{DATA_HEADER_LEN, DATA_HEADER_OFFSET};
     use super::*;
 
@@ -507,8 +507,8 @@ mod tests {
     #[test]
     fn a_header_shorter_than_its_own_fields_is_corrupt() {
         let mut head = vec![0u8; 64];
-        head[0..4].copy_from_slice(&(8u32).to_le_bytes());
-        head[4..8].copy_from_slice(&(2u32).to_le_bytes());
+        head[0..4].copy_from_slice(&crate::bytes::write_u32_le(8));
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(2));
         assert!(matches!(
             Entry::parse(&head, 0x800, &DatLimits::default()),
             Err(Error::EntryCorrupt { detail, .. }) if detail == "entry header is shorter than its own fields"
@@ -520,9 +520,10 @@ mod tests {
         // The header length is what bounds every table read, so a count that overruns it is refused
         // before anything is reserved for it.
         let mut head = vec![0u8; 128];
-        head[0..4].copy_from_slice(&(128u32).to_le_bytes());
-        head[4..8].copy_from_slice(&(2u32).to_le_bytes());
-        head[ENTRY_HEADER_LEN..ENTRY_HEADER_LEN + 4].copy_from_slice(&(1_000_000u32).to_le_bytes());
+        head[0..4].copy_from_slice(&crate::bytes::write_u32_le(128));
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(2));
+        head[ENTRY_HEADER_LEN..ENTRY_HEADER_LEN + 4]
+            .copy_from_slice(&crate::bytes::write_u32_le(1_000_000));
         assert!(matches!(
             Entry::parse(&head, 0x800, &DatLimits::default()),
             Err(Error::EntryCorrupt { detail, .. })
@@ -533,8 +534,8 @@ mod tests {
     #[test]
     fn a_declared_header_longer_than_the_cap_is_refused_before_it_is_read() {
         let mut head = vec![0u8; 128];
-        head[0..4].copy_from_slice(&(u32::MAX).to_le_bytes());
-        head[4..8].copy_from_slice(&(2u32).to_le_bytes());
+        head[0..4].copy_from_slice(&crate::bytes::write_u32_le(u32::MAX));
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(2));
         assert!(matches!(
             Entry::parse(&head, 0x800, &DatLimits::default()),
             Err(Error::LimitExceeded)
@@ -544,23 +545,23 @@ mod tests {
     #[test]
     fn a_declared_file_size_over_the_cap_is_refused() {
         let mut head = vec![0u8; 128];
-        head[0..4].copy_from_slice(&(128u32).to_le_bytes());
-        head[4..8].copy_from_slice(&(2u32).to_le_bytes());
-        head[8..12].copy_from_slice(&(u32::MAX).to_le_bytes());
+        head[0..4].copy_from_slice(&crate::bytes::write_u32_le(128));
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(2));
+        head[8..12].copy_from_slice(&crate::bytes::write_u32_le(u32::MAX));
         assert!(matches!(
             Entry::parse(&head, 0x800, &DatLimits::default()),
             Err(Error::LimitExceeded)
         ));
         // The same word on an empty entry is a leftover, so it is carried rather than refused.
-        head[4..8].copy_from_slice(&(1u32).to_le_bytes());
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(1));
         assert!(Entry::parse(&head, 0x800, &DatLimits::default()).is_ok());
     }
 
     #[test]
     fn a_header_cut_short_of_its_declared_length_is_truncated() {
         let mut head = vec![0u8; 64];
-        head[0..4].copy_from_slice(&(128u32).to_le_bytes());
-        head[4..8].copy_from_slice(&(2u32).to_le_bytes());
+        head[0..4].copy_from_slice(&crate::bytes::write_u32_le(128));
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(2));
         assert!(matches!(
             Entry::parse(&head, 0x800, &DatLimits::default()),
             Err(Error::Truncated { .. })
@@ -573,8 +574,8 @@ mod tests {
         // it. Nothing bounds that number, so the arithmetic that carries it has to saturate: wrapping
         // would abort a debug build instead of returning the truncation this is.
         let mut head = vec![0u8; 32];
-        head[0..4].copy_from_slice(&(128u32).to_le_bytes());
-        head[4..8].copy_from_slice(&(2u32).to_le_bytes());
+        head[0..4].copy_from_slice(&crate::bytes::write_u32_le(128));
+        head[4..8].copy_from_slice(&crate::bytes::write_u32_le(2));
         match Entry::parse(&head, u64::MAX - 8, &DatLimits::default()) {
             Err(Error::Truncated { offset, .. }) => assert_eq!(offset, u64::MAX),
             other => panic!("expected Truncated, got {other:?}"),

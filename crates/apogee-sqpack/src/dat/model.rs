@@ -375,12 +375,8 @@ mod tests {
         // Stack 816, runtime 9584, then one level of detail with a vertex and an index buffer.
         let lengths = [816, 9584, 4000, 0, 500, 0, 0, 0, 0, 0, 0];
         let head = table.file_header(&lengths);
-        assert_eq!(
-            u32::from_le_bytes([head[0], head[1], head[2], head[3]]),
-            0x0100_0006
-        );
-        let word =
-            |at: usize| u32::from_le_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+        let word = |at: usize| bytes::read_u32_le(&head, at);
+        assert_eq!(word(0x00), 0x0100_0006);
         assert_eq!(word(0x04), 816);
         assert_eq!(word(0x08), 9584);
         assert_eq!(word(0x10), 68 + 816 + 9584); // first vertex buffer
