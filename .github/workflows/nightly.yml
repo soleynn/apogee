@@ -26,6 +26,7 @@ jobs:
           - runner_manifest
           - sqpack_codec
           - sqpack_index
+          - sqpack_entry
           - zipatch_chunk
           - zipatch_sqpk
           - zipatch_apply
