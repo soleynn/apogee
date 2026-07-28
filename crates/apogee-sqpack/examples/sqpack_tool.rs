@@ -82,6 +82,12 @@ fn stat(path: &Path) -> Result<bool, Box<dyn Error>> {
 
 fn stat_tree(root: &Path) -> Result<bool, Box<dyn Error>> {
     let game = GameData::open(root)?;
+    if game.repos().is_empty() {
+        // "No repositories" and "not a game tree" read the same in a summary, and one of them is a
+        // typo in the argument.
+        eprintln!("{}: no sqpack repositories here", root.display());
+        return Ok(false);
+    }
     for repo in game.repos() {
         println!(
             "{:<6} version={}",
@@ -178,19 +184,30 @@ fn ls(args: &[String]) -> Result<bool, Box<dyn Error>> {
             None => println!("{:016x}  <collision>", entry.key),
         }
     }
-    for record in index.collisions() {
+    for record in index.collisions().iter().take(limit) {
         println!(
             "{:016x}  #{} {}",
             record.key, record.conflict_index, record.path
         );
     }
-    println!("{} entry/entries", index.entries().len());
+    // Both counts, because a truncated listing under a full count reads as a container that holds
+    // only what was printed.
+    println!(
+        "showing {} of {} entry/entries, {} collision(s)",
+        index.entries().len().min(limit),
+        index.entries().len(),
+        index.collisions().len()
+    );
     Ok(true)
 }
 
 /// Resolve a game path and write its bytes. `args` is `game-dir, game/path, out-file`.
 fn extract(args: &[String]) -> Result<bool, Box<dyn Error>> {
     let game = GameData::open(Path::new(&args[0]))?;
+    if game.archives().is_empty() {
+        eprintln!("{}: no sqpack archives here", args[0]);
+        return Ok(false);
+    }
     let Some((dat, entry)) = game.entry(&args[1])? else {
         eprintln!("{}: not in this install", args[1]);
         return Ok(false);
