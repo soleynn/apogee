@@ -12,15 +12,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::archive::{ArchiveId, Category, PLATFORM_TAG};
+use crate::dat::{Dat, Entry};
 use crate::error::Result;
 use crate::index::{Index, IndexKind};
 
 /// The index cache's shape: one parsed container per archive and index form, shared across clones.
 type IndexCache = Arc<Mutex<HashMap<(Repo, ArchiveId, IndexKind), Arc<Index>>>>;
+
+/// The dat cache's shape: one open container per file, shared across clones.
+type DatCache = Arc<Mutex<HashMap<PathBuf, Arc<Dat>>>>;
 
 /// A SqPack repository within a game tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -160,6 +165,9 @@ pub struct GameData {
     /// Indexes parsed on first use. Shared across clones on purpose: two handles on one install
     /// should not each pay to parse the same twelve megabytes.
     indexes: IndexCache,
+    /// Dat containers opened on first use, for the same reason. Not the same snapshot an index is:
+    /// a container's headers are read once and its entries are read live (see [`Dat`]).
+    dats: DatCache,
 }
 
 impl fmt::Debug for GameData {
@@ -170,6 +178,7 @@ impl fmt::Debug for GameData {
             .field("repos", &self.repos.len())
             .field("archives", &self.archives.len())
             .field("indexes_open", &self.cached_index_count())
+            .field("dats_open", &self.cached_dat_count())
             .finish()
     }
 }
@@ -203,6 +212,7 @@ impl GameData {
             repos,
             archives,
             indexes: Arc::new(Mutex::new(HashMap::new())),
+            dats: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -358,12 +368,93 @@ impl GameData {
         }
     }
 
+    /// The dat file a lookup landed in, opened on first use and kept afterwards.
+    ///
+    /// # Errors
+    /// Everything [`Dat::open`] raises: the file cannot be opened, or its headers do not parse.
+    pub fn dat(&self, location: &FileLocation) -> Result<Arc<Dat>> {
+        self.dat_at(&location.dat_path)
+    }
+
+    /// One of an archive's dat files, opened on first use and kept afterwards. This is how a sweep
+    /// reaches a container it has only enumerated, without resolving a path first.
+    ///
+    /// # Errors
+    /// Everything [`Dat::open`] raises.
+    pub fn dat_of(&self, info: &ArchiveInfo, dat: u8) -> Result<Arc<Dat>> {
+        self.dat_at(&info.dat_path(dat))
+    }
+
+    /// One dat file, keyed by the path it was opened from: a cache keyed on an archive's identity
+    /// instead could hand back a container from somewhere else, since a [`FileLocation`] carries both
+    /// and nothing binds them together.
+    fn dat_at(&self, path: &Path) -> Result<Arc<Dat>> {
+        if let Some(hit) = self.lock_dats().get(path) {
+            return Ok(Arc::clone(hit));
+        }
+        let dat = Arc::new(Dat::open(path)?);
+        // A racing caller may have opened the same container; either handle is equally good.
+        Ok(Arc::clone(
+            self.lock_dats()
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::clone(&dat)),
+        ))
+    }
+
+    /// How many dat containers have been opened and kept so far.
+    #[must_use]
+    pub fn cached_dat_count(&self) -> usize {
+        self.lock_dats().len()
+    }
+
+    /// Resolve a game path and parse the entry holding it, or `None` if the install has no such
+    /// file.
+    ///
+    /// # Errors
+    /// Everything [`GameData::lookup`], [`GameData::dat`] and [`Dat::entry_at`] raise.
+    pub fn entry(&self, path: &str) -> Result<Option<(Arc<Dat>, Entry)>> {
+        let Some(found) = self.lookup(path)? else {
+            return Ok(None);
+        };
+        let dat = self.dat(&found)?;
+        let entry = dat.entry_at(found.offset)?;
+        Ok(Some((dat, entry)))
+    }
+
+    /// Read a game path's bytes, or `None` if the install has no such file.
+    ///
+    /// # Errors
+    /// Everything [`GameData::entry`] and [`Dat::read`] raise.
+    pub fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let Some((dat, entry)) = self.entry(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(dat.read(&entry)?))
+    }
+
+    /// Read a game path's bytes into `out`, returning how many were written, or `None` if the
+    /// install has no such file.
+    ///
+    /// # Errors
+    /// Everything [`GameData::entry`] and [`Dat::read_into`] raise.
+    pub fn read_into(&self, path: &str, out: &mut impl Write) -> Result<Option<u64>> {
+        let Some((dat, entry)) = self.entry(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(dat.read_into(&entry, out)?))
+    }
+
     /// The index cache, with a poisoned lock treated as a live one: it holds only parsed containers,
     /// so a panic elsewhere leaves nothing inconsistent to protect.
     fn lock_indexes(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<(Repo, ArchiveId, IndexKind), Arc<Index>>> {
         self.indexes.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The dat cache, poisoned-as-live for the same reason as [`GameData::lock_indexes`].
+    fn lock_dats(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Arc<Dat>>> {
+        self.dats.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -468,6 +559,7 @@ fn read_version_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dat::build::EntrySpec;
     use crate::hash::hash_path;
     use crate::index::build::{IndexBuilder, packed};
     use std::fs;
@@ -878,6 +970,134 @@ mod tests {
         assert_eq!(data.lookup("exd/root.exl").unwrap().unwrap().dat, 2);
         let fresh = GameData::open(tmp.path()).unwrap();
         assert_eq!(fresh.lookup("exd/root.exl").unwrap().unwrap().dat, 3);
+    }
+
+    /// An archive whose index really points at entries in a dat file beside it.
+    fn archive_with_data(dir: &Path, id: ArchiveId, files: &[(&str, EntrySpec)]) -> Vec<Vec<u8>> {
+        use crate::dat::build::DatBuilder;
+        fs::create_dir_all(dir).unwrap();
+        let mut dat = DatBuilder::new();
+        for (_, spec) in files {
+            dat.entry(spec.clone());
+        }
+        let (bytes, placed) = dat.build();
+        fs::write(dir.join(id.dat_file_name(0)), &bytes).unwrap();
+
+        let mut index = IndexBuilder::new(IndexKind::Index1);
+        for ((path, _), at) in files.iter().zip(&placed) {
+            index.path(path, packed(0, at.offset));
+        }
+        fs::write(
+            dir.join(id.index_file_name(IndexKind::Index1)),
+            index.bytes(),
+        )
+        .unwrap();
+        placed.into_iter().map(|p| p.content).collect()
+    }
+
+    #[test]
+    fn a_path_reads_the_bytes_its_archive_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path();
+        write(&game.join("ffxivgame.ver"), "2024.03.27.0000.0000");
+        let content = archive_with_data(
+            &game.join("sqpack/ffxiv"),
+            ArchiveId::new(0x0a, 0, 0),
+            &[
+                ("exd/root.exl", EntrySpec::standard(vec![b"ROOT".to_vec()])),
+                (
+                    "exd/item.exh",
+                    EntrySpec::standard(vec![b"ITEM ".repeat(500), b"tail".to_vec()]),
+                ),
+            ],
+        );
+
+        let data = GameData::open(game).unwrap();
+        assert_eq!(
+            data.read("exd/root.exl").unwrap().as_ref(),
+            Some(&content[0])
+        );
+        assert_eq!(
+            data.read("EXD/Item.EXH").unwrap().as_ref(),
+            Some(&content[1])
+        );
+        // A path the install does not hold is absent rather than an error, the way a lookup is.
+        assert_eq!(data.read("exd/nothing.exl").unwrap(), None);
+        assert_eq!(data.read("nope/root.exl").unwrap(), None);
+
+        // Streaming into a sink writes the same bytes and reports the count.
+        let mut sink = Vec::new();
+        assert_eq!(
+            data.read_into("exd/item.exh", &mut sink).unwrap(),
+            Some(content[1].len() as u64)
+        );
+        assert_eq!(sink, content[1]);
+        assert_eq!(data.read_into("exd/nothing.exl", &mut sink).unwrap(), None);
+    }
+
+    #[test]
+    fn dat_containers_are_opened_once_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path();
+        archive_with_data(
+            &game.join("sqpack/ffxiv"),
+            ArchiveId::new(0x0a, 0, 0),
+            &[("exd/root.exl", EntrySpec::standard(vec![b"ROOT".to_vec()]))],
+        );
+        let data = GameData::open(game).unwrap();
+        assert_eq!(data.cached_dat_count(), 0);
+        data.read("exd/root.exl").unwrap();
+        assert_eq!(data.cached_dat_count(), 1);
+        data.read("exd/root.exl").unwrap();
+        assert_eq!(data.cached_dat_count(), 1);
+        // A clone shares the open containers rather than opening its own.
+        let twin = data.clone();
+        twin.read("exd/root.exl").unwrap();
+        assert_eq!(twin.cached_dat_count(), 1);
+        assert!(format!("{data:?}").contains("dats_open"));
+    }
+
+    #[test]
+    fn an_entry_carries_the_container_it_was_read_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path();
+        archive_with_data(
+            &game.join("sqpack/ffxiv"),
+            ArchiveId::new(0x0a, 0, 0),
+            &[("exd/root.exl", EntrySpec::standard(vec![b"ROOT".to_vec()]))],
+        );
+        let data = GameData::open(game).unwrap();
+        let (dat, entry) = data.entry("exd/root.exl").unwrap().unwrap();
+        assert_eq!(entry.declared_len(), 4);
+        assert_eq!(dat.read(&entry).unwrap(), b"ROOT");
+        assert!(data.entry("exd/nothing.exl").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_lookup_that_lands_outside_its_dat_file_is_reported_rather_than_read() {
+        // A repair sweep meets exactly this: an index that survived a rewrite its dat file did not.
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path();
+        let dir = game.join("sqpack/ffxiv");
+        archive_with_data(
+            &dir,
+            ArchiveId::new(0x0a, 0, 0),
+            &[("exd/root.exl", EntrySpec::standard(vec![b"ROOT".to_vec()]))],
+        );
+        let id = ArchiveId::new(0x0a, 0, 0);
+        let mut index = IndexBuilder::new(IndexKind::Index1);
+        index.path("exd/root.exl", packed(0, 0x40_000));
+        fs::write(
+            dir.join(id.index_file_name(IndexKind::Index1)),
+            index.bytes(),
+        )
+        .unwrap();
+
+        let data = GameData::open(game).unwrap();
+        assert!(matches!(
+            data.read("exd/root.exl"),
+            Err(crate::Error::Truncated { .. })
+        ));
     }
 
     #[test]
