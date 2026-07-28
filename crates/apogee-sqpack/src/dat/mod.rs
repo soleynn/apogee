@@ -368,7 +368,7 @@ impl<S: DatSource> Dat<S> {
         let mut produced = 0u64;
         for size in sizes {
             produced += self.decode_sized(at, u32::from(*size), out, run)?;
-            at += u64::from(*size);
+            at = at.saturating_add(u64::from(*size));
         }
         Ok(produced)
     }
@@ -381,7 +381,7 @@ impl<S: DatSource> Dat<S> {
     ) -> Result<u64> {
         let mut written = 0u64;
         for block in blocks {
-            let at = run.base + u64::from(block.offset);
+            let at = run.base.saturating_add(u64::from(block.offset));
             let produced = self.decode_sized(at, u32::from(block.on_disk_size), out, run)?;
             if produced != u64::from(block.decompressed_size) {
                 return Err(Error::EntryCorrupt {
@@ -436,7 +436,12 @@ impl<S: DatSource> Dat<S> {
                     offset: entry.offset(),
                     detail: "a mip level names blocks the entry does not hold",
                 })?;
-            let produced = self.decode_run(run.base + u64::from(mip.offset), sizes, out, run)?;
+            let produced = self.decode_run(
+                run.base.saturating_add(u64::from(mip.offset)),
+                sizes,
+                out,
+                run,
+            )?;
             if produced != u64::from(mip.decompressed_size) {
                 return Err(Error::EntryCorrupt {
                     offset: entry.offset(),
@@ -468,7 +473,7 @@ impl<S: DatSource> Dat<S> {
                 offset: entry.offset(),
                 detail: "a model section names blocks the entry does not hold",
             })?;
-            lengths[i] = self.decode_run(run.base + start, sizes, &mut body, run)?;
+            lengths[i] = self.decode_run(run.base.saturating_add(start), sizes, &mut body, run)?;
         }
 
         let head = table.file_header(&lengths);
@@ -479,6 +484,10 @@ impl<S: DatSource> Dat<S> {
 }
 
 /// One entry's read: where its bytes are, and what is left of the size it declares.
+///
+/// Every offset built from `base` saturates. A [`DatSource`] is a public seam and its `len` is
+/// whatever the implementor says, so a table word added to a base near the end of the address space
+/// must come out as a read past the end (which is a truncation) rather than as an overflow.
 ///
 /// A block is charged once it has decoded, so a fabricated table overruns by at most the one block
 /// that broke the budget (itself capped by [`codec::Limits`]) before the read stops, rather than by
@@ -518,11 +527,11 @@ fn block_range(first: u32, count: u32, total: usize) -> Option<std::ops::Range<u
 fn rebase(err: Error, at: u64) -> Error {
     match err {
         Error::BlockCorrupt { offset, detail } => Error::BlockCorrupt {
-            offset: at + offset,
+            offset: at.saturating_add(offset),
             detail,
         },
         Error::Truncated { offset, needed } => Error::Truncated {
-            offset: at + offset,
+            offset: at.saturating_add(offset),
             needed,
         },
         other => other,
@@ -606,7 +615,7 @@ mod tests {
 
     #[test]
     fn an_empty_entry_extracts_nothing() {
-        let (bytes, offset, _) = one(EntrySpec::empty_with_leftovers(83952, 453));
+        let (bytes, offset, _) = one(EntrySpec::empty_with_leftovers(83952, 453, 57472));
         let dat = Dat::parse(&bytes).unwrap();
         let entry = dat.entry_at(offset).unwrap();
         assert_eq!(entry.content_type(), ContentType::Empty);
@@ -922,6 +931,134 @@ mod tests {
         assert_eq!(block.len(), 128);
         let (bytes, offset, content) = one(EntrySpec::standard_stored(vec![plain, vec![1u8; 8]]));
         assert_eq!(extract(&bytes, offset).unwrap(), content);
+    }
+
+    #[test]
+    fn a_mip_spanning_several_blocks_walks_all_of_them() {
+        // The packer chunks a mip at sixteen kilobytes, so a mip of more than one block is the
+        // ordinary case rather than an edge: a hundred thousand textures in a full install have one.
+        // A reader that decoded only the first block of each mip would still pass a one-block test.
+        let mips = vec![
+            vec![vec![1u8; 4096], vec![2u8; 4096], vec![3u8; 1000]],
+            vec![vec![4u8; 512], vec![5u8; 256]],
+        ];
+        let (bytes, offset, content) = one(EntrySpec::texture_blocks(vec![0xAB; 80], mips));
+        let dat = Dat::parse(&bytes).unwrap();
+        let entry = dat.entry_at(offset).unwrap();
+        assert_eq!(entry.block_count(), 5);
+        assert_eq!(dat.read(&entry).unwrap(), content);
+        assert_eq!(
+            entry.stored_len(),
+            Some(80 + 4096 + 4096 + 1000 + 512 + 256)
+        );
+    }
+
+    #[test]
+    fn a_model_section_spanning_several_blocks_walks_all_of_them() {
+        let mut sections: [Vec<Vec<u8>>; 11] = Default::default();
+        sections[0] = vec![b"stack".repeat(20)];
+        sections[1] = vec![b"runtime".repeat(30), b"more runtime".repeat(40)];
+        sections[2] = vec![vec![7u8; 4096], vec![8u8; 4096], vec![9u8; 100]];
+        sections[4] = vec![vec![1u8; 300]];
+        let (bytes, offset, content) = one(EntrySpec::model_blocks(sections));
+        let dat = Dat::parse(&bytes).unwrap();
+        let entry = dat.entry_at(offset).unwrap();
+        assert_eq!(entry.block_count(), 7);
+        let out = dat.read(&entry).unwrap();
+        assert_eq!(out, content);
+        // The written header measures each section from what its blocks decoded to, not from a
+        // single block, so a run walked short would move every offset after it.
+        let word = |at: usize| bytes::read_u32_le(&out, at);
+        assert_eq!(word(0x28), 4096 + 4096 + 100);
+        assert_eq!(word(0x10), 68 + 100 + (210 + 480));
+    }
+
+    #[test]
+    fn a_texture_that_declares_more_than_it_stores_extracts_what_is_there() {
+        // The volume-texture case: the declared length counts padding between mip surfaces that the
+        // archive does not hold. Every other content type is held to its declared length exactly, so
+        // this is the one shape where a short extraction is the right answer.
+        let (bytes, offset, content) = one(EntrySpec::texture_declaring(
+            vec![0xCD; 80],
+            vec![vec![3u8; 512]],
+            4096,
+        ));
+        let dat = Dat::parse(&bytes).unwrap();
+        let entry = dat.entry_at(offset).unwrap();
+        assert_eq!(entry.declared_len(), 4096);
+        assert_eq!(entry.stored_len(), Some(80 + 512));
+        assert!(entry.stored_len().is_some_and(|n| n < entry.declared_len()));
+        let out = dat.read(&entry).unwrap();
+        assert_eq!(out, content);
+        assert_eq!(out.len() as u64, entry.stored_len().unwrap());
+    }
+
+    #[test]
+    fn a_texture_header_length_is_read_from_the_first_mip_rather_than_assumed() {
+        // Every texture in a real install opens with an eighty-byte header, which is exactly why the
+        // length is taken from the first mip's offset instead of written down as a constant.
+        let (bytes, offset, content) =
+            one(EntrySpec::texture(vec![0x5Au8; 48], vec![vec![1u8; 64]]));
+        let dat = Dat::parse(&bytes).unwrap();
+        let entry = dat.entry_at(offset).unwrap();
+        let EntryBody::Texture(table) = entry.body() else {
+            panic!("expected a texture body");
+        };
+        assert_eq!(table.raw_header_len(), 48);
+        assert_eq!(dat.read(&entry).unwrap(), content);
+    }
+
+    #[test]
+    fn a_texture_declaring_a_file_but_no_mips_is_corrupt() {
+        let (mut bytes, offset, _) = one(EntrySpec::texture(vec![0u8; 80], vec![vec![7u8; 64]]));
+        let at = usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN;
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(0));
+        assert!(matches!(
+            extract(&bytes, offset),
+            Err(Error::EntryCorrupt { detail, .. })
+                if detail == "texture entry declares a file but no mip levels"
+        ));
+    }
+
+    #[test]
+    fn a_texture_header_longer_than_the_file_it_belongs_to_is_corrupt() {
+        // Caught before the container-length guard, so a header claiming more than the file is a
+        // statement about the entry rather than about how much of it happens to be on disk.
+        let (mut bytes, offset, _) = one(EntrySpec::texture(vec![0u8; 80], vec![vec![7u8; 64]]));
+        let at = usize::try_from(offset).unwrap();
+        bytes[at + ENTRY_HEADER_LEN + 4..at + ENTRY_HEADER_LEN + 8]
+            .copy_from_slice(&bytes::write_u32_le(0x0FFF_FF00));
+        assert!(matches!(
+            extract(&bytes, offset),
+            Err(Error::EntryCorrupt { detail, .. })
+                if detail == "texture header is longer than the file it belongs to"
+        ));
+    }
+
+    #[test]
+    fn a_header_over_the_cap_is_refused_before_the_container_is_read() {
+        // The cap has to fire in `entry_at`, before the buffer exists: an entry declaring a gigabyte
+        // of header inside a large enough archive would otherwise reserve it from four bytes. What
+        // says the cap is doing the refusing, and not the read that follows it, is that a header
+        // just under it comes back as the truncation it is.
+        let (mut bytes, offset, _) = one(EntrySpec::standard(vec![b"payload".to_vec()]));
+        let at = usize::try_from(offset).unwrap();
+        let tight = DatLimits {
+            max_entry_header_bytes: 4096,
+            ..DatLimits::default()
+        };
+
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(1 << 24));
+        let dat = Dat::from_source(&bytes[..], &tight).unwrap();
+        assert!(matches!(dat.entry_at(offset), Err(Error::LimitExceeded)));
+        assert!(matches!(
+            Dat::parse(&bytes).unwrap().entry_at(offset),
+            Err(Error::LimitExceeded)
+        ));
+
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(4096));
+        let dat = Dat::from_source(&bytes[..], &tight).unwrap();
+        assert!(matches!(dat.entry_at(offset), Err(Error::Truncated { .. })));
     }
 
     #[test]

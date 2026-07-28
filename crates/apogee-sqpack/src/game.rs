@@ -411,13 +411,23 @@ impl GameData {
     /// file.
     ///
     /// # Errors
-    /// Everything [`GameData::lookup`], [`GameData::dat`] and [`Dat::entry_at`] raise.
+    /// - [`crate::Error::EntryOutOfBounds`] if the index answered with an offset its dat file does
+    ///   not reach, which a repair sweep meets when an index survives a rewrite its dat did not.
+    ///   This is the one caller that knows the key that landed there, so it is the one that can say
+    ///   which entry was wrong rather than only where the file ended.
+    /// - Everything [`GameData::lookup`], [`GameData::dat`] and [`Dat::entry_at`] raise.
     pub fn entry(&self, path: &str) -> Result<Option<(Arc<Dat>, Entry)>> {
         let Some(found) = self.lookup(path)? else {
             return Ok(None);
         };
         let dat = self.dat(&found)?;
-        let entry = dat.entry_at(found.offset)?;
+        let entry = dat.entry_at(found.offset).map_err(|err| match err {
+            crate::Error::Truncated { .. } => crate::Error::EntryOutOfBounds {
+                index_key: index_key(path, found.index_kind),
+                offset: found.offset,
+            },
+            other => other,
+        })?;
         Ok(Some((dat, entry)))
     }
 
@@ -546,6 +556,16 @@ fn enumerate_archives(info: &RepoInfo) -> Result<Vec<ArchiveInfo>> {
         .collect())
 }
 
+/// The key an index of this form holds `path` under, for a fault that has to name the entry rather
+/// than only the byte it stopped at.
+fn index_key(path: &str, kind: IndexKind) -> u64 {
+    let hash = crate::hash::hash_path(path);
+    match kind {
+        IndexKind::Index2 => u64::from(hash.full),
+        _ => hash.key(),
+    }
+}
+
 /// Read and trim a version file, returning `None` if it is absent or unreadable. Inspection is
 /// tolerant; the strict sanity gate lives on the login path, not here.
 fn read_version_file(path: &Path) -> Option<String> {
@@ -559,7 +579,7 @@ fn read_version_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dat::builder::EntrySpec;
+    use crate::dat::builder::{DatBuilder, EntrySpec};
     use crate::hash::hash_path;
     use crate::index::build::{IndexBuilder, packed};
     use std::fs;
@@ -1036,6 +1056,60 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_spanning_several_dat_files_reads_each_from_its_own_container() {
+        // Every large archive in a real install spans two to seven dat files in one directory, so a
+        // cache keyed on anything coarser than the file would answer a lookup in `dat1` with `dat0`'s
+        // handle and hand back whatever sits at that offset in the wrong file.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sqpack/ffxiv");
+        fs::create_dir_all(&dir).unwrap();
+        let id = ArchiveId::new(0x0a, 0, 0);
+
+        let mut placed = Vec::new();
+        for (n, body) in [b"from dat zero".as_slice(), b"from dat one".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut dat = DatBuilder::new();
+            dat.entry(EntrySpec::standard(vec![body.to_vec()]));
+            let (bytes, at) = dat.build();
+            fs::write(dir.join(id.dat_file_name(n as u8)), &bytes).unwrap();
+            placed.push(at[0].clone());
+        }
+        let mut index = IndexBuilder::new(IndexKind::Index1);
+        index.path("exd/zero.exl", packed(0, placed[0].offset));
+        index.path("exd/one.exl", packed(1, placed[1].offset));
+        fs::write(
+            dir.join(id.index_file_name(IndexKind::Index1)),
+            index.bytes(),
+        )
+        .unwrap();
+
+        let data = GameData::open(tmp.path()).unwrap();
+        assert_eq!(
+            data.read("exd/zero.exl").unwrap().unwrap(),
+            b"from dat zero"
+        );
+        assert_eq!(data.read("exd/one.exl").unwrap().unwrap(), b"from dat one");
+        assert_eq!(data.cached_dat_count(), 2);
+
+        // And the same two containers are what an enumerating sweep reaches by dat number.
+        let info = data.archive(Repo::Base, id).unwrap();
+        let zero = data.dat_of(info, 0).unwrap();
+        let one = data.dat_of(info, 1).unwrap();
+        assert!(!Arc::ptr_eq(&zero, &one));
+        assert_eq!(data.cached_dat_count(), 2);
+        assert_eq!(
+            zero.read_entry_at(placed[0].offset).unwrap(),
+            b"from dat zero"
+        );
+        assert_eq!(
+            one.read_entry_at(placed[1].offset).unwrap(),
+            b"from dat one"
+        );
+    }
+
+    #[test]
     fn dat_containers_are_opened_once_and_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let game = tmp.path();
@@ -1094,10 +1168,13 @@ mod tests {
         .unwrap();
 
         let data = GameData::open(game).unwrap();
-        assert!(matches!(
-            data.read("exd/root.exl"),
-            Err(crate::Error::Truncated { .. })
-        ));
+        match data.read("exd/root.exl") {
+            Err(crate::Error::EntryOutOfBounds { index_key, offset }) => {
+                assert_eq!(index_key, hash_path("exd/root.exl").key());
+                assert_eq!(offset, 0x40_000);
+            }
+            other => panic!("expected EntryOutOfBounds, got {other:?}"),
+        }
     }
 
     #[test]
