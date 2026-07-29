@@ -27,6 +27,7 @@ is tagged with its change type. Versioning aims to follow
 - Prefix verbs, a signed component manifest, and the withdrawal of the catalog (#76) _(added)_
 - Dalamud as a launch setting, and the catalog of installable programs removed (#77) _(added)_
 - Read SqPack indexes and resolve a game path to its bytes (#79) _(changed)_
+- Extract a file from a SqPack dat entry (#80) _(changed)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
