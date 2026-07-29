@@ -299,17 +299,16 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz build component_manifest --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run component_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
 
-  # The one live call: an unauthenticated GET to SE's boot endpoint, confirming the patchlist parser
-  # handles genuinely-current output. An amber canary (continue-on-error) with one retry, so an SE CDN
-  # hiccup is a visible warning, not a red build; the parser is also covered hermetically by fixtures.
+  # The one live call: two unauthenticated GETs to SE's boot endpoint, covering both dispositions it
+  # has. One sends the base sentinel and parses the boot patch chain it answers with; the other
+  # re-sends the last version that chain offers, which must then read as current. It needs no account
+  # and no secrets, so it runs on pull requests as well as on main, and it is not amber as a whole: a
+  # misread is exactly the class of bug that otherwise surfaces only in a live patch run. Only an
+  # unreachable service is tolerated, and the tool's exit code is what tells the two apart.
   boot-check-live:
     name: boot-check-live
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
-    # Talks to the live service with real credentials, so it runs once the change is on main rather
-    # than on every push to every branch.
-    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -321,7 +320,25 @@ jobs:
         with:
           workspaces: tools/boot-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Live boot-version check (retried once)
-        run: >
-          cargo run --manifest-path tools/boot-check/Cargo.toml ||
-          { sleep 5; cargo run --manifest-path tools/boot-check/Cargo.toml; }
+      # Exit 2 is an unreachable service: retried once, then downgraded to an annotation, because an SE
+      # CDN hiccup is not a fault in this repo. Every other non-zero exit is SE answering and the
+      # answer being read wrongly, which is red. The parser is also covered hermetically by fixtures.
+      - name: Live boot-version check (unreachable retried once)
+        run: |
+          probe() { cargo run --manifest-path tools/boot-check/Cargo.toml; }
+          for attempt in 1 2; do
+            # Assigned in the `||` branch, not from a `$?` after an `if`: a false `if` condition
+            # completes successfully, so that would read 0 and swallow every failure.
+            code=0
+            probe || code=$?
+            if [ "$code" -eq 0 ]; then
+              exit 0
+            fi
+            if [ "$code" -ne 2 ]; then
+              exit "$code"
+            fi
+            if [ "$attempt" = 1 ]; then
+              sleep 5
+            fi
+          done
+          echo "::warning title=boot-check-live::SE's boot endpoint was unreachable, so the live check did not run"
