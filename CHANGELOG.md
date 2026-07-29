@@ -28,6 +28,7 @@ is tagged with its change type. Versioning aims to follow
 - Dalamud as a launch setting, and the catalog of installable programs removed (#77) _(added)_
 - Read SqPack indexes and resolve a game path to its bytes (#79) _(changed)_
 - Extract a file from a SqPack dat entry (#80) _(changed)_
+- Bring boot current before registering, and read a 204 boot check as current (#83) _(fixed)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
