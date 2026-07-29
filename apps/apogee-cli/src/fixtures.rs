@@ -11,17 +11,23 @@ use apogee_test_support::transport::FixtureTransport;
 
 /// The scripted transport to inject, or `None` to use the real network.
 ///
-/// `APOGEE_FIXTURE_LOGIN=current` scripts a login → current-game registration (the launch e2e).
-/// `APOGEE_FIXTURE_LOGIN=patch` scripts a login → pending-game-patch → current registration for the
-/// patch e2e: the single pending entry is read from the file named by `APOGEE_FIXTURE_PATCH_ENTRY`
-/// (a nine-field patchlist line the test builds with real per-block hashes and the chaos-server URL),
-/// and `APOGEE_FIXTURE_MAXEX` sets the reported max expansion.
+/// `APOGEE_FIXTURE_LOGIN=current` scripts a login → current-boot check → current-game registration
+/// (the launch e2e). `APOGEE_FIXTURE_LOGIN=patch` scripts a login → current-boot check →
+/// pending-game-patch → current registration for the patch e2e: the single pending entry is read from
+/// the file named by `APOGEE_FIXTURE_PATCH_ENTRY` (a nine-field patchlist line the test builds with
+/// real per-block hashes and the chaos-server URL), and `APOGEE_FIXTURE_MAXEX` sets the reported max
+/// expansion.
+///
+/// The boot check precedes registration in every patching flow, so it is scripted once, ahead of the
+/// register responses. Omitting it would feed the game patchlist to the boot check, which would apply
+/// it as a boot patch.
 pub(crate) fn transport() -> Option<Arc<dyn Transport>> {
     match std::env::var("APOGEE_FIXTURE_LOGIN").ok().as_deref() {
         Some("current") => Some(Arc::new(FixtureTransport::new([
             fx::login_status_open(),
             fx::oauth_top("STOREDBLOB"),
             fx::submit_success("FIXTURE-SID", 3, 1),
+            fx::boot_current(),
             fx::register_current("FIXTURE-UID"),
         ]))),
         Some("patch") => {
@@ -40,6 +46,7 @@ pub(crate) fn transport() -> Option<Arc<dyn Transport>> {
                 fx::login_status_open(),
                 fx::oauth_top("STOREDBLOB"),
                 fx::submit_success("FIXTURE-SID", 3, max_expansion),
+                fx::boot_current(),
                 fx::register_with_patches("FIXTURE-UID", &[&entry]),
                 fx::register_current("FIXTURE-UID"),
             ])))
