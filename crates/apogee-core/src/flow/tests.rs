@@ -215,12 +215,24 @@ fn install_cmd(profile: Uuid) -> Command {
     }
 }
 
-/// The four scripted responses of a successful login → current-game registration.
+/// The four scripted responses of a successful login → current-game registration. `Login` neither
+/// patches nor launches, so no boot check precedes its registration.
 fn login_then_current() -> [ProtoResponse; 4] {
     [
         fx::login_status_open(),
         fx::oauth_top("STOREDBLOB"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_current(UNIQUE_ID),
+    ]
+}
+
+/// The same for a flow that patches: boot is checked, and found current, before registering.
+fn play_then_current() -> [ProtoResponse; 5] {
+    [
+        fx::login_status_open(),
+        fx::oauth_top("STOREDBLOB"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::boot_current(),
         fx::register_current(UNIQUE_ID),
     ]
 }
@@ -407,7 +419,7 @@ async fn pending_game_patches_are_summed_and_narrated() {
 #[tokio::test]
 async fn a_current_game_launches_straight_through() {
     let h = harness(false);
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch.clone(), NOW);
 
@@ -454,7 +466,7 @@ async fn a_launch_inside_the_cache_window_skips_the_network() {
     let h = harness(false);
 
     // First, a full play populates the session cache.
-    let first_transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let first_transport = Arc::new(FixtureTransport::new(play_then_current()));
     let first_launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, first_transport.clone(), first_launch, NOW);
     let events = run(
@@ -604,7 +616,7 @@ async fn launch_carries_the_profile_env_and_wrappers() {
         p.launch.extra_env = vec![("DXVK_HUD".to_string(), "fps".to_string())];
         p.launch.wrappers = vec!["gamescope".to_string()];
     });
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport, launch.clone(), NOW);
 
@@ -628,7 +640,7 @@ async fn close_after_launch_detaches_without_supervising() {
             backup_before_patch: false,
         })
         .unwrap();
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     // A running backend would block wait() forever; detach must return before ever awaiting it.
     let launch = Arc::new(FakeLaunchBackend::running());
     let ctx = context(&h, transport, launch.clone(), NOW);
@@ -651,12 +663,14 @@ async fn close_after_launch_detaches_without_supervising() {
     );
 }
 
-/// A login that lands on one pending game patch, then reports current.
-fn login_then_patch() -> [ProtoResponse; 5] {
+/// A login that lands on one pending game patch, then reports current. The boot check precedes the
+/// register loop, so it is scripted once even though registration happens twice.
+fn login_then_patch() -> [ProtoResponse; 6] {
     [
         fx::login_status_open(),
         fx::oauth_top("S"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::boot_current(),
         fx::register_with_patches(
             UNIQUE_ID,
             &[&game_entry(
@@ -778,7 +792,7 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
     );
     h.store.save_profile(&profile).unwrap();
 
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let addons = Arc::new(FakeAddons::new());
     let ctx = context_with_addons(
@@ -830,7 +844,7 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
 #[tokio::test]
 async fn a_cancelled_launch_abandons_its_companions() {
     let h = harness(false);
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::running());
     let addons = Arc::new(FakeAddons::new());
     let ctx = context_with_addons(
@@ -878,7 +892,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
             backup_before_patch: false,
         })
         .unwrap();
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let addons = Arc::new(FakeAddons::new().with_work());
     let ctx = context_with_addons(
@@ -915,7 +929,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
             backup_before_patch: false,
         })
         .unwrap();
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     // Running, so awaiting the game would block forever: detaching must not await it.
     let launch = Arc::new(FakeLaunchBackend::running());
     let addons = Arc::new(FakeAddons::new());
@@ -948,7 +962,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
 #[tokio::test]
 async fn a_companion_failure_reaches_the_event_stream() {
     let h = harness(false);
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let addons = Arc::new(FakeAddons::new().failing("no such file"));
     let ctx = context_with_addons(
@@ -974,7 +988,7 @@ async fn a_companion_failure_reaches_the_event_stream() {
 #[tokio::test]
 async fn cancelling_a_running_launch_kills_the_game_and_exits() {
     let h = harness(false);
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::running());
     let ctx = context(&h, transport, launch.clone(), NOW);
 
@@ -1026,7 +1040,7 @@ async fn a_corrupt_cache_falls_back_to_a_full_login_on_play() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("{}.json", h.account)), b"garbage").unwrap();
 
-    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport.clone(), launch.clone(), NOW);
 
@@ -1034,7 +1048,7 @@ async fn a_corrupt_cache_falls_back_to_a_full_login_on_play() {
     assert_eq!(states(&events).last(), Some(&FlowState::Exited));
     assert_eq!(
         transport.recorded().len(),
-        4,
+        5,
         "a corrupt cache forces a full login"
     );
     assert_eq!(launch.launch_count(), 1);
@@ -1087,6 +1101,7 @@ async fn patches_pending_continue_to_launch() {
         fx::login_status_open(),
         fx::oauth_top("S"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::boot_current(),
         fx::register_with_patches(
             UNIQUE_ID,
             &[
@@ -1127,8 +1142,8 @@ async fn patches_pending_continue_to_launch() {
     );
     // The game patchlist split into a base-game set and an ex1 set, base first.
     assert_eq!(patch.installed_repos(), [Repo::Game, Repo::Expansion(1)]);
-    // Auth (3) + register-pending + re-register-current = 5 requests, then launch.
-    assert_eq!(transport.recorded().len(), 5);
+    // Auth (3) + boot check + register-pending + re-register-current = 6 requests, then launch.
+    assert_eq!(transport.recorded().len(), 6);
     assert!(
         patch_frames(&events)
             .iter()
@@ -1138,13 +1153,12 @@ async fn patches_pending_continue_to_launch() {
 }
 
 #[tokio::test]
-async fn a_boot_patch_re_registers_then_launches() {
+async fn a_stale_boot_is_patched_before_registering() {
     let h = harness(false);
     let transport = Arc::new(FixtureTransport::new([
         fx::login_status_open(),
         fx::oauth_top("S"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
-        fx::register_needs_boot(),
         fx::boot_patchlist(&[&fx::synthetic_boot_entry(4_096, "2024.02.01.0000.0001")]),
         fx::register_current(UNIQUE_ID),
     ]));
@@ -1156,7 +1170,7 @@ async fn a_boot_patch_re_registers_then_launches() {
 
     assert!(
         errors(&events).is_empty(),
-        "the boot re-register loop should reach launch: {:?}",
+        "boot should be patched before registering, then launch: {:?}",
         errors(&events)
     );
     assert_eq!(
@@ -1170,8 +1184,38 @@ async fn a_boot_patch_re_registers_then_launches() {
         ]
     );
     assert_eq!(patch.installed_repos(), [Repo::Boot]);
-    // Auth (3), register (409), boot check, re-register (current) = 6.
-    assert_eq!(transport.recorded().len(), 6);
+    // Auth (3), boot check (patches), register (current) = 5. Registration is never asked to
+    // discover the stale boot, because it answers that 410 rather than 409.
+    assert_eq!(transport.recorded().len(), 5);
+}
+
+/// Boot checks clean, yet registration still demands a boot patch. That is the reference launcher's
+/// documented tamper case (boot EXEs whose hashes no longer match), not ordinary staleness, and it
+/// has no recovery: the flow stops instead of spinning the register loop.
+#[tokio::test]
+async fn a_boot_demand_with_nothing_offered_stops_rather_than_spinning() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top("S"),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::boot_current(),
+        fx::register_needs_boot(),
+        fx::boot_current(),
+    ]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport.clone(), patch.clone(), launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+
+    assert_eq!(
+        errors(&events).len(),
+        1,
+        "a boot demand the boot server will not satisfy is an error"
+    );
+    assert!(patch.installed_repos().is_empty());
+    assert_eq!(launch.launch_count(), 0);
 }
 
 #[tokio::test]
@@ -1231,6 +1275,7 @@ async fn patch_applies_pending_without_launching() {
         fx::login_status_open(),
         fx::oauth_top("S"),
         fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::boot_current(),
         fx::register_with_patches(
             UNIQUE_ID,
             &[&game_entry(
@@ -1371,7 +1416,7 @@ async fn a_profile_with_dalamud_off_never_asks_for_it() {
     let addons = Arc::new(FakeAddons::new());
     let ctx = context_with_addons(
         &h,
-        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FixtureTransport::new(play_then_current())),
         Arc::new(FakePatchBackend::new()),
         Arc::new(FakeLaunchBackend::exiting()),
         addons.clone(),
@@ -1398,7 +1443,7 @@ async fn a_profile_with_dalamud_on_asks_for_it_on_every_launch() {
     let addons = Arc::new(FakeAddons::new());
     let ctx = context_with_addons(
         &h,
-        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FixtureTransport::new(play_then_current())),
         Arc::new(FakePatchBackend::new()),
         Arc::new(FakeLaunchBackend::exiting()),
         addons.clone(),
@@ -1426,7 +1471,7 @@ async fn the_prefix_is_prepared_before_the_game_is_spawned() {
     let addons = Arc::new(FakeAddons::new());
     let ctx = context_with_addons(
         &h,
-        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FixtureTransport::new(play_then_current())),
         Arc::new(FakePatchBackend::new()),
         launch.clone(),
         addons.clone(),
@@ -1461,7 +1506,7 @@ async fn what_an_injectable_composes_reaches_the_spawn() {
     let addons = Arc::new(FakeAddons::new().inserting("--mode=inject"));
     let ctx = context_with_addons(
         &h,
-        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FixtureTransport::new(play_then_current())),
         Arc::new(FakePatchBackend::new()),
         launch.clone(),
         addons,
@@ -1489,7 +1534,7 @@ async fn stopping_a_prefix_while_it_is_being_created_is_narrated_rather_than_fai
     let addons = Arc::new(FakeAddons::new());
     let ctx = context_with_addons(
         &h,
-        Arc::new(FixtureTransport::new(login_then_current())),
+        Arc::new(FixtureTransport::new(play_then_current())),
         Arc::new(FakePatchBackend::new()),
         launch.clone(),
         addons.clone(),
