@@ -1,15 +1,16 @@
 #![forbid(unsafe_code)]
 //! FFXIV SqPack container formats and the compressed-block codec.
 //!
-//! This crate is the read side of FFXIV's archive format. Today it provides the shared block
-//! [`codec`], the container [`CommonHeader`] parse, the [`Index`] reader, and [`GameData`] install
-//! enumeration and lookup; dat-entry extraction and the integrity inspector build on top of these.
+//! This crate is the read side of FFXIV's archive format: the shared block [`codec`], the container
+//! [`CommonHeader`] parse, the [`Index`] reader, the [`Dat`] reader that turns an entry back into
+//! the file it holds, and [`GameData`], which puts them together over an install. The integrity
+//! inspector and mod detection build on top of these.
 //!
 //! ```no_run
 //! let game = apogee_sqpack::GameData::open("/path/to/game")?;
-//! if let Some(found) = game.lookup("exd/root.exl")? {
-//!     // The file's bytes start at `found.offset` inside `found.dat_path`.
-//!     assert_eq!(found.offset % 128, 0);
+//! if let Some(bytes) = game.read("exd/root.exl")? {
+//!     // Hashed, looked up in an index, decoded block by block out of a dat file.
+//!     assert!(!bytes.is_empty());
 //! }
 //! # Ok::<(), apogee_sqpack::Error>(())
 //! ```
@@ -22,6 +23,7 @@ mod archive;
 mod bytes;
 pub mod codec;
 mod container;
+mod dat;
 mod error;
 mod game;
 mod hash;
@@ -31,6 +33,13 @@ pub use archive::{ArchiveId, Category, PLATFORM_TAG};
 pub use container::{
     COMMON_HEADER_LEN, COMMON_HEADER_MIN, CommonHeader, Platform, SQPACK_MAGIC, SqPackKind,
     parse_common_header,
+};
+pub use dat::{
+    BlockRun, ContentType, DATA_HEADER_LEN, DATA_HEADER_OFFSET, DATA_UNIT,
+    DEFAULT_MAX_ENTRY_HEADER_BYTES, DEFAULT_MAX_FILE_BYTES, Dat, DatLimits, DatSource, DataHeader,
+    ENTRY_HEADER_LEN, Entry, EntryBody, EntryHeader, FileSource, MIP_LEVEL_LEN,
+    MODEL_FILE_HEADER_LEN, MODEL_LOD_COUNT, MODEL_TABLE_OFFSET, MipLevel, ModelSection, ModelTable,
+    STANDARD_BLOCK_LEN, StandardBlock, TextureTable,
 };
 pub use error::{Error, Result};
 pub use game::{ArchiveInfo, FileLocation, GameData, Repo, RepoInfo};
