@@ -277,6 +277,11 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz run sqpack_codec --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build sqpack_index --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run sqpack_index --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_entry --target x86_64-unknown-linux-gnu
+      # A malloc bound as well as an RSS one: the readers reserve at most a megabyte at a time, and
+      # `vec![0u8; n]` never touches its pages, so an RSS limit alone would not notice a reservation
+      # made out of a declared size.
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_entry --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build zipatch_chunk --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run zipatch_chunk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build zipatch_sqpk --target x86_64-unknown-linux-gnu

@@ -32,6 +32,14 @@ pub enum Error {
     /// An index container's header or segment table contradicted the format.
     #[error("index corrupt at offset {offset}: {detail}")]
     IndexCorrupt { offset: u64, detail: &'static str },
+    /// A dat container's headers, one of its entries, or one of that entry's tables contradicted
+    /// the format. Kept distinct from [`Error::BlockCorrupt`] and [`Error::IndexCorrupt`] because
+    /// the three reach different callers: a block fault is the codec's, an index fault the lookup's,
+    /// and this one belongs to the archive that holds the file. The dat side has one arm where the
+    /// index side has one, rather than a container arm and an entry arm, because the offset every
+    /// variant carries already says which of the two it is.
+    #[error("dat entry corrupt at offset {offset}: {detail}")]
+    EntryCorrupt { offset: u64, detail: &'static str },
     /// A hash collision landed on a synonym entry that could not yet be resolved.
     #[error("unresolved synonym for key {key}")]
     SynonymUnresolved { key: String },
