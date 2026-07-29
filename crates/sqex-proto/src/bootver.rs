@@ -1,9 +1,9 @@
 //! The unauthenticated boot-version check.
 //!
-//! A plain-HTTP GET asking whether the boot component is current. An empty or whitespace body means
-//! current; otherwise the body is a boot patchlist naming the pending patches in order. This is also
-//! the one endpoint CI is allowed to call live, to keep the patchlist parser honest against
-//! genuinely-current SE output.
+//! A plain-HTTP GET asking whether the boot component is current. A current boot answers `204 No
+//! Content`; a pending one a `200` whose body is a boot patchlist naming the patches in order. An
+//! empty or whitespace `200` body is also read as current. This is also the one endpoint CI is
+//! allowed to call live, to keep the patchlist parser honest against genuinely-current SE output.
 
 use http::{HeaderName, HeaderValue, Method};
 
@@ -28,6 +28,13 @@ pub async fn check_boot_version(
 ) -> Result<Vec<PatchListEntry>, ProtoError> {
     let request = build_request(boot_version, now)?;
     let response = transport.execute(request).await?;
+
+    // A current boot answers `204 No Content` with no body, which is an ordinary disposition rather
+    // than a fault, so it is matched before the 200-only gate below (observed against the live
+    // service; the same shape `register_session` documents for a current game).
+    if response.status == 204 {
+        return Ok(Vec::new());
+    }
 
     if !response.is_ok() {
         return Err(ProtoError::invalid_response(Step::BootVersion, &response));

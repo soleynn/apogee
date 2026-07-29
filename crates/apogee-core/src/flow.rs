@@ -373,8 +373,13 @@ async fn patch_to_current(
 
     if mode == InstallMode::FromNothing {
         announce_patching(ctx, profile, tx, &mut patching_announced);
-        ensure_boot_current(ctx, profile, mode, tx, cancel).await?;
     }
+
+    // Boot is brought current before the first registration rather than in reaction to one. A
+    // registration carrying an out-of-date boot is answered 410, which is terminal, so the
+    // `NeedsBootPatch` arm below never sees an ordinary stale boot; it stays as the tamper case the
+    // reference launcher documents (boot EXEs whose hashes no longer match after boot is current).
+    ensure_boot_current(ctx, profile, mode, tx, cancel, &mut patching_announced).await?;
 
     for _round in 0..MAX_REGISTER_ROUNDS {
         // Cancellation is threaded through the patch backend (an in-flight install honors it) and the
@@ -386,8 +391,9 @@ async fn patch_to_current(
                 return Ok(None);
             }
             Registration::NeedsBootPatch => {
-                announce_patching(ctx, profile, tx, &mut patching_announced);
-                if !ensure_boot_current(ctx, profile, mode, tx, cancel).await? {
+                if !ensure_boot_current(ctx, profile, mode, tx, cancel, &mut patching_announced)
+                    .await?
+                {
                     // Registration demands a boot patch, but the boot server offers none: a
                     // contradiction (tampered boot EXEs, or a stuck server). Stop rather than spin.
                     return Err(CoreError::PatchIncomplete {
@@ -428,12 +434,16 @@ async fn patch_to_current(
 /// Bring the boot repository current: fetch its patchlist and, if any patches are pending, apply them
 /// through the patch backend. Returns whether any boot patch was applied (`false` when boot is already
 /// current). `mode` selects the strict boot version read or the base-sentinel install-from-nothing one.
+///
+/// Announces patching itself, once a patch is known to be pending, so that a boot check finding
+/// nothing to do stays free of side effects.
 async fn ensure_boot_current(
     ctx: &FlowContext,
     profile: &Profile,
     mode: InstallMode,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
+    announced: &mut bool,
 ) -> Result<bool, CoreError> {
     let paths = InstallPaths::new(&profile.game_path);
     let boot_version = match mode {
@@ -445,6 +455,7 @@ async fn ensure_boot_current(
     if patches.is_empty() {
         return Ok(false);
     }
+    announce_patching(ctx, profile, tx, announced);
     let request = InstallRequest {
         repo: Repo::Boot,
         game_root: profile.game_path.clone(),

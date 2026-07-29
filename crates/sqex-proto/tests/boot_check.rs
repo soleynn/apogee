@@ -55,6 +55,14 @@ fn builds_the_fingerprinted_request() {
     );
 }
 
+/// The shape the live service sends for a current boot, and the one a 200-only gate rejected.
+#[test]
+fn no_content_means_boot_is_current() {
+    let transport = FixtureTransport::once(ProtoResponse::new(204, Vec::new()));
+    let entries = block_on(check_boot_version(&transport, BOOT_VERSION, &fixed_time())).unwrap();
+    assert!(entries.is_empty());
+}
+
 #[test]
 fn empty_body_means_boot_is_current() {
     let transport = FixtureTransport::once(ProtoResponse::new(200, Vec::new()));

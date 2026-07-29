@@ -139,11 +139,11 @@ pub fn boot_patchlist(entries: &[&str]) -> ProtoResponse {
     ProtoResponse::new(200, multipart_envelope(entries))
 }
 
-/// The boot-version check response for a current boot component: an empty `200` body (the shape
-/// `check_boot_version` reads as "no pending boot patches").
+/// The boot-version check response for a current boot component: `204 No Content`, the shape the
+/// live service sends (`check_boot_version` also tolerates an empty `200` body).
 #[must_use]
 pub fn boot_current() -> ProtoResponse {
-    ProtoResponse::new(200, Vec::new())
+    ProtoResponse::new(204, Vec::new())
 }
 
 /// A six-field boot patch entry of `length` bytes at `version_id`, for building [`boot_patchlist`]
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn boot_current_reports_no_pending_patches() {
-        assert_eq!(boot_current().status, 200);
+        assert_eq!(boot_current().status, 204);
         assert!(boot_current().body.is_empty());
     }
 
