@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use super::finding::{Sink, read_fault};
+use crate::bytes;
 use crate::container::COMMON_HEADER_LEN;
 use crate::hash::hash_path;
 use crate::index::{
@@ -750,7 +751,7 @@ fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
     bytes
         .get(at..at.checked_add(8)?)
         .and_then(|raw| <[u8; 8]>::try_from(raw).ok())
-        .map(u64::from_le_bytes)
+        .map(bytes::u64_le)
 }
 
 #[cfg(test)]
@@ -1122,7 +1123,7 @@ mod tests {
             WordCase {
                 name: "common size",
                 mutate: |b| {
-                    b.header_pad(COMMON_HEADER_SIZE_AT as usize, &0x800u32.to_le_bytes());
+                    b.header_pad(COMMON_HEADER_SIZE_AT as usize, &bytes::write_u32_le(0x800));
                 },
                 word: HeaderWord::CommonHeaderSize,
                 at: COMMON_HEADER_SIZE_AT,
@@ -1132,7 +1133,7 @@ mod tests {
             WordCase {
                 name: "common version",
                 mutate: |b| {
-                    b.header_pad(COMMON_VERSION_AT as usize, &7u32.to_le_bytes());
+                    b.header_pad(COMMON_VERSION_AT as usize, &bytes::write_u32_le(7));
                 },
                 word: HeaderWord::CommonVersion,
                 at: COMMON_VERSION_AT,

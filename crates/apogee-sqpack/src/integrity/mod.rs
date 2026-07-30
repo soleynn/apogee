@@ -32,6 +32,7 @@ pub use finding::{
 };
 pub use index::{IndexFacts, IndexInspection, Located, compare_index_forms, inspect_index};
 
+use crate::bytes;
 use crate::container::COMMON_HEADER_LEN;
 use crate::dat::DatLimits;
 use crate::index::IndexLimits;
@@ -329,7 +330,7 @@ pub(crate) fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     bytes
         .get(at..at.checked_add(4)?)
         .and_then(|raw| <[u8; 4]>::try_from(raw).ok())
-        .map(u32::from_le_bytes)
+        .map(bytes::u32_le)
 }
 
 /// SHA-1 of `bytes`, the digest all four of the format's hash fields carry.

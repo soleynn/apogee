@@ -298,6 +298,7 @@ fn locations_in(locations: &[Located], dat: u8) -> &[Located] {
 mod tests {
     use super::*;
     use crate::archive::ArchiveId;
+    use crate::bytes;
     use crate::dat::builder::EntrySpec;
     use crate::game::Repo;
     use crate::index::Index;
@@ -529,7 +530,7 @@ mod tests {
         );
         let mut bytes = std::fs::read(&path).unwrap();
         let block_at = usize::try_from(crate::dat::DATA_HEADER_OFFSET).unwrap() + 0x400 + 128;
-        bytes[block_at + 8..block_at + 12].copy_from_slice(&0x8000u32.to_le_bytes());
+        bytes[block_at + 8..block_at + 12].copy_from_slice(&bytes::write_u32_le(0x8000));
         std::fs::write(&path, &bytes).unwrap();
         let game = GameData::open(game.game_dir()).unwrap();
 

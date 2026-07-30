@@ -486,6 +486,7 @@ impl Write for Discard {
 mod tests {
     use super::*;
     use crate::archive::ArchiveId;
+    use crate::bytes;
     use crate::dat::builder::{DatBuilder, EntrySpec, Placed};
     use crate::dat::{DATA_HEADER_OFFSET, ENTRY_HEADER_LEN, MODEL_LOD_COUNT, empty_block_header};
     use crate::game::Repo;
@@ -873,7 +874,7 @@ mod tests {
             WordCase {
                 name: "common size",
                 mutate: |b| {
-                    b.header_pad(COMMON_HEADER_SIZE_AT as usize, &0x800u32.to_le_bytes());
+                    b.header_pad(COMMON_HEADER_SIZE_AT as usize, &bytes::write_u32_le(0x800));
                 },
                 word: HeaderWord::CommonHeaderSize,
                 at: COMMON_HEADER_SIZE_AT,
@@ -883,7 +884,7 @@ mod tests {
             WordCase {
                 name: "common version",
                 mutate: |b| {
-                    b.header_pad(COMMON_VERSION_AT as usize, &7u32.to_le_bytes());
+                    b.header_pad(COMMON_VERSION_AT as usize, &bytes::write_u32_le(7));
                 },
                 word: HeaderWord::CommonVersion,
                 at: COMMON_VERSION_AT,
@@ -893,7 +894,7 @@ mod tests {
             WordCase {
                 name: "data header size",
                 mutate: |b| {
-                    b.header_pad(DATA_HEADER_SIZE_AT as usize, &0x800u32.to_le_bytes());
+                    b.header_pad(DATA_HEADER_SIZE_AT as usize, &bytes::write_u32_le(0x800));
                 },
                 word: HeaderWord::SecondHeaderSize,
                 at: DATA_HEADER_SIZE_AT,
@@ -1036,7 +1037,7 @@ mod tests {
         let built = b.built();
         let mut bytes = built.bytes.clone();
         let at = usize::try_from(built.placed[0].offset).unwrap();
-        bytes[at..at + 4].copy_from_slice(&100u32.to_le_bytes());
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(100));
         let opts = SweepOptions {
             gaps: GapPolicy::Skip,
             ..SweepOptions::default()
@@ -1053,7 +1054,7 @@ mod tests {
         let built = clean_dat().built();
         let mut bytes = built.bytes.clone();
         let at = usize::try_from(built.placed[0].offset).unwrap() + OCCUPIED_UNITS_AT;
-        bytes[at..at + 4].copy_from_slice(&99u32.to_le_bytes());
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(99));
         let finding = only_walk_finding(&bytes, &located(&built.placed), &SweepOptions::default());
         assert!(matches!(
             finding.defect,
@@ -1074,7 +1075,7 @@ mod tests {
         let mut bytes = built.bytes.clone();
         let at = usize::try_from(built.placed[0].offset).unwrap() + ALLOCATED_UNITS_AT;
         let grown = u32_at(&bytes, at).unwrap() + 1;
-        bytes[at..at + 4].copy_from_slice(&grown.to_le_bytes());
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(grown));
         let finding = only_walk_finding(&bytes, &located(&built.placed), &SweepOptions::default());
         // Filed against the slot that reaches too far, which is the entry a repair has to re-place.
         assert_eq!(finding.site.offset, Some(built.placed[0].offset));
@@ -1101,7 +1102,7 @@ mod tests {
         // Reserve the distance to the last entry, so the slot ends one header past it and swallows both
         // of the others without running off the end of the declared region.
         let units = u32::try_from((last - first) / u64::from(DATA_UNIT)).unwrap();
-        bytes[at..at + 4].copy_from_slice(&units.to_le_bytes());
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(units));
 
         let found = walk(&bytes, &located(&built.placed), &SweepOptions::default()).findings;
         assert_eq!(found.len(), 2, "one per entry it swallowed: {found:#?}");
@@ -1123,7 +1124,7 @@ mod tests {
         let in_the_header = 0x700u64;
         let mut head = Vec::new();
         for word in [DATA_UNIT, ContentType::Empty.word(), 0, 0, 0] {
-            head.extend_from_slice(&word.to_le_bytes());
+            head.extend_from_slice(&bytes::write_u32_le(word));
         }
         b.header_pad(usize::try_from(in_the_header).unwrap(), &head);
         let built = b.built();
@@ -1151,7 +1152,7 @@ mod tests {
         b.entry(EntrySpec::standard(vec![b"payload".to_vec()]));
         let mut head = Vec::new();
         for word in [DATA_UNIT, ContentType::Empty.word(), 0, 0, 0] {
-            head.extend_from_slice(&word.to_le_bytes());
+            head.extend_from_slice(&bytes::write_u32_le(word));
         }
         let in_the_header = [0x600u64, 0x700];
         for at in in_the_header {
@@ -1189,7 +1190,7 @@ mod tests {
         let last = built.placed.last().unwrap().offset;
         let at = usize::try_from(last).unwrap() + ALLOCATED_UNITS_AT;
         let grown = u32_at(&bytes, at).unwrap() + 4;
-        bytes[at..at + 4].copy_from_slice(&grown.to_le_bytes());
+        bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(grown));
         let finding = only_walk_finding(&bytes, &located(&built.placed), &SweepOptions::default());
         assert_eq!(finding.site.offset, Some(last));
         assert!(matches!(
@@ -1247,7 +1248,7 @@ mod tests {
         let in_the_header = 0x500u64;
         let mut head = Vec::new();
         for word in [DATA_UNIT, ContentType::Empty.word(), 0, 0, 0] {
-            head.extend_from_slice(&word.to_le_bytes());
+            head.extend_from_slice(&bytes::write_u32_le(word));
         }
         let mut b = items.clone();
         b.header_pad(usize::try_from(in_the_header).unwrap(), &head);
@@ -1357,7 +1358,7 @@ mod tests {
         let mut bytes = built.bytes.clone();
         // A "compressed" size above the stored sentinel is a framing the codec refuses outright.
         let block_at = usize::try_from(built.placed[0].offset).unwrap() + DATA_UNIT as usize;
-        bytes[block_at + 8..block_at + 12].copy_from_slice(&0x8000u32.to_le_bytes());
+        bytes[block_at + 8..block_at + 12].copy_from_slice(&bytes::write_u32_le(0x8000));
         let named = located(&built.placed);
         assert!(
             walk(&bytes, &named, &SweepOptions::default())
@@ -1494,7 +1495,7 @@ mod tests {
                 // union of the slots rather than their sum.
                 let at = usize::try_from(first.offset).unwrap() + ALLOCATED_UNITS_AT;
                 let grown = u32_at(&bytes, at).unwrap_or(0) + 2;
-                bytes[at..at + 4].copy_from_slice(&grown.to_le_bytes());
+                bytes[at..at + 4].copy_from_slice(&bytes::write_u32_le(grown));
             }
             for opts in every_pass() {
                 let totals = walk(&bytes, &located(&built.placed), &opts).totals;
