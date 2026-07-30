@@ -155,9 +155,11 @@ impl IndexKind {
 /// verbatim: verifying it is the inspector's job, not something every open pays for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentDescriptor {
-    /// Byte offset of the segment within the file. Zero when the segment is unused.
+    /// Byte offset of the segment within the file. Not to be read when the segment is unused: a real
+    /// container leaves an emptied segment's offset at the write cursor, at zero, or at the position it
+    /// held before it was emptied, and all three occur across one install.
     pub offset: u32,
-    /// Byte length of the segment. Zero when the segment is unused.
+    /// Byte length of the segment, and the only field that decides whether the container carries it.
     pub size: u32,
     /// The SHA-1 the header claims over the segment's bytes.
     pub sha1: [u8; 20],
