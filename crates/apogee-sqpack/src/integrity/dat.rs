@@ -82,9 +82,7 @@ pub fn inspect_dat_headers<S: DatSource>(
         // decides that is not enough, and the checks that reach past the end skip themselves.
         Ok(read) => head.truncate(read),
         Err(error) => {
-            let (fault, detail, offset) = read_fault(&error);
-            sink.push_on(offset, Defect::ContainerUnreadable { fault, detail });
-            totals.containers_unreadable = 1;
+            crate::integrity::note_unreadable(&mut sink, &mut totals, &error);
             return DatInspection {
                 report: sink.finish(totals),
                 dat: None,
@@ -95,9 +93,7 @@ pub fn inspect_dat_headers<S: DatSource>(
     let dat = match Dat::from_source(source, &opts.dat_limits) {
         Ok(dat) => dat,
         Err(error) => {
-            let (fault, detail, offset) = read_fault(&error);
-            sink.push_on(offset, Defect::ContainerUnreadable { fault, detail });
-            totals.containers_unreadable = 1;
+            crate::integrity::note_unreadable(&mut sink, &mut totals, &error);
             return DatInspection {
                 report: sink.finish(totals),
                 dat: None,
