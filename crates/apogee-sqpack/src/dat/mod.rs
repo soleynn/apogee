@@ -15,6 +15,11 @@
 //! length exactly, and their entries read like any other. So a missing common header is recorded and
 //! carried, never a refusal: refusing would make a fifth of a real install unreadable.
 //!
+//! The same marker fills the space between entries. A patch that deletes or moves a file leaves its
+//! slot behind, zeroed with a 24-byte header at the front saying how many blocks the run covers:
+//! [`empty_block_header`] writes it, [`empty_block_count`] reads it back, and a stretch of a data
+//! region no entry claims is a chain of them.
+//!
 //! ```no_run
 //! use apogee_sqpack::{Dat, GameData};
 //! let game = GameData::open("/path/to/game")?;
@@ -27,6 +32,7 @@
 //! # Ok::<(), apogee_sqpack::Error>(())
 //! ```
 
+mod empty;
 mod entry;
 mod model;
 mod source;
@@ -42,6 +48,7 @@ use crate::codec::{self, BlockMeta};
 use crate::container::{COMMON_HEADER_LEN, CommonHeader, parse_common_header};
 use crate::error::{Error, Result};
 
+pub use empty::{EMPTY_BLOCK_HEADER_LEN, empty_block_count, empty_block_header};
 pub use entry::{
     ContentType, DATA_UNIT, DEFAULT_MAX_ENTRY_HEADER_BYTES, DEFAULT_MAX_FILE_BYTES, DatLimits,
     ENTRY_HEADER_LEN, Entry, EntryBody, EntryHeader, MIP_LEVEL_LEN, MipLevel, STANDARD_BLOCK_LEN,

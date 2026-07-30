@@ -41,9 +41,10 @@ pub use container::{
 pub use dat::{
     BlockRun, ContentType, DATA_HEADER_LEN, DATA_HEADER_OFFSET, DATA_UNIT,
     DEFAULT_MAX_ENTRY_HEADER_BYTES, DEFAULT_MAX_FILE_BYTES, Dat, DatLimits, DatSource, DataHeader,
-    ENTRY_HEADER_LEN, Entry, EntryBody, EntryHeader, FileSource, MIP_LEVEL_LEN,
-    MODEL_FILE_HEADER_LEN, MODEL_LOD_COUNT, MODEL_TABLE_OFFSET, MipLevel, ModelSection, ModelTable,
-    STANDARD_BLOCK_LEN, StandardBlock, TextureTable,
+    EMPTY_BLOCK_HEADER_LEN, ENTRY_HEADER_LEN, Entry, EntryBody, EntryHeader, FileSource,
+    MIP_LEVEL_LEN, MODEL_FILE_HEADER_LEN, MODEL_LOD_COUNT, MODEL_TABLE_OFFSET, MipLevel,
+    ModelSection, ModelTable, STANDARD_BLOCK_LEN, StandardBlock, TextureTable, empty_block_count,
+    empty_block_header,
 };
 pub use error::{Error, Result};
 pub use game::{ArchiveInfo, FileLocation, GameData, Repo, RepoInfo};
