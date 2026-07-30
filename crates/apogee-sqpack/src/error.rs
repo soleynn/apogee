@@ -17,6 +17,12 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// SqPack access failures. Offsets and keys travel with every variant for triage.
+///
+/// `#[non_exhaustive]` for the callers, frozen for us: a header self-hash mismatch used to have an
+/// arm here and was never raised, because the check that finds one belongs to a sweep that reports
+/// rather than refuses, and it says so with [`crate::integrity::Defect::HeaderHashMismatch`]. A
+/// variant nothing constructs is a contract nothing tests, so it is gone and the tests below are
+/// what keep the set honest.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -26,9 +32,6 @@ pub enum Error {
     /// A recognized-but-unhandled platform byte (PS3/PS4), or an unrecognized one.
     #[error("unsupported platform")]
     UnsupportedPlatform,
-    /// A header's stored SHA-1 did not match its contents (checked by the inspector, not on open).
-    #[error("header hash mismatch")]
-    HeaderHashMismatch,
     /// Fewer bytes were available than a structure requires.
     #[error("truncated at offset {offset}: need {needed} more byte(s)")]
     Truncated { offset: u64, needed: u64 },
@@ -117,6 +120,82 @@ impl From<std::io::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Freeze the taxonomy: every variant as a pattern, a value built from it, and the line it
+    /// renders as, in one entry.
+    ///
+    /// The generated `match` has no wildcard arm, so a variant added to the enum stops this
+    /// compiling until it gains an entry, and an entry is a pattern *and* a sample *and* an expected
+    /// string. Written instead as a match beside a table the pair would fail open: the compiler would
+    /// force the arm, and the same edit could forget the table, leaving a variant named and never
+    /// rendered. Each sample is also checked against its own pattern, so an entry cannot be filed
+    /// under one variant while building another.
+    ///
+    /// What it pins is `Display`, because that is what a shell prints and what a `PatchError` chain
+    /// carries upward. The messages are as much a contract as the fields.
+    macro_rules! frozen {
+        ($test:ident, $ty:ty, {
+            $( $pat:pat => ($sample:expr, $expected:expr $(,)?) ),+ $(,)?
+        }) => {
+            #[test]
+            fn $test() {
+                #[allow(dead_code)]
+                fn every_variant_has_an_entry(value: &$ty) {
+                    match value { $( $pat => () ),+ }
+                }
+                $({
+                    let sample: $ty = $sample;
+                    // The pattern is an argument, never the format string: it contains braces.
+                    assert!(
+                        matches!(sample, $pat),
+                        "the sample filed under {} builds a different variant",
+                        stringify!($pat),
+                    );
+                    assert_eq!(sample.to_string(), $expected, "{}", stringify!($pat));
+                })+
+            }
+        };
+    }
+
+    frozen!(every_error_renders_as_recorded, Error, {
+        Error::BadMagic => (Error::BadMagic, "bad SqPack magic"),
+        Error::UnsupportedPlatform => (Error::UnsupportedPlatform, "unsupported platform"),
+        Error::Truncated { .. } => (
+            Error::Truncated { offset: 2048, needed: 16 },
+            "truncated at offset 2048: need 16 more byte(s)",
+        ),
+        Error::EntryOutOfBounds { .. } => (
+            Error::EntryOutOfBounds { index_key: 7, offset: 4096 },
+            "entry out of bounds: index_key=7, offset=4096",
+        ),
+        Error::BlockCorrupt { .. } => (
+            Error::BlockCorrupt { offset: 128, detail: "header size is not 16" },
+            "block corrupt at offset 128: header size is not 16",
+        ),
+        Error::IndexCorrupt { .. } => (
+            Error::IndexCorrupt { offset: 1024, detail: "not an index container" },
+            "index corrupt at offset 1024: not an index container",
+        ),
+        Error::EntryCorrupt { .. } => (
+            Error::EntryCorrupt { offset: 2176, detail: "entry header is shorter than its own fields" },
+            "dat entry corrupt at offset 2176: entry header is shorter than its own fields",
+        ),
+        Error::SynonymUnresolved { .. } => (
+            Error::SynonymUnresolved { key: "0x0123456789abcdef".to_owned() },
+            "unresolved synonym for key 0x0123456789abcdef",
+        ),
+        Error::LimitExceeded => (Error::LimitExceeded, "resource limit exceeded"),
+        Error::Busy => (Error::Busy, "archive busy"),
+        Error::Io(_) => (Error::Io(std::io::Error::other("nope")), "io error"),
+    });
+
+    /// The type crosses thread boundaries in a rayon sweep and is stored in boxed chains above this
+    /// crate. Nothing else pins it: a variant boxing a non-`Send` source would be caught at the first
+    /// caller instead of here.
+    const _: fn() = || {
+        fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+        assert_send_sync_static::<Error>();
+    };
 
     #[test]
     fn a_held_file_is_busy_only_under_the_table_that_names_its_code() {

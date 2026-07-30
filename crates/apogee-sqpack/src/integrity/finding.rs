@@ -224,6 +224,11 @@ impl ReadFault {
 }
 
 /// Fold a reader error into the fault, the parser's own detail, and the byte position it names.
+///
+/// Matched arm by arm with no wildcard, even though [`Error`] is `#[non_exhaustive]` and a wildcard
+/// would compile: this is the one place the taxonomy narrows, and a new variant folding silently to
+/// [`ReadFault::Other`] would reach every report in the crate as "unreadable" with nothing said about
+/// why. The compiler asks instead.
 pub(crate) fn read_fault(error: &Error) -> (ReadFault, &'static str, Option<u64>) {
     match *error {
         Error::BadMagic => (ReadFault::Magic, "", None),
@@ -236,7 +241,10 @@ pub(crate) fn read_fault(error: &Error) -> (ReadFault, &'static str, Option<u64>
         Error::LimitExceeded => (ReadFault::LimitExceeded, "", None),
         Error::Busy => (ReadFault::Busy, "", None),
         Error::Io(ref error) => (io_fault(error.kind()), "", None),
-        _ => (ReadFault::Other, "", None),
+        // A lookup fault, not a container one: nothing that opens or parses a container raises it, so
+        // it has no fault of its own to fold to. Named rather than left to a wildcard so that stays a
+        // decision.
+        Error::SynonymUnresolved { .. } => (ReadFault::Other, "", None),
     }
 }
 
