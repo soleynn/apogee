@@ -1,17 +1,23 @@
-//! `zipatch-tool`: the patch-day inspection and index binary. Four verbs:
+//! `zipatch-tool`: the patch-day inspection and index binary. Five verbs:
 //!
 //! ```text
 //! cargo run -p apogee-zipatch --example zipatch_tool -- dump <file.patch>
 //! cargo run -p apogee-zipatch --example zipatch_tool -- index <out.apzi> <repo-version> <patch>...
 //! cargo run -p apogee-zipatch --example zipatch_tool -- verify <game-root> <index.apzi>
 //! cargo run -p apogee-zipatch --example zipatch_tool -- repair <game-root> <index.apzi> <patch>...
+//! cargo run -p apogee-zipatch --example zipatch_tool -- mods <game-dir> <index.apzi> <repo>...
 //! ```
 //!
 //! `dump` renders every chunk with its file offset; `index` builds a block index from a patch chain;
 //! `verify` checks an install against one and reports broken/missing/size-mismatched/stray files;
-//! `repair` heals a damaged install by pulling the broken ranges from local patch files. All
-//! formatting lives in the library (the `Display` impls and the typed reports), so this example stays
-//! an I/O shell that the library never has to become.
+//! `repair` heals a damaged install by pulling the broken ranges from local patch files; `mods`
+//! answers the question a repair should ask first, which files it would replace with something else.
+//! All formatting lives in the libraries (the `Display` impls and the typed reports), so this example
+//! stays an I/O shell that they never have to become.
+//!
+//! `mods` is here rather than beside the reader because it needs both halves: this crate owns the
+//! block index and the verification, `apogee-sqpack` owns the archive and the comparison, and the
+//! byte-range map between them is all either has to know about the other.
 
 use std::error::Error;
 use std::fs::File;
@@ -19,6 +25,8 @@ use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use apogee_sqpack::mods::{ModOptions, PristineMap};
+use apogee_sqpack::{GameData, Repo};
 use apogee_zipatch::{Index, LocalPatchSource, PatchReader, Platform, VerifyOptions, build_index};
 
 fn main() -> ExitCode {
@@ -30,9 +38,10 @@ fn main() -> ExitCode {
             verify(Path::new(&rest[0]), Path::new(&rest[1]))
         }
         Some((verb, rest)) if verb == "repair" && rest.len() >= 3 => repair(rest),
+        Some((verb, rest)) if verb == "mods" && rest.len() >= 2 => mods(rest),
         _ => {
             eprintln!(
-                "usage:\n  zipatch_tool dump <file.patch>\n  zipatch_tool index <out.apzi> <repo-version> <patch>...\n  zipatch_tool verify <game-root> <index.apzi>\n  zipatch_tool repair <game-root> <index.apzi> <patch>..."
+                "usage:\n  zipatch_tool dump <file.patch>\n  zipatch_tool index <out.apzi> <repo-version> <patch>...\n  zipatch_tool verify <game-root> <index.apzi>\n  zipatch_tool repair <game-root> <index.apzi> <patch>...\n  zipatch_tool mods <game-dir> <index.apzi> <repo>..."
             );
             return ExitCode::FAILURE;
         }
@@ -102,6 +111,47 @@ fn verify(root: &Path, index_path: &Path) -> Result<bool, Box<dyn Error>> {
         report.stray_files.len(),
     );
     Ok(report.is_clean())
+}
+
+/// Verify `game-dir` against `index.apzi`, then say which of its files a repair would replace.
+/// "Clean" when the install holds only what the chain put there. `args` is `game-dir, index.apzi,
+/// repo...`, where each `repo` (`ffxiv`, `ex1`, …) is the caller asserting that the index covers that
+/// repository exhaustively: without one, a container the index does not name is unknown rather than
+/// added, which is the safe direction for an index built from part of a chain.
+fn mods(args: &[String]) -> Result<bool, Box<dyn Error>> {
+    let root = Path::new(&args[0]);
+    let index = Index::read_apzi(BufReader::new(File::open(&args[1])?))?;
+    let report = index.verify(root, &VerifyOptions::default())?;
+
+    let mut builder = PristineMap::builder();
+    for name in &args[2..] {
+        let repo = Repo::from_dir_name(name).ok_or("not a repository name")?;
+        builder.accounts_for(repo);
+    }
+    index.describe_containers(&report, &mut builder);
+    let map = builder.build();
+
+    let found = GameData::open(root)?.detect_mods(&map, &ModOptions::default());
+    println!(
+        "pristine={} modified={} foreign={} broken={} unknown={} shared={}",
+        found.totals.pristine,
+        found.totals.modified,
+        found.totals.foreign,
+        found.totals.broken,
+        found.totals.unknown,
+        found.totals.shared,
+    );
+    if !found.is_exhaustive() {
+        println!("note: part of the install was not judged; name its repositories to include it");
+    }
+    for file in found.replaced() {
+        println!("{file}");
+    }
+    println!(
+        "{} file(s) a repair would replace",
+        found.would_be_replaced()
+    );
+    Ok(found.is_pristine())
 }
 
 /// Verify `root` against `index.apzi`, then repair the broken ranges from the given patch files (in
