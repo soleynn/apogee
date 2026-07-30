@@ -257,7 +257,11 @@ pub fn inspect_dat_entries<S: DatSource>(
         }
 
         // Claimed space is the union of the slots, so the accounting closes even where they overlap.
-        let start = offset.max(DATA_REGION_OFFSET);
+        // Both ends are held inside the region, each against its own bound: a location past the end of
+        // a region shorter than the file contributes no run, or the space between the last slot and it
+        // would be counted as unclaimed region bytes and read as a chain of wiped ones, and a container
+        // cut short of `0x800` has a region ending before it begins.
+        let start = offset.max(DATA_REGION_OFFSET).min(region_end);
         let end = slot_end.min(region_end);
         if start > covered_to {
             record_gap(dat, covered_to, start, opts, &mut sink, &mut totals);
@@ -1195,6 +1199,72 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_slot_named_past_a_short_declared_region_accounts_for_nothing_outside_it() {
+        // A `data_units` word declaring less than the file holds is what an append whose index write
+        // landed and whose header write did not leaves behind, and the locations past the end of that
+        // region still have their twenty bytes to read. Those bytes are not in the region, so measuring
+        // a run up to one of them takes unclaimed space out of thin air.
+        let mut items = DatBuilder::new();
+        items
+            .entry(EntrySpec::standard(vec![b"inside".to_vec()]))
+            .gap_chain(&[1, 3])
+            .entry(EntrySpec::standard(vec![b"past the end".to_vec()]));
+        let built = items.built();
+        let (gap_at, _) = built.gaps[0];
+        // The region ends one wiped region into the run, so the second location is outside it and the
+        // first of the run's regions is the whole of the unclaimed space there is.
+        let region_end = gap_at + u64::from(DATA_UNIT);
+        let mut b = items.clone();
+        b.declared_units(
+            u32::try_from((region_end - DATA_REGION_OFFSET) / u64::from(DATA_UNIT)).unwrap(),
+        );
+        let bytes = b.bytes();
+
+        let named = located(&built.placed);
+        let report = walk(&bytes, &named, &SweepOptions::default());
+        let totals = report.totals;
+        assert_eq!(totals.data_region_bytes, region_end - DATA_REGION_OFFSET);
+        assert_eq!(
+            totals.claimed_bytes + totals.unclaimed_bytes,
+            totals.data_region_bytes
+        );
+        assert_eq!(totals.unclaimed_bytes, u64::from(DATA_UNIT));
+        assert_eq!(totals.gaps, 1);
+        assert_eq!(totals.unclaimed_regions, 1);
+        // The slot outside the region is the whole of what is reported: nothing is said about the bytes
+        // past the region, which are the ones a container declaring less than it holds is asking about.
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+        assert_eq!(report.findings[0].site.offset, Some(built.placed[1].offset));
+        assert!(matches!(
+            report.findings[0].defect,
+            Defect::SlotBeyondDataRegion { region_end: end, .. } if end == region_end
+        ));
+
+        // And a container cut short of where a data region starts declares one that ends before it
+        // begins. The walk has to hold a location inside that container's own header against a region
+        // end below it and still close the accounting on an empty region.
+        let in_the_header = 0x500u64;
+        let mut head = Vec::new();
+        for word in [DATA_UNIT, ContentType::Empty.word(), 0, 0, 0] {
+            head.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut b = items.clone();
+        b.header_pad(usize::try_from(in_the_header).unwrap(), &head);
+        let cut = usize::try_from(DATA_REGION_OFFSET).unwrap() - 0x200;
+        let named = [Located {
+            dat: 0,
+            offset: in_the_header,
+            key: 0xF00D,
+        }];
+        let report = walk(&b.bytes()[..cut], &named, &SweepOptions::default());
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+        assert_eq!(report.findings[0].defect, Defect::SlotBeforeDataRegion);
+        assert_eq!(report.totals.data_region_bytes, 0);
+        assert_eq!(report.totals.claimed_bytes, 0);
+        assert_eq!(report.totals.unclaimed_bytes, 0);
+    }
+
     // --- the space between slots ---
 
     #[test]
@@ -1402,6 +1472,7 @@ mod tests {
             slack in 0u32..4,
             gaps in prop::collection::vec(1u32..4, 0..4),
             overlap in any::<bool>(),
+            shrink in 0u32..6,
         ) {
             let mut b = DatBuilder::new();
             b.slack(slack);
@@ -1412,7 +1483,12 @@ mod tests {
                 b.gap(*units);
             }
             let built = b.built();
-            let mut bytes = built.bytes.clone();
+            // A region declared shorter than the file is what an interrupted header write leaves, and
+            // the locations past its end are still readable: what the walk accounts for has to stay
+            // inside the region it says it measured either way.
+            let laid = (built.bytes.len() as u64 - DATA_REGION_OFFSET) / u64::from(DATA_UNIT);
+            b.declared_units(u32::try_from(laid.saturating_sub(u64::from(shrink))).unwrap_or(0));
+            let mut bytes = b.bytes();
             if overlap && let Some(first) = built.placed.first() {
                 // Two slots covering the same bytes still has to balance, because claimed space is the
                 // union of the slots rather than their sum.
