@@ -579,7 +579,23 @@ mod tests {
             .runner("GE-Proton", "11-1")
             .expect("proton runner present");
         assert_eq!(runner.kind, RunnerKind::ProtonUmu);
+        assert!(runner.uses_ntsync(), "the proton row declares ntsync");
         assert!(catalog.tool("umu-launcher").is_some());
+
+        // The wine build the injection path steers to. It predates ntsync, and saying so in the row
+        // is what keeps a launch through it on fsync instead of on nothing.
+        let wine = catalog
+            .runner("wine-xiv", "10.8.r0.a2ca9e4")
+            .expect("wine runner present");
+        assert_eq!(wine.kind, RunnerKind::Wine);
+        assert_eq!(wine.archive.format, ArchiveFormat::TarXz);
+        assert!(!wine.uses_ntsync());
+        // The archive's own top directory carries the build flavour but not the distribution the
+        // asset was built on, so the strip prefix and the file name legitimately disagree.
+        assert_eq!(
+            wine.archive.strip_prefix.as_deref(),
+            Some("wine-xiv-staging-fsync-git-10.8.r0.a2ca9e4-nolsc")
+        );
     }
 
     /// A row written before the key existed still parses, and reads as no rather than as absent
