@@ -1,25 +1,36 @@
 //! What kind of machine this is, where that changes how a game should be launched.
 //!
-//! Three facts that are routinely conflated and are not the same question. The **board** says what
-//! the hardware is, and only that answers "does this have a Steam Deck's CPU". The **OS image** says
-//! whether SteamOS is installed, which is neither necessary (a Deck runs Bazzite or Arch just as
-//! well) nor sufficient (SteamOS ships on machines that are not Decks). The **session** says whether
+//! Three facts that are routinely conflated and are not the same question. The **machine** says what
+//! the hardware is, from the product name its firmware reports, and only that answers whether this is
+//! a Steam Deck at all. The **OS image** says whether SteamOS is installed, which is neither necessary
+//! (a Deck runs Bazzite or Arch just as well) nor sufficient (SteamOS ships on machines that are not
+//! Decks). The **session** says whether
 //! the launch is happening under the Steam compositor rather than a desktop, which is a property of
 //! how the user is logged in and changes between reboots on one machine.
 //!
 //! Each is read separately and reported separately. The reads are split from the parsing the same way
-//! the kernel version is ([`crate::env`]), so what a given board string means is decided by a test
+//! the kernel version is ([`crate::env`]), so what a given firmware string means is decided by a test
 //! over literals rather than by whatever machine happens to run the suite.
+//!
+//! **No launch variable follows from any of it, and that is a finding rather than an omission.** The
+//! tuning a Steam Deck wants is applied by the session that starts the game: the display limits, the
+//! backlight, the fan curve and the CPU topology are all exported before this launcher's process
+//! exists, so a launch from inside that session already has them. Restating one of them here would be
+//! redundant there and, worse, would take a decision away somewhere else: the CPU topology in
+//! particular is what a Proton runner's own per-title fixes set, and they skip their own adjustment
+//! whenever the variable is already present, so pre-setting it silently disables a correction that
+//! knows more about the title than this crate does. What the detection is for is telling a user what
+//! their machine is, and letting the launch path ask.
 
-/// A Steam Deck, by the board name Valve ships in its firmware.
+/// A Steam Deck, by the product name Valve ships in its firmware.
 ///
 /// Both models are 1280x800; they differ in panel and refresh ceiling, not resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeckModel {
-    /// The original LCD Deck, which the board calls `Jupiter`.
+    /// The original LCD Deck, which the firmware calls `Jupiter`.
     Lcd,
-    /// The OLED Deck, which the board calls `Galileo`.
+    /// The OLED Deck, which the firmware calls `Galileo`.
     Oled,
 }
 
@@ -27,7 +38,7 @@ pub enum DeckModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct HostIdentity {
-    /// The Steam Deck this is, from the board itself. `None` on everything else.
+    /// The Steam Deck this is, from the firmware itself. `None` on everything else.
     pub deck: Option<DeckModel>,
     /// SteamOS is the installed distribution. Independent of `deck` in both directions.
     pub steamos: bool,
@@ -42,7 +53,7 @@ impl HostIdentity {
     #[must_use]
     pub fn detect() -> Self {
         Self {
-            deck: read_board_name().as_deref().and_then(parse_deck_model),
+            deck: read_product_name().as_deref().and_then(parse_deck_model),
             steamos: read_os_release()
                 .as_deref()
                 .is_some_and(os_release_is_steamos),
@@ -51,8 +62,9 @@ impl HostIdentity {
     }
 }
 
-/// The board's own product name, as the firmware reports it.
-fn read_board_name() -> Option<String> {
+/// The system's own product name, as the firmware reports it. Valve names the machine here, not in
+/// the board fields, which on a Deck carry the mainboard's part identity instead.
+fn read_product_name() -> Option<String> {
     std::fs::read_to_string("/sys/class/dmi/id/product_name").ok()
 }
 
@@ -60,10 +72,10 @@ fn read_os_release() -> Option<String> {
     std::fs::read_to_string("/etc/os-release").ok()
 }
 
-/// Which Deck a board name identifies, if any.
+/// Which Deck a product name identifies, if any.
 ///
 /// Matched case-insensitively on the trimmed value: the strings come from firmware this project does
-/// not control, and a board that renames itself is better read as no Deck than as the wrong one.
+/// not control, and a machine that renames itself is better read as no Deck than as the wrong one.
 fn parse_deck_model(product_name: &str) -> Option<DeckModel> {
     let name = product_name.trim();
     if name.eq_ignore_ascii_case("Jupiter") {
@@ -84,18 +96,21 @@ fn os_release_is_steamos(text: &str) -> bool {
 }
 
 /// One `KEY=value` from an `os-release` file, unquoted. Comments and blank lines are skipped, and a
-/// repeated key keeps the first, since that is the one a shell sourcing the file would see last-wins
-/// only if it re-assigned, which these files do not.
+/// repeated key keeps the **last**: the file is defined as something a shell can source, so a second
+/// assignment overwrites the first, and reading it any other way disagrees with every other consumer
+/// on the machine.
 fn os_release_value(text: &str, key: &str) -> Option<String> {
+    let mut found = None;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') {
             continue;
         }
-        let Some((found, value)) = line.split_once('=') else {
+        // Split once, so a value containing `=` keeps it.
+        let Some((name, value)) = line.split_once('=') else {
             continue;
         };
-        if found.trim() != key {
+        if name.trim() != key {
             continue;
         }
         let value = value.trim();
@@ -104,9 +119,9 @@ fn os_release_value(text: &str, key: &str) -> Option<String> {
             .and_then(|v| v.strip_suffix('"'))
             .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
             .unwrap_or(value);
-        return Some(unquoted.to_owned());
+        found = Some(unquoted.to_owned());
     }
-    None
+    found
 }
 
 /// Whether the session is the Steam compositor. It names itself in the desktop variable, which is
@@ -128,16 +143,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn board_names_identify_the_two_deck_models() {
+    fn product_names_identify_the_two_deck_models() {
         assert_eq!(parse_deck_model("Jupiter"), Some(DeckModel::Lcd));
         assert_eq!(parse_deck_model("Galileo"), Some(DeckModel::Oled));
-        // Firmware values arrive with a trailing newline when read from the board.
+        // Firmware values arrive with a trailing newline when read from the firmware node.
         assert_eq!(parse_deck_model("Jupiter\n"), Some(DeckModel::Lcd));
         assert_eq!(parse_deck_model("galileo"), Some(DeckModel::Oled));
     }
 
     #[test]
-    fn no_other_board_is_a_deck() {
+    fn no_other_machine_is_a_deck() {
         for name in [
             "X570 AORUS ELITE WIFI",
             "ROG Ally RC71L",
@@ -150,7 +165,7 @@ mod tests {
     }
 
     /// The distribution and the hardware are separate answers, and the pairing that proves it is a
-    /// Deck running something else: the board still says Jupiter while `ID` says otherwise.
+    /// Deck running something else: the firmware still says Jupiter while `ID` says otherwise.
     #[test]
     fn steamos_is_read_from_the_id_and_not_from_the_variant() {
         let steamos = "NAME=\"SteamOS\"\nID=steamos\nID_LIKE=arch\nVARIANT_ID=steamdeck\n";
@@ -175,6 +190,27 @@ mod tests {
         assert_eq!(os_release_value(text, "MISSING"), None);
         assert_eq!(os_release_value("", "ID"), None);
         assert_eq!(os_release_value("garbage with no equals", "ID"), None);
+    }
+
+    /// The file is meant to be sourced by a shell, where a second assignment wins. Reading the first
+    /// instead would disagree with every other consumer of the same file on the same machine.
+    #[test]
+    fn a_repeated_key_takes_the_last_assignment() {
+        assert_eq!(
+            os_release_value("ID=arch\nID=steamos\n", "ID").as_deref(),
+            Some("steamos")
+        );
+        assert!(os_release_is_steamos("ID=arch\nID=steamos\n"));
+        assert!(!os_release_is_steamos("ID=steamos\nID=arch\n"));
+    }
+
+    /// A value is split on the first separator only, so one containing another keeps it.
+    #[test]
+    fn a_value_containing_a_separator_survives() {
+        assert_eq!(
+            os_release_value("HOME_URL=\"https://x.invalid/?a=b\"\n", "HOME_URL").as_deref(),
+            Some("https://x.invalid/?a=b")
+        );
     }
 
     #[test]

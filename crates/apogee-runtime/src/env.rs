@@ -11,8 +11,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::deck::{DeckModel, HostIdentity};
-
 /// The Direct3D DLL stems DXVK provides. The single source of truth shared with the DXVK install and
 /// health check ([`crate::dxvk`]), so the set overridden to native and the set verified on disk cannot
 /// drift apart.
@@ -108,21 +106,20 @@ pub struct EnvConfig {
 /// What the host supports, injected so the matrix stays pure and testable. `ntsync` must already
 /// reflect the selected runner's support, which [`HostCaps::for_runner`] is how a caller applies,
 /// since ntsync needs both a new-enough kernel and a runner build that uses it.
+// Deliberately exhaustive, unlike the enums around it: the whole point of the type is that a caller
+// can build one, so a test can compute an environment for a host it is not running on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct HostCaps {
     /// ntsync is usable: `/dev/ntsync` present, kernel new enough, and the runner supports it.
     pub ntsync: bool,
     /// fsync is usable (kernel has `futex_waitv`, 5.16+).
     pub fsync: bool,
-    /// The Steam Deck this is running on, when the board says it is one.
-    pub deck: Option<DeckModel>,
 }
 
 impl HostCaps {
-    /// Detect the host's capabilities from `/dev`, the kernel version, and the board's own identity.
-    /// `ntsync` here reflects only the host; pass the selected runner through
-    /// [`for_runner`](Self::for_runner) before computing an environment.
+    /// Detect the host's capabilities from `/dev` and the kernel version. `ntsync` here reflects only
+    /// the host; pass the selected runner through [`for_runner`](Self::for_runner) before computing an
+    /// environment.
     #[must_use]
     pub fn detect() -> Self {
         let kernel = read_kernel_version();
@@ -130,7 +127,6 @@ impl HostCaps {
             ntsync: std::path::Path::new("/dev/ntsync").exists()
                 && kernel.is_some_and(|k| k >= (6, 14)),
             fsync: kernel.is_some_and(|k| k >= (5, 16)),
-            deck: HostIdentity::detect().deck,
         }
     }
 
@@ -174,9 +170,6 @@ pub fn compute_environment(config: &EnvConfig, host: &HostCaps) -> Environment {
     apply_hud(&mut vars, &config.hud);
     if let Some(dxvk) = &config.dxvk {
         apply_dxvk(&mut vars, dxvk);
-    }
-    if let Some(deck) = host.deck {
-        apply_deck(&mut vars, deck);
     }
 
     // User overrides win: merged last, overwriting any computed value with the same key.
@@ -259,23 +252,6 @@ fn apply_hud(vars: &mut BTreeMap<String, String>, hud: &Hud) {
     }
 }
 
-/// The Deck tuning that is this launcher's to apply: the CPU topology wine reports to the game.
-///
-/// The Deck is four cores with two threads each, and wine's default view of that makes the game
-/// schedule as though the eight were independent. The Deck's own session exports this figure for
-/// everything it starts, so a launch that goes through it inherits it; a launch that does not (a
-/// desktop-mode run, a launcher started outside the session) would otherwise differ from the same
-/// game started from the library, on the same machine, for no reason the user can see.
-///
-/// It is the whole list on purpose. The rest of what the Deck configures for a game (refresh
-/// ceilings, backlight, fan curve, HDR defaults) is read by the compositor and the Steam client
-/// before this process exists, and restating any of it here would either do nothing or contradict a
-/// component that already decided. Both models get the same answer: they share a CPU and a
-/// resolution, and differ only in panel and refresh, neither of which is a wine variable.
-fn apply_deck(vars: &mut BTreeMap<String, String>, _model: DeckModel) {
-    vars.insert("WINE_CPU_TOPOLOGY".into(), "8:0,1,2,3,4,5,6,7".to_owned());
-}
-
 fn apply_dxvk(vars: &mut BTreeMap<String, String>, dxvk: &DxvkEnv) {
     // Override the Direct3D DLLs (and nvapi, when installed) to the native DXVK builds.
     let mut dlls = DXVK_DLL_STEMS.to_vec();
@@ -350,11 +326,7 @@ mod tests {
     use super::*;
 
     fn caps(ntsync: bool, fsync: bool) -> HostCaps {
-        HostCaps {
-            ntsync,
-            fsync,
-            deck: None,
-        }
+        HostCaps { ntsync, fsync }
     }
 
     /// A catalog row with only the field the sync fold reads set.
@@ -545,46 +517,6 @@ mod tests {
                 "strace",
             ]
         );
-    }
-
-    /// The Deck's topology is applied for either model and, being a computed value like any other,
-    /// still loses to a user who sets it themselves.
-    #[test]
-    fn a_deck_gets_its_cpu_topology_and_the_user_can_still_override_it() {
-        for model in [DeckModel::Lcd, DeckModel::Oled] {
-            let host = HostCaps {
-                deck: Some(model),
-                ..caps(false, true)
-            };
-            let out = compute_environment(&EnvConfig::default(), &host);
-            assert_eq!(
-                out.vars.get("WINE_CPU_TOPOLOGY").map(String::as_str),
-                Some("8:0,1,2,3,4,5,6,7"),
-                "{model:?} is a Deck"
-            );
-
-            let mut env = BTreeMap::new();
-            env.insert("WINE_CPU_TOPOLOGY".to_owned(), "4:0,1,2,3".to_owned());
-            let overridden = compute_environment(
-                &EnvConfig {
-                    env,
-                    ..Default::default()
-                },
-                &host,
-            );
-            assert_eq!(
-                overridden.vars.get("WINE_CPU_TOPOLOGY").map(String::as_str),
-                Some("4:0,1,2,3")
-            );
-        }
-    }
-
-    /// Nothing off a Deck acquires Deck tuning, which is what keeps the fact hardware-shaped rather
-    /// than distribution-shaped.
-    #[test]
-    fn a_machine_that_is_not_a_deck_gets_no_deck_variables() {
-        let out = compute_environment(&EnvConfig::default(), &caps(false, true));
-        assert!(!out.vars.contains_key("WINE_CPU_TOPOLOGY"));
     }
 
     /// A rich, fixed profile pinned as a golden so the full matrix cannot change silently.

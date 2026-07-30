@@ -82,7 +82,8 @@ pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
 pub use session::{GameExit, GameSession};
 #[cfg(unix)]
 pub use steam::{
-    CompatTool, CompatToolInstall, installed_compat_tool, remove_compat_tool, steam_installs,
+    CompatTool, CompatToolInstall, SteamInstall, installed_compat_tool, remove_compat_tool,
+    steam_installs,
 };
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.

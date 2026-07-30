@@ -135,15 +135,32 @@ pub fn installed_compat_tool(steam_root: &Path) -> Option<PathBuf> {
 /// Remove the registration from `steam_root`, reporting whether there was one. Only the directory
 /// this launcher writes is removed, never the tool directory it sits in, which holds everyone else's.
 ///
+/// Removal is gated on the same test that reports one as present, so a directory that merely shares
+/// the name is left alone. The two disagreeing is how a recursive delete reaches something this
+/// launcher never wrote.
+///
 /// # Errors
-/// [`RuntimeError::Io`] if the directory exists and cannot be removed.
+/// [`RuntimeError::Io`] if the registration is there and cannot be removed.
 pub fn remove_compat_tool(steam_root: &Path) -> Result<bool, RuntimeError> {
-    let dir = tool_dir(steam_root);
-    if !dir.exists() {
+    let Some(dir) = installed_compat_tool(steam_root) else {
         return Ok(false);
-    }
+    };
     std::fs::remove_dir_all(&dir).map_err(io_at(&dir))?;
     Ok(true)
+}
+
+/// A Steam installation on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SteamInstall {
+    /// The installation root; its tool directory is the one a registration goes in.
+    pub path: PathBuf,
+    /// The client runs confined, seeing a filesystem of its own rather than the host's.
+    ///
+    /// A registration names a program by absolute path, and a confined client resolves that path
+    /// inside its own view, where this launcher is not installed. So a registration written here would
+    /// be listed by Steam and fail when chosen, which is worse than not offering it.
+    pub confined: bool,
 }
 
 /// Every Steam installation belonging to this user, most conventional first.
@@ -154,34 +171,40 @@ pub fn remove_compat_tool(steam_root: &Path) -> Result<bool, RuntimeError> {
 /// the other. System-wide tool directories are deliberately absent: they are not this user's to write
 /// to, and a registration there would apply to every account on the machine.
 #[must_use]
-pub fn steam_installs() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Vec::new();
-    };
+pub fn steam_installs() -> Vec<SteamInstall> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| installs_under(&home))
+        .unwrap_or_default()
+}
+
+/// The same search rooted at `home`, so the ordering, the de-duplication and which locations count as
+/// confined are decided by a test over a directory tree rather than by the machine running it.
+fn installs_under(home: &Path) -> Vec<SteamInstall> {
+    // (relative path, whether the client that owns it runs confined)
     let candidates = [
-        ".steam/root",
-        ".steam/steam",
-        ".local/share/Steam",
-        // Steam packaged as a sandboxed application keeps its own home, and the tool directory has
-        // to be inside it to be visible to the sandboxed client.
-        ".var/app/com.valvesoftware.Steam/.steam/root",
-        "snap/steam/common/.steam/root",
+        (".steam/root", false),
+        (".steam/steam", false),
+        (".local/share/Steam", false),
+        // A packaged client keeps its own home, and its tool directory has to be inside that home to
+        // be visible to it at all.
+        (".var/app/com.valvesoftware.Steam/.steam/root", true),
+        ("snap/steam/common/.steam/root", true),
     ];
-    let mut found: Vec<PathBuf> = Vec::new();
-    for candidate in candidates {
+    let mut found: Vec<SteamInstall> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for (candidate, confined) in candidates {
         let path = home.join(candidate);
         if !path.is_dir() {
             continue;
         }
         // Resolve before comparing: `.steam/root` is normally a symlink to one of the others.
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if found
-            .iter()
-            .any(|seen| seen.canonicalize().unwrap_or_else(|_| seen.clone()) == key)
-        {
+        if seen.contains(&key) {
             continue;
         }
-        found.push(path);
+        seen.push(key);
+        found.push(SteamInstall { path, confined });
     }
     found
 }
@@ -376,6 +399,48 @@ mod tests {
             CompatTool::new("/home/u/my apps/apogee-cli", vec!["launch".to_owned()]).command_line();
         assert_eq!(script, "'/home/u/my apps/apogee-cli' 'launch'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// The usual layout reaches one installation twice, through a symlink and through the real path.
+    /// Offering it twice would let a user register under one name and look for it under the other.
+    #[test]
+    fn one_installation_reachable_two_ways_is_offered_once() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let real = home.path().join(".local/share/Steam");
+        std::fs::create_dir_all(&real)?;
+        std::fs::create_dir_all(home.path().join(".steam"))?;
+        std::os::unix::fs::symlink(&real, home.path().join(".steam/root"))?;
+
+        let installs = installs_under(home.path());
+        assert_eq!(installs.len(), 1, "{installs:?}");
+        // The symlink is the more conventional name, so it is the one offered.
+        assert_eq!(installs[0].path, home.path().join(".steam/root"));
+        assert!(!installs[0].confined);
+        Ok(())
+    }
+
+    /// A confined client resolves the registration's program path inside its own filesystem, where
+    /// this launcher is not installed. The fact travels with the installation so a caller decides what
+    /// to do about it instead of matching on the path.
+    #[test]
+    fn a_packaged_client_is_reported_as_confined() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        std::fs::create_dir_all(
+            home.path()
+                .join(".var/app/com.valvesoftware.Steam/.steam/root"),
+        )?;
+
+        let installs = installs_under(home.path());
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].confined);
+        Ok(())
+    }
+
+    #[test]
+    fn a_home_with_no_steam_offers_nothing() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        assert!(installs_under(home.path()).is_empty());
+        Ok(())
     }
 
     #[test]

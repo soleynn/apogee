@@ -162,6 +162,63 @@ fn a_machine_without_steam_is_refused_rather_than_written_to() -> std::io::Resul
     Ok(())
 }
 
+/// The environment a game session hands a program is minimal, and a launch that went wrong there is
+/// exactly when these two commands are worth running. Neither needs the profile store, so neither may
+/// require the variables that locate it.
+#[test]
+fn asking_what_the_machine_is_works_with_no_environment_at_all() -> std::io::Result<()> {
+    let bare = Command::new(env!("CARGO_BIN_EXE_apogee-cli"))
+        .args(["steam", "status"])
+        .env_clear()
+        .output()?;
+    assert!(
+        bare.status.success(),
+        "status failed with a bare environment: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    assert!(stdout(&bare).contains("machine:"), "{}", stdout(&bare));
+
+    let bare = Command::new(env!("CARGO_BIN_EXE_apogee-cli"))
+        .args(["steam", "unregister"])
+        .env_clear()
+        .output()?;
+    // No home means no installation to withdraw from, which is an answer rather than a crash about
+    // configuration directories.
+    assert!(
+        String::from_utf8_lossy(&bare.stderr).contains("no steam installation"),
+        "stderr: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    Ok(())
+}
+
+/// Withdrawing is gated on the same test that reports a registration as present. A directory that
+/// merely shares the name belongs to whoever wrote it, and a recursive delete is not the place to
+/// find out this launcher did not.
+#[test]
+fn a_directory_this_launcher_did_not_write_is_not_removed() -> std::io::Result<()> {
+    let home = with_profile_and_steam()?;
+    let foreign = tool_dir(home.path());
+    std::fs::create_dir_all(&foreign)?;
+    std::fs::write(foreign.join("compatibilitytool.vdf"), "someone else's")?;
+
+    let out = run(home.path(), &["steam", "status"])?;
+    assert!(stdout(&out).contains("not registered"), "{}", stdout(&out));
+
+    let out = run(home.path(), &["steam", "unregister"])?;
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("nothing registered"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        foreign.join("compatibilitytool.vdf").is_file(),
+        "the other tool's file survived"
+    );
+    Ok(())
+}
+
 /// Status reports the machine as well as the registration, since which of the two a Deck-specific
 /// problem lies in is the first thing worth knowing.
 #[test]
