@@ -827,12 +827,15 @@ async fn prefix(
         }
         PrefixAction::Check => {
             emit(tx, FlowState::CheckingPrefix);
-            if let Some(health) = ctx
+            match ctx
                 .launch
                 .check_prefix(&profile.runner, &prefix_dir, cancel, tx)
                 .await?
             {
-                let _ = tx.send(Event::PrefixHealth(health));
+                Some(health) => {
+                    let _ = tx.send(Event::PrefixHealth(health));
+                }
+                None => emit(tx, FlowState::NoPrefix),
             }
         }
         PrefixAction::Fix => {

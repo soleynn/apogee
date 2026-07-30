@@ -209,6 +209,10 @@ pub enum FlowState {
     Repairing,
     /// The prefix is being examined for drift.
     CheckingPrefix,
+    /// There is no prefix to examine yet. Its own disposition because otherwise a prefix that was
+    /// never created and one with nothing wrong report identically, and only one of them is an
+    /// answer to the question that was asked.
+    NoPrefix,
     /// The drift that has a targeted fix is being fixed in place.
     FixingPrefix,
     /// The prefix is being deleted and built again.

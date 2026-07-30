@@ -271,10 +271,13 @@ fn apply_dxvk(vars: &mut BTreeMap<String, String>, dxvk: &DxvkEnv) {
         format!("{}=native", dlls.join(",")),
     );
     if let Some(cache) = &dxvk.state_cache {
-        vars.insert(
-            "DXVK_STATE_CACHE_PATH".into(),
-            cache.to_string_lossy().into_owned(),
-        );
+        // Both spellings. The 2.x builds read the first and the 3.x builds renamed it to the second,
+        // and which one a prefix has is a catalog row rather than something decided here. A build
+        // that does not know a name simply does not read it, so naming both costs nothing and
+        // getting it wrong costs the cache silently landing outside the prefix it belongs to.
+        let path = cache.to_string_lossy().into_owned();
+        vars.insert("DXVK_STATE_CACHE_PATH".into(), path.clone());
+        vars.insert("DXVK_SHADER_CACHE_PATH".into(), path);
     }
 }
 
@@ -522,6 +525,30 @@ mod tests {
                 "gamemoderun",
                 "strace",
             ]
+        );
+    }
+
+    /// The name of the shader-cache variable changed between the translation's major versions, and a
+    /// catalog can pin either. Naming only one is a cache that silently goes somewhere else.
+    #[test]
+    fn the_shader_cache_is_named_the_way_both_generations_read_it() {
+        let out = compute_environment(
+            &EnvConfig {
+                dxvk: Some(DxvkEnv {
+                    state_cache: Some(PathBuf::from("/prefix/dxvk_cache")),
+                    nvapi: false,
+                }),
+                ..Default::default()
+            },
+            &caps(false, true),
+        );
+        assert_eq!(
+            out.vars.get("DXVK_STATE_CACHE_PATH").map(String::as_str),
+            Some("/prefix/dxvk_cache")
+        );
+        assert_eq!(
+            out.vars.get("DXVK_SHADER_CACHE_PATH").map(String::as_str),
+            Some("/prefix/dxvk_cache")
         );
     }
 

@@ -4,6 +4,7 @@ expression: out
 ---
 Environment {
     vars: {
+        "DXVK_SHADER_CACHE_PATH": "/prefix/dxvk_cache",
         "DXVK_STATE_CACHE_PATH": "/prefix/dxvk_cache",
         "MANGOHUD": "1",
         "MANGOHUD_CONFIG": "cpu_temp",

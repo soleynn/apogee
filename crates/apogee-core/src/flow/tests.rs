@@ -714,10 +714,45 @@ async fn checking_a_prefix_reports_its_drift_and_changes_nothing() {
     .await;
 
     assert!(states(&events).contains(&FlowState::CheckingPrefix));
+    assert!(
+        !states(&events).contains(&FlowState::NoPrefix),
+        "there was one to examine"
+    );
     assert_eq!(health_reports(&events).len(), 1);
     assert_eq!(health_reports(&events)[0].issues.len(), 1);
     assert!(!launch.was_fixed(), "a check fixes nothing");
     assert!(!launch.was_recreated(), "a check destroys nothing");
+}
+
+/// A prefix that was never created and one with nothing wrong are different answers, and reporting
+/// them identically leaves a user unable to tell which they got.
+#[tokio::test]
+async fn a_prefix_that_does_not_exist_says_so_rather_than_reporting_nothing_wrong() {
+    let h = harness(false);
+    // The double has no prefix at all, which is the same shape the real backend reports for one that
+    // was never created.
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Check,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::NoPrefix));
+    assert!(
+        health_reports(&events).is_empty(),
+        "nothing was examined, so nothing is reported about it"
+    );
 }
 
 /// Fixing applies the resolutions that leave the prefix in place and reports what is left, so a
