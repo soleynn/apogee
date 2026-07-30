@@ -18,6 +18,12 @@ sha1.workspace = true
 # The whole-install sweep runs its archives, and each archive's data files, in parallel.
 rayon.workspace = true
 
+[features]
+# Exposes src/fixtures.rs (synthetic archive builders) so another crate's tests can lay down real
+# container bytes instead of hand-rolling them. Test-only; never a default feature (release builds
+# never compile it).
+test-fixtures = []
+
 [dev-dependencies]
 # Temp game trees for install-enumeration and lookup tests.
 tempfile.workspace = true

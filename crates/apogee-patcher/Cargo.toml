@@ -20,6 +20,10 @@ tokio-stream.workspace = true
 url.workspace = true
 apogee-fetch = { path = "../apogee-fetch" }
 apogee-zipatch = { path = "../apogee-zipatch" }
+# Mod detection compares an install against a map of what the chain wrote. The reader owns the
+# archive and the comparison; this crate holds the block index and the verification a map is built
+# from, so the lowering between the two lives here.
+apogee-sqpack = { path = "../apogee-sqpack" }
 # Patchlist entries (and, later, the version cross-check) cross this seam.
 sqex-proto = { path = "../sqex-proto" }
 
@@ -33,6 +37,9 @@ rustix = { workspace = true, features = ["fs"] }
 apogee-test-support = { path = "../apogee-test-support" }
 # test-fixtures exposes the synthetic patch builders shared with zipatch's own tests; test-only.
 apogee-zipatch = { path = "../apogee-zipatch", features = ["test-fixtures"] }
+# And the archive builders, so the mod-detection suite lays down containers the reader itself wrote
+# rather than a second hand-rolled copy of the layout.
+apogee-sqpack = { path = "../apogee-sqpack", features = ["test-fixtures"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util.workspace = true

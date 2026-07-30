@@ -12,14 +12,14 @@ use std::collections::BTreeSet;
 
 use rayon::prelude::*;
 
-use super::finding::read_fault;
+use super::finding::Sink;
 use crate::dat::FileSource;
 use crate::game::{ArchiveInfo, GameData};
 use crate::index::{self, IndexKind};
 use crate::integrity::{
     ContainerId, ContainerRef, ContainerReport, Defect, Finding, IndexFacts, Located, Report, Site,
     SweepOptions, Totals, compare_index_forms, inspect_dat_entries, inspect_dat_headers,
-    inspect_data_region, inspect_index,
+    inspect_data_region, inspect_index, note_unreadable,
 };
 
 /// The most data files an archive can be missing one of. A location word spells the data file in three
@@ -32,7 +32,8 @@ impl GameData {
     ///
     /// Infallible on purpose: the tree is the subject here, so a container that will not open is a
     /// finding rather than a reason to abandon a sweep over a hundred gigabytes. A caller telling a
-    /// broken install apart from a broken disk reads [`Totals::containers_unreadable`].
+    /// broken install apart from a broken disk reads [`Totals::containers_unreadable`], and one
+    /// sweeping a tree while the game runs reads [`Report::is_complete`].
     #[must_use]
     pub fn inspect(&self, opts: &SweepOptions) -> Report {
         let archives = self.archives();
@@ -230,28 +231,16 @@ fn in_pool<T: Send>(opts: &SweepOptions, work: impl FnOnce() -> T + Send) -> T {
 /// counter it is charged to comes from the site, so the count of containers reached stays right whether
 /// or not any of them answered.
 fn unreadable(at: ContainerRef, error: &crate::Error) -> ContainerReport {
-    let (fault, detail, offset) = read_fault(error);
-    let mut totals = Totals {
-        containers_unreadable: 1,
-        ..Totals::default()
-    };
+    let mut totals = Totals::default();
     match at.file {
         ContainerId::Index(_) => totals.index_files = 1,
         ContainerId::Dat(_) => totals.data_files = 1,
         _ => {}
     }
-    ContainerReport {
-        findings: vec![Finding {
-            site: Site {
-                container: at,
-                offset,
-                key: None,
-            },
-            defect: Defect::ContainerUnreadable { fault, detail },
-        }],
-        totals,
-        truncated: false,
-    }
+    // One finding at most, and none at all when the container was merely in use.
+    let mut sink = Sink::new(at, 1);
+    note_unreadable(&mut sink, &mut totals, error);
+    sink.finish(totals)
 }
 
 /// A site that is the archive rather than any one of its files.
@@ -711,6 +700,82 @@ mod tests {
             game.inspect_archive(clean, &SweepOptions::default())
                 .is_clean()
         );
+    }
+
+    #[test]
+    fn a_sweep_reads_an_install_another_process_holds_open_for_writing() {
+        // The launcher inspects while the game is running, so this is the ordinary case rather than
+        // an edge one. On this platform nothing a holder can do refuses a read-only open: a write
+        // handle, an advisory lock and a byte-range lock all leave it succeeding, so the sweep must
+        // come back with the same report it would give on an idle tree.
+        let fixtures = archives();
+        let (tmp, game) = tree(&fixtures);
+        let held: Vec<std::fs::File> = walk_files(tmp.path())
+            .iter()
+            .map(|path| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+            })
+            .collect();
+        assert!(held.len() >= 8, "expected every container held: {held:?}");
+
+        let report = game.inspect(&SweepOptions {
+            hash_data_regions: true,
+            ..SweepOptions::default()
+        });
+        assert!(report.is_clean(), "{:#?}", report.findings);
+        // Nothing was skipped, which is the half `is_clean` on its own cannot say.
+        assert!(report.is_complete());
+        assert_eq!(report.totals.containers_busy, 0);
+        assert_eq!(report.totals.containers_unreadable, 0);
+        drop(held);
+    }
+
+    #[test]
+    fn a_container_in_use_is_counted_rather_than_called_unusable() {
+        // The one thing worse than missing a fault is inventing one: a container another process
+        // holds is fine, and grading it `Unusable` at container scope would tell a caller to replace
+        // a healthy archive. It is not reported at all, and the report says it is incomplete.
+        let at = ContainerRef::new(Repo::Base, ArchiveId::new(0x0a, 0, 0), ContainerId::Dat(0));
+        let busy = unreadable(at, &crate::Error::Busy);
+        assert!(busy.findings.is_empty());
+        assert_eq!(busy.totals.containers_busy, 1);
+        assert_eq!(busy.totals.containers_unreadable, 0);
+        assert_eq!(busy.totals.data_files, 1);
+        let report = Report {
+            totals: busy.totals,
+            ..Report::default()
+        };
+        assert!(report.is_clean());
+        assert!(!report.is_complete());
+
+        // A container that genuinely will not open is still a finding, and still says the sweep saw
+        // everything it could.
+        let gone = unreadable(at, &crate::Error::from(std::io::Error::other("no disk")));
+        assert_eq!(gone.findings.len(), 1);
+        assert_eq!(gone.totals.containers_unreadable, 1);
+        assert_eq!(gone.totals.containers_busy, 0);
+    }
+
+    /// Every file in a laid-out game tree, so a test can hold all of them at once.
+    fn walk_files(root: &std::path::Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
     }
 
     #[test]

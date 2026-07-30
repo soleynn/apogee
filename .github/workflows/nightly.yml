@@ -28,6 +28,7 @@ jobs:
           - sqpack_index
           - sqpack_entry
           - sqpack_inspect
+          - sqpack_mods
           - zipatch_chunk
           - zipatch_sqpk
           - zipatch_apply

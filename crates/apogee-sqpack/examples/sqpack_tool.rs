@@ -330,8 +330,12 @@ fn print_report(report: &Report, opts: &SweepOptions, elapsed: Duration) {
     }
     let totals = &report.totals;
     println!(
-        "{} archive(s), {} index file(s), {} data file(s), {} unreadable",
-        totals.archives, totals.index_files, totals.data_files, totals.containers_unreadable
+        "{} archive(s), {} index file(s), {} data file(s), {} unreadable, {} busy",
+        totals.archives,
+        totals.index_files,
+        totals.data_files,
+        totals.containers_unreadable,
+        totals.containers_busy
     );
     println!(
         "{} entry/entries, {} collision record(s), {} location(s), {} entry header(s), {} decoded",
@@ -382,6 +386,14 @@ fn print_report(report: &Report, opts: &SweepOptions, elapsed: Duration) {
             report.of_severity(Severity::Unusable).count()
         ),
     }
+    // A container another process held was not looked at, and saying "clean" about a sweep that
+    // skipped some of the install would be the one reading a caller must not take from this.
+    if !report.is_complete() {
+        println!(
+            "incomplete: {} container(s) were in use and not examined",
+            report.totals.containers_busy
+        );
+    }
 }
 
 /// The same report as one object. The library publishes no `serde` (a taxonomy that grows whenever
@@ -417,6 +429,9 @@ fn json_report(
     let swept = swept_bytes(totals);
     let document = json!({
         "clean": report.is_clean(),
+        // Alongside `clean`, never folded into it: a sweep that skipped a container another process
+        // held found nothing wrong with what it read, and that is a different claim.
+        "complete": report.is_complete(),
         "worst_severity": report.worst_severity().map(severity_name),
         "findings": findings,
         "truncated": truncated,
@@ -438,6 +453,7 @@ fn json_report(
             "index_files": totals.index_files,
             "data_files": totals.data_files,
             "containers_unreadable": totals.containers_unreadable,
+            "containers_busy": totals.containers_busy,
             "index_bytes": totals.index_bytes,
             "entries": totals.entries,
             "collision_records": totals.collision_records,

@@ -1,9 +1,14 @@
-//! A synthetic dat writer for tests. Deliberately not a public API: this crate reads archives and
-//! never writes them, and the only reason to lay these bytes out is to prove the reader reads them.
+//! A synthetic dat writer for tests, reachable outside the crate only through the `test-fixtures`
+//! feature. This crate reads archives and never writes them, so this is not a write API: the only
+//! reason to lay these bytes out is to prove the reader reads them.
 //!
 //! Knowing the format well enough to write it is what makes the reader's tests worth anything: the
 //! builder places entries at real slot boundaries, pads blocks the way the format does, and can be
 //! told to write a deliberately wrong table.
+//!
+//! The builder writes into in-memory buffers that cannot fail, so it asserts its own invariants
+//! rather than threading a `Result` through every chained call.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::Write as _;
 
@@ -22,7 +27,7 @@ use super::{
 
 /// How a block's payload is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Packing {
+pub enum Packing {
     /// Raw DEFLATE, the way a real archive stores anything that compresses.
     Deflate,
     /// The stored sentinel, for content DEFLATE would not shrink.
@@ -31,7 +36,7 @@ pub(crate) enum Packing {
 
 /// One entry to lay down.
 #[derive(Debug, Clone)]
-pub(crate) enum EntrySpec {
+pub enum EntrySpec {
     /// A placeholder whose leftover words describe a slot that is no longer there.
     Empty {
         raw_size: u32,
@@ -63,18 +68,18 @@ pub(crate) enum EntrySpec {
 
 /// A model entry's sections and the fields its written file header carries.
 #[derive(Debug, Clone)]
-pub(crate) struct ModelSpec {
+pub struct ModelSpec {
     /// Each section as the blocks it is stored in, in the order an extraction writes them.
-    pub(crate) sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT],
-    pub(crate) version: u32,
-    pub(crate) vertex_declaration_count: u16,
-    pub(crate) material_count: u16,
-    pub(crate) lod_count: u8,
+    pub sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT],
+    pub version: u32,
+    pub vertex_declaration_count: u16,
+    pub material_count: u16,
+    pub lod_count: u8,
 }
 
 impl EntrySpec {
     /// A standard entry over the given chunks, one block each, DEFLATE-packed.
-    pub(crate) fn standard(chunks: Vec<Vec<u8>>) -> Self {
+    pub fn standard(chunks: Vec<Vec<u8>>) -> Self {
         EntrySpec::Standard {
             chunks,
             packing: Packing::Deflate,
@@ -82,7 +87,7 @@ impl EntrySpec {
     }
 
     /// A standard entry whose blocks are stored rather than compressed.
-    pub(crate) fn standard_stored(chunks: Vec<Vec<u8>>) -> Self {
+    pub fn standard_stored(chunks: Vec<Vec<u8>>) -> Self {
         EntrySpec::Standard {
             chunks,
             packing: Packing::Stored,
@@ -90,11 +95,7 @@ impl EntrySpec {
     }
 
     /// An empty entry whose remaining words still describe its slot's previous occupant.
-    pub(crate) fn empty_with_leftovers(
-        raw_size: u32,
-        allocated_units: u32,
-        leftover_word: u32,
-    ) -> Self {
+    pub fn empty_with_leftovers(raw_size: u32, allocated_units: u32, leftover_word: u32) -> Self {
         EntrySpec::Empty {
             raw_size,
             allocated_units,
@@ -103,7 +104,7 @@ impl EntrySpec {
     }
 
     /// A texture entry: an uncompressed format header and one block per mip level.
-    pub(crate) fn texture(header: Vec<u8>, mips: Vec<Vec<u8>>) -> Self {
+    pub fn texture(header: Vec<u8>, mips: Vec<Vec<u8>>) -> Self {
         EntrySpec::Texture {
             header,
             mips: mips.into_iter().map(|mip| vec![mip]).collect(),
@@ -112,7 +113,7 @@ impl EntrySpec {
     }
 
     /// A texture entry whose mips span several blocks each, the way a real one over 16 KiB does.
-    pub(crate) fn texture_blocks(header: Vec<u8>, mips: Vec<Vec<Vec<u8>>>) -> Self {
+    pub fn texture_blocks(header: Vec<u8>, mips: Vec<Vec<Vec<u8>>>) -> Self {
         EntrySpec::Texture {
             header,
             mips,
@@ -122,7 +123,7 @@ impl EntrySpec {
 
     /// A texture entry that declares a longer file than it stores, the way a volume texture whose
     /// mip surfaces are padded in the file does.
-    pub(crate) fn texture_declaring(header: Vec<u8>, mips: Vec<Vec<u8>>, declares: u32) -> Self {
+    pub fn texture_declaring(header: Vec<u8>, mips: Vec<Vec<u8>>, declares: u32) -> Self {
         EntrySpec::Texture {
             header,
             mips: mips.into_iter().map(|mip| vec![mip]).collect(),
@@ -132,7 +133,7 @@ impl EntrySpec {
 
     /// A model entry whose sections are given in the order an extraction writes them: the stack, the
     /// runtime block, then each level of detail's vertex, edge-geometry and index buffers.
-    pub(crate) fn model(sections: [Vec<u8>; 2 + 3 * MODEL_LOD_COUNT]) -> Self {
+    pub fn model(sections: [Vec<u8>; 2 + 3 * MODEL_LOD_COUNT]) -> Self {
         Self::model_blocks(sections.map(|section| {
             if section.is_empty() {
                 Vec::new()
@@ -143,7 +144,7 @@ impl EntrySpec {
     }
 
     /// A model entry whose sections span several blocks each.
-    pub(crate) fn model_blocks(sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT]) -> Self {
+    pub fn model_blocks(sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT]) -> Self {
         EntrySpec::Model(Box::new(ModelSpec {
             sections,
             version: 0x0100_0006,
@@ -154,13 +155,13 @@ impl EntrySpec {
     }
 
     /// An entry declaring a content type outside the known set.
-    pub(crate) fn unknown_type(word: u32) -> Self {
+    pub fn unknown_type(word: u32) -> Self {
         EntrySpec::Unknown { word }
     }
 }
 
 /// One block's bytes: header, payload, and the padding up to the 128-byte boundary.
-pub(crate) fn block_bytes(plain: &[u8], packing: Packing) -> Vec<u8> {
+pub fn block_bytes(plain: &[u8], packing: Packing) -> Vec<u8> {
     let (payload, declared) = match packing {
         Packing::Stored => (plain.to_vec(), STORED_SENTINEL),
         Packing::Deflate => {
@@ -219,7 +220,7 @@ enum Item {
 /// and the data-region digest before them, so a poke inside a hashed run leaves a container whose
 /// hashes are still right about its own bytes.
 #[derive(Debug, Clone)]
-pub(crate) struct DatBuilder {
+pub struct DatBuilder {
     items: Vec<Item>,
     /// Slack to leave in the slot of every entry pushed from here on, in 128-byte units.
     slack_units: u32,
@@ -238,22 +239,29 @@ pub(crate) struct DatBuilder {
 
 /// Where an entry was written, and what it should extract to.
 #[derive(Debug, Clone)]
-pub(crate) struct Placed {
-    pub(crate) offset: u64,
-    pub(crate) content: Vec<u8>,
+pub struct Placed {
+    pub offset: u64,
+    pub content: Vec<u8>,
 }
 
 /// A built container: its bytes, where its entries landed, and the extent of every run of its data
 /// region no entry's slot covers.
 #[derive(Debug, Clone)]
-pub(crate) struct Built {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) placed: Vec<Placed>,
-    pub(crate) gaps: Vec<(u64, u64)>,
+pub struct Built {
+    pub bytes: Vec<u8>,
+    pub placed: Vec<Placed>,
+    pub gaps: Vec<(u64, u64)>,
+}
+
+impl Default for DatBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DatBuilder {
-    pub(crate) fn new() -> Self {
+    /// A container holding nothing, with every header word as a real one spells it.
+    pub fn new() -> Self {
         Self {
             items: Vec::new(),
             slack_units: 0,
@@ -270,7 +278,7 @@ impl DatBuilder {
         }
     }
 
-    pub(crate) fn entry(&mut self, spec: EntrySpec) -> &mut Self {
+    pub fn entry(&mut self, spec: EntrySpec) -> &mut Self {
         let slack_units = self.slack_units;
         self.items.push(Item::Entry { spec, slack_units });
         self
@@ -279,88 +287,88 @@ impl DatBuilder {
     /// Leave `units` of unused space inside the slot of every entry pushed after this, the way an
     /// archive that shrank a file in place leaves the rest of its slot reserved. Slack lives *inside*
     /// a slot; the space between slots is [`DatBuilder::gap`].
-    pub(crate) fn slack(&mut self, units: u32) -> &mut Self {
+    pub fn slack(&mut self, units: u32) -> &mut Self {
         self.slack_units = units;
         self
     }
 
     /// Leave `units` of space no entry claims, stamped with the marker a patcher writes over a region
     /// it wiped.
-    pub(crate) fn gap(&mut self, units: u32) -> &mut Self {
+    pub fn gap(&mut self, units: u32) -> &mut Self {
         self.gap_chain(&[units])
     }
 
     /// The same, as several wiped regions back to back, which is what adjacent deletions leave.
-    pub(crate) fn gap_chain(&mut self, units: &[u32]) -> &mut Self {
+    pub fn gap_chain(&mut self, units: &[u32]) -> &mut Self {
         self.items.push(Item::Gap(units.to_vec()));
         self
     }
 
     /// Leave space no entry claims holding `bytes` verbatim, padded out to a whole unit.
-    pub(crate) fn raw_gap(&mut self, bytes: Vec<u8>) -> &mut Self {
+    pub fn raw_gap(&mut self, bytes: Vec<u8>) -> &mut Self {
         self.items.push(Item::RawGap(bytes));
         self
     }
 
     /// Declare a container type other than "data" in the common header.
-    pub(crate) fn container_kind(&mut self, kind: u32) -> &mut Self {
+    pub fn container_kind(&mut self, kind: u32) -> &mut Self {
         self.container_kind = Some(kind);
         self
     }
 
     /// Write the twenty-four-byte blob the spanned dat files with no `SqPack` magic carry in place
     /// of a common header, which is what nineteen of a full install's eighty-six dat files hold.
-    pub(crate) fn no_magic(&mut self) -> &mut Self {
+    pub fn no_magic(&mut self) -> &mut Self {
         self.no_magic = true;
         self
     }
 
     /// Declare a data-region length other than what was laid down.
-    pub(crate) fn declared_units(&mut self, units: u32) -> &mut Self {
+    pub fn declared_units(&mut self, units: u32) -> &mut Self {
         self.declared_units = Some(units);
         self
     }
 
     /// Declare `sha1` over the data region instead of the digest of its bytes.
-    pub(crate) fn data_sha1(&mut self, sha1: [u8; 20]) -> &mut Self {
+    pub fn data_sha1(&mut self, sha1: [u8; 20]) -> &mut Self {
         self.data_sha1 = Some(sha1);
         self
     }
 
     /// Declare all zeros over the data region, which claims nothing about it. Two dat files of a full
     /// install do this.
-    pub(crate) fn zero_data_sha1(&mut self) -> &mut Self {
+    pub fn zero_data_sha1(&mut self) -> &mut Self {
         self.data_sha1(UNCLAIMED_DIGEST)
     }
 
     /// Declare `sha1` for one header instead of the digest of its own leading bytes.
-    pub(crate) fn self_hash(&mut self, header: HeaderId, sha1: [u8; 20]) -> &mut Self {
+    pub fn self_hash(&mut self, header: HeaderId, sha1: [u8; 20]) -> &mut Self {
         self.self_hashes[self_hash_slot(header)] = Some(sha1);
         self
     }
 
     /// Spell the data header's word at `0x08` as something other than the 16 every container spells.
-    pub(crate) fn unclassified(&mut self, word: u32) -> &mut Self {
+    pub fn unclassified(&mut self, word: u32) -> &mut Self {
         self.unclassified = word;
         self
     }
 
     /// Spell one of the data header's three reserved words as something other than zero.
-    pub(crate) fn reserved(&mut self, index: usize, word: u32) -> &mut Self {
+    pub fn reserved(&mut self, index: usize, word: u32) -> &mut Self {
         self.reserved[index] = word;
         self
     }
 
     /// Declare which of the archive's dat files this is. A full install spells `dat0` and `dat1` both
     /// as 1 in places, so nothing may check it.
-    pub(crate) fn span_index(&mut self, index: u32) -> &mut Self {
+    pub fn span_index(&mut self, index: u32) -> &mut Self {
         self.span_index = index;
         self
     }
 
     /// Declare the length at which the archive rolls over to the next dat file. Eighteen `dat0` files
     /// of a full install are longer than their own value, so nothing may check it either.
-    pub(crate) fn max_file_size(&mut self, len: u32) -> &mut Self {
+    pub fn max_file_size(&mut self, len: u32) -> &mut Self {
         self.max_file_size = len;
         self
     }
@@ -368,24 +376,24 @@ impl DatBuilder {
     /// Write `bytes` verbatim at absolute offset `at`, which must be inside the two headers. Applied
     /// before the headers' own digests are computed, so a poke inside a hashed run leaves the
     /// container's hashes correct and a poke past one does not.
-    pub(crate) fn header_pad(&mut self, at: usize, bytes: &[u8]) -> &mut Self {
+    pub fn header_pad(&mut self, at: usize, bytes: &[u8]) -> &mut Self {
         self.header_pokes.push((at, bytes.to_vec()));
         self
     }
 
     /// The container's bytes, and where each entry landed with the content it holds.
-    pub(crate) fn build(&self) -> (Vec<u8>, Vec<Placed>) {
+    pub fn build(&self) -> (Vec<u8>, Vec<Placed>) {
         let built = self.built();
         (built.bytes, built.placed)
     }
 
     /// The container's bytes alone.
-    pub(crate) fn bytes(&self) -> Vec<u8> {
+    pub fn bytes(&self) -> Vec<u8> {
         self.built().bytes
     }
 
     /// The container, its entries and the extent of every run between their slots.
-    pub(crate) fn built(&self) -> Built {
+    pub fn built(&self) -> Built {
         let mut region = Vec::new();
         let mut placed = Vec::new();
         let mut gaps = Vec::new();
