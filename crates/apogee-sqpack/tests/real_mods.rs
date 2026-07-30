@@ -117,14 +117,21 @@ fn a_container_header_that_differs_implicates_no_file_at_all() -> R<()> {
     })?;
     let report = run(&game, &map);
 
-    assert!(report.is_pristine(), "{:#?}", &report.files[..]);
+    // Not one file, out of the whole install.
+    assert_eq!(report.would_be_replaced(), 0, "{:#?}", &report.files[..]);
+    assert!(report.files.is_empty(), "{:#?}", &report.files[..]);
     assert_eq!(report.totals.modified, 0);
     assert_eq!(report.totals.foreign, 0);
     assert_eq!(report.totals.broken, 0);
+    assert!(report.is_exhaustive());
     // And the walk really ran: one header read per entry the indexes named.
     assert_eq!(report.totals.entry_headers_read, report.totals.pristine);
     assert!(report.totals.entry_headers_read > 1_000_000);
-    // The containers are all reported rewritten, which is the honest thing to say about them.
+    // The containers themselves *are* altered, and the report says so. The install is not pristine,
+    // which is the difference between "nothing here is a file a repair would revert" and "nothing
+    // here changed": something rewrote every container and no file's content moved with it.
+    assert!(!report.is_pristine());
+    assert_eq!(report.altered_containers().count(), report.containers.len());
     assert!(
         report
             .containers

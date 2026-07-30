@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c324f4505db46c90485d6eb713355c66b5f91ba9cb618e1712fd3ab1ad5bbbdd # shrinks to seed = 10671720687684683446, interrupt_at = [2523723, 416836, 573698, 510116]
+cc 32969e069534cb154fc65b56a4916d90d66b60af192d7823cbcdf7d251250bb4 # shrinks to seed = 8667757976054010012, interrupt_at = [102931, 911914]

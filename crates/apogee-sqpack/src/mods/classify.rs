@@ -99,11 +99,9 @@ pub fn classify_entries<S: DatSource>(
             pristine_len: None,
             actual_len: Some(actual_len),
         });
-        for located in named {
-            // No read at all: no byte of this container came from a patch, so what each entry holds
-            // follows from that alone.
-            push(&mut out, whole(located, at, standing), opts);
-        }
+        // No read at all: no byte of this container came from a patch, so what each entry holds
+        // follows from that alone.
+        file_verdicts(&mut out, named, at, standing, opts);
         return out;
     };
 
@@ -226,6 +224,22 @@ fn container_standing(coverage: &Coverage, actual_len: u64) -> ContainerStanding
         ContainerStanding::Pristine
     } else {
         ContainerStanding::Rewritten
+    }
+}
+
+/// Give every location the same verdict, for a container nothing was read from.
+///
+/// Used where the answer follows from the container rather than from any entry: one the map never
+/// described, and one that is not on disk at all.
+pub(crate) fn file_verdicts(
+    out: &mut ContainerComparison,
+    named: &[Located],
+    at: ContainerRef,
+    standing: Standing,
+    opts: &ModOptions,
+) {
+    for located in named {
+        push(out, whole(located, at, standing), opts);
     }
 }
 

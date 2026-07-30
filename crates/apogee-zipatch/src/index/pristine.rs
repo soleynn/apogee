@@ -54,12 +54,11 @@ impl Index {
     ///   and `accounts_for` decides what that means.
     pub fn describe_containers(&self, report: &VerifyReport, map: &mut MapBuilder) {
         let mut lengths: HashMap<&Path, u64> = HashMap::new();
-        for target in &self.targets {
-            let Some(at) = ContainerRef::from_relative_path(&target.path) else {
+        for (path, len) in self.targets() {
+            let Some(at) = ContainerRef::from_relative_path(path) else {
                 continue;
             };
-            let len = target.final_len();
-            lengths.insert(target.path.as_path(), len);
+            lengths.insert(path, len);
             map.container(at, len);
         }
         for path in &report.missing_files {

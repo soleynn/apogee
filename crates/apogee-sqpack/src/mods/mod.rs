@@ -24,9 +24,11 @@
 //! are hash-based and this crate bundles no path dictionary, so a verdict carries the key and the
 //! archive, and a caller with a hashlist supplies the rest.
 //!
-//! Cost is bounded by how much actually changed rather than by the size of the install. A container
-//! the map vouches for end to end is answered without reading a byte of it, and so is one the map
-//! never described, so a pristine install is classified out of its indexes alone.
+//! What it costs is every index parsed, which is 55 MB over a full install, plus one twenty-byte
+//! read per file in each container the map does not already answer for. A container the map vouches
+//! for end to end is answered from its length, and so is one the map never described, so a pristine
+//! install is classified out of its indexes alone: measured at 1.5 seconds over 118 GiB against 32
+//! seconds when every container has to be walked.
 
 mod classify;
 mod map;
@@ -77,23 +79,42 @@ pub struct ModReport {
 
 impl ModReport {
     /// Whether the install holds only what the patch chain put there.
+    ///
+    /// Both halves matter, and the second is not implied by the first: no file's bytes differ, *and*
+    /// no container the map speaks for was rewritten, grown, added or lost. An index container holds
+    /// no files at all, so a tool that rewrites one leaves every file verdict pristine, and a report
+    /// that answered from file verdicts alone would call that install untouched.
     #[must_use]
     pub fn is_pristine(&self) -> bool {
-        self.totals.modified == 0 && self.totals.foreign == 0
+        self.would_be_replaced() == 0 && self.altered_containers().next().is_none()
     }
 
     /// How many files a repair would replace with something else. The number the pre-repair prompt
     /// is about.
+    ///
+    /// Broken files are not in it: a repair restores those rather than reverting them, so putting
+    /// them in the list would warn a user about work they never did.
     #[must_use]
     pub fn would_be_replaced(&self) -> u64 {
         self.totals.modified + self.totals.foreign
     }
 
-    /// Whether every file was actually judged. False when the map did not speak for part of the
-    /// install or a container could not be read, in which case the counts are about what was seen.
+    /// The containers something rewrote, added or removed, in report order.
+    pub fn altered_containers(&self) -> impl Iterator<Item = &ContainerVerdict> {
+        self.containers.iter().filter(|v| v.standing.is_altered())
+    }
+
+    /// Whether every file got a verdict about its contents.
+    ///
+    /// False when the map did not speak for part of the install, when a container could not be read
+    /// or parsed, or when an entry did not hold together, in which case the counts are about what
+    /// was seen. A caller reads this before reading a clean result as "no mods": the alternative is
+    /// that "nothing was looked at" renders identically to "nothing was found".
     #[must_use]
     pub fn is_exhaustive(&self) -> bool {
-        self.totals.unknown == 0 && self.totals.containers_unreadable == 0
+        self.totals.unknown == 0
+            && self.totals.broken == 0
+            && self.totals.containers_unreadable == 0
     }
 
     /// The files a repair would replace, in report order.
@@ -198,10 +219,50 @@ mod tests {
         assert_eq!(report.would_be_replaced(), 2);
         assert_eq!(report.replaced().count(), 2);
         assert_eq!(report.of_standing(Standing::Broken).count(), 1);
-        // A broken entry is not something a repair "reverts": it is already not a file.
+        // A broken entry is not something a repair "reverts": it is already not a file. It does mean
+        // the report is not the whole story, though, so a caller cannot read it as "nothing else to
+        // find" either.
         assert!(report.replaced().all(|f| f.standing != Standing::Broken));
-        assert!(report.is_exhaustive());
+        assert!(!report.is_exhaustive());
         assert!(ModReport::default().is_pristine());
+        assert!(ModReport::default().is_exhaustive());
+    }
+
+    #[test]
+    fn a_container_rewritten_in_place_is_not_a_pristine_install() {
+        // An index container holds no files, so a tool that rewrites one leaves every file verdict
+        // pristine. Answering from file verdicts alone would call that install untouched, which is
+        // the shape a mod tool leaves every time it repoints a row.
+        let report = ModReport {
+            containers: vec![ContainerVerdict {
+                container: ContainerRef::new(
+                    Repo::Base,
+                    ArchiveId::new(0x0a, 0, 0),
+                    ContainerId::Index(crate::IndexKind::Index1),
+                ),
+                standing: ContainerStanding::Rewritten,
+                pristine_len: Some(4096),
+                actual_len: Some(4096),
+            }],
+            totals: ModTotals {
+                pristine: 900,
+                ..ModTotals::default()
+            },
+            ..ModReport::default()
+        };
+        assert_eq!(report.would_be_replaced(), 0);
+        assert!(!report.is_pristine());
+        assert_eq!(report.altered_containers().count(), 1);
+        // A container nothing measured is not an altered one: that is what `is_exhaustive` says.
+        let unknown = ModReport {
+            containers: vec![ContainerVerdict {
+                standing: ContainerStanding::Unknown,
+                ..report.containers[0]
+            }],
+            ..ModReport::default()
+        };
+        assert!(unknown.is_pristine());
+        assert_eq!(unknown.altered_containers().count(), 0);
     }
 
     #[test]

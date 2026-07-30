@@ -142,6 +142,9 @@ pub enum ContainerStanding {
     /// The map describes no such container, in a repository it claims to describe exhaustively: the
     /// pristine install did not have this file.
     Added,
+    /// Something should have this container and the tree does not have it: the map describes it, or
+    /// an index sends entries into it. A repair restores this rather than reverting it.
+    Missing,
     /// The map does not speak for this container's repository, or the container would not be read.
     Unknown,
 }
@@ -156,7 +159,22 @@ impl ContainerStanding {
             ContainerStanding::Grown => "grown",
             ContainerStanding::Truncated => "truncated",
             ContainerStanding::Added => "added",
+            ContainerStanding::Missing => "missing",
             ContainerStanding::Unknown => "unknown",
+        }
+    }
+
+    /// Whether something has rewritten, added or removed this container. `Unknown` answers no: what
+    /// nothing measured is [`crate::mods::ModReport::is_exhaustive`]'s to say, not this.
+    #[must_use]
+    pub fn is_altered(self) -> bool {
+        match self {
+            ContainerStanding::Rewritten
+            | ContainerStanding::Grown
+            | ContainerStanding::Truncated
+            | ContainerStanding::Added
+            | ContainerStanding::Missing => true,
+            ContainerStanding::Pristine | ContainerStanding::Unknown => false,
         }
     }
 }

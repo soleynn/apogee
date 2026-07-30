@@ -24,8 +24,8 @@ use crate::dat::{
 };
 use crate::integrity::{
     COMMON_HEADER_SIZE_AT, COMMON_VERSION_AT, ContainerRef, ContainerReport, Defect,
-    FORMAT_VERSION, GapPolicy, HASH_CHUNK_BYTES, HeaderWord, Located, SweepOptions, Totals,
-    UNCLAIMED_DIGEST, check_self_hashes, check_uncovered_runs, u32_at,
+    FORMAT_VERSION, GapPolicy, HASH_CHUNK_BYTES, HeaderWord, Located, ReadFault, SweepOptions,
+    Totals, UNCLAIMED_DIGEST, check_self_hashes, check_uncovered_runs, u32_at,
 };
 
 /// How much of a container the two headers take, and so how much one read covers both.
@@ -150,10 +150,11 @@ pub fn inspect_data_region<S: DatSource>(dat: &Dat<S>, at: ContainerRef) -> Cont
             .unwrap_or(usize::MAX)
             .min(window.len());
         if let Err(error) = dat.source().read_exact_at(&mut window[..want], pos) {
-            // The length was checked above, so a short read here means the file changed under the
-            // sweep. Nothing is known about the region after that, which is what this says.
-            let (fault, detail, offset) = read_fault(&error);
-            sink.push_on(offset, Defect::ContainerUnreadable { fault, detail });
+            // The length was checked above, so a failure here means the file changed under the
+            // sweep, or another process took it mid-read. Nothing is known about the region after
+            // that, which is what this says; routed through the shared arm so a container merely in
+            // use is counted rather than graded unusable.
+            crate::integrity::note_unreadable(&mut sink, &mut totals, &error);
             return sink.finish(totals);
         }
         hasher.update(&window[..want]);
@@ -212,6 +213,14 @@ pub fn inspect_dat_entries<S: DatSource>(
             Ok(header) => header,
             Err(error) => {
                 let (fault, detail, _) = read_fault(&error);
+                if fault == ReadFault::Busy {
+                    // Another process took the container mid-walk. Every remaining entry would fail
+                    // the same way, and a report naming a hundred thousand of them would be a
+                    // hundred thousand statements about the reader rather than about the archive.
+                    // The walk stops and the container is counted, the way an unopenable one is.
+                    totals.containers_busy += 1;
+                    return sink.finish(totals);
+                }
                 sink.push_keyed(offset, key, Defect::EntryHeaderUnreadable { fault, detail });
                 continue;
             }

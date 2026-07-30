@@ -198,6 +198,22 @@ mod tests {
     };
 
     #[test]
+    fn the_platform_table_holds_the_codes_that_platform_refuses_with() {
+        // The table itself, not a copy of it. Everything else here passes a table in so the rule can
+        // be tested on either platform, and that leaves the one thing a rule cannot check about
+        // itself: whether the constant it reads in production says what it should.
+        if cfg!(windows) {
+            // `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`.
+            assert_eq!(BUSY_CODES, [32, 33]);
+        } else {
+            assert!(
+                BUSY_CODES.is_empty(),
+                "no code refuses a read-only open here, and 32 and 33 are EPIPE and EDOM"
+            );
+        }
+    }
+
+    #[test]
     fn a_held_file_is_busy_only_under_the_table_that_names_its_code() {
         // Both tables are exercised here whichever platform runs the test, which is the point of
         // passing the table in: CI never executes a Windows binary.

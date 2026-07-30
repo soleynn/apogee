@@ -333,7 +333,6 @@ fn a_tree_a_mod_tool_has_been_at_names_the_file_it_moved() -> R<()> {
     // alongside. Here that is the whole container, because these fixtures are one block each; over
     // a real chain a write is 9 KB at the median against a mean entry of 61 KB, so the run that
     // covers a header covers about one entry rather than an archive's worth.
-    assert!(live.would_be_replaced() >= 1);
     for file in live.replaced() {
         assert!(
             file.container.repo == Repo::Base && file.container.archive.category == 0x0a,

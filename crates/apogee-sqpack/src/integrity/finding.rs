@@ -92,9 +92,11 @@ impl ContainerRef {
     /// chain's targets, a verification of them) has to get from those to containers, and a second
     /// hand-rolled parse elsewhere is a second thing to be wrong.
     ///
-    /// Strict on purpose. Only a name this crate would itself build is accepted, so an uppercase
-    /// stem, a `.bck`, a `movie/…` or a path outside `sqpack/` answers `None` rather than being
-    /// bent into some container's identity.
+    /// Exact on purpose, and checked rather than argued: whatever the parse comes up with has to
+    /// spell the path back byte for byte, or it is not that container's name. That is what refuses
+    /// the near-misses a hand-written parse waves through, an uppercase repository directory, a dat
+    /// number with a leading zero or a `+`, and it is what keeps the two directions from drifting
+    /// apart as either grows.
     #[must_use]
     pub fn from_relative_path(path: &std::path::Path) -> Option<Self> {
         let mut parts = path.components();
@@ -108,13 +110,13 @@ impl ContainerRef {
             return None;
         }
         let (stem, rest) = name.split_once(&format!(".{PLATFORM_TAG}."))?;
-        let archive = ArchiveId::parse_stem(stem).filter(|id| id.stem() == stem)?;
+        let archive = ArchiveId::parse_stem(stem)?;
         let file = match rest {
             "index" => ContainerId::Index(IndexKind::Index1),
             "index2" => ContainerId::Index(IndexKind::Index2),
             _ => ContainerId::Dat(rest.strip_prefix("dat")?.parse().ok()?),
         };
-        Some(Self::new(repo, archive, file))
+        Some(Self::new(repo, archive, file)).filter(|at| at.relative_path() == path)
     }
 }
 
@@ -1311,6 +1313,11 @@ mod tests {
             "sqpack/ffxiv/0a0000.ps3.index",
             "sqpack/ffxiv/0a0000.win32.datx",
             "sqpack/ffxiv/0a0000.win32.dat999",
+            // Near-misses that parse as numbers or as names and spell a different file: this crate
+            // builds `dat1`, never `dat01`, and `ex1`, never `EX1`.
+            "sqpack/ffxiv/0a0000.win32.dat01",
+            "sqpack/ffxiv/0a0000.win32.dat+1",
+            "sqpack/EX1/020101.win32.index",
             "sqpack/nowhere/0a0000.win32.index",
             "sqpack/ffxiv/sub/0a0000.win32.index",
             "sqpack/ffxiv",

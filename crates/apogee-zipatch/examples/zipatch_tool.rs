@@ -142,7 +142,14 @@ fn mods(args: &[String]) -> Result<bool, Box<dyn Error>> {
         found.totals.shared,
     );
     if !found.is_exhaustive() {
-        println!("note: part of the install was not judged; name its repositories to include it");
+        println!(
+            "note: {} file(s) were not judged; name a repository to include it, and see the \
+             containers below for what could not be read",
+            found.totals.unknown + found.totals.broken,
+        );
+    }
+    for container in found.altered_containers() {
+        println!("{container}");
     }
     for file in found.replaced() {
         println!("{file}");

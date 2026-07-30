@@ -2,9 +2,12 @@
 //! the same reasons. One archive is the unit of work and the archives run in parallel, because a
 //! single data file of a real install can be an eighth of it.
 //!
-//! Where this differs from the structural sweep is what it costs. That one reads every entry header
-//! of the install; this one reads none at all in a container the map vouches for, so its cost tracks
-//! how much of the install disagrees rather than how large the install is.
+//! Where this differs from the structural sweep is what it costs. Both parse every index; that one
+//! then reads every entry header of the install, while this one reads none at all in a container the
+//! map already answers for, so what it adds on top of the indexes tracks how much of the install
+//! disagrees rather than how large it is.
+
+use std::collections::BTreeSet;
 
 use rayon::prelude::*;
 
@@ -13,9 +16,9 @@ use crate::index::{self, IndexKind};
 use crate::integrity::{
     ContainerId, ContainerRef, IndexFacts, Located, SweepOptions, inspect_index,
 };
-use crate::mods::classify::{ContainerComparison, classify_entries};
-use crate::mods::map::PristineMap;
-use crate::mods::verdict::{ContainerStanding, ContainerVerdict};
+use crate::mods::classify::{ContainerComparison, classify_entries, file_verdicts};
+use crate::mods::map::{Coverage, PristineMap};
+use crate::mods::verdict::{ContainerStanding, ContainerVerdict, Standing};
 use crate::mods::{ModOptions, ModReport, ModTotals};
 
 impl GameData {
@@ -70,22 +73,57 @@ impl GameData {
         // archive having been retargeted. Where a file's bytes are is what decides, and that is the
         // data-file side below.
         for kind in [IndexKind::Index1, IndexKind::Index2] {
-            if !info.has_index(kind) {
-                continue;
-            }
             let at = archive.with_file(ContainerId::Index(kind));
-            let actual_len = std::fs::metadata(info.index_path(kind))
-                .ok()
-                .map(|meta| meta.len());
-            out.containers
-                .push(container_verdict(at, map, accounted, actual_len));
+            let actual_len = info
+                .has_index(kind)
+                .then(|| {
+                    std::fs::metadata(info.index_path(kind))
+                        .ok()
+                        .map(|m| m.len())
+                })
+                .flatten();
+            // A form the tree does not have is skipped unless the map says it should be there, in
+            // which case its absence is the finding.
+            if actual_len.is_some() || map.coverage(at).is_some() {
+                out.containers
+                    .push(container_verdict(at, map, accounted, actual_len));
+            }
         }
 
-        let locations = self.locations_of(info);
-        let comparisons: Vec<ContainerComparison> = info
-            .dats
+        let Some(locations) = self.locations_of(info) else {
+            // Neither index form parsed, so nothing names the files this archive holds and none of
+            // them can be judged. Reported rather than silently contributing no verdicts, which is
+            // what would otherwise let a wrecked archive read as a clean one.
+            out.totals.containers_unreadable += 1;
+            out.containers.push(ContainerVerdict {
+                container: archive,
+                standing: ContainerStanding::Unknown,
+                pristine_len: None,
+                actual_len: None,
+            });
+            return out;
+        };
+
+        // Every data file the archive could have: the ones on disk, the ones the index sends entries
+        // into, and the ones the map says should exist. A file the index names and the tree has lost
+        // would otherwise take its entries out of the report entirely.
+        let mut wanted: BTreeSet<u8> = info.dats.iter().copied().collect();
+        wanted.extend(locations.iter().map(|located| located.dat));
+        wanted.extend(map.containers().filter_map(|(at, _)| match at.file {
+            ContainerId::Dat(dat) if at.repo == info.repo && at.archive == info.id => Some(dat),
+            _ => None,
+        }));
+        let present: BTreeSet<u8> = info.dats.iter().copied().collect();
+
+        let comparisons: Vec<ContainerComparison> = wanted
             .par_iter()
-            .map(|dat| self.compare_dat(info, *dat, &locations, archive, map, accounted, opts))
+            .map(|dat| {
+                if present.contains(dat) {
+                    self.compare_dat(info, *dat, &locations, archive, map, accounted, opts)
+                } else {
+                    absent_dat(*dat, &locations, archive, map, opts)
+                }
+            })
             .collect();
         for comparison in comparisons {
             absorb(&mut out, comparison);
@@ -103,7 +141,7 @@ impl GameData {
     /// that check exists and compares the two form's locations directly. And two keys naming one
     /// offset, which is how a collision table spells a synonym, are two files sharing one entry and
     /// so two verdicts over one extent.
-    fn locations_of(&self, info: &ArchiveInfo) -> Vec<Located> {
+    fn locations_of(&self, info: &ArchiveInfo) -> Option<Vec<Located>> {
         let opts = SweepOptions::default();
         for kind in [IndexKind::Index1, IndexKind::Index2] {
             if !info.has_index(kind) {
@@ -119,10 +157,12 @@ impl GameData {
             };
             let inspection = inspect_index(&bytes, &facts, &opts);
             if inspection.index.is_some() {
-                return inspection.locations;
+                return Some(inspection.locations);
             }
         }
-        Vec::new()
+        // `None` rather than an empty list, which is a different fact: an archive can legitimately
+        // name nothing, and an archive whose every index form is unreadable names nothing *knowable*.
+        None
     }
 
     /// One data file, opened directly rather than through the handle's cache so a comparison over a
@@ -191,6 +231,40 @@ impl GameData {
         };
         classify_entries(&container, named, coverage, accounted, at, opts)
     }
+}
+
+/// A data file the archive should have and does not: the map describes it, or its index sends
+/// entries into it, and it is not on disk.
+///
+/// Every file it would have held is [`crate::mods::Standing::Broken`], since what it would deliver
+/// cannot be read at all. That is deliberately not "would be replaced": a repair restores these
+/// rather than reverting them, and warning about them would put files a user never touched in the
+/// list of files a user is about to lose.
+fn absent_dat(
+    dat: u8,
+    locations: &[Located],
+    archive: ContainerRef,
+    map: &PristineMap,
+    opts: &ModOptions,
+) -> ContainerComparison {
+    let at = archive.with_file(ContainerId::Dat(dat));
+    let named = locations_in(locations, dat);
+    let mut out = ContainerComparison {
+        verdict: Some(ContainerVerdict {
+            container: at,
+            standing: ContainerStanding::Missing,
+            pristine_len: map.coverage(at).map(Coverage::pristine_len),
+            actual_len: None,
+        }),
+        totals: ModTotals {
+            containers: 1,
+            containers_unreadable: 1,
+            ..ModTotals::default()
+        },
+        ..ContainerComparison::default()
+    };
+    file_verdicts(&mut out, named, at, Standing::Broken, opts);
+    out
 }
 
 /// How a container with no entries of its own stands, from the map and its length.
@@ -452,25 +526,130 @@ mod tests {
     }
 
     #[test]
-    fn the_same_tree_reports_the_same_thing_at_any_thread_count() {
+    fn the_same_tree_reports_the_same_thing_in_the_same_order_every_time() {
+        // The map covers neither repository, so every file in the tree is carried rather than
+        // counted. A pristine tree would leave the list empty and make the ordering assertion below
+        // pass whatever the sort did.
         let fixtures = archives();
-        let (tmp, game) = write_tree(&fixtures);
-        let map = map_of(tmp.path(), &[Repo::Base]);
+        let (_tmp, game) = write_tree(&fixtures);
+        let map = PristineMap::builder().build();
         let one = game.detect_mods(&map, &ModOptions::default());
+        assert!(one.files.len() > 4, "the list has to have content to order");
+        assert!(
+            one.files
+                .iter()
+                .map(|f| f.container)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1,
+            "and has to span containers, or the ordering is within one"
+        );
         assert_eq!(one, game.detect_mods(&map, &ModOptions::default()));
-        // Ascending by container, so a caller reads the list archive by archive.
+        // Ascending by container, then by where in it the file sits, so a caller reads the list
+        // archive by archive and in the order a repair would walk it.
         assert!(
             one.files
                 .windows(2)
-                .all(|pair| pair[0].container <= pair[1].container)
+                .all(|p| (p[0].container, p[0].offset, p[0].key)
+                    <= (p[1].container, p[1].offset, p[1].key))
         );
+        assert!(
+            one.containers
+                .windows(2)
+                .all(|p| p[0].container <= p[1].container)
+        );
+    }
 
-        // One archive on its own answers exactly what the whole-tree pass said about it.
+    #[test]
+    fn one_archive_on_its_own_answers_what_the_whole_tree_pass_said_about_it() {
+        let fixtures = archives();
+        let (tmp, game) = write_tree(&fixtures);
+        let map = map_of(tmp.path(), &[Repo::Base, Repo::Ex(1)]);
         let (repo, id) = fixtures[0].id();
         let info = game.archive(repo, id).unwrap();
         let alone = game.detect_mods_in_archive(info, &map, &ModOptions::default());
         assert!(alone.is_pristine());
         assert_eq!(alone.totals.containers, info.dats.len() as u32);
+
+        let whole = game.detect_mods(&map, &ModOptions::default());
+        let mine: Vec<_> = whole
+            .containers
+            .iter()
+            .filter(|v| v.container.archive == id && v.container.repo == repo)
+            .copied()
+            .collect();
+        assert_eq!(alone.containers, mine);
+    }
+
+    #[test]
+    fn an_archive_whose_indexes_will_not_parse_is_not_a_clean_one() {
+        // Nothing names the files it holds, so none of them can be judged. Contributing no verdicts
+        // at all would let a wrecked archive disappear into a report that then calls itself clean
+        // and exhaustive.
+        let fixtures = archives();
+        let (tmp, game) = write_tree(&fixtures);
+        let map = map_of(tmp.path(), &[Repo::Base, Repo::Ex(1)]);
+        let (repo, id) = fixtures[0].id();
+        for kind in [IndexKind::Index1, IndexKind::Index2] {
+            let path = tmp
+                .path()
+                .join("sqpack")
+                .join(repo.dir_name())
+                .join(id.index_file_name(kind));
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        }
+        let game = GameData::open(game.game_dir()).unwrap();
+        let report = game.detect_mods(&map, &ModOptions::default());
+
+        assert!(!report.is_exhaustive());
+        assert_eq!(report.totals.containers_unreadable, 1);
+        assert!(report.containers.iter().any(|v| v.container.archive == id
+            && v.container.file == ContainerId::Archive
+            && v.standing == ContainerStanding::Unknown));
+        // The other archive is untouched and still says so.
+        assert_eq!(report.would_be_replaced(), 0);
+    }
+
+    #[test]
+    fn a_data_file_the_map_has_and_the_tree_does_not_is_reported_rather_than_dropped() {
+        // Deleting a container takes its entries out of the on-disk walk entirely, so the files it
+        // held would simply vanish from the report: an install missing an archive would read exactly
+        // like one that is whole.
+        let fixtures = archives();
+        let (tmp, game) = write_tree(&fixtures);
+        let map = map_of(tmp.path(), &[Repo::Base, Repo::Ex(1)]);
+        let (repo, id) = fixtures[0].id();
+        std::fs::remove_file(
+            tmp.path()
+                .join("sqpack")
+                .join(repo.dir_name())
+                .join(id.dat_file_name(1)),
+        )
+        .unwrap();
+        let game = GameData::open(game.game_dir()).unwrap();
+        let report = game.detect_mods(&map, &ModOptions::default());
+
+        let missing: Vec<_> = report
+            .altered_containers()
+            .filter(|v| v.standing == ContainerStanding::Missing)
+            .collect();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].container.file, ContainerId::Dat(1));
+        assert!(missing[0].pristine_len.is_some());
+        assert!(missing[0].actual_len.is_none());
+
+        // Its files are broken, not "would be replaced": a repair restores them rather than
+        // reverting them, and warning about them would name files the user never touched.
+        assert!(report.totals.broken > 0);
+        assert_eq!(report.would_be_replaced(), 0);
+        assert!(!report.is_pristine());
+        assert!(!report.is_exhaustive());
+        assert!(
+            report
+                .of_standing(Standing::Broken)
+                .all(|f| f.container.file == ContainerId::Dat(1))
+        );
     }
 
     #[test]
