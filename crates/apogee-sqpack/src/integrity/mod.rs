@@ -19,8 +19,8 @@ mod finding;
 mod index;
 mod sweep;
 
-#[cfg(test)]
-mod fixture;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) mod fixture;
 
 use sha1::{Digest, Sha1};
 
@@ -143,9 +143,22 @@ pub struct Report {
 
 impl Report {
     /// Whether the install is structurally sound with nothing to repair.
+    ///
+    /// A sweep that could not see everything can still be clean about what it saw, so this is not on
+    /// its own the answer to "is the install fine": pair it with [`Report::is_complete`].
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.findings.is_empty()
+    }
+
+    /// Whether every container was actually looked at.
+    ///
+    /// False when a container was in use by another process, which a caller sweeping a tree while
+    /// the game runs should expect. Those containers are counted, not reported, because "in use" is
+    /// not a fault of the install and nothing was learned about them either way.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.totals.containers_busy == 0
     }
 
     /// The worst finding's severity, or `None` when there are none.
@@ -200,6 +213,9 @@ pub struct Totals {
     /// Containers that would not open or parse. A caller that sees this equal to the container count
     /// is looking at a disconnected disk, not a corrupt install.
     pub containers_unreadable: u32,
+    /// Containers another process holds and would not share, so this sweep did not look at them.
+    /// Counted rather than reported: see [`note_unreadable`].
+    pub containers_busy: u32,
     /// Bytes of index container read.
     pub index_bytes: u64,
     /// Index entries walked.
@@ -242,6 +258,7 @@ impl Totals {
         self.index_files += other.index_files;
         self.data_files += other.data_files;
         self.containers_unreadable += other.containers_unreadable;
+        self.containers_busy += other.containers_busy;
         self.index_bytes += other.index_bytes;
         self.entries += other.entries;
         self.collision_records += other.collision_records;
@@ -259,6 +276,24 @@ impl Totals {
         self.unclaimed_hash_fields += other.unclaimed_hash_fields;
         self.defects_suppressed += other.defects_suppressed;
     }
+}
+
+/// Record a container that would not open or read: one finding, or nothing at all when it was only
+/// in use.
+///
+/// A busy container is not a fault of the install. Another process holds it and this sweep did not
+/// look, so reporting it would grade a healthy container [`Severity::Unusable`] at
+/// [`Scope::Container`] and tell the caller to replace it, which is the worst mistake this module
+/// can make. There is no severity that fits "not examined", and the axis is closed on purpose, so it
+/// is counted into [`Totals::containers_busy`] and [`Report::is_complete`] is what says so.
+pub(crate) fn note_unreadable(sink: &mut Sink, totals: &mut Totals, error: &crate::Error) {
+    let (fault, detail, offset) = finding::read_fault(error);
+    if fault == ReadFault::Busy {
+        totals.containers_busy += 1;
+        return;
+    }
+    totals.containers_unreadable += 1;
+    sink.push_on(offset, Defect::ContainerUnreadable { fault, detail });
 }
 
 /// The digest each of a container's two headers declares over its own leading bytes.
@@ -340,7 +375,7 @@ pub(crate) fn sha1(bytes: &[u8]) -> [u8; 20] {
 
 /// Which slot of a two-digest override array a header owns, for the container builders the tests
 /// drive: both of them can be told to declare something other than what their bytes hash to.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) fn self_hash_slot(header: HeaderId) -> usize {
     match header {
         HeaderId::Common => 0,

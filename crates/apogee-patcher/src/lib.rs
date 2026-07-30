@@ -30,6 +30,7 @@ use apogee_fetch::{FetchError, Fetcher};
 mod catalog;
 mod install;
 mod job;
+pub mod mods;
 mod preflight;
 mod progress;
 mod recycler;

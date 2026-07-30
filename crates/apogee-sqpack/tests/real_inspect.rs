@@ -90,6 +90,7 @@ fn totals_of(v: &Value) -> R<Totals> {
         index_files: field_u32(v, "index_files")?,
         data_files: field_u32(v, "data_files")?,
         containers_unreadable: field_u32(v, "containers_unreadable")?,
+        containers_busy: field_u32(v, "containers_busy")?,
         index_bytes: field_u64(v, "index_bytes")?,
         entries: field_u64(v, "entries")?,
         collision_records: field_u64(v, "collision_records")?,
@@ -109,7 +110,7 @@ fn totals_of(v: &Value) -> R<Totals> {
     })
 }
 
-/// The twenty counters paired with the recording's, named, in the order the crate declares them.
+/// The twenty-one counters paired with the recording's, named, in the order the crate declares them.
 fn pairs(found: &Totals, want: &Totals) -> Vec<(&'static str, u64, u64)> {
     vec![
         ("archives", found.archives.into(), want.archives.into()),
@@ -127,6 +128,11 @@ fn pairs(found: &Totals, want: &Totals) -> Vec<(&'static str, u64, u64)> {
             "containers_unreadable",
             found.containers_unreadable.into(),
             want.containers_unreadable.into(),
+        ),
+        (
+            "containers_busy",
+            found.containers_busy.into(),
+            want.containers_busy.into(),
         ),
         ("index_bytes", found.index_bytes, want.index_bytes),
         ("entries", found.entries, want.entries),

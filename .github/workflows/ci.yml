@@ -286,6 +286,10 @@ jobs:
       # The same malloc bound, for the same reason: the inspector reads a suspect container through
       # those same readers.
       - run: cargo +nightly-2026-07-23 fuzz run sqpack_inspect --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_mods --target x86_64-unknown-linux-gnu
+      # Mod detection reads the same suspect containers, and its other input is a map a caller built,
+      # so both are hostile here.
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_mods --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build zipatch_chunk --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run zipatch_chunk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build zipatch_sqpk --target x86_64-unknown-linux-gnu

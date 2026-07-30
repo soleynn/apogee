@@ -747,14 +747,21 @@ fn parse_collisions(seg: &[u8], base: u32, kind: IndexKind) -> Result<Vec<Collis
     Ok(out)
 }
 
-/// A synthetic index writer for tests. Deliberately not a public API: this crate reads archives and
-/// never writes them, and the only reason to lay these bytes out is to prove the reader reads them.
+/// A synthetic index writer for tests, compiled only for them and for the `test-fixtures` feature.
+/// This crate reads archives and never writes them, so this is not a write API: the only reason to
+/// lay these bytes out is to prove the reader reads them. It stays crate-private either way, since
+/// what the feature publishes is the whole archive an [`crate::fixtures::ArchiveFixture`] lays down.
 ///
 /// What it writes by default is byte-faithful down to the six digests a real container carries, so a
 /// container it builds is one the integrity checks find nothing wrong with. Every knob past that
 /// spells one measured shape differently, so a check can be shown to fire on exactly that difference.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) mod build {
+    // Most of the knobs below exist for one check's own test, so the module reads as dead whenever
+    // the feature compiles it without the test harness. Keeping the set complete is the point: a
+    // check is shown to fire by spelling exactly one measured shape differently.
+    #![allow(dead_code)]
+
     use super::*;
     use crate::bytes;
     use crate::container::{COMMON_HEADER_LEN, SQPACK_MAGIC};

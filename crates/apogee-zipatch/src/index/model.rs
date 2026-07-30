@@ -12,7 +12,7 @@
 //! the behavior of the reference `IndexedZiPatchTargetFile`, documented and re-implemented, never
 //! translated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::chunk::Platform;
 
@@ -301,6 +301,19 @@ impl Index {
     #[must_use]
     pub fn platform(&self) -> Platform {
         self.platform
+    }
+
+    /// The files this index describes and the length each should have once the chain has been
+    /// applied.
+    ///
+    /// The only way out to what an index covers. A caller comparing an install against the chain
+    /// that built it needs both halves, and [`Index::verify`] answers only about the files that
+    /// disagree: a file it never mentions is one this has to name for the caller to know it was
+    /// accounted for at all.
+    pub fn targets(&self) -> impl ExactSizeIterator<Item = (&Path, u64)> {
+        self.targets
+            .iter()
+            .map(|target| (target.path.as_path(), target.final_len()))
     }
 }
 

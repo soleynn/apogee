@@ -50,25 +50,41 @@ const PATH_TAIL: &[u8] = b"chara/monster/m0001/obj/body/b0001/model/was_longer.m
 const UNCLASSIFIED_LEN: usize = 32;
 
 /// Builds one archive: an `.index`, an `.index2` and as many data files as it was asked for.
-pub(crate) struct ArchiveFixture {
+pub struct ArchiveFixture {
     repo: Repo,
     id: ArchiveId,
     dats: Vec<DatBuilder>,
-    /// The paths laid into each data file, in the order their entries were.
-    paths: Vec<Vec<String>>,
+    /// The path each entry of a data file is named by, in the order the entries were laid down.
+    /// `None` for an entry no index points at: what a mod tool leaves behind when it moves a file's
+    /// bytes elsewhere and repoints the row.
+    paths: Vec<Vec<Option<String>>>,
 }
 
 /// A built archive: the bytes of each of its files, and where each data file's entries and unclaimed
 /// runs landed.
-pub(crate) struct BuiltArchive {
-    pub(crate) index1: Vec<u8>,
-    pub(crate) index2: Vec<u8>,
-    pub(crate) dats: Vec<Built>,
+pub struct BuiltArchive {
+    pub index1: Vec<u8>,
+    pub index2: Vec<u8>,
+    pub dats: Vec<Built>,
+    /// Every path the archive names, with where its entry landed and what it should extract to. The
+    /// answer a reader is checked against, derived from the bytes that were laid down rather than
+    /// declared beside them. Entries nothing names are absent.
+    pub files: Vec<PlacedFile>,
+}
+
+/// One named file of a built archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedFile {
+    pub path: String,
+    pub dat: u8,
+    pub offset: u64,
+    /// What extracting the entry should produce.
+    pub content: Vec<u8>,
 }
 
 impl ArchiveFixture {
     /// An empty archive of `dats` data files.
-    pub(crate) fn new(repo: Repo, id: ArchiveId, dats: usize) -> Self {
+    pub fn new(repo: Repo, id: ArchiveId, dats: usize) -> Self {
         Self {
             repo,
             id,
@@ -83,7 +99,7 @@ impl ArchiveFixture {
     /// occupying nothing under a large allocation, slack inside a slot, a `span_index` that is not the
     /// dat number, a `max_file_size` the file exceeds, two data files, a single wiped region and a chain
     /// of three, and a collision in each index form.
-    pub(crate) fn clean(repo: Repo, id: ArchiveId) -> Self {
+    pub fn clean(repo: Repo, id: ArchiveId) -> Self {
         let mut f = Self::new(repo, id, 2);
         f.dat(1).span_index(1).max_file_size(2_000);
         f.file(
@@ -133,51 +149,73 @@ impl ArchiveFixture {
     }
 
     /// Lay `spec` into data file `dat` and name it `path` in both index forms.
-    pub(crate) fn file(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
+    pub fn file(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
         self.dats[dat].entry(spec);
-        self.paths[dat].push(path.to_owned());
+        self.paths[dat].push(Some(path.to_owned()));
         self
     }
 
+    /// Lay `spec` down after everything already in data file `dat` and repoint `path` at it, leaving
+    /// the bytes it used to have where they were with nothing naming them.
+    ///
+    /// This is the shape every appending mod tool leaves: the archive grows past the length the patch
+    /// chain gave it, the index row moves, and the original content is orphaned rather than
+    /// overwritten. Nothing happens if the archive does not already carry `path`, since there would be
+    /// no row to repoint.
+    pub fn retarget(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
+        let Some(slot) = self.paths[dat]
+            .iter_mut()
+            .find(|named| named.as_deref() == Some(path))
+        else {
+            return self;
+        };
+        *slot = None;
+        self.file(dat, path, spec)
+    }
+
     /// Leave `units` of space no entry claims in data file `dat`.
-    pub(crate) fn gap(&mut self, dat: usize, units: u32) -> &mut Self {
+    pub fn gap(&mut self, dat: usize, units: u32) -> &mut Self {
         self.dats[dat].gap(units);
         self
     }
 
     /// The same as a chain of wiped regions, which is what adjacent deletions leave.
-    pub(crate) fn gap_chain(&mut self, dat: usize, units: &[u32]) -> &mut Self {
+    pub fn gap_chain(&mut self, dat: usize, units: &[u32]) -> &mut Self {
         self.dats[dat].gap_chain(units);
         self
     }
 
     /// One data file's builder, for the knobs that container's own checks need.
-    pub(crate) fn dat(&mut self, dat: usize) -> &mut DatBuilder {
+    pub fn dat(&mut self, dat: usize) -> &mut DatBuilder {
         &mut self.dats[dat]
     }
 
     /// Which repository and archive this is.
-    pub(crate) fn id(&self) -> (Repo, ArchiveId) {
+    pub fn id(&self) -> (Repo, ArchiveId) {
         (self.repo, self.id)
     }
 
     /// The archive's files, and where everything in them landed.
-    pub(crate) fn built(&self) -> BuiltArchive {
+    pub fn built(&self) -> BuiltArchive {
         let dats: Vec<Built> = self.dats.iter().map(DatBuilder::built).collect();
-        let mut placed: Vec<Named> = Vec::new();
+        let mut files: Vec<PlacedFile> = Vec::new();
         for (n, (built, paths)) in dats.iter().zip(&self.paths).enumerate() {
             for (path, at) in paths.iter().zip(&built.placed) {
-                placed.push(Named {
+                // An entry no path names is one nothing points at, so no index row is written for it.
+                let Some(path) = path else { continue };
+                files.push(PlacedFile {
                     path: path.clone(),
                     dat: n as u8,
                     offset: at.offset,
+                    content: at.content.clone(),
                 });
             }
         }
         BuiltArchive {
-            index1: self.index(IndexKind::Index1, &placed),
-            index2: self.index(IndexKind::Index2, &placed),
+            index1: self.index(IndexKind::Index1, &files),
+            index2: self.index(IndexKind::Index2, &files),
             dats,
+            files,
         }
     }
 
@@ -185,7 +223,7 @@ impl ArchiveFixture {
     ///
     /// # Errors
     /// Whatever the filesystem raises.
-    pub(crate) fn write_to(&self, dir: &Path) -> std::io::Result<()> {
+    pub fn write_to(&self, dir: &Path) -> std::io::Result<()> {
         let built = self.built();
         std::fs::create_dir_all(dir)?;
         for (kind, bytes) in [
@@ -202,7 +240,7 @@ impl ArchiveFixture {
 
     /// One index form over the placed files: a group of one key becomes an entry, a group of several
     /// becomes a placeholder plus a record apiece, which is how a real container spells a collision.
-    fn index(&self, kind: IndexKind, placed: &[Named]) -> Vec<u8> {
+    fn index(&self, kind: IndexKind, placed: &[PlacedFile]) -> Vec<u8> {
         let mut b = IndexBuilder::new(kind);
         b.data_file_count(self.dats.len() as u32)
             .collision_path_tail(PATH_TAIL)
@@ -210,7 +248,7 @@ impl ArchiveFixture {
         if kind == IndexKind::Index1 {
             b.unclassified(UNCLASSIFIED_LEN);
         }
-        let mut groups: BTreeMap<u64, Vec<&Named>> = BTreeMap::new();
+        let mut groups: BTreeMap<u64, Vec<&PlacedFile>> = BTreeMap::new();
         for file in placed {
             groups
                 .entry(key_of(kind, &file.path))
@@ -232,13 +270,6 @@ impl ArchiveFixture {
         }
         b.bytes()
     }
-}
-
-/// One file of the archive once its entry has been laid down.
-struct Named {
-    path: String,
-    dat: u8,
-    offset: u64,
 }
 
 /// The key one index form holds `path` under.

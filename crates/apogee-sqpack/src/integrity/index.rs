@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use super::finding::{Sink, read_fault};
+use super::finding::Sink;
 use crate::bytes;
 use crate::container::COMMON_HEADER_LEN;
 use crate::hash::hash_path;
@@ -94,9 +94,7 @@ pub fn inspect_index(bytes: &[u8], facts: &IndexFacts<'_>, opts: &SweepOptions) 
     let index = match Index::parse(bytes) {
         Ok(index) => index,
         Err(error) => {
-            let (fault, detail, offset) = read_fault(&error);
-            sink.push_on(offset, Defect::ContainerUnreadable { fault, detail });
-            totals.containers_unreadable = 1;
+            crate::integrity::note_unreadable(&mut sink, &mut totals, &error);
             return IndexInspection {
                 report: sink.finish(totals),
                 index: None,

@@ -12,6 +12,9 @@
 //! `repair` heals a damaged install by pulling the broken ranges from local patch files. All
 //! formatting lives in the library (the `Display` impls and the typed reports), so this example stays
 //! an I/O shell that the library never has to become.
+//!
+//! Asking which files a repair would *replace* needs an archive reader as well as an index, so it is
+//! `apogee-patcher`'s tool rather than this one.
 
 use std::error::Error;
 use std::fs::File;

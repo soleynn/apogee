@@ -28,10 +28,13 @@ pub mod codec;
 mod container;
 mod dat;
 mod error;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures;
 mod game;
 mod hash;
 mod index;
 pub mod integrity;
+pub mod mods;
 
 pub use archive::{ArchiveId, Category, PLATFORM_TAG};
 pub use container::{
