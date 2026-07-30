@@ -54,8 +54,10 @@ pub struct ArchiveFixture {
     repo: Repo,
     id: ArchiveId,
     dats: Vec<DatBuilder>,
-    /// The paths laid into each data file, in the order their entries were.
-    paths: Vec<Vec<String>>,
+    /// The path each entry of a data file is named by, in the order the entries were laid down.
+    /// `None` for an entry no index points at: what a mod tool leaves behind when it moves a file's
+    /// bytes elsewhere and repoints the row.
+    paths: Vec<Vec<Option<String>>>,
 }
 
 /// A built archive: the bytes of each of its files, and where each data file's entries and unclaimed
@@ -135,8 +137,26 @@ impl ArchiveFixture {
     /// Lay `spec` into data file `dat` and name it `path` in both index forms.
     pub fn file(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
         self.dats[dat].entry(spec);
-        self.paths[dat].push(path.to_owned());
+        self.paths[dat].push(Some(path.to_owned()));
         self
+    }
+
+    /// Lay `spec` down after everything already in data file `dat` and repoint `path` at it, leaving
+    /// the bytes it used to have where they were with nothing naming them.
+    ///
+    /// This is the shape every appending mod tool leaves: the archive grows past the length the patch
+    /// chain gave it, the index row moves, and the original content is orphaned rather than
+    /// overwritten. Nothing happens if the archive does not already carry `path`, since there would be
+    /// no row to repoint.
+    pub fn retarget(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
+        let Some(slot) = self.paths[dat]
+            .iter_mut()
+            .find(|named| named.as_deref() == Some(path))
+        else {
+            return self;
+        };
+        *slot = None;
+        self.file(dat, path, spec)
     }
 
     /// Leave `units` of space no entry claims in data file `dat`.
@@ -167,6 +187,8 @@ impl ArchiveFixture {
         let mut placed: Vec<Named> = Vec::new();
         for (n, (built, paths)) in dats.iter().zip(&self.paths).enumerate() {
             for (path, at) in paths.iter().zip(&built.placed) {
+                // An entry no path names is one nothing points at, so no index row is written for it.
+                let Some(path) = path else { continue };
                 placed.push(Named {
                     path: path.clone(),
                     dat: n as u8,

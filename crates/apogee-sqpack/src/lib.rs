@@ -34,6 +34,7 @@ mod game;
 mod hash;
 mod index;
 pub mod integrity;
+pub mod mods;
 
 pub use archive::{ArchiveId, Category, PLATFORM_TAG};
 pub use container::{

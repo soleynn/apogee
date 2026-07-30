@@ -14,7 +14,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::archive::ArchiveId;
+use crate::archive::{ArchiveId, PLATFORM_TAG};
 use crate::container::COMMON_HEADER_LEN;
 use crate::dat::DATA_UNIT;
 use crate::error::Error;
@@ -83,6 +83,38 @@ impl ContainerRef {
         PathBuf::from(SQPACK_DIR)
             .join(self.repo.dir_name())
             .join(leaf)
+    }
+
+    /// The container a game-subtree-relative path names, or `None` for a path that names none.
+    ///
+    /// The inverse of [`ContainerRef::relative_path`], and here rather than in whatever crate needs
+    /// it because the layout is this crate's to know: anything holding a list of file paths (a patch
+    /// chain's targets, a verification of them) has to get from those to containers, and a second
+    /// hand-rolled parse elsewhere is a second thing to be wrong.
+    ///
+    /// Strict on purpose. Only a name this crate would itself build is accepted, so an uppercase
+    /// stem, a `.bck`, a `movie/…` or a path outside `sqpack/` answers `None` rather than being
+    /// bent into some container's identity.
+    #[must_use]
+    pub fn from_relative_path(path: &std::path::Path) -> Option<Self> {
+        let mut parts = path.components();
+        let sqpack = parts.next()?.as_os_str().to_str()?;
+        if sqpack != SQPACK_DIR {
+            return None;
+        }
+        let repo = Repo::from_dir_name(parts.next()?.as_os_str().to_str()?)?;
+        let name = parts.next()?.as_os_str().to_str()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let (stem, rest) = name.split_once(&format!(".{PLATFORM_TAG}."))?;
+        let archive = ArchiveId::parse_stem(stem).filter(|id| id.stem() == stem)?;
+        let file = match rest {
+            "index" => ContainerId::Index(IndexKind::Index1),
+            "index2" => ContainerId::Index(IndexKind::Index2),
+            _ => ContainerId::Dat(rest.strip_prefix("dat")?.parse().ok()?),
+        };
+        Some(Self::new(repo, archive, file))
     }
 }
 
@@ -1238,6 +1270,58 @@ mod tests {
                 produced: 0,
             },
         ]
+    }
+
+    #[test]
+    fn a_container_path_round_trips_through_the_name_it_builds() {
+        for repo in [Repo::Base, Repo::Ex(1), Repo::Ex(9)] {
+            for file in [
+                ContainerId::Index(IndexKind::Index1),
+                ContainerId::Index(IndexKind::Index2),
+                ContainerId::Dat(0),
+                ContainerId::Dat(7),
+            ] {
+                let at = ContainerRef::new(repo, ArchiveId::new(0x0a, 3, 2), file);
+                assert_eq!(
+                    ContainerRef::from_relative_path(&at.relative_path()),
+                    Some(at),
+                    "{}",
+                    at.relative_path().display()
+                );
+            }
+        }
+        // An archive is not a file, so its stem is not a container path in the other direction.
+        let archive = ContainerRef::new(Repo::Base, ArchiveId::new(0, 0, 0), ContainerId::Archive);
+        assert_eq!(
+            ContainerRef::from_relative_path(&archive.relative_path()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_path_this_crate_would_not_build_names_no_container() {
+        // A patch chain's target list holds every file the game has, most of which are not
+        // containers, and a mod tool's leftovers sit in the same directories. Each of these has to
+        // answer "none" rather than be bent into some container's identity.
+        for path in [
+            "ffxivboot.exe",
+            "movie/ffxiv/00000.bk2",
+            "sqpack/ffxiv/0a0000.win32.dat0.bck",
+            "sqpack/ffxiv/0A0000.win32.index",
+            "sqpack/ffxiv/0a0000.ps3.index",
+            "sqpack/ffxiv/0a0000.win32.datx",
+            "sqpack/ffxiv/0a0000.win32.dat999",
+            "sqpack/nowhere/0a0000.win32.index",
+            "sqpack/ffxiv/sub/0a0000.win32.index",
+            "sqpack/ffxiv",
+            "0a0000.win32.index",
+        ] {
+            assert_eq!(
+                ContainerRef::from_relative_path(std::path::Path::new(path)),
+                None,
+                "{path}"
+            );
+        }
     }
 
     #[test]
