@@ -1,12 +1,21 @@
 //! Recorded-fact pins for SqPack index containers, captured from a real FFXIV install.
 //!
-//! The hermetic test checks the recording against the crate's own definitions: every recorded key is
-//! what [`hash_path`] computes for the path beside it, every count is its segment's size over the
-//! record length the crate declares, the non-empty segments tile the file from `0x800`, and every
-//! recorded location fits the packing an entry word uses. CI carries no Square Enix bytes. The
-//! install-gated test re-reads the real containers named in the fixture from
-//! `$APOGEE_SQPACK_REAL_INSTALL` and asserts the parser reproduces all of it, down to each segment's
-//! SHA-1 recomputed over the bytes the parser framed; it is `#[ignore]` by default.
+//! The recorded values were produced by a separate implementation of the format, out of process, so
+//! what the gated test proves is agreement between two readers rather than a program agreeing with
+//! itself. The hermetic test checks the recording against the crate's own definitions: every
+//! recorded key is what [`hash_path`] computes for the path beside it, every count is its segment's
+//! size over the record length the crate declares, the non-empty segments tile the file from
+//! `0x800`, and every recorded location fits the packing an entry word uses. CI carries no Square
+//! Enix bytes.
+//!
+//! The install-gated test re-reads the real containers named in the fixture from
+//! `$APOGEE_SQPACK_REAL_INSTALL` and asserts the parser reproduces all of it; it is `#[ignore]` by
+//! default. A patch rewrites every extent, count and location, so only the patch the fixture was
+//! recorded on is held to those. What is checked on any version is what a patch cannot move: the
+//! fields the format fixes, each segment's declared SHA-1 against the bytes the parser framed, the
+//! dat count against the dat files present, a path's key against what the crate hashes it to, each
+//! collision record against its own path, each folder row against the run it names, and a floor
+//! under every count. A patch day fails on a regression rather than on a count.
 
 use std::error::Error;
 use std::fmt::Write as _;
@@ -23,12 +32,37 @@ type R<T> = Result<T, Box<dyn Error>>;
 /// Where the first segment starts in every index container: past both headers.
 const FIRST_SEGMENT: u64 = COMMON_HEADER_LEN as u64 + INDEX_HEADER_LEN as u64;
 
-fn records() -> R<Vec<Value>> {
-    let doc: Value = serde_json::from_str(include_str!("fixtures/real_index.json"))?;
+fn doc() -> R<Value> {
+    Ok(serde_json::from_str(include_str!(
+        "fixtures/real_index.json"
+    ))?)
+}
+
+fn records(doc: &Value) -> R<&Vec<Value>> {
     doc["records"]
         .as_array()
-        .cloned()
         .ok_or_else(|| "records is not an array".into())
+}
+
+/// Whether the tree is the patch the recording was taken from, read from the base repository's
+/// version file.
+fn is_recorded_version(game: &GameData, doc: &Value) -> R<bool> {
+    let want = field_str(doc, "version")?;
+    Ok(game
+        .repos()
+        .iter()
+        .any(|r| r.repo == Repo::Base && r.version.as_deref() == Some(want)))
+}
+
+/// A count the recording found work in, off the patch it was recorded on: still within a tenth of
+/// what was measured, which is what makes a patch day fail on a finding rather than on a count.
+fn assert_floor(found: u64, want: u64, where_: &str) {
+    if want != 0 {
+        assert!(
+            found * 10 >= want * 9,
+            "{where_}: {found} is far below the recorded {want}"
+        );
+    }
 }
 
 fn field_str<'a>(v: &'a Value, key: &str) -> R<&'a str> {
@@ -91,9 +125,14 @@ fn segments(record: &Value) -> R<Vec<(u64, u64, String)>> {
 
 #[test]
 fn the_recording_is_consistent_with_the_formats_this_crate_declares() -> R<()> {
-    let records = records()?;
+    let doc = doc()?;
+    let records = records(&doc)?;
     assert!(!records.is_empty(), "fixture has records");
-    for record in &records {
+    assert!(
+        !field_str(&doc, "version")?.is_empty(),
+        "fixture is versioned"
+    );
+    for record in records {
         let path = field_str(record, "path")?;
         let kind = kind_of(record)?;
         let segments = segments(record)?;
@@ -309,7 +348,8 @@ fn unhex(text: &str) -> R<Vec<u8>> {
 
 #[test]
 fn the_parser_reads_a_container_rebuilt_from_the_recording() -> R<()> {
-    for record in &records()? {
+    let doc = doc()?;
+    for record in records(&doc)? {
         let path = field_str(record, "path")?;
         let index = Index::parse(&rebuild(record)?)?;
         let header = index.header();
@@ -383,26 +423,29 @@ fn repo_of(record: &Value) -> R<Repo> {
 /// Re-read the real containers named in the fixture and confirm the parser still reproduces every
 /// recorded fact. Gated on `APOGEE_SQPACK_REAL_INSTALL` (the game subtree holding `sqpack/` and
 /// `ffxivgame.ver`); `#[ignore]` so the hermetic suite stays install-free.
+///
+/// Every extent, count and location is the patch's, so only that patch is held to them. What holds
+/// on any version is checked either way, and is most of what the recording is for: a segment's
+/// declared SHA-1 against the bytes the parser framed is what says the extents are the right ones,
+/// whatever they happen to be.
 #[test]
 #[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
 fn the_parser_reproduces_the_recording_on_a_live_install() -> R<()> {
     let root = std::env::var("APOGEE_SQPACK_REAL_INSTALL")?;
     let root = Path::new(&root);
     let game = GameData::open(root)?;
+    let doc = doc()?;
+    let exact = is_recorded_version(&game, &doc)?;
 
-    for record in &records()? {
+    for record in records(&doc)? {
         let name = field_str(record, "path")?;
         let file = root.join("sqpack").join(name);
         let bytes = std::fs::read(&file)?;
-        assert_eq!(
-            bytes.len() as u64,
-            field_u64(record, "file_len")?,
-            "{name} length"
-        );
         let index = Index::parse(&bytes)?;
         let header = index.header();
         let kind = kind_of(record)?;
 
+        // The fields the format fixes, which no patch moves.
         assert_eq!(index.kind(), kind, "{name}");
         assert_eq!(
             u64::from(header.header_size),
@@ -412,26 +455,6 @@ fn the_parser_reproduces_the_recording_on_a_live_install() -> R<()> {
         assert_eq!(
             u64::from(header.version),
             field_u64(record, "version")?,
-            "{name}"
-        );
-        assert_eq!(
-            u64::from(header.data_file_count),
-            field_u64(record, "data_file_count")?,
-            "{name}"
-        );
-        assert_eq!(
-            index.entries().len() as u64,
-            field_u64(record, "entry_count")?,
-            "{name}"
-        );
-        assert_eq!(
-            index.folders().len() as u64,
-            field_u64(record, "folder_count")?,
-            "{name}"
-        );
-        assert_eq!(
-            index.collisions().len() as u64,
-            field_u64(record, "collision_count")?,
             "{name}"
         );
         assert!(index.is_sorted(), "{name}: entries are in key order");
@@ -445,64 +468,45 @@ fn the_parser_reproduces_the_recording_on_a_live_install() -> R<()> {
             .count();
         assert_eq!(
             present as u64,
-            field_u64(record, "data_file_count")?,
+            u64::from(header.data_file_count),
             "{name} dat files"
         );
 
-        // Each segment's recorded SHA-1 is both what the header declares and what the bytes the
-        // parser framed actually hash to, which is what says the extents are the right ones.
-        for (n, (offset, size, sha1)) in segments(record)?.iter().enumerate() {
-            let declared = header.segments[n];
-            assert_eq!(
-                u64::from(declared.offset),
-                *offset,
-                "{name} segment {n} offset"
-            );
-            assert_eq!(u64::from(declared.size), *size, "{name} segment {n} size");
-            assert_eq!(
-                hex(&declared.sha1),
-                *sha1,
-                "{name} segment {n} declared sha1"
-            );
+        // Each segment's declared SHA-1 against the bytes the parser framed: whatever the extents
+        // are on this patch, they are the ones the container's own header vouches for.
+        for (n, declared) in header.segments.iter().enumerate() {
             let start = declared.offset as usize;
             let end = start + declared.size as usize;
+            let framed = bytes
+                .get(start..end)
+                .ok_or_else(|| format!("{name} segment {n} runs past the file"))?;
             assert_eq!(
-                sha1_hex(&bytes[start..end]),
-                *sha1,
+                sha1_hex(framed),
+                hex(&declared.sha1),
                 "{name} segment {n} contents"
             );
         }
 
-        for sample in field_array(record, "sample_entries")? {
-            let at = field_u64(sample, "at")? as usize;
-            let entry = index
-                .entries()
-                .get(at)
-                .ok_or("sample entry is out of range")?;
-            assert_eq!(entry.key, hex_u64(sample, "key")?, "{name} entry {at} key");
+        // Every collision record's key is what its own path hashes to, and the entry it names is a
+        // placeholder whose location lives in the record rather than in the entry.
+        for row in index.collisions() {
             assert_eq!(
-                entry.packed,
-                hex_u32(sample, "packed")?,
-                "{name} entry {at} packed"
+                key_for(&row.path, kind),
+                row.key,
+                "{name}: {} key",
+                row.path
             );
+            let entry = index.lookup(row.key).ok_or("collision key has no entry")?;
+            assert!(
+                entry.is_collision(),
+                "{name}: {} entry is a placeholder",
+                row.path
+            );
+            assert_eq!(entry.location(), None, "{name}: {}", row.path);
         }
 
-        for (n, sample) in field_array(record, "sample_folders")?.iter().enumerate() {
-            let row = index
-                .folders()
-                .get(n)
-                .ok_or("sample folder is out of range")?;
-            assert_eq!(row.hash, hex_u32(sample, "hash")?, "{name} folder {n}");
-            assert_eq!(
-                u64::from(row.entries_offset),
-                field_u64(sample, "entries_offset")?,
-                "{name} folder {n} offset"
-            );
-            assert_eq!(
-                u64::from(row.entries_size),
-                field_u64(sample, "entries_size")?,
-                "{name} folder {n} size"
-            );
+        // Every folder row names a run of entries that all carry its hash.
+        for (n, row) in index.folders().iter().enumerate() {
             let run = index.folder_entries(row).ok_or("folder row names no run")?;
             assert!(
                 run.iter().all(|e| e.folder_hash() == row.hash),
@@ -510,53 +514,14 @@ fn the_parser_reproduces_the_recording_on_a_live_install() -> R<()> {
             );
         }
 
-        for row in field_array(record, "collisions")? {
-            let file = field_str(row, "path")?;
-            let found = index
-                .collisions()
-                .iter()
-                .find(|c| c.path == file)
-                .ok_or_else(|| format!("{name}: no collision record for {file}"))?;
-            assert_eq!(found.key, hex_u64(row, "key")?, "{name}: {file} key");
-            assert_eq!(
-                found.packed,
-                hex_u32(row, "packed")?,
-                "{name}: {file} packed"
-            );
-            assert_eq!(
-                u64::from(found.conflict_index),
-                field_u64(row, "conflict_index")?,
-                "{name}: {file} conflict index"
-            );
-            // The entry itself is only a placeholder: the location lives in the record.
-            let entry = index
-                .lookup(found.key)
-                .ok_or("collision key has no entry")?;
-            assert!(
-                entry.is_collision(),
-                "{name}: {file} entry is a placeholder"
-            );
-            assert_eq!(entry.location(), None, "{name}: {file}");
-        }
-
-        // Every recorded path resolves to the recorded dat and offset, through this container and
-        // through the whole install.
+        // Every recorded path still hashes to its recorded key and still resolves, through this
+        // container and through the whole install, to one and the same place.
         for row in field_array(record, "resolved")? {
             let file = field_str(row, "path")?;
+            assert_eq!(key_for(file, kind), hex_u64(row, "key")?, "{name}: {file}");
             let direct = index
                 .resolve(file)?
                 .ok_or_else(|| format!("{name}: {file} no longer resolves"))?;
-            assert_eq!(
-                u64::from(direct.dat),
-                field_u64(row, "dat")?,
-                "{name}: {file} dat"
-            );
-            assert_eq!(
-                direct.offset,
-                field_u64(row, "offset")?,
-                "{name}: {file} offset"
-            );
-
             let found = game
                 .lookup(file)?
                 .ok_or_else(|| format!("{file} does not resolve through the install"))?;
@@ -566,19 +531,43 @@ fn the_parser_reproduces_the_recording_on_a_live_install() -> R<()> {
                 "{file} archive"
             );
             assert_eq!(found.repo, repo_of(record)?, "{file} repo");
-            assert_eq!(u64::from(found.dat), field_u64(row, "dat")?, "{file} dat");
-            assert_eq!(found.offset, field_u64(row, "offset")?, "{file} offset");
+            assert_eq!(found.dat, direct.dat, "{file} dat");
+            assert_eq!(found.offset, direct.offset, "{file} offset");
             assert!(
                 found.dat_path.is_file(),
                 "{file}: {:?} exists",
                 found.dat_path
+            );
+            if exact {
+                assert_eq!(u64::from(direct.dat), field_u64(row, "dat")?, "{file} dat");
+                assert_eq!(direct.offset, field_u64(row, "offset")?, "{file} offset");
+            }
+        }
+
+        if exact {
+            assert_recorded_extents(&index, &bytes, record, name)?;
+        } else {
+            assert_floor(
+                index.entries().len() as u64,
+                field_u64(record, "entry_count")?,
+                &format!("{name} entries"),
+            );
+            assert_floor(
+                index.folders().len() as u64,
+                field_u64(record, "folder_count")?,
+                &format!("{name} folders"),
+            );
+            assert_floor(
+                index.collisions().len() as u64,
+                field_u64(record, "collision_count")?,
+                &format!("{name} collisions"),
             );
         }
     }
 
     // The install's archives are discovered from the index files present, and each recorded container
     // is one of them.
-    for record in &records()? {
+    for record in records(&doc)? {
         let archive = ArchiveId::parse_stem(field_str(record, "archive")?)
             .ok_or("archive stem does not parse")?;
         let info = game
@@ -589,6 +578,106 @@ fn the_parser_reproduces_the_recording_on_a_live_install() -> R<()> {
             info.has_index1 && info.has_index2,
             "{} has both index forms",
             archive.stem()
+        );
+    }
+    Ok(())
+}
+
+/// Everything a patch moves, on the one patch the recording was taken from: the container's length,
+/// its counts, every segment's extent and declared digest, and the entries, folders and collision
+/// records the recording sampled.
+fn assert_recorded_extents(index: &Index, bytes: &[u8], record: &Value, name: &str) -> R<()> {
+    let header = index.header();
+    assert_eq!(
+        bytes.len() as u64,
+        field_u64(record, "file_len")?,
+        "{name} length"
+    );
+    assert_eq!(
+        u64::from(header.data_file_count),
+        field_u64(record, "data_file_count")?,
+        "{name}"
+    );
+    assert_eq!(
+        index.entries().len() as u64,
+        field_u64(record, "entry_count")?,
+        "{name}"
+    );
+    assert_eq!(
+        index.folders().len() as u64,
+        field_u64(record, "folder_count")?,
+        "{name}"
+    );
+    assert_eq!(
+        index.collisions().len() as u64,
+        field_u64(record, "collision_count")?,
+        "{name}"
+    );
+
+    for (n, (offset, size, sha1)) in segments(record)?.iter().enumerate() {
+        let declared = header.segments[n];
+        assert_eq!(
+            u64::from(declared.offset),
+            *offset,
+            "{name} segment {n} offset"
+        );
+        assert_eq!(u64::from(declared.size), *size, "{name} segment {n} size");
+        assert_eq!(
+            hex(&declared.sha1),
+            *sha1,
+            "{name} segment {n} declared sha1"
+        );
+    }
+
+    for sample in field_array(record, "sample_entries")? {
+        let at = field_u64(sample, "at")? as usize;
+        let entry = index
+            .entries()
+            .get(at)
+            .ok_or("sample entry is out of range")?;
+        assert_eq!(entry.key, hex_u64(sample, "key")?, "{name} entry {at} key");
+        assert_eq!(
+            entry.packed,
+            hex_u32(sample, "packed")?,
+            "{name} entry {at} packed"
+        );
+    }
+
+    for (n, sample) in field_array(record, "sample_folders")?.iter().enumerate() {
+        let row = index
+            .folders()
+            .get(n)
+            .ok_or("sample folder is out of range")?;
+        assert_eq!(row.hash, hex_u32(sample, "hash")?, "{name} folder {n}");
+        assert_eq!(
+            u64::from(row.entries_offset),
+            field_u64(sample, "entries_offset")?,
+            "{name} folder {n} offset"
+        );
+        assert_eq!(
+            u64::from(row.entries_size),
+            field_u64(sample, "entries_size")?,
+            "{name} folder {n} size"
+        );
+    }
+
+    for row in field_array(record, "collisions")? {
+        let file = field_str(row, "path")?;
+        let found = index
+            .collisions()
+            .iter()
+            .find(|c| c.path == file)
+            .ok_or_else(|| format!("{name}: no collision record for {file}"))?;
+        assert_eq!(found.key, hex_u64(row, "key")?, "{name}: {file} key");
+        assert_eq!(
+            found.packed,
+            hex_u32(row, "packed")?,
+            "{name}: {file} packed"
+        );
+        assert_eq!(
+            u64::from(found.conflict_index),
+            field_u64(row, "conflict_index")?,
+            "{name}: {file} conflict index"
         );
     }
     Ok(())

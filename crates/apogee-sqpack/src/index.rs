@@ -8,14 +8,15 @@
 //! | Segment | Holds |
 //! |---|---|
 //! | 1 | the entries, ascending by key |
-//! | 2 | the collision table: one 256-byte record per colliding path, ending at an all-ones key |
+//! | 2 | the collision table: one 256-byte record per colliding path, then a terminating record |
 //! | 3 | 16-byte records whose role is not settled; `.index` only, carried verbatim |
 //! | 4 | the folder table: `.index` only, one row per folder naming its run of segment-1 entries |
 //!
 //! A key whose entry has bit 0 set is a collision placeholder and carries no location at all: the
 //! locations for that key live in segment 2, one record per colliding path, each holding the literal
 //! path so the right one can be picked. [`Index::resolve`] does that; [`Index::lookup`] hands back the
-//! placeholder so a caller working from a bare hash can see what it is.
+//! placeholder so a caller working from a bare hash can see what it is. Segment 2 ends at a record
+//! whose key is all ones in the kind's key width, which an `.index2` may spell in its low half alone.
 
 use std::fs::File;
 use std::io::Read;
@@ -47,6 +48,25 @@ pub const COLLISION_RECORD_LEN: usize = 256;
 /// The number of segments an index header describes.
 pub const SEGMENT_COUNT: usize = 4;
 
+/// Where each of the four segment descriptors sits in the file: the positions
+/// [`parse_index_header`] reads them from, in header order. The reader takes them in sequence; a check
+/// that has to name one has to address it.
+pub(crate) const SEGMENT_DESCRIPTOR_AT: [u64; SEGMENT_COUNT] = [0x408, 0x454, 0x49C, 0x4E4];
+
+/// Where the declared data-file count sits, between the first two segment descriptors.
+pub(crate) const DATA_FILE_COUNT_AT: u64 = 0x450;
+
+/// Where the index-kind word sits, after the fourth segment descriptor.
+pub(crate) const INDEX_KIND_AT: u64 = 0x52C;
+
+/// Where a collision record's path field starts: after its key, its location word and its conflict
+/// index.
+pub(crate) const COLLISION_PATH_AT: usize = 16;
+
+/// The record length the third segment's size divides by. Nothing here claims to know what those
+/// records mean; only that the segment is a whole number of them.
+pub(crate) const UNCLASSIFIED_RECORD_LEN: usize = 16;
+
 /// A cap on the file an [`Index::open`] will read. The largest archive in a full retail install is
 /// `chara`'s at roughly 12 MiB, so this leaves two orders of magnitude of headroom while still
 /// refusing to read a fabricated multi-gigabyte "index" into memory.
@@ -57,9 +77,11 @@ pub const DEFAULT_MAX_INDEX_BYTES: u64 = 256 << 20;
 const READ_RESERVE_HINT: u64 = 1 << 20;
 
 /// The path field of a collision record.
-const COLLISION_PATH_LEN: usize = COLLISION_RECORD_LEN - 16;
+const COLLISION_PATH_LEN: usize = COLLISION_RECORD_LEN - COLLISION_PATH_AT;
 
-/// The key an unused collision record carries; it terminates the table.
+/// The key an unused collision record carries in a filled key field; it terminates the table. Only an
+/// `.index` key is as wide as the field holding it, so which keys terminate a table is
+/// `IndexKind::terminates_collisions` rather than this constant alone.
 const COLLISION_TERMINATOR: u64 = u64::MAX;
 
 /// The byte length of one segment descriptor: offset, size, SHA-1, and 44 bytes of padding.
@@ -122,6 +144,20 @@ impl IndexKind {
         }
     }
 
+    /// Whether `key` is the record that ends a collision table: all ones in this kind's key width.
+    ///
+    /// An `.index2` key is a 32-bit hash zero-extended into the record's 8-byte field, and a full
+    /// retail install spells its terminator both ways: 8 of 59 archives write all ones in the low
+    /// half alone and leave the unused half zero, the rest fill the field. Reading the unused half
+    /// would take those 8 sentinels for a record keyed `0xFFFF_FFFF`, whose location word of zero
+    /// decodes to the start of dat 0, which is that file's own header rather than anything in it.
+    pub(crate) fn terminates_collisions(self, key: u64) -> bool {
+        match self {
+            IndexKind::Index1 => key == COLLISION_TERMINATOR,
+            IndexKind::Index2 => key & u64::from(u32::MAX) == u64::from(u32::MAX),
+        }
+    }
+
     fn from_word(word: u32, offset: u64) -> Result<Self> {
         match word {
             0 => Ok(IndexKind::Index1),
@@ -138,9 +174,11 @@ impl IndexKind {
 /// verbatim: verifying it is the inspector's job, not something every open pays for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentDescriptor {
-    /// Byte offset of the segment within the file. Zero when the segment is unused.
+    /// Byte offset of the segment within the file. Not to be read when the segment is unused: a real
+    /// container leaves an emptied segment's offset at the write cursor, at zero, or at the position it
+    /// held before it was emptied, and all three occur across one install.
     pub offset: u32,
-    /// Byte length of the segment. Zero when the segment is unused.
+    /// Byte length of the segment, and the only field that decides whether the container carries it.
     pub size: u32,
     /// The SHA-1 the header claims over the segment's bytes.
     pub sha1: [u8; 20],
@@ -348,22 +386,7 @@ impl Index {
     /// - [`Error::LimitExceeded`] if the file is larger than `limits.max_index_bytes`.
     /// - Everything [`Index::parse`] raises.
     pub fn open_with_limits(path: impl AsRef<Path>, limits: &IndexLimits) -> Result<Self> {
-        let file = File::open(path.as_ref())?;
-        let len = file.metadata()?.len();
-        if len > limits.max_index_bytes {
-            return Err(Error::LimitExceeded);
-        }
-        // The cap is enforced on what is actually read, not on what the directory entry claims: a
-        // character device or a pipe reports a length of zero and would otherwise be read forever.
-        // Reading one byte past the cap is what tells the two apart from a file that exactly fills it.
-        let hint = len.min(READ_RESERVE_HINT);
-        let mut buf = Vec::with_capacity(usize::try_from(hint).unwrap_or(0));
-        file.take(limits.max_index_bytes.saturating_add(1))
-            .read_to_end(&mut buf)?;
-        if buf.len() as u64 > limits.max_index_bytes {
-            return Err(Error::LimitExceeded);
-        }
-        Self::parse(&buf)
+        Self::parse(&read_capped(path.as_ref(), limits)?)
     }
 
     /// Parse an index container from its bytes.
@@ -413,6 +436,7 @@ impl Index {
                 "collision segment is not a whole number of records",
             )?,
             header.collision_segment().offset,
+            header.kind,
         )?;
         let folders = parse_folders(
             segment(
@@ -565,6 +589,33 @@ impl Index {
     }
 }
 
+/// Read a whole index container into memory, refusing one longer than `limits` allows.
+///
+/// Answers with the bytes rather than a parse, because the checks that judge a container need both:
+/// the two header digests and the four segment digests cover bytes the parsed form no longer carries.
+///
+/// # Errors
+/// - [`Error::Io`] if the file cannot be read.
+/// - [`Error::LimitExceeded`] if it is longer than `limits.max_index_bytes`.
+pub(crate) fn read_capped(path: &Path, limits: &IndexLimits) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > limits.max_index_bytes {
+        return Err(Error::LimitExceeded);
+    }
+    // The cap is enforced on what is actually read, not on what the directory entry claims: a
+    // character device or a pipe reports a length of zero and would otherwise be read forever.
+    // Reading one byte past the cap is what tells the two apart from a file that exactly fills it.
+    let hint = len.min(READ_RESERVE_HINT);
+    let mut buf = Vec::with_capacity(usize::try_from(hint).unwrap_or(0));
+    file.take(limits.max_index_bytes.saturating_add(1))
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > limits.max_index_bytes {
+        return Err(Error::LimitExceeded);
+    }
+    Ok(buf)
+}
+
 /// Parse the index header at `0x400`. The cursor's base is that absolute offset, so a short read
 /// reports where in the file it ran out.
 fn parse_index_header(c: &mut Cursor<'_>) -> Result<IndexHeader> {
@@ -672,7 +723,7 @@ fn parse_folders(seg: &[u8], base: u32) -> Result<Vec<FolderRow>> {
     Ok(out)
 }
 
-fn parse_collisions(seg: &[u8], base: u32) -> Result<Vec<CollisionRecord>> {
+fn parse_collisions(seg: &[u8], base: u32, kind: IndexKind) -> Result<Vec<CollisionRecord>> {
     let mut c = Cursor::new(seg, u64::from(base));
     let mut out = Vec::new();
     while c.remaining() >= COLLISION_RECORD_LEN {
@@ -680,7 +731,7 @@ fn parse_collisions(seg: &[u8], base: u32) -> Result<Vec<CollisionRecord>> {
         let packed = c.u32_le()?;
         let conflict_index = c.u32_le()?;
         let raw = c.take(COLLISION_PATH_LEN)?;
-        if key == COLLISION_TERMINATOR {
+        if kind.terminates_collisions(key) {
             break;
         }
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
@@ -698,11 +749,30 @@ fn parse_collisions(seg: &[u8], base: u32) -> Result<Vec<CollisionRecord>> {
 
 /// A synthetic index writer for tests. Deliberately not a public API: this crate reads archives and
 /// never writes them, and the only reason to lay these bytes out is to prove the reader reads them.
+///
+/// What it writes by default is byte-faithful down to the six digests a real container carries, so a
+/// container it builds is one the integrity checks find nothing wrong with. Every knob past that
+/// spells one measured shape differently, so a check can be shown to fire on exactly that difference.
 #[cfg(test)]
 pub(crate) mod build {
     use super::*;
     use crate::bytes;
     use crate::container::{COMMON_HEADER_LEN, SQPACK_MAGIC};
+    use crate::integrity::{HeaderId, SELF_HASH_AT, SELF_HASH_LEN, self_hash_slot, sha1};
+
+    /// How the record that ends a collision table is spelled.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub(crate) enum Terminator {
+        /// All ones across the record's whole 8-byte key field, which every `.index` and most
+        /// `.index2` files write.
+        #[default]
+        Wide,
+        /// All ones in an `.index2`'s 32-bit key width, leaving the unused half zero, which some
+        /// archives write instead. Nothing for an `.index`, whose key fills the field.
+        Narrow,
+        /// No terminating record at all, which no real container writes.
+        Absent,
+    }
 
     /// Builds a byte-faithful index container: common header, index header, then the segments laid
     /// out back to back from `0x800` in the order a real container writes them.
@@ -711,14 +781,26 @@ pub(crate) mod build {
         kind: IndexKind,
         data_file_count: u32,
         entries: Vec<IndexEntry>,
+        entry_pads: Vec<(usize, u32)>,
+        sort_entries: bool,
         collisions: Vec<CollisionRecord>,
+        collision_path_tail: Vec<u8>,
+        terminator: Terminator,
         folders: Option<Vec<FolderRow>>,
+        folder_pads: Vec<(usize, u32)>,
         unclassified: Vec<u8>,
         header_size: u32,
         version: u32,
         kind_word: Option<u32>,
         container_kind: u32,
-        segment_sha1: [u8; 20],
+        segment_sha1: [Option<[u8; 20]>; SEGMENT_COUNT],
+        zero_segment_hashes: bool,
+        self_hashes: [Option<[u8; 20]>; 2],
+        zero_self_hashes: bool,
+        zero_empty_segment_offsets: bool,
+        header_pokes: Vec<(usize, Vec<u8>)>,
+        segment_gaps: [usize; SEGMENT_COUNT],
+        trailing: usize,
     }
 
     impl IndexBuilder {
@@ -727,14 +809,26 @@ pub(crate) mod build {
                 kind,
                 data_file_count: 1,
                 entries: Vec::new(),
+                entry_pads: Vec::new(),
+                sort_entries: false,
                 collisions: Vec::new(),
+                collision_path_tail: Vec::new(),
+                terminator: Terminator::default(),
                 folders: None,
+                folder_pads: Vec::new(),
                 unclassified: Vec::new(),
                 header_size: INDEX_HEADER_LEN,
                 version: 1,
                 kind_word: None,
                 container_kind: 2,
-                segment_sha1: [0; 20],
+                segment_sha1: [None; SEGMENT_COUNT],
+                zero_segment_hashes: false,
+                self_hashes: [None; 2],
+                zero_self_hashes: false,
+                zero_empty_segment_offsets: false,
+                header_pokes: Vec::new(),
+                segment_gaps: [0; SEGMENT_COUNT],
+                trailing: 0,
             }
         }
 
@@ -755,6 +849,21 @@ pub(crate) mod build {
             self.entry(key, packed)
         }
 
+        /// Write the entries in ascending key order, which is what a real container does and what
+        /// makes a derived folder table's rows ascend: the derivation groups *consecutive* equal
+        /// folder hashes, so an unsorted table cannot produce a coherent one.
+        pub(crate) fn sort_entries(&mut self) -> &mut Self {
+            self.sort_entries = true;
+            self
+        }
+
+        /// Write `word` into the reserved word of the entry at `position`, which only an `.index`
+        /// entry has.
+        pub(crate) fn entry_pad(&mut self, position: usize, word: u32) -> &mut Self {
+            self.entry_pads.push((position, word));
+            self
+        }
+
         /// Add a collision record.
         pub(crate) fn collision(
             &mut self,
@@ -772,6 +881,20 @@ pub(crate) mod build {
             self
         }
 
+        /// Leave `tail` in every collision record's path field after the path's terminating NUL, which
+        /// is what a real record carries: the field is never zeroed, so it holds whatever longer path
+        /// was written there before.
+        pub(crate) fn collision_path_tail(&mut self, tail: &[u8]) -> &mut Self {
+            self.collision_path_tail = tail.to_vec();
+            self
+        }
+
+        /// How to spell the record that ends the collision table.
+        pub(crate) fn terminator(&mut self, terminator: Terminator) -> &mut Self {
+            self.terminator = terminator;
+            self
+        }
+
         pub(crate) fn data_file_count(&mut self, n: u32) -> &mut Self {
             self.data_file_count = n;
             self
@@ -780,6 +903,12 @@ pub(crate) mod build {
         /// Write a folder table verbatim instead of deriving one from the entries.
         pub(crate) fn folders(&mut self, rows: Vec<FolderRow>) -> &mut Self {
             self.folders = Some(rows);
+            self
+        }
+
+        /// Write `word` into the reserved word of the folder row at `position`.
+        pub(crate) fn folder_pad(&mut self, position: usize, word: u32) -> &mut Self {
+            self.folder_pads.push((position, word));
             self
         }
 
@@ -801,8 +930,55 @@ pub(crate) mod build {
             self
         }
 
-        pub(crate) fn segment_sha1(&mut self, sha1: [u8; 20]) -> &mut Self {
-            self.segment_sha1 = sha1;
+        /// Declare `sha1` for one segment instead of the digest of its bytes.
+        pub(crate) fn segment_sha1(&mut self, segment: usize, sha1: [u8; 20]) -> &mut Self {
+            self.segment_sha1[segment] = Some(sha1);
+            self
+        }
+
+        /// Declare all zeros for every non-empty segment, which claims nothing about their bytes.
+        pub(crate) fn zero_segment_hashes(&mut self) -> &mut Self {
+            self.zero_segment_hashes = true;
+            self
+        }
+
+        /// Declare `sha1` for one header instead of the digest of its own leading bytes.
+        pub(crate) fn self_hash(&mut self, header: HeaderId, sha1: [u8; 20]) -> &mut Self {
+            self.self_hashes[self_hash_slot(header)] = Some(sha1);
+            self
+        }
+
+        /// Declare all zeros for both headers' own digests.
+        pub(crate) fn zero_self_hashes(&mut self) -> &mut Self {
+            self.zero_self_hashes = true;
+            self
+        }
+
+        /// Declare zero rather than the write cursor as an empty segment's offset, which is the other
+        /// shape a real container writes.
+        pub(crate) fn zero_empty_segment_offsets(&mut self) -> &mut Self {
+            self.zero_empty_segment_offsets = true;
+            self
+        }
+
+        /// Write `bytes` verbatim at absolute offset `at`, which must be inside the two headers.
+        /// Applied before the headers' own digests are computed, so a poke inside a hashed run leaves
+        /// the container's hashes correct and a poke past one does not.
+        pub(crate) fn header_pad(&mut self, at: usize, bytes: &[u8]) -> &mut Self {
+            self.header_pokes.push((at, bytes.to_vec()));
+            self
+        }
+
+        /// Leave `len` bytes between the previous segment and segment `index`, so the segments no
+        /// longer tile.
+        pub(crate) fn segment_gap(&mut self, index: usize, len: usize) -> &mut Self {
+            self.segment_gaps[index] = len;
+            self
+        }
+
+        /// Leave `len` bytes past the last segment.
+        pub(crate) fn trailing(&mut self, len: usize) -> &mut Self {
+            self.trailing = len;
             self
         }
 
@@ -818,9 +994,9 @@ pub(crate) mod build {
 
         /// The folder table a real container would carry for these entries: one row per distinct
         /// folder hash, in the order the entries first mention it, each naming its run.
-        fn derived_folders(&self, entry_base: u32) -> Vec<FolderRow> {
+        fn derived_folders(entries: &[IndexEntry], entry_base: u32) -> Vec<FolderRow> {
             let mut rows: Vec<FolderRow> = Vec::new();
-            for (i, entry) in self.entries.iter().enumerate() {
+            for (i, entry) in entries.iter().enumerate() {
                 let hash = entry.folder_hash();
                 let offset = entry_base + (i * INDEX1_ENTRY_LEN) as u32;
                 match rows.last_mut() {
@@ -837,16 +1013,45 @@ pub(crate) mod build {
             rows
         }
 
+        /// A record's 240-byte path field: the path, its terminating NUL, then whatever the previous
+        /// occupant left. A path that fills the field is written without a NUL, which is a shape no
+        /// real record has.
+        fn path_field(&self, path: &str) -> Vec<u8> {
+            let mut field = vec![0u8; COLLISION_PATH_LEN];
+            let raw = path.as_bytes();
+            let len = raw.len().min(COLLISION_PATH_LEN);
+            field[..len].copy_from_slice(&raw[..len]);
+            let tail_at = len + 1;
+            if tail_at < COLLISION_PATH_LEN {
+                let tail = &self.collision_path_tail;
+                let tail_len = tail.len().min(COLLISION_PATH_LEN - tail_at);
+                field[tail_at..tail_at + tail_len].copy_from_slice(&tail[..tail_len]);
+            }
+            field
+        }
+
+        fn word_for(pads: &[(usize, u32)], position: usize) -> u32 {
+            pads.iter()
+                .find(|(at, _)| *at == position)
+                .map_or(0, |(_, word)| *word)
+        }
+
         pub(crate) fn bytes(&self) -> Vec<u8> {
-            let entry_base = COMMON_HEADER_LEN as u32 + INDEX_HEADER_LEN;
+            let mut entries = self.entries.clone();
+            if self.sort_entries {
+                entries.sort_by_key(|entry| entry.key);
+            }
 
             let mut entry_bytes = Vec::new();
-            for entry in &self.entries {
+            for (i, entry) in entries.iter().enumerate() {
                 match self.kind {
                     IndexKind::Index1 => {
                         entry_bytes.extend_from_slice(&bytes::write_u64_le(entry.key));
                         entry_bytes.extend_from_slice(&bytes::write_u32_le(entry.packed));
-                        entry_bytes.extend_from_slice(&bytes::write_u32_le(0));
+                        entry_bytes.extend_from_slice(&bytes::write_u32_le(Self::word_for(
+                            &self.entry_pads,
+                            i,
+                        )));
                     }
                     IndexKind::Index2 => {
                         entry_bytes.extend_from_slice(&bytes::write_u32_le(entry.file_hash()));
@@ -854,79 +1059,123 @@ pub(crate) mod build {
                     }
                 }
             }
+
             // A real container always writes the terminating record, so an empty table is 256 bytes.
             let mut collision_bytes = Vec::new();
             for record in &self.collisions {
                 collision_bytes.extend_from_slice(&bytes::write_u64_le(record.key));
                 collision_bytes.extend_from_slice(&bytes::write_u32_le(record.packed));
                 collision_bytes.extend_from_slice(&bytes::write_u32_le(record.conflict_index));
-                let mut path = record.path.as_bytes().to_vec();
-                path.resize(COLLISION_PATH_LEN, 0);
-                collision_bytes.extend_from_slice(&path);
+                collision_bytes.extend_from_slice(&self.path_field(&record.path));
             }
-            collision_bytes.extend_from_slice(&bytes::write_u64_le(COLLISION_TERMINATOR));
-            collision_bytes.extend_from_slice(&bytes::write_u32_le(0));
-            collision_bytes.extend_from_slice(&bytes::write_u32_le(u32::MAX));
-            collision_bytes.resize(collision_bytes.len() + COLLISION_PATH_LEN, 0);
+            if self.terminator != Terminator::Absent {
+                let key = match (self.terminator, self.kind) {
+                    (Terminator::Narrow, IndexKind::Index2) => u64::from(u32::MAX),
+                    _ => COLLISION_TERMINATOR,
+                };
+                collision_bytes.extend_from_slice(&bytes::write_u64_le(key));
+                collision_bytes.extend_from_slice(&bytes::write_u32_le(0));
+                collision_bytes.extend_from_slice(&bytes::write_u32_le(u32::MAX));
+                collision_bytes.resize(collision_bytes.len() + COLLISION_PATH_LEN, 0);
+            }
 
+            let entry_base =
+                COMMON_HEADER_LEN as u32 + INDEX_HEADER_LEN + self.segment_gaps[0] as u32;
             let folder_rows = match (&self.folders, self.kind) {
                 (Some(rows), _) => rows.clone(),
-                (None, IndexKind::Index1) => self.derived_folders(entry_base),
+                (None, IndexKind::Index1) => Self::derived_folders(&entries, entry_base),
                 (None, IndexKind::Index2) => Vec::new(),
             };
             let mut folder_bytes = Vec::new();
-            for row in &folder_rows {
+            for (i, row) in folder_rows.iter().enumerate() {
                 folder_bytes.extend_from_slice(&bytes::write_u32_le(row.hash));
                 folder_bytes.extend_from_slice(&bytes::write_u32_le(row.entries_offset));
                 folder_bytes.extend_from_slice(&bytes::write_u32_le(row.entries_size));
-                folder_bytes.extend_from_slice(&bytes::write_u32_le(0));
+                folder_bytes
+                    .extend_from_slice(&bytes::write_u32_le(Self::word_for(&self.folder_pads, i)));
             }
 
-            let mut cursor = entry_base;
-            let mut descriptors = Vec::new();
-            for payload in [
+            let payloads: [&[u8]; SEGMENT_COUNT] = [
                 &entry_bytes,
                 &collision_bytes,
                 &self.unclassified,
                 &folder_bytes,
-            ] {
+            ];
+            let mut body = Vec::new();
+            let mut cursor = COMMON_HEADER_LEN as u32 + INDEX_HEADER_LEN;
+            let mut descriptors = [(0u32, 0u32); SEGMENT_COUNT];
+            for (i, payload) in payloads.iter().enumerate() {
                 if payload.is_empty() {
-                    descriptors.push((0u32, 0u32));
-                } else {
-                    descriptors.push((cursor, payload.len() as u32));
-                    cursor += payload.len() as u32;
+                    // A real container leaves an emptied segment's offset at the write cursor, or at
+                    // zero; both shapes occur, and only the size says the segment is not there.
+                    let offset = if self.zero_empty_segment_offsets {
+                        0
+                    } else {
+                        cursor
+                    };
+                    descriptors[i] = (offset, 0);
+                    continue;
                 }
+                body.extend(std::iter::repeat_n(0u8, self.segment_gaps[i]));
+                cursor += self.segment_gaps[i] as u32;
+                descriptors[i] = (cursor, payload.len() as u32);
+                body.extend_from_slice(payload);
+                cursor += payload.len() as u32;
             }
+            body.extend(std::iter::repeat_n(0u8, self.trailing));
 
-            let mut out = vec![0u8; COMMON_HEADER_LEN];
+            let mut out = vec![0u8; COMMON_HEADER_LEN + INDEX_HEADER_LEN as usize];
             out[0..8].copy_from_slice(&SQPACK_MAGIC);
             out[0x0C..0x10].copy_from_slice(&bytes::write_u32_le(COMMON_HEADER_LEN as u32));
             out[0x10..0x14].copy_from_slice(&bytes::write_u32_le(1));
             out[0x14..0x18].copy_from_slice(&bytes::write_u32_le(self.container_kind));
 
-            let mut header = vec![0u8; INDEX_HEADER_LEN as usize];
-            header[0x00..0x04].copy_from_slice(&bytes::write_u32_le(self.header_size));
-            header[0x04..0x08].copy_from_slice(&bytes::write_u32_le(self.version));
-            let mut write_descriptor = |at: usize, (offset, size): (u32, u32)| {
-                header[at..at + 4].copy_from_slice(&bytes::write_u32_le(offset));
-                header[at + 4..at + 8].copy_from_slice(&bytes::write_u32_le(size));
-                if size != 0 {
-                    header[at + 8..at + 28].copy_from_slice(&self.segment_sha1);
+            let head = COMMON_HEADER_LEN;
+            out[head..head + 4].copy_from_slice(&bytes::write_u32_le(self.header_size));
+            out[head + 4..head + 8].copy_from_slice(&bytes::write_u32_le(self.version));
+            for (i, (offset, size)) in descriptors.iter().enumerate() {
+                let at = SEGMENT_DESCRIPTOR_AT[i] as usize;
+                out[at..at + 4].copy_from_slice(&bytes::write_u32_le(*offset));
+                out[at + 4..at + 8].copy_from_slice(&bytes::write_u32_le(*size));
+                if *size == 0 {
+                    // An unused descriptor declares the digest of nothing, the way a real one does.
+                    out[at + 8..at + 8 + SELF_HASH_LEN].copy_from_slice(&sha1(&[]));
+                    continue;
                 }
-            };
-            write_descriptor(0x08, descriptors[0]);
-            write_descriptor(0x54, descriptors[1]);
-            write_descriptor(0x9C, descriptors[2]);
-            write_descriptor(0xE4, descriptors[3]);
-            header[0x50..0x54].copy_from_slice(&bytes::write_u32_le(self.data_file_count));
+                let digest = self.segment_sha1[i].unwrap_or_else(|| {
+                    if self.zero_segment_hashes {
+                        [0; 20]
+                    } else {
+                        sha1(payloads[i])
+                    }
+                });
+                out[at + 8..at + 8 + SELF_HASH_LEN].copy_from_slice(&digest);
+            }
+            let count_at = DATA_FILE_COUNT_AT as usize;
+            out[count_at..count_at + 4].copy_from_slice(&bytes::write_u32_le(self.data_file_count));
+            let kind_at = INDEX_KIND_AT as usize;
             let kind_word = self.kind_word.unwrap_or_else(|| self.kind.word());
-            header[0x12C..0x130].copy_from_slice(&bytes::write_u32_le(kind_word));
+            out[kind_at..kind_at + 4].copy_from_slice(&bytes::write_u32_le(kind_word));
+            for (at, poke) in &self.header_pokes {
+                out[*at..*at + poke.len()].copy_from_slice(poke);
+            }
 
-            out.extend_from_slice(&header);
-            out.extend_from_slice(&entry_bytes);
-            out.extend_from_slice(&collision_bytes);
-            out.extend_from_slice(&self.unclassified);
-            out.extend_from_slice(&folder_bytes);
+            out.extend_from_slice(&body);
+
+            // Each header's own digest covers everything before it, so it is written last: a poke into
+            // a hashed run then leaves a container whose hashes are still right about its bytes.
+            for header in [HeaderId::Common, HeaderId::Second] {
+                let at = header.starts_at();
+                let digest = self.self_hashes[self_hash_slot(header)].unwrap_or_else(|| {
+                    if self.zero_self_hashes {
+                        [0; 20]
+                    } else {
+                        sha1(&out[at..at + SELF_HASH_AT])
+                    }
+                });
+                let field = at + SELF_HASH_AT;
+                out[field..field + SELF_HASH_LEN].copy_from_slice(&digest);
+            }
             out
         }
     }
@@ -942,7 +1191,7 @@ pub(crate) mod build {
 
 #[cfg(test)]
 mod tests {
-    use super::build::{IndexBuilder, packed};
+    use super::build::{IndexBuilder, Terminator, packed};
     use super::*;
     use crate::bytes;
     use crate::container::Platform;
@@ -1171,6 +1420,64 @@ mod tests {
     }
 
     #[test]
+    fn an_index2_collision_table_ends_at_a_terminator_in_its_key_width() {
+        // An `.index2` key is 32 bits in the record's 8-byte field, and real archives spell the
+        // sentinel both ways. Read against the filled form alone, the narrow one parses as a record
+        // keyed `0xFFFF_FFFF` whose zero location word decodes to the start of dat 0: its own header.
+        let key = u64::from(hash_path("chara/one.mdl").full);
+        for narrow in [false, true] {
+            let mut empty = IndexBuilder::new(IndexKind::Index2);
+            empty.path("exd/root.exl", packed(0, 0x80));
+            let mut shared = IndexBuilder::new(IndexKind::Index2);
+            shared
+                .entry(key, 1)
+                .collision(key, packed(1, 0x1000), 0, "chara/one.mdl")
+                .collision(key, packed(2, 0x2000), 1, "chara/two.mdl");
+            if narrow {
+                empty.terminator(Terminator::Narrow);
+                shared.terminator(Terminator::Narrow);
+            }
+
+            let index = Index::parse(&empty.bytes()).unwrap();
+            assert!(index.collisions().is_empty(), "narrow terminator: {narrow}");
+            assert_eq!(
+                index.header().collision_segment().size,
+                COLLISION_RECORD_LEN as u32,
+                "narrow terminator: {narrow}"
+            );
+
+            let index = Index::parse(&shared.bytes()).unwrap();
+            assert_eq!(index.collisions().len(), 2, "narrow terminator: {narrow}");
+            assert_eq!(
+                index.resolve("chara/one.mdl").unwrap(),
+                Some(DataLocation {
+                    dat: 1,
+                    offset: 0x1000
+                }),
+                "narrow terminator: {narrow}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_collision_table_reads_a_key_that_is_all_ones_in_one_half() {
+        // An `.index` key is the folder hash over the file hash, so `0x0000_0000_FFFF_FFFF` names
+        // folder 0's file `0xFFFF_FFFF` and `0xFFFF_FFFF_0000_0000` folder `0xFFFF_FFFF`'s file 0.
+        // Both are records the table holds: only a key filling the whole field ends it.
+        let low = u64::from(u32::MAX);
+        let high = low << 32;
+        let mut b = IndexBuilder::new(IndexKind::Index1);
+        b.entry(low, 1)
+            .entry(high, 1)
+            .collision(low, packed(1, 0x1000), 0, "chara/one.mdl")
+            .collision(high, packed(2, 0x2000), 0, "chara/two.mdl");
+        let index = Index::parse(&b.bytes()).unwrap();
+        assert_eq!(index.collisions().len(), 2);
+        assert_eq!(index.collisions()[0].key, low);
+        assert_eq!(index.collisions()[1].key, high);
+    }
+
+    #[test]
     fn a_collision_record_that_is_itself_a_placeholder_is_unresolved() {
         // Decoding it would answer with offset zero, which is the dat file's own header rather than
         // any file in it.
@@ -1274,7 +1581,7 @@ mod tests {
     fn a_segment_sha1_is_carried_verbatim() {
         let sha1 = [0xAB; 20];
         let mut b = IndexBuilder::new(IndexKind::Index1);
-        b.segment_sha1(sha1).path("exd/root.exl", 0);
+        b.segment_sha1(0, sha1).path("exd/root.exl", 0);
         let index = Index::parse(&b.bytes()).unwrap();
         assert_eq!(index.header().entry_segment().sha1, sha1);
     }

@@ -114,6 +114,10 @@ pub struct ArchiveInfo {
     pub has_index1: bool,
     /// Whether an `.index2` does.
     pub has_index2: bool,
+    /// The `.dat{n}` numbers sitting beside the archive, ascending. Filled by the directory walk that
+    /// discovered the archive, so what an index declares can be judged against what is there without
+    /// a second listing and without probing a dat space nobody enumerated.
+    pub dats: Vec<u8>,
 }
 
 impl ArchiveInfo {
@@ -506,6 +510,10 @@ fn enumerate_repos(game_dir: &Path, sqpack: &Path) -> Result<Vec<RepoInfo>> {
 
 /// List one repository's archives, keyed off the index files present. Both forms are looked for, so an
 /// archive that lost its `.index` is still discovered rather than silently absent.
+///
+/// The data files are collected in the same pass and attached to whichever archive an index file
+/// names: a directory holding only dat files still enumerates nothing, so an archive that lost both
+/// its indexes is absent rather than half-discovered.
 fn enumerate_archives(info: &RepoInfo) -> Result<Vec<ArchiveInfo>> {
     let suffixes = [
         (
@@ -517,7 +525,9 @@ fn enumerate_archives(info: &RepoInfo) -> Result<Vec<ArchiveInfo>> {
             format!(".{PLATFORM_TAG}.{}", IndexKind::Index2.extension()),
         ),
     ];
+    let dat_suffix = format!(".{PLATFORM_TAG}.dat");
     let mut found: BTreeMap<ArchiveId, (bool, bool)> = BTreeMap::new();
+    let mut dats: BTreeMap<ArchiveId, Vec<u8>> = BTreeMap::new();
     for entry in std::fs::read_dir(&info.dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -525,6 +535,10 @@ fn enumerate_archives(info: &RepoInfo) -> Result<Vec<ArchiveInfo>> {
         }
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
+        if let Some((id, dat)) = parse_dat_name(name, &dat_suffix) {
+            dats.entry(id).or_default().push(dat);
+            continue;
+        }
         // `.index` is a suffix of nothing else, but `.index2` ends in `.index2`, so the longer suffix
         // is tested first.
         for (kind, suffix) in suffixes.iter().rev() {
@@ -546,14 +560,28 @@ fn enumerate_archives(info: &RepoInfo) -> Result<Vec<ArchiveInfo>> {
     }
     Ok(found
         .into_iter()
-        .map(|(id, (has_index1, has_index2))| ArchiveInfo {
-            repo: info.repo,
-            id,
-            dir: info.dir.clone(),
-            has_index1,
-            has_index2,
+        .map(|(id, (has_index1, has_index2))| {
+            let mut dats = dats.remove(&id).unwrap_or_default();
+            dats.sort_unstable();
+            ArchiveInfo {
+                repo: info.repo,
+                id,
+                dir: info.dir.clone(),
+                has_index1,
+                has_index2,
+                dats,
+            }
         })
         .collect())
+}
+
+/// The archive and `.dat{n}` number a data file's name spells, or `None` for a name that is not one.
+/// A suffix that is not a `u8`, or a stem no id spells, is skipped for the same reason an index file's
+/// is: this crate would never build that path.
+fn parse_dat_name(name: &str, dat_suffix: &str) -> Option<(ArchiveId, u8)> {
+    let (stem, number) = name.split_once(dat_suffix)?;
+    let id = ArchiveId::parse_stem(stem).filter(|id| id.stem() == stem)?;
+    Some((id, number.parse::<u8>().ok()?))
 }
 
 /// The key an index of this form holds `path` under, for a fault that has to name the entry rather
@@ -753,6 +781,32 @@ mod tests {
             Repo::Base
         );
         assert_eq!(data.archive(Repo::Base, ArchiveId::new(0x0b, 0, 0)), None);
+    }
+
+    #[test]
+    fn an_archives_data_files_are_listed_by_the_walk_that_discovered_it() {
+        let tmp = game_tree();
+        let dir = tmp.path().join("sqpack/ffxiv");
+        let id = ArchiveId::new(0x0a, 0, 0);
+        for name in [
+            id.dat_file_name(0),
+            id.dat_file_name(2),
+            // Names this crate would never build a path to are not data files of this archive.
+            format!("{}.bck", id.dat_file_name(3)),
+            "0a0000.win32.dat".to_owned(),
+            "0A0000.win32.dat4".to_owned(),
+        ] {
+            write(&dir.join(name), "");
+        }
+        let data = GameData::open(tmp.path()).unwrap();
+        assert_eq!(data.archive(Repo::Base, id).unwrap().dats, [0, 2]);
+        // An archive with no dat files beside it lists none rather than assuming a `dat0`.
+        assert!(
+            data.archive(Repo::Base, ArchiveId::new(0x00, 0, 0))
+                .unwrap()
+                .dats
+                .is_empty()
+        );
     }
 
     #[test]

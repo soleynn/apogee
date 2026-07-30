@@ -1,5 +1,6 @@
 {
-  "note": "Recorded facts for SqPack index containers, captured from a real FFXIV install. No Square Enix bytes: only parsed header fields, segment extents, the SHA-1 each segment header already declares, counts, and a handful of entries with the paths and locations they resolve to. The hermetic test checks the recording against the crate's own definitions (every recorded key is what hash_path computes for its path, every count is the segment's size over its record length, the segments tile the file); the install-gated test (APOGEE_SQPACK_REAL_INSTALL) re-reads the real containers and confirms the parser still reproduces all of it. Segment 3 is recorded by extent only: its role is not settled.",
+  "note": "Recorded facts for SqPack index containers, captured from a real FFXIV install. No Square Enix bytes: only parsed header fields, segment extents, the SHA-1 each segment header already declares, counts, and a handful of entries with the paths and locations they resolve to. The values were produced by a separate implementation of the format (a throwaway Python reader), never by this crate, so what the gated test proves is agreement between two readers rather than a program agreeing with itself. The hermetic test checks the recording against the crate's own definitions (every recorded key is what hash_path computes for its path, every count is the segment's size over its record length, the segments tile the file); the install-gated test (APOGEE_SQPACK_REAL_INSTALL) re-reads the real containers and confirms the parser still reproduces all of it. Segment 3 is recorded by extent only: its role is not settled. `version` is the install these values were measured on, as `ffxivgame.ver` spells it. The gated test holds a live tree to them exactly only when it is that patch; on any other it checks the format's own invariants and a floor under each count, so the patch after this one fails on a regression rather than on a length.",
+  "version": "2026.07.16.0001.0000",
   "records": [
     {
       "path": "ffxiv/000000.win32.index",
@@ -157,7 +158,7 @@
       "path": "ffxiv/0a0000.win32.index",
       "repo": "ffxiv",
       "archive": "0a0000",
-      "file_len": 644560,
+      "file_len": 645840,
       "kind": "index1",
       "header_size": 1024,
       "version": 1,
@@ -168,7 +169,7 @@
         {
           "offset": 2048,
           "size": 605952,
-          "sha1": "f6a41e3ccc16b413a250b45584a7bcc9bc0ca3d3"
+          "sha1": "2ee938fda749a4fbc8850f4e635523ff5065500b"
         },
         {
           "offset": 608000,
@@ -177,11 +178,11 @@
         },
         {
           "offset": 608256,
-          "size": 34512,
-          "sha1": "1bb2a4cd0061872752d76f121105d50322d6ebb1"
+          "size": 35792,
+          "sha1": "b2e055303355d9036d2505aed11094a9d00bdd33"
         },
         {
-          "offset": 642768,
+          "offset": 644048,
           "size": 1792,
           "sha1": "1bdfb61b1205a83ae60d006b2119e306718f362f"
         }
@@ -244,7 +245,7 @@
       "path": "ffxiv/040000.win32.index2",
       "repo": "ffxiv",
       "archive": "040000",
-      "file_len": 2652728,
+      "file_len": 2673936,
       "kind": "index2",
       "header_size": 1024,
       "version": 1,
@@ -254,13 +255,13 @@
       "segments": [
         {
           "offset": 2048,
-          "size": 2643256,
-          "sha1": "5b25287776a1cb7f4e70c382553c20a2026131a9"
+          "size": 2664464,
+          "sha1": "003b8484bebb22b912e2c14b26f0d17efe390912"
         },
         {
-          "offset": 2645304,
+          "offset": 2666512,
           "size": 7424,
-          "sha1": "468aabd6208bc614566241c9ca3224733c371aeb"
+          "sha1": "96cdac89a330772af1e76fe09c81e6c9e4a1180b"
         },
         {
           "offset": 0,
@@ -273,7 +274,7 @@
           "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
         }
       ],
-      "entry_count": 330407,
+      "entry_count": 333058,
       "folder_count": 0,
       "collision_count": 28,
       "entries_sorted": true,
@@ -284,12 +285,12 @@
           "packed": "01e04d70"
         },
         {
-          "at": 165203,
-          "key": "00000000800507ec",
-          "packed": "039bf9c4"
+          "at": 166529,
+          "key": "00000000800bdbcf",
+          "packed": "0c90de40"
         },
         {
-          "at": 330406,
+          "at": 333057,
           "key": "00000000ffffe9dc",
           "packed": "354bd4f0"
         }

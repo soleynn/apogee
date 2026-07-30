@@ -42,8 +42,8 @@ pub fn write_u16_le(v: u16) -> [u8; 2] {
     v.to_le_bytes()
 }
 
-/// Write a `u64` as eight little-endian bytes. Test-only, for the same reason as [`write_u32_le`].
-#[cfg(test)]
+/// Write a `u64` as eight little-endian bytes, for the same reason as [`write_u32_le`], plus the one
+/// field a wiped region's marker spells eight bytes wide (see [`crate::empty_block_header`]).
 #[must_use]
 pub fn write_u64_le(v: u64) -> [u8; 8] {
     v.to_le_bytes()

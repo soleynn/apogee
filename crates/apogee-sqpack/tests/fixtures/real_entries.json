@@ -1,16 +1,17 @@
 {
- "note": "Recorded facts for SqPack dat entries, captured from a real FFXIV install. No Square Enix bytes: only parsed header fields, table counts, extracted lengths, and a sha256 of each extracted file. The values were produced by a separate implementation of the format (a throwaway Python reader), never by this crate. The hermetic test checks the recording against the crate's own definitions (each length against the unit the header counts in, each table against the header that has to hold it); the install-gated test (APOGEE_SQPACK_REAL_INSTALL) extracts the real entries and asserts the crate reproduces every recorded fact, sha256 included.",
+ "note": "Recorded facts for SqPack dat entries, captured from a real FFXIV install. No Square Enix bytes: only parsed header fields, table counts, extracted lengths, and a sha256 of each extracted file. The values were produced by a separate implementation of the format (a throwaway Python reader), never by this crate, so what the gated test proves is agreement between two readers rather than a program agreeing with itself. The hermetic test checks the recording against the crate's own definitions (each length against the unit the header counts in, each table against the header that has to hold it); the install-gated test (APOGEE_SQPACK_REAL_INSTALL) extracts the real entries and asserts the crate reproduces every recorded fact, sha256 included. `version` is the install these values were measured on, as `ffxivgame.ver` spells it. The gated test holds a live tree to them exactly only when it is that patch; on any other it checks the format's own invariants and a floor under each count, so the patch after this one fails on a regression rather than on a length.",
+ "version": "2026.07.16.0001.0000",
  "dats": [
   {
    "path": "ffxiv/0a0000.win32.dat0",
-   "file_len": 326401280,
+   "file_len": 335766912,
    "has_magic": true,
    "header_size": 1024,
    "unclassified": 16,
-   "data_units": 2549994,
+   "data_units": 2623163,
    "span_index": 1,
    "max_file_size": 2000000000,
-   "data_sha1": "d12cc01cc3a9eb3bc2d6badc6a063563df96d1ec"
+   "data_sha1": "f2102f58e2f7754dd5a70c4612db3ec4ab0924f5"
   },
   {
    "path": "ffxiv/000000.win32.dat0",
@@ -21,7 +22,7 @@
    "data_units": 610086,
    "span_index": 1,
    "max_file_size": 2000000000,
-   "data_sha1": "41f58f6dc2dca48453e4bf835ef11dfef6ff66a4"
+   "data_sha1": "5abd5342ef64d1d0b25b27c105baeba12cf2e37b"
   },
   {
    "path": "ffxiv/040000.win32.dat3",
@@ -32,7 +33,7 @@
    "data_units": 15624983,
    "span_index": 3,
    "max_file_size": 2000000000,
-   "data_sha1": "4b528cbee94f74daf20a202453899ec14108fe2c"
+   "data_sha1": "4f36a89959ea18fe5f41fa79acdf4a8ddd7865dc"
   },
   {
    "path": "ffxiv/020000.win32.dat1",
@@ -762,11 +763,11 @@
    "repo": "ffxiv",
    "archive": "060000",
    "dat": 0,
-   "offset": 86272,
+   "offset": 213655808,
    "content_type": "empty",
    "header_size": 128,
    "raw_size": 0,
-   "allocated_units": 13,
+   "allocated_units": 171,
    "occupied_units": 0,
    "extracted_len": 0,
    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -775,14 +776,14 @@
    "repo": "ffxiv",
    "archive": "010000",
    "dat": 0,
-   "offset": 44830976,
+   "offset": 2796648832,
    "content_type": "texture",
    "header_size": 256,
    "raw_size": 28172,
-   "allocated_units": 26,
-   "occupied_units": 20,
+   "allocated_units": 9,
+   "occupied_units": 9,
    "extracted_len": 26284,
-   "sha256": "6cb3259af1e27d3502aff0dc5ac073e7367b3cca06b37e1bccde591d27b4813d",
+   "sha256": "025b46c31f844c5d9b844e0d4f583d0ab3a8f9ad625b0f7b94d9a83107065f0d",
    "mips": 6,
    "blocks": 7,
    "texture_header_len": 80
@@ -791,14 +792,14 @@
    "repo": "ffxiv",
    "archive": "010000",
    "dat": 0,
-   "offset": 1070995584,
+   "offset": 1594552576,
    "content_type": "texture",
    "header_size": 256,
    "raw_size": 37540,
-   "allocated_units": 38,
-   "occupied_units": 38,
+   "allocated_units": 77,
+   "occupied_units": 72,
    "extracted_len": 35052,
-   "sha256": "772bf5cfcff45b651ca784135ed8e6d2568818e94e340c273c2997bc07c505d0",
+   "sha256": "aaf18a8530b8544ab53aeaf67ce80fd31d5396eae16f474a19f2a5935b15dbfe",
    "mips": 6,
    "blocks": 8,
    "texture_header_len": 80

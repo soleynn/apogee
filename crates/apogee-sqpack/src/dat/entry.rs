@@ -129,6 +129,47 @@ pub struct EntryHeader {
 }
 
 impl EntryHeader {
+    /// Parse the five words an entry header opens with, bounded by `limits`.
+    ///
+    /// This is what a sweep over a whole archive reads at each location an index names: five words at
+    /// a time rather than a whole declared header, since the tables are not what a slot map needs.
+    /// `offset` is where the entry sits in its dat file, and is what the returned errors are measured
+    /// against.
+    ///
+    /// # Errors
+    /// - [`Error::Truncated`] if `buf` is shorter than [`ENTRY_HEADER_LEN`].
+    /// - [`Error::LimitExceeded`] if the declared header or file size exceeds `limits`.
+    /// - [`Error::EntryCorrupt`] if the declared header is shorter than these five words.
+    pub fn parse(buf: &[u8], offset: u64, limits: &DatLimits) -> Result<Self> {
+        let mut c = Cursor::new(buf, offset);
+        let header_size = c.u32_le()?;
+        let content_type = ContentType::from_word(c.u32_le()?);
+        let raw_size = c.u32_le()?;
+        let allocated_units = c.u32_le()?;
+        let occupied_units = c.u32_le()?;
+
+        if header_size > limits.max_entry_header_bytes {
+            return Err(Error::LimitExceeded);
+        }
+        if header_size < ENTRY_HEADER_LEN as u32 {
+            return Err(Error::EntryCorrupt {
+                offset,
+                detail: "entry header is shorter than its own fields",
+            });
+        }
+        // An empty entry's size word is a leftover, so only a real one is held to the cap.
+        if content_type != ContentType::Empty && u64::from(raw_size) > limits.max_file_bytes {
+            return Err(Error::LimitExceeded);
+        }
+        Ok(EntryHeader {
+            header_size,
+            content_type,
+            raw_size,
+            allocated_units,
+            occupied_units,
+        })
+    }
+
     /// The slot reserved for the entry's data, in bytes.
     #[must_use]
     pub fn allocated_bytes(&self) -> u64 {
@@ -240,7 +281,7 @@ impl Entry {
     /// - [`Error::LimitExceeded`] if the header or the declared file size exceeds `limits`.
     /// - [`Error::EntryCorrupt`] if the table does not fit inside the declared header.
     pub fn parse(buf: &[u8], offset: u64, limits: &DatLimits) -> Result<Self> {
-        let header = parse_entry_header(buf, offset, limits)?;
+        let header = EntryHeader::parse(buf, offset, limits)?;
         let declared = usize::try_from(header.header_size).map_err(|_| Error::LimitExceeded)?;
         let head = buf.get(..declared).ok_or_else(|| Error::Truncated {
             offset: offset.saturating_add(buf.len() as u64),
@@ -331,37 +372,6 @@ impl Entry {
             EntryBody::Model(model) => model.block_sizes.len(),
         }
     }
-}
-
-/// Parse the five words every entry header opens with, bounded by `limits`.
-fn parse_entry_header(buf: &[u8], offset: u64, limits: &DatLimits) -> Result<EntryHeader> {
-    let mut c = Cursor::new(buf, offset);
-    let header_size = c.u32_le()?;
-    let content_type = ContentType::from_word(c.u32_le()?);
-    let raw_size = c.u32_le()?;
-    let allocated_units = c.u32_le()?;
-    let occupied_units = c.u32_le()?;
-
-    if header_size > limits.max_entry_header_bytes {
-        return Err(Error::LimitExceeded);
-    }
-    if header_size < ENTRY_HEADER_LEN as u32 {
-        return Err(Error::EntryCorrupt {
-            offset,
-            detail: "entry header is shorter than its own fields",
-        });
-    }
-    // An empty entry's size word is a leftover, so only a real one is held to the cap.
-    if content_type != ContentType::Empty && u64::from(raw_size) > limits.max_file_bytes {
-        return Err(Error::LimitExceeded);
-    }
-    Ok(EntryHeader {
-        header_size,
-        content_type,
-        raw_size,
-        allocated_units,
-        occupied_units,
-    })
 }
 
 /// The bytes a table of `count` records of `unit` bytes needs after `start`, refused when it does
