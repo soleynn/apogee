@@ -68,8 +68,10 @@ pub struct Located {
 pub struct IndexInspection {
     /// The findings and what the checks accounted for.
     pub report: ContainerReport,
-    /// The parsed container, handed back so a sweep that goes on to walk the dat files need not parse
-    /// twice. `None` exactly when the report carries a [`Defect::ContainerUnreadable`].
+    /// The parsed container, handed back so a caller that goes on to read the archive itself need not
+    /// parse it twice. `None` exactly when the report carries a [`Defect::ContainerUnreadable`]. It is
+    /// the largest thing an inspection holds, and everything above is derived from it already, so a
+    /// caller working through a whole install drops these as it goes.
     pub index: Option<Index>,
     /// Every location the container names, entries and collision records together, ascending by
     /// `(dat, offset, key)`. Empty when the container did not parse.

@@ -17,9 +17,9 @@ use crate::dat::FileSource;
 use crate::game::{ArchiveInfo, GameData};
 use crate::index::{self, IndexKind};
 use crate::integrity::{
-    ContainerId, ContainerRef, ContainerReport, Defect, Finding, IndexFacts, IndexInspection,
-    Located, Report, Site, SweepOptions, Totals, compare_index_forms, inspect_dat_entries,
-    inspect_dat_headers, inspect_data_region, inspect_index,
+    ContainerId, ContainerRef, ContainerReport, Defect, Finding, IndexFacts, Located, Report, Site,
+    SweepOptions, Totals, compare_index_forms, inspect_dat_entries, inspect_dat_headers,
+    inspect_data_region, inspect_index,
 };
 
 /// The most data files an archive can be missing one of. A location word spells the data file in three
@@ -74,29 +74,31 @@ impl GameData {
 
         let forms = [IndexKind::Index1, IndexKind::Index2]
             .map(|kind| self.inspect_form(info, kind, archive, opts, &mut out));
-        let [first, second] = &forms;
 
         // Only worth comparing when both forms parsed: an unreadable container names no locations at
         // all, and reporting every location of the other form as unmatched would bury what went wrong.
-        if let (Some(first), Some(second)) = (first, second) {
+        if let [Some(first), Some(second)] = &forms {
             absorb(
                 &mut out,
                 archive,
                 compare_index_forms(&first.locations, &second.locations, archive, opts),
             );
         }
-
-        // The primary form is the `.index` when it parsed, mirroring `lookup` and halving the random
-        // reads. That the other form names the same places is what the comparison above has said.
-        let primary = first.as_ref().or(second.as_ref());
-        let locations: &[Located] = primary.map_or(&[], |form| form.locations.as_slice());
         let declared = forms
             .iter()
             .flatten()
-            .filter_map(|form| form.index.as_ref())
-            .map(|index| index.header().data_file_count)
+            .map(|form| form.data_file_count)
             .max()
             .unwrap_or(0);
+
+        // The primary form is the `.index` when it parsed, mirroring `lookup` and halving the random
+        // reads. That the other form names the same places is what the comparison above has said, and
+        // its locations are the only thing the comparison was for: an archive names millions of them, so
+        // the walk below is left holding one form's rather than both.
+        let [first, second] = forms;
+        let locations = first
+            .or(second)
+            .map_or_else(Vec::new, |form| form.locations);
 
         // Both forms name their own locations, so what the walk was handed is the primary form's count
         // rather than the sum: the other form's is what the comparison above already spoke for.
@@ -115,7 +117,7 @@ impl GameData {
         let reports: Vec<Report> = info
             .dats
             .par_iter()
-            .map(|dat| inspect_dat_file(info, *dat, locations, archive, opts))
+            .map(|dat| inspect_dat_file(info, *dat, &locations, archive, opts))
             .collect();
         for report in reports {
             merge(&mut out, report);
@@ -123,8 +125,8 @@ impl GameData {
         out
     }
 
-    /// One index form of an archive: read whole, checked, and handed back so the data-file walk can use
-    /// the locations it named. `None` when the archive has no such form or it would not parse.
+    /// One index form of an archive: read whole, checked, and reduced to what the rest of the archive's
+    /// checks read of it. `None` when the archive has no such form or it would not parse.
     fn inspect_form(
         &self,
         info: &ArchiveInfo,
@@ -132,7 +134,7 @@ impl GameData {
         archive: ContainerRef,
         opts: &SweepOptions,
         out: &mut Report,
-    ) -> Option<IndexInspection> {
+    ) -> Option<Form> {
         let at = archive.with_file(ContainerId::Index(kind));
         if !info.has_index(kind) {
             out.findings.push(Finding {
@@ -154,10 +156,25 @@ impl GameData {
             dats: &info.dats,
         };
         let mut inspection = inspect_index(&bytes, &facts, opts);
-        let parsed = inspection.index.is_some();
         absorb(out, at, std::mem::take(&mut inspection.report));
-        parsed.then_some(inspection)
+        let data_file_count = inspection.index?.header().data_file_count;
+        Some(Form {
+            locations: inspection.locations,
+            data_file_count,
+        })
     }
+}
+
+/// One index form's inspection, as much of it as the archive's remaining checks read.
+///
+/// The parsed container is not among them: an index at the reader's cap parses to tens of millions of
+/// entries, and one header word is all the sweep takes from them once the locations have been derived,
+/// so it is dropped where it was parsed rather than held through the data-file walk.
+struct Form {
+    /// Every location the container names, ascending.
+    locations: Vec<Located>,
+    /// How many data files its header declares.
+    data_file_count: u32,
 }
 
 /// One data file: its headers, then whichever of the two expensive passes were asked for.

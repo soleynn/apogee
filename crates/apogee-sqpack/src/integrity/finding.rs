@@ -3,7 +3,9 @@
 //! One [`Defect`] variant per rule, with the location travelling beside it in a [`Site`] rather than
 //! inside it: that is what lets one ordering rule and one renderer cover the whole taxonomy. Every
 //! field is an integer, a digest, a small enum or a `&'static str`, so a [`Finding`] is `Copy` and
-//! allocates nothing, and the per-container budget is the only thing bounding a sweep's memory.
+//! allocates nothing, and the per-container budget bounds what a wrecked container costs to report. It
+//! bounds the report and nothing else: what a sweep holds while producing one is the containers it has
+//! parsed, which is [`crate::index::IndexLimits`] times the archives in flight.
 //!
 //! [`Severity`] and [`Scope`] are derived from the defect rather than stored beside it, so neither can
 //! drift: severity says how much a fault bears on playing the game (a mod tool's coherent rewrite is
