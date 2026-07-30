@@ -13,6 +13,7 @@ mod bench;
 mod catalog;
 #[cfg(target_os = "linux")]
 mod companion;
+mod deck;
 #[cfg(target_os = "linux")]
 mod dosdevices;
 #[cfg(target_os = "linux")]
@@ -52,6 +53,7 @@ pub use catalog::{
 };
 #[cfg(target_os = "linux")]
 pub use companion::{Companion, CompanionExit, CompanionSpec};
+pub use deck::{DeckModel, HostIdentity};
 #[cfg(target_os = "linux")]
 pub use dosdevices::DriveMap;
 pub use env::{
