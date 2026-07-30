@@ -30,6 +30,7 @@ is tagged with its change type. Versioning aims to follow
 - Extract a file from a SqPack dat entry (#80) _(changed)_
 - Bring boot current before registering, and read a 204 boot check as current (#83) _(fixed)_
 - Probe a derived current boot version in the live boot check (#84) _(changed)_
+- Sweep an install's SqPack containers and report what disagrees with what they declare (#86) _(changed)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
