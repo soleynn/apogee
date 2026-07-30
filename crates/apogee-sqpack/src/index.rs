@@ -8,14 +8,15 @@
 //! | Segment | Holds |
 //! |---|---|
 //! | 1 | the entries, ascending by key |
-//! | 2 | the collision table: one 256-byte record per colliding path, ending at an all-ones key |
+//! | 2 | the collision table: one 256-byte record per colliding path, then a terminating record |
 //! | 3 | 16-byte records whose role is not settled; `.index` only, carried verbatim |
 //! | 4 | the folder table: `.index` only, one row per folder naming its run of segment-1 entries |
 //!
 //! A key whose entry has bit 0 set is a collision placeholder and carries no location at all: the
 //! locations for that key live in segment 2, one record per colliding path, each holding the literal
 //! path so the right one can be picked. [`Index::resolve`] does that; [`Index::lookup`] hands back the
-//! placeholder so a caller working from a bare hash can see what it is.
+//! placeholder so a caller working from a bare hash can see what it is. Segment 2 ends at a record
+//! whose key is all ones in the kind's key width, which an `.index2` may spell in its low half alone.
 
 use std::fs::File;
 use std::io::Read;
@@ -59,7 +60,9 @@ const READ_RESERVE_HINT: u64 = 1 << 20;
 /// The path field of a collision record.
 const COLLISION_PATH_LEN: usize = COLLISION_RECORD_LEN - 16;
 
-/// The key an unused collision record carries; it terminates the table.
+/// The key an unused collision record carries in a filled key field; it terminates the table. Only an
+/// `.index` key is as wide as the field holding it, so which keys terminate a table is
+/// `IndexKind::terminates_collisions` rather than this constant alone.
 const COLLISION_TERMINATOR: u64 = u64::MAX;
 
 /// The byte length of one segment descriptor: offset, size, SHA-1, and 44 bytes of padding.
@@ -119,6 +122,20 @@ impl IndexKind {
         match self {
             IndexKind::Index1 => "index",
             IndexKind::Index2 => "index2",
+        }
+    }
+
+    /// Whether `key` is the record that ends a collision table: all ones in this kind's key width.
+    ///
+    /// An `.index2` key is a 32-bit hash zero-extended into the record's 8-byte field, and a full
+    /// retail install spells its terminator both ways: 8 of 59 archives write all ones in the low
+    /// half alone and leave the unused half zero, the rest fill the field. Reading the unused half
+    /// would take those 8 sentinels for a record keyed `0xFFFF_FFFF`, whose location word of zero
+    /// decodes to the start of dat 0, which is that file's own header rather than anything in it.
+    fn terminates_collisions(self, key: u64) -> bool {
+        match self {
+            IndexKind::Index1 => key == COLLISION_TERMINATOR,
+            IndexKind::Index2 => key & u64::from(u32::MAX) == u64::from(u32::MAX),
         }
     }
 
@@ -413,6 +430,7 @@ impl Index {
                 "collision segment is not a whole number of records",
             )?,
             header.collision_segment().offset,
+            header.kind,
         )?;
         let folders = parse_folders(
             segment(
@@ -672,7 +690,7 @@ fn parse_folders(seg: &[u8], base: u32) -> Result<Vec<FolderRow>> {
     Ok(out)
 }
 
-fn parse_collisions(seg: &[u8], base: u32) -> Result<Vec<CollisionRecord>> {
+fn parse_collisions(seg: &[u8], base: u32, kind: IndexKind) -> Result<Vec<CollisionRecord>> {
     let mut c = Cursor::new(seg, u64::from(base));
     let mut out = Vec::new();
     while c.remaining() >= COLLISION_RECORD_LEN {
@@ -680,7 +698,7 @@ fn parse_collisions(seg: &[u8], base: u32) -> Result<Vec<CollisionRecord>> {
         let packed = c.u32_le()?;
         let conflict_index = c.u32_le()?;
         let raw = c.take(COLLISION_PATH_LEN)?;
-        if key == COLLISION_TERMINATOR {
+        if kind.terminates_collisions(key) {
             break;
         }
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
@@ -714,6 +732,7 @@ pub(crate) mod build {
         collisions: Vec<CollisionRecord>,
         folders: Option<Vec<FolderRow>>,
         unclassified: Vec<u8>,
+        narrow_terminator: bool,
         header_size: u32,
         version: u32,
         kind_word: Option<u32>,
@@ -730,6 +749,7 @@ pub(crate) mod build {
                 collisions: Vec::new(),
                 folders: None,
                 unclassified: Vec::new(),
+                narrow_terminator: false,
                 header_size: INDEX_HEADER_LEN,
                 version: 1,
                 kind_word: None,
@@ -780,6 +800,14 @@ pub(crate) mod build {
         /// Write a folder table verbatim instead of deriving one from the entries.
         pub(crate) fn folders(&mut self, rows: Vec<FolderRow>) -> &mut Self {
             self.folders = Some(rows);
+            self
+        }
+
+        /// Spell the terminating record's key in the kind's key width instead of filling the record's
+        /// 8-byte field: `0xFFFF_FFFF` for an `.index2`, which is how some real archives write it. An
+        /// `.index` key is already as wide as the field, so this changes nothing for that kind.
+        pub(crate) fn narrow_terminator(&mut self) -> &mut Self {
+            self.narrow_terminator = true;
             self
         }
 
@@ -864,7 +892,11 @@ pub(crate) mod build {
                 path.resize(COLLISION_PATH_LEN, 0);
                 collision_bytes.extend_from_slice(&path);
             }
-            collision_bytes.extend_from_slice(&bytes::write_u64_le(COLLISION_TERMINATOR));
+            let terminator = match (self.narrow_terminator, self.kind) {
+                (true, IndexKind::Index2) => u64::from(u32::MAX),
+                _ => COLLISION_TERMINATOR,
+            };
+            collision_bytes.extend_from_slice(&bytes::write_u64_le(terminator));
             collision_bytes.extend_from_slice(&bytes::write_u32_le(0));
             collision_bytes.extend_from_slice(&bytes::write_u32_le(u32::MAX));
             collision_bytes.resize(collision_bytes.len() + COLLISION_PATH_LEN, 0);
@@ -1168,6 +1200,64 @@ mod tests {
                 .iter()
                 .all(|c| c.path != "chara/three.mdl")
         );
+    }
+
+    #[test]
+    fn an_index2_collision_table_ends_at_a_terminator_in_its_key_width() {
+        // An `.index2` key is 32 bits in the record's 8-byte field, and real archives spell the
+        // sentinel both ways. Read against the filled form alone, the narrow one parses as a record
+        // keyed `0xFFFF_FFFF` whose zero location word decodes to the start of dat 0: its own header.
+        let key = u64::from(hash_path("chara/one.mdl").full);
+        for narrow in [false, true] {
+            let mut empty = IndexBuilder::new(IndexKind::Index2);
+            empty.path("exd/root.exl", packed(0, 0x80));
+            let mut shared = IndexBuilder::new(IndexKind::Index2);
+            shared
+                .entry(key, 1)
+                .collision(key, packed(1, 0x1000), 0, "chara/one.mdl")
+                .collision(key, packed(2, 0x2000), 1, "chara/two.mdl");
+            if narrow {
+                empty.narrow_terminator();
+                shared.narrow_terminator();
+            }
+
+            let index = Index::parse(&empty.bytes()).unwrap();
+            assert!(index.collisions().is_empty(), "narrow terminator: {narrow}");
+            assert_eq!(
+                index.header().collision_segment().size,
+                COLLISION_RECORD_LEN as u32,
+                "narrow terminator: {narrow}"
+            );
+
+            let index = Index::parse(&shared.bytes()).unwrap();
+            assert_eq!(index.collisions().len(), 2, "narrow terminator: {narrow}");
+            assert_eq!(
+                index.resolve("chara/one.mdl").unwrap(),
+                Some(DataLocation {
+                    dat: 1,
+                    offset: 0x1000
+                }),
+                "narrow terminator: {narrow}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_collision_table_reads_a_key_that_is_all_ones_in_one_half() {
+        // An `.index` key is the folder hash over the file hash, so `0x0000_0000_FFFF_FFFF` names
+        // folder 0's file `0xFFFF_FFFF` and `0xFFFF_FFFF_0000_0000` folder `0xFFFF_FFFF`'s file 0.
+        // Both are records the table holds: only a key filling the whole field ends it.
+        let low = u64::from(u32::MAX);
+        let high = low << 32;
+        let mut b = IndexBuilder::new(IndexKind::Index1);
+        b.entry(low, 1)
+            .entry(high, 1)
+            .collision(low, packed(1, 0x1000), 0, "chara/one.mdl")
+            .collision(high, packed(2, 0x2000), 0, "chara/two.mdl");
+        let index = Index::parse(&b.bytes()).unwrap();
+        assert_eq!(index.collisions().len(), 2);
+        assert_eq!(index.collisions()[0].key, low);
+        assert_eq!(index.collisions()[1].key, high);
     }
 
     #[test]
