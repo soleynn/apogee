@@ -55,6 +55,7 @@ pub struct ArchiveLayout {
 
 /// A Wine/Proton runner: an installable, pinned artifact.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Runner {
     pub name: String,
     pub version: String,
@@ -62,6 +63,23 @@ pub struct Runner {
     pub url: Url,
     pub sha256: [u8; 32],
     pub archive: ArchiveLayout,
+    /// Whether this build uses ntsync, which is a property of the build rather than of the kernel:
+    /// a row omits it when nobody has said. Read [`Runner::uses_ntsync`] rather than this field,
+    /// which keeps "nobody said" distinguishable from "no" for a later row that wants to say so.
+    pub ntsync: Option<bool>,
+}
+
+impl Runner {
+    /// Whether a launch through this runner may resolve to ntsync.
+    ///
+    /// An unstated capability reads as **no**. ntsync is selected by setting no variable at all, so a
+    /// build wrongly assumed to use it runs with neither esync nor fsync either: a prefix with no
+    /// accelerated synchronization that still launches and reports success. Wrongly assuming the
+    /// other way costs fsync, which every build back to kernel 5.16 has.
+    #[must_use]
+    pub fn uses_ntsync(&self) -> bool {
+        self.ntsync.unwrap_or(false)
+    }
 }
 
 /// A supporting tool managed as data (currently `umu-launcher`), installed like a runner.
@@ -165,6 +183,10 @@ struct RawRunner {
     url: String,
     sha256: String,
     archive: RawArchive,
+    /// Absent in a row written before the key existed, and absent is meaningful (see
+    /// [`Runner::uses_ntsync`]), so it stays an `Option` rather than defaulting to a bool.
+    #[serde(default)]
+    ntsync: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -255,6 +277,7 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
         url,
         sha256,
         archive,
+        ntsync: r.ntsync,
     })
 }
 
@@ -557,5 +580,15 @@ mod tests {
             .expect("proton runner present");
         assert_eq!(runner.kind, RunnerKind::ProtonUmu);
         assert!(catalog.tool("umu-launcher").is_some());
+    }
+
+    /// A row written before the key existed still parses, and reads as no rather than as absent
+    /// support the launcher then acts on.
+    #[test]
+    fn a_runner_row_without_the_sync_key_still_parses() {
+        let cat = Catalog::from_json_bytes(manifest(GOOD_PIN).as_bytes()).expect("parses");
+        let runner = cat.runner("UMU-Proton", "9-20").expect("runner present");
+        assert_eq!(runner.ntsync, None);
+        assert!(!runner.uses_ntsync());
     }
 }
