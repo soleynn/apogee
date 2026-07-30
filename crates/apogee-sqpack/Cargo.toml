@@ -12,6 +12,9 @@ thiserror.workspace = true
 flate2.workspace = true
 # The index path hash is CRC-32 with the final bit-inversion left off.
 crc32fast.workspace = true
+# All four hash fields a container carries (two header self hashes, one per index segment, one over a
+# dat's data region) are SHA-1, so the integrity checks cannot be built without it.
+sha1.workspace = true
 
 [dev-dependencies]
 # Temp game trees for install-enumeration and lookup tests.
@@ -21,9 +24,6 @@ tempfile.workspace = true
 # install-gated tests and digests the generated path corpus.
 serde_json.workspace = true
 sha2.workspace = true
-# The install-gated index test recomputes each segment's SHA-1 over the bytes the parser framed and
-# checks it against the one the header declares.
-sha1.workspace = true
 # The lookup-agrees-with-a-linear-scan property over synthetic index containers.
 proptest.workspace = true
 

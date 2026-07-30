@@ -3,8 +3,11 @@
 //!
 //! This crate is the read side of FFXIV's archive format: the shared block [`codec`], the container
 //! [`CommonHeader`] parse, the [`Index`] reader, the [`Dat`] reader that turns an entry back into
-//! the file it holds, and [`GameData`], which puts them together over an install. The integrity
-//! inspector and mod detection build on top of these.
+//! the file it holds, and [`GameData`], which puts them together over an install.
+//!
+//! [`integrity`] is the structural inspector built on top of them: pure checks over one container's
+//! bytes, driven either one container at a time or as a sweep over a whole install. Mod detection
+//! builds on these too.
 //!
 //! ```no_run
 //! let game = apogee_sqpack::GameData::open("/path/to/game")?;
@@ -28,6 +31,7 @@ mod error;
 mod game;
 mod hash;
 mod index;
+pub mod integrity;
 
 pub use archive::{ArchiveId, Category, PLATFORM_TAG};
 pub use container::{
