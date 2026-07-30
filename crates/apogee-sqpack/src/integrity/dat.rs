@@ -607,9 +607,13 @@ mod tests {
         let built = clean_dat().built();
         let named = located(&built.placed);
         for opts in every_pass() {
-            let report = inspect_dat_headers(&built.bytes[..], container(), &opts).report;
-            assert!(report.findings.is_empty(), "{:#?}", report.findings);
-            let Some(dat) = inspect_dat_headers(&built.bytes[..], container(), &opts).dat else {
+            let inspection = inspect_dat_headers(&built.bytes[..], container(), &opts);
+            assert!(
+                inspection.report.findings.is_empty(),
+                "{:#?}",
+                inspection.report.findings
+            );
+            let Some(dat) = inspection.dat else {
                 panic!("the clean fixture must parse")
             };
             let region = inspect_data_region(&dat, container());
@@ -1297,6 +1301,25 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
+
+        /// No byte of a container can change unnoticed. Provable rather than hopeful: the two self
+        /// hashes cover everything before them, the two 44-byte tails after them are checked zero, the
+        /// digest fields themselves are what the comparison reads, and the data region is covered by
+        /// the digest the header declares over it.
+        #[test]
+        fn no_byte_of_a_container_can_change_unnoticed(at in 0usize..0x4000, bit in 0u32..8) {
+            let mut b = DatBuilder::new();
+            b.entry(EntrySpec::standard(vec![b"the quick brown fox ".repeat(60)]));
+            let built = b.built();
+            let mut bytes = built.bytes.clone();
+            let at = at % bytes.len();
+            bytes[at] ^= 1 << bit;
+            let mut found = headers(&bytes).report.findings;
+            if let Some(dat) = headers(&bytes).dat {
+                found.extend(inspect_data_region(&dat, container()).findings);
+            }
+            prop_assert!(!found.is_empty(), "byte {:#x} bit {} went unnoticed", at, bit);
+        }
 
         /// The accounting closes for any shape, which is what makes a report honest about what it did
         /// not check: measured to hold exactly over a full install's 125,797,530,368 region bytes.
