@@ -108,16 +108,13 @@ fn stat_tree(root: &Path) -> Result<bool, Box<dyn Error>> {
         );
     }
     for archive in game.archives() {
-        let dats = (0..u8::MAX)
-            .take_while(|n| archive.dat_path(*n).is_file())
-            .count();
         println!(
             "{:<6} {} index={} index2={} dats={}",
             archive.repo.dir_name(),
             archive.id.stem(),
             archive.has_index1,
             archive.has_index2,
-            dats
+            archive.dats.len()
         );
     }
     println!(
