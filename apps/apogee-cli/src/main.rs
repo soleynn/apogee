@@ -70,6 +70,23 @@ enum Commands {
         #[command(subcommand)]
         action: DalamudAction,
     },
+    /// Start a profile from the Steam interface, on a handheld or anywhere else without a desktop.
+    #[cfg(unix)]
+    Steam {
+        #[command(subcommand)]
+        action: SteamAction,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Subcommand)]
+enum SteamAction {
+    /// Say what this machine is and whether Steam has been told about any profile.
+    Status,
+    /// Offer a profile in Steam's compatibility-tool list. Steam has to be restarted to see it.
+    Register(TargetArgs),
+    /// Withdraw the offer. Nothing else in the Steam installation is touched.
+    Unregister,
 }
 
 #[derive(Subcommand)]
@@ -320,7 +337,94 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             dalamud(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(unix)]
+        Commands::Steam { action } => steam(&core, action),
     }
+}
+
+/// Registering a profile with Steam, so it can be started from the Steam interface where there is no
+/// desktop to start it from.
+///
+/// The registration runs `launch`, which starts from a session already established: on a handheld
+/// there is nowhere to type a password, so signing in stays a thing done once from a desktop and the
+/// Steam entry only starts what is already logged in.
+#[cfg(unix)]
+fn steam(core: &Core, action: SteamAction) -> Result<ExitCode, CliError> {
+    let installs = apogee_core::steam_installs();
+    let identity = apogee_core::HostIdentity::detect();
+
+    match action {
+        SteamAction::Status => {
+            println!(
+                "machine: {}{}{}",
+                match identity.deck {
+                    Some(model) => format!("Steam Deck ({model:?})"),
+                    None => "not a Steam Deck".to_owned(),
+                },
+                if identity.steamos { ", SteamOS" } else { "" },
+                if identity.game_mode {
+                    ", in the Steam session"
+                } else {
+                    ""
+                },
+            );
+            if installs.is_empty() {
+                println!("steam: no installation found");
+                return Ok(ExitCode::SUCCESS);
+            }
+            for install in &installs {
+                match apogee_core::installed_compat_tool(install) {
+                    Some(dir) => println!(
+                        "steam: {} -> registered at {}",
+                        install.display(),
+                        dir.display()
+                    ),
+                    None => println!("steam: {} -> not registered", install.display()),
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        SteamAction::Register(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            let install = first_steam_install(&installs)?;
+            // The path this process was started from, so the registration keeps working after the
+            // shell that ran it is gone. Moving the binary means registering again.
+            let binary = std::env::current_exe()?;
+            let tool = apogee_core::CompatTool::new(
+                binary,
+                vec![
+                    "launch".to_owned(),
+                    "--profile".to_owned(),
+                    profile.id.to_string(),
+                ],
+            )
+            .display_name(format!("Apogee ({})", profile.name));
+            let written = tool.install(install)?;
+            println!("registered {} at {}", profile.name, written.dir.display());
+            println!("runs: {}", written.command);
+            println!("restart steam for it to appear in the compatibility tool list");
+            Ok(ExitCode::SUCCESS)
+        }
+        SteamAction::Unregister => {
+            let install = first_steam_install(&installs)?;
+            if apogee_core::remove_compat_tool(install)? {
+                println!("unregistered from {}", install.display());
+            } else {
+                println!("nothing registered at {}", install.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// The Steam installation to act on: the first one found, since the search is ordered by how
+/// conventional a location is and a second one is the same client packaged differently.
+#[cfg(unix)]
+fn first_steam_install(installs: &[PathBuf]) -> Result<&Path, CliError> {
+    installs
+        .first()
+        .map(PathBuf::as_path)
+        .ok_or_else(|| "no steam installation found; run steam once first".into())
 }
 
 /// The Dalamud toggle, read from and written back to the profile that owns it.

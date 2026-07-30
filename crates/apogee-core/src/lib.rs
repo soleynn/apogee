@@ -30,6 +30,11 @@ pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, T
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{BenchError, BenchStats, FrameLog};
+#[cfg(unix)]
+pub use apogee_runtime::{
+    CompatTool, CompatToolInstall, HostIdentity, installed_compat_tool, remove_compat_tool,
+    steam_installs,
+};
 pub use apogee_secrets::Secret;
 pub use command::{Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Progress};
 pub use composition::{Core, CoreConfig};

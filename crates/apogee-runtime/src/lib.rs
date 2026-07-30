@@ -38,6 +38,8 @@ mod session;
 mod shim;
 #[cfg(target_os = "linux")]
 mod spawn;
+#[cfg(unix)]
+mod steam;
 #[cfg(target_os = "linux")]
 mod supervise;
 
@@ -78,6 +80,10 @@ pub use progress::{Progress, RuntimeEvent};
 pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
+#[cfg(unix)]
+pub use steam::{
+    CompatTool, CompatToolInstall, installed_compat_tool, remove_compat_tool, steam_installs,
+};
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
 ///
