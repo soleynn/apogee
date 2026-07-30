@@ -29,14 +29,16 @@ pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
 pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, Trigger};
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
-pub use apogee_runtime::{BenchError, BenchStats, FrameLog};
+pub use apogee_runtime::{BenchError, BenchStats, FrameLog, HealthIssue, PrefixHealth};
 #[cfg(unix)]
 pub use apogee_runtime::{
     CompatTool, CompatToolInstall, DeckModel, HostIdentity, SteamInstall, installed_compat_tool,
     remove_compat_tool, steam_installs,
 };
 pub use apogee_secrets::Secret;
-pub use command::{Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Progress};
+pub use command::{
+    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, PrefixAction, Progress,
+};
 pub use composition::{Core, CoreConfig};
 pub use error::CoreError;
 pub use model::{

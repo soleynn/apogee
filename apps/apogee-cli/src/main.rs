@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
-    FrameLog, OtpSource, PatchProgress, Profile, Region, RunIn, RunnerSelection, Secret,
-    SetupEvent, Trigger, Uuid,
+    FrameLog, HealthIssue, OtpSource, PatchProgress, PrefixAction, PrefixHealth, Profile, Region,
+    RunIn, RunnerSelection, Secret, SetupEvent, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -70,12 +70,40 @@ enum Commands {
         #[command(subcommand)]
         action: DalamudAction,
     },
+    /// Work on a profile's wine prefix without launching anything.
+    Prefix {
+        #[command(subcommand)]
+        action: PrefixCommand,
+    },
     /// Start a profile from the Steam interface, on a handheld or anywhere else without a desktop.
     #[cfg(unix)]
     Steam {
         #[command(subcommand)]
         action: SteamAction,
     },
+}
+
+#[derive(Subcommand)]
+enum PrefixCommand {
+    /// Create it if it is not there and bring it up to what a launch would.
+    Create(TargetArgs),
+    /// Report what has drifted. Changes nothing.
+    Health(TargetArgs),
+    /// Fix what can be fixed in place, and report what is left.
+    Fix(TargetArgs),
+    /// Delete it and build it again. Everything installed into it is lost, including the game's own
+    /// settings, so it asks first unless told not to.
+    Recreate(PrefixRecreateArgs),
+}
+
+#[derive(Args)]
+struct PrefixRecreateArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Skip the confirmation. For scripts, which have no one to ask.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[cfg(unix)]
@@ -347,8 +375,87 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             dalamud(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Prefix { action } => prefix(&core, action).await,
         #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
+    }
+}
+
+/// Working on a profile's prefix. The destructive one confirms first: it discards everything
+/// installed into the prefix, including the settings the game keeps there.
+async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError> {
+    let (target, act) = match &action {
+        PrefixCommand::Create(args) => (&args.profile, PrefixAction::Create),
+        PrefixCommand::Health(args) => (&args.profile, PrefixAction::Check),
+        PrefixCommand::Fix(args) => (&args.profile, PrefixAction::Fix),
+        PrefixCommand::Recreate(args) => (&args.profile, PrefixAction::Recreate),
+    };
+    let profile = resolve_profile(core, target)?.id;
+
+    if let PrefixCommand::Recreate(args) = &action
+        && !args.yes
+    {
+        println!("this deletes the prefix and everything installed into it, including the game's");
+        println!("own settings. `backup create` captures those first.");
+        let answer = prompt_line("type the profile name to confirm: ")?;
+        if answer.trim() != resolve_profile(core, target)?.name {
+            println!("not recreating");
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+
+    Ok(drive(
+        core,
+        Command::Prefix {
+            profile,
+            action: act,
+        },
+    )
+    .await)
+}
+
+/// One line per problem found, or a line saying there were none.
+fn render_health(health: &PrefixHealth) -> String {
+    if health.is_healthy() {
+        return "prefix: nothing wrong".to_owned();
+    }
+    let mut out = format!("prefix: {} problem(s)", health.issues.len());
+    for issue in &health.issues {
+        out.push('\n');
+        out.push_str("  ");
+        out.push_str(&render_health_issue(issue));
+    }
+    out
+}
+
+fn render_health_issue(issue: &HealthIssue) -> String {
+    match issue {
+        HealthIssue::MissingSkeleton { path } => {
+            format!("missing prefix file {} (fix rebuilds it)", path.display())
+        }
+        HealthIssue::DriveMapping {
+            letter,
+            expected,
+            found,
+        } => match found {
+            Some(found) => format!(
+                "drive {letter}: points at {} instead of {} (fix rewrites it)",
+                found.display(),
+                expected.display()
+            ),
+            None => format!(
+                "drive {letter}: is missing, should be {} (fix rewrites it)",
+                expected.display()
+            ),
+        },
+        HealthIssue::RunnerMismatch { recorded, expected } => format!(
+            "built with {} {} but the profile now selects {} {}: only `prefix recreate` resolves this",
+            recorded.name, recorded.version, expected.name, expected.version
+        ),
+        HealthIssue::MissingDxvkDll { dll, .. } => {
+            format!("{dll} is recorded as installed but is not there (fix reinstalls it)")
+        }
+        _ => "an unrecognized problem".to_owned(),
     }
 }
 
@@ -954,6 +1061,7 @@ fn render(event: &Event) -> String {
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
         Event::Frontier(_) => "frontier data received".to_owned(),
+        Event::PrefixHealth(health) => render_health(health),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
     }

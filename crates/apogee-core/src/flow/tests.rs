@@ -19,7 +19,7 @@ use apogee_patcher::{PatchProgress, Repo};
 use super::{FlowContext, drive, language_id, launch_arguments, read_repo_ver};
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
-use crate::command::{Command, Event, FlowState};
+use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
@@ -169,6 +169,17 @@ fn errors(events: &[Event]) -> Vec<String> {
         .iter()
         .filter_map(|e| match e {
             Event::Error(err) => Some(err.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The prefix reports a run emitted, in order.
+fn health_reports(events: &[Event]) -> Vec<apogee_runtime::PrefixHealth> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PrefixHealth(health) => Some(health.clone()),
             _ => None,
         })
         .collect()
@@ -671,6 +682,153 @@ async fn a_runner_with_ntsync_launches_carrying_no_sync_variable() {
     let plan = launch.last_plan().unwrap();
     assert!(!plan.env().contains_key("WINEFSYNC"));
     assert!(!plan.env().contains_key("WINEESYNC"));
+}
+
+/// Checking reports and changes nothing. The report reaches the shell as one value, because the whole
+/// point is the list a user decides about.
+#[tokio::test]
+async fn checking_a_prefix_reports_its_drift_and_changes_nothing() {
+    let h = harness(false);
+    let drift = apogee_runtime::PrefixHealth {
+        issues: vec![apogee_runtime::HealthIssue::MissingSkeleton {
+            path: std::path::PathBuf::from("/prefix/system.reg"),
+        }],
+    };
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().with_health(drift, apogee_runtime::PrefixHealth::default()),
+    );
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Check,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::CheckingPrefix));
+    assert_eq!(health_reports(&events).len(), 1);
+    assert_eq!(health_reports(&events)[0].issues.len(), 1);
+    assert!(!launch.was_fixed(), "a check fixes nothing");
+    assert!(!launch.was_recreated(), "a check destroys nothing");
+}
+
+/// Fixing applies the resolutions that leave the prefix in place and reports what is left, so a
+/// problem no targeted fix covers is still in front of the user afterwards rather than silently gone.
+#[tokio::test]
+async fn fixing_a_prefix_reports_what_is_left_and_never_recreates() {
+    let h = harness(false);
+    let before = apogee_runtime::PrefixHealth {
+        issues: vec![
+            apogee_runtime::HealthIssue::MissingSkeleton {
+                path: std::path::PathBuf::from("/prefix/system.reg"),
+            },
+            apogee_runtime::HealthIssue::RunnerMismatch {
+                recorded: apogee_runtime::RunnerRef {
+                    name: "GE-Proton".to_string(),
+                    version: "11-1".to_string(),
+                },
+                expected: apogee_runtime::RunnerRef {
+                    name: "wine-xiv".to_string(),
+                    version: "10.8".to_string(),
+                },
+            },
+        ],
+    };
+    // Only the first has a targeted fix; the runner change is left behind on purpose.
+    let after = apogee_runtime::PrefixHealth {
+        issues: vec![before.issues[1].clone()],
+    };
+    let launch = Arc::new(FakeLaunchBackend::exiting().with_health(before, after));
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Fix,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::FixingPrefix));
+    assert!(launch.was_fixed());
+    assert!(
+        !launch.was_recreated(),
+        "the destructive one is never reached by fixing"
+    );
+    let residual = health_reports(&events);
+    assert_eq!(residual.len(), 1);
+    assert_eq!(
+        residual[0].issues.len(),
+        1,
+        "what no targeted fix covers is still reported"
+    );
+}
+
+/// The destructive one happens only when it is the action that was asked for.
+#[tokio::test]
+async fn recreating_is_the_only_action_that_destroys_the_prefix() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Recreate,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::RecreatingPrefix));
+    assert!(launch.was_recreated());
+    assert!(errors(&events).is_empty());
+}
+
+/// Creating one is what a launch does first, reachable on its own so a user can pay that cost before
+/// they want to play rather than during.
+#[tokio::test]
+async fn creating_a_prefix_prepares_it_without_launching() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Create,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::PreparingPrefix));
+    assert_eq!(launch.prepared().len(), 1);
+    assert_eq!(launch.launch_count(), 0, "nothing was launched");
 }
 
 /// A prefix that has graphics translation installed launches with the overrides that activate it,

@@ -24,7 +24,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::addons::AddonBackend;
-use crate::command::{Command, Event, FlowState};
+use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
@@ -133,6 +133,7 @@ pub(crate) async fn drive(
             .await
         }
         Command::Repair { profile } => repair(&ctx, profile, &tx, &cancel).await,
+        Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
         Command::FirstRun(_) => todo!("walk the initial setup"),
         Command::ImportXivLauncher(_) => todo!("import an existing launcher configuration"),
         Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
@@ -799,6 +800,61 @@ fn launch_arguments(session: &UidCacheEntry, language: u8) -> ArgumentBuilder {
         .add("language", language.to_string())
         .add("resetConfig", "0")
         .add("ver", &session.game_version)
+}
+
+/// Work on a profile's prefix without launching anything.
+///
+/// Each action narrates its own disposition and, where it has one, ends with the report of what is
+/// wrong. Nothing here decides on the user's behalf: a check changes nothing, a fix applies only the
+/// resolutions that leave the prefix in place, and the destructive one happens only when it is the
+/// action that was asked for.
+async fn prefix(
+    ctx: &FlowContext,
+    profile_id: Uuid,
+    action: PrefixAction,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<(), CoreError> {
+    let profile = ctx.store.load_profile(profile_id)?;
+    let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
+
+    match action {
+        PrefixAction::Create => {
+            emit(tx, FlowState::PreparingPrefix);
+            ctx.launch
+                .prepare(&profile.runner, &prefix_dir, cancel, tx)
+                .await?;
+        }
+        PrefixAction::Check => {
+            emit(tx, FlowState::CheckingPrefix);
+            if let Some(health) = ctx
+                .launch
+                .check_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .await?
+            {
+                let _ = tx.send(Event::PrefixHealth(health));
+            }
+        }
+        PrefixAction::Fix => {
+            emit(tx, FlowState::FixingPrefix);
+            if let Some(residual) = ctx
+                .launch
+                .fix_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .await?
+            {
+                // What is left after the fix, which is what a user has to decide about. An empty
+                // report is the fix having resolved everything.
+                let _ = tx.send(Event::PrefixHealth(residual));
+            }
+        }
+        PrefixAction::Recreate => {
+            emit(tx, FlowState::RecreatingPrefix);
+            ctx.launch
+                .recreate_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// The launch environment a profile asks for, before the host resolves it.

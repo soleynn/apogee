@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, Progress, RunnerKind, Runtime,
-    RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, PrefixHealth, Progress,
+    RunnerKind, Runtime, RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -199,6 +199,68 @@ impl LaunchBackend for RuntimeLauncher {
         let progress = relay_progress(events);
         self.prepare_prefix(runner, prefix_dir, cancel, &progress)
             .await
+    }
+
+    async fn check_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<PrefixHealth>, CoreError> {
+        let progress = relay_progress(events);
+        let prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        let Some(prefix) = prepared.prefix else {
+            return Ok(None);
+        };
+        Ok(Some(self.runtime.check_prefix(&prefix).await?))
+    }
+
+    async fn fix_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<PrefixHealth>, CoreError> {
+        let progress = relay_progress(events);
+        let prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        let Some(prefix) = prepared.prefix else {
+            return Ok(None);
+        };
+        let health = self.runtime.check_prefix(&prefix).await?;
+        if health.is_healthy() {
+            return Ok(Some(health));
+        }
+        Ok(Some(
+            self.runtime
+                .repair_prefix(&prefix, &health.issues, cancel, &progress)
+                .await?,
+        ))
+    }
+
+    async fn recreate_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<(), CoreError> {
+        let progress = relay_progress(events);
+        let prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        let Some(prefix) = prepared.prefix else {
+            return Ok(());
+        };
+        self.runtime
+            .recreate_prefix(&prefix, cancel, &progress)
+            .await?;
+        Ok(())
     }
 
     async fn launch(

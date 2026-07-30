@@ -66,6 +66,37 @@ pub(crate) trait LaunchBackend: Send + Sync {
         events: &UnboundedSender<Event>,
     ) -> Result<Prepared, CoreError>;
 
+    /// Report the prefix's drift against what it records, changing nothing.
+    ///
+    /// `None` is a backend with no prefix to examine, which only the test double is. The prefix is
+    /// prepared first, because a prefix that is not there has no drift to report and creating it is
+    /// what a caller asking about it wants.
+    async fn check_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
+
+    /// Apply a targeted fix for each problem that has one, and report what is left.
+    async fn fix_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
+
+    /// Delete the prefix and build it again.
+    async fn recreate_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<(), CoreError>;
+
     /// Spawn `plan` and supervise the game, relaying download/extract progress onto `events` as
     /// [`Event::Progress`]. Returns a handle to the running game.
     async fn launch(
@@ -108,6 +139,12 @@ pub(crate) mod fake {
         caps: apogee_runtime::HostCaps,
         /// What `prepare` reports the prefix's graphics translation to be.
         dxvk: Option<apogee_runtime::DxvkEnv>,
+        /// What a check reports, and what a fix is asked to resolve.
+        health: Option<apogee_runtime::PrefixHealth>,
+        /// What a fix reports is left afterwards.
+        residual: Option<apogee_runtime::PrefixHealth>,
+        fixed: Arc<AtomicBool>,
+        recreated: Arc<AtomicBool>,
     }
 
     impl FakeLaunchBackend {
@@ -145,7 +182,32 @@ pub(crate) mod fake {
                     fsync: false,
                 },
                 dxvk: None,
+                health: None,
+                residual: None,
+                fixed: Arc::new(AtomicBool::new(false)),
+                recreated: Arc::new(AtomicBool::new(false)),
             }
+        }
+
+        /// Report `health` from a check, and `residual` from a fix.
+        pub(crate) fn with_health(
+            mut self,
+            health: apogee_runtime::PrefixHealth,
+            residual: apogee_runtime::PrefixHealth,
+        ) -> Self {
+            self.health = Some(health);
+            self.residual = Some(residual);
+            self
+        }
+
+        /// Whether a fix was applied.
+        pub(crate) fn was_fixed(&self) -> bool {
+            self.fixed.load(Ordering::SeqCst)
+        }
+
+        /// Whether the prefix was destroyed and built again.
+        pub(crate) fn was_recreated(&self) -> bool {
+            self.recreated.load(Ordering::SeqCst)
         }
 
         /// Report `caps` from `prepare`, standing in for a host and a runner that resolve to them.
@@ -219,6 +281,40 @@ pub(crate) mod fake {
                 caps: self.caps,
                 dxvk: self.dxvk.clone(),
             })
+        }
+
+        async fn check_prefix(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError> {
+            Ok(self.health.clone())
+        }
+
+        async fn fix_prefix(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError> {
+            self.fixed.store(true, Ordering::SeqCst);
+            // A fix resolves whatever the double was told to report, which is what lets a test tell
+            // "the fix ran" from "the fix ran and something is still wrong".
+            Ok(self.residual.clone())
+        }
+
+        async fn recreate_prefix(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<(), CoreError> {
+            self.recreated.store(true, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn launch(
