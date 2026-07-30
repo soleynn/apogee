@@ -15,6 +15,11 @@
 //! length exactly, and their entries read like any other. So a missing common header is recorded and
 //! carried, never a refusal: refusing would make a fifth of a real install unreadable.
 //!
+//! The same marker fills the space between entries. A patch that deletes or moves a file leaves its
+//! slot behind, zeroed with a 24-byte header at the front saying how many blocks the run covers:
+//! [`empty_block_header`] writes it, [`empty_block_count`] reads it back, and a stretch of a data
+//! region no entry claims is a chain of them.
+//!
 //! ```no_run
 //! use apogee_sqpack::{Dat, GameData};
 //! let game = GameData::open("/path/to/game")?;
@@ -27,6 +32,7 @@
 //! # Ok::<(), apogee_sqpack::Error>(())
 //! ```
 
+mod empty;
 mod entry;
 mod model;
 mod source;
@@ -42,6 +48,7 @@ use crate::codec::{self, BlockMeta};
 use crate::container::{COMMON_HEADER_LEN, CommonHeader, parse_common_header};
 use crate::error::{Error, Result};
 
+pub use empty::{EMPTY_BLOCK_HEADER_LEN, empty_block_count, empty_block_header};
 pub use entry::{
     ContentType, DATA_UNIT, DEFAULT_MAX_ENTRY_HEADER_BYTES, DEFAULT_MAX_FILE_BYTES, DatLimits,
     ENTRY_HEADER_LEN, Entry, EntryBody, EntryHeader, MIP_LEVEL_LEN, MipLevel, STANDARD_BLOCK_LEN,
@@ -59,6 +66,27 @@ pub const DATA_HEADER_OFFSET: u64 = COMMON_HEADER_LEN as u64;
 
 /// The declared length of the data header, and so the offset of the first entry.
 pub const DATA_HEADER_LEN: u32 = 0x400;
+
+/// Where the data region starts, and so the lowest offset any entry can sit at.
+pub(crate) const DATA_REGION_OFFSET: u64 = DATA_HEADER_OFFSET + DATA_HEADER_LEN as u64;
+
+/// Where the data header declares its own length: the position [`parse_data_header`] reads it from.
+pub(crate) const DATA_HEADER_SIZE_AT: u64 = DATA_HEADER_OFFSET;
+
+/// Where the data header carries the word whose role is not settled and whose value never varies.
+pub(crate) const DATA_UNCLASSIFIED_AT: u64 = DATA_HEADER_OFFSET + 0x08;
+
+/// Where the data header declares the length of the region after it.
+pub(crate) const DATA_UNITS_AT: u64 = DATA_HEADER_OFFSET + 0x0C;
+
+/// The three words the data header reserves, in the order [`parse_data_header`] skips them. Zero in
+/// every dat file of an install, and addressed here because a check that names one has to say where
+/// it is.
+pub(crate) const DATA_RESERVED_AT: [u64; 3] = [
+    DATA_HEADER_OFFSET + 0x04,
+    DATA_HEADER_OFFSET + 0x14,
+    DATA_HEADER_OFFSET + 0x1C,
+];
 
 /// How much of an extraction to reserve up front. The rest grows as bytes arrive, so an entry that
 /// declares a size nothing backs cannot make a reservation out of it.
@@ -209,6 +237,12 @@ impl<S: DatSource> Dat<S> {
         self.source.is_empty()
     }
 
+    /// The bytes behind the container, for the checks that read spans no entry frames: the two
+    /// headers, the data region as one run, and the space between slots.
+    pub(crate) fn source(&self) -> &S {
+        &self.source
+    }
+
     /// The bounds this container reads under.
     #[must_use]
     pub fn limits(&self) -> &DatLimits {
@@ -236,6 +270,19 @@ impl<S: DatSource> Dat<S> {
         let mut head = vec![0u8; len.max(ENTRY_HEADER_LEN)];
         self.source.read_exact_at(&mut head, offset)?;
         Entry::parse(&head, offset, &self.limits)
+    }
+
+    /// The five words at `offset`, which is what a slot walk needs: reads exactly
+    /// [`ENTRY_HEADER_LEN`] bytes, where [`Dat::entry_at`] reads the whole declared header so it can
+    /// frame the tables too.
+    ///
+    /// # Errors
+    /// - [`Error::Truncated`] if the container ends inside those five words.
+    /// - Everything [`EntryHeader::parse`] raises.
+    pub fn entry_header_at(&self, offset: u64) -> Result<EntryHeader> {
+        let mut lead = [0u8; ENTRY_HEADER_LEN];
+        self.source.read_exact_at(&mut lead, offset)?;
+        EntryHeader::parse(&lead, offset, &self.limits)
     }
 
     /// The entry at `offset`, extracted. Named apart from [`DatSource::read_at`], which hands back
@@ -698,6 +745,35 @@ mod tests {
             placed[0].offset + first.header().slot_len(),
             placed[1].offset
         );
+    }
+
+    #[test]
+    fn a_slot_walk_reads_five_words_where_a_full_parse_reads_a_whole_table() {
+        // A sweep over an archive reads one of these at every location an index names, so it must
+        // agree with the full parse on every word and must not depend on the table fitting.
+        let mut b = DatBuilder::new();
+        b.entry(EntrySpec::standard(vec![b"payload".repeat(400)]));
+        let (bytes, placed) = b.build();
+        let dat = Dat::parse(&bytes).unwrap();
+        let offset = placed[0].offset;
+        assert_eq!(
+            dat.entry_header_at(offset).unwrap(),
+            *dat.entry_at(offset).unwrap().header()
+        );
+        // Only the five words are read, so a container that ends right after them still answers.
+        let short = &bytes[..usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN];
+        assert_eq!(
+            Dat::from_source(short, &DatLimits::default())
+                .unwrap()
+                .entry_header_at(offset)
+                .unwrap()
+                .content_type,
+            ContentType::Standard
+        );
+        assert!(matches!(
+            dat.entry_header_at(bytes.len() as u64 - 4),
+            Err(Error::Truncated { .. })
+        ));
     }
 
     #[test]

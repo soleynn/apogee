@@ -90,14 +90,17 @@ pub(crate) fn write_u64_be(v: u64) -> [u8; 8] {
     v.to_be_bytes()
 }
 
-/// Write a `u32` as four little-endian bytes. The empty-block write-side shim stamps its header
-/// through this, so a game-native field can't be written in the wrong order by accident.
+/// Write a `u32` as four little-endian bytes (the `FHDR` version dword). Fixture builders only: the
+/// game-native fields the apply engine stamps are written by the crate that reads them back.
+#[cfg(any(test, feature = "test-fixtures"))]
 #[must_use]
 pub(crate) fn write_u32_le(v: u32) -> [u8; 4] {
     v.to_le_bytes()
 }
 
-/// Write a `u64` as eight little-endian bytes (the empty-block header's `blockCount - 1` field).
+/// Write a `u64` as eight little-endian bytes (a `T` command's `deletedDataSize`/`seekCount`).
+/// Fixture builders only, as [`write_u32_le`] is.
+#[cfg(any(test, feature = "test-fixtures"))]
 #[must_use]
 pub(crate) fn write_u64_le(v: u64) -> [u8; 8] {
     v.to_le_bytes()

@@ -1,32 +1,22 @@
-//! The private write-side SqPack shim: byte layouts the apply engine stamps into `.dat` files that
-//! are not the shared block codec's job. Today that is the empty-block header a `D` (DeleteData) or
+//! The write-side SqPack shim: byte layouts the apply engine stamps into `.dat` files that are not
+//! the shared block codec's job. Today that is the empty-block header a `D` (DeleteData) or
 //! `E` (ExpandData) command writes at the start of the region it wipes.
 //!
-//! These bytes are game-native little-endian and must match the reference patcher exactly, so they
-//! are built through the crate's one endianness home ([`crate::bytes`]).
-
-use crate::bytes;
+//! The layout itself lives in `apogee-sqpack` beside the reader that recognises it, for the reason
+//! the block codec does: a region this crate stamps is a region that crate has to account for, and
+//! two copies of one layout can disagree. What stays here is the apply engine's name for it and the
+//! byte pin below, which is this crate's own check that what it writes is what the reference patcher
+//! writes.
 
 /// The fixed byte length of the empty-block header a `D`/`E` command stamps.
-pub(crate) const EMPTY_BLOCK_HEADER_LEN: usize = 24;
+pub(crate) const EMPTY_BLOCK_HEADER_LEN: usize = apogee_sqpack::EMPTY_BLOCK_HEADER_LEN;
 
-/// The empty-block header written at the start of the region a `D`/`E` command wipes. Five
-/// little-endian fields: block size (always 128), a zero, a zero file size, the block count minus one
-/// as a **u64**, then a trailing zero, for twenty-four bytes total.
+/// The empty-block header written at the start of the region a `D`/`E` command wipes.
 ///
-/// The count-minus-one field is eight bytes, not four: the reference stamps it from a 64-bit
-/// subtraction, so a `block_count` of 0 wraps to `0xFFFF_FFFF_FFFF_FFFF` and the field's high four
-/// bytes are meaningful. Writing four bytes here would drift from the reference on that edge.
-///
-/// The wiped region is zeroed separately; this header overwrites its first [`EMPTY_BLOCK_HEADER_LEN`]
-/// bytes.
+/// The wiped region is zeroed separately; this header overwrites its first
+/// [`EMPTY_BLOCK_HEADER_LEN`] bytes.
 pub(crate) fn empty_block_header(block_count: u32) -> [u8; EMPTY_BLOCK_HEADER_LEN] {
-    let mut out = [0u8; EMPTY_BLOCK_HEADER_LEN];
-    out[0..4].copy_from_slice(&bytes::write_u32_le(128)); // block size, always 128
-    // out[4..8] (a zero) and out[8..12] (the zero file size) stay zero.
-    out[12..20].copy_from_slice(&bytes::write_u64_le(u64::from(block_count).wrapping_sub(1)));
-    // out[20..24] (the trailing field) stays zero.
-    out
+    apogee_sqpack::empty_block_header(block_count)
 }
 
 #[cfg(test)]

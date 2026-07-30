@@ -27,6 +27,7 @@ jobs:
           - sqpack_codec
           - sqpack_index
           - sqpack_entry
+          - sqpack_inspect
           - zipatch_chunk
           - zipatch_sqpk
           - zipatch_apply

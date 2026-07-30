@@ -1,10 +1,18 @@
 //! Recorded-fact pins for the SqPack common header, captured from a real FFXIV install.
 //!
-//! The hermetic test reconstructs each recorded header's identifying prefix and asserts the parser
-//! reproduces the recorded fields (and that a real install was observed to carry the spec's expected
-//! `0x400`/`1`/win32 values, which is what retires the `[pin]` markers). CI carries no SE bytes. The
-//! install-gated test re-reads the real files named in the fixture from `$APOGEE_SQPACK_REAL_INSTALL`
-//! and confirms the parser output and the header sha256 still match; it is `#[ignore]` by default.
+//! The recorded values were produced by a separate implementation of the format, out of process, so
+//! what the gated test proves is agreement between two readers rather than a program agreeing with
+//! itself. The hermetic test reconstructs each recorded header's identifying prefix and asserts the
+//! parser reproduces the recorded fields (and that a real install was observed to carry the spec's
+//! expected `0x400`/`1`/win32 values, which is what retires the `[pin]` markers). CI carries no SE
+//! bytes.
+//!
+//! The install-gated test re-reads the real files named in the fixture from
+//! `$APOGEE_SQPACK_REAL_INSTALL` and confirms the parser output and the header sha256 still match;
+//! it is `#[ignore]` by default. Only the patch the fixture was recorded on is held to the digests
+//! and lengths: a patch rewrites containers, so on any other version the test checks the fields the
+//! format fixes, a floor under each length, and the digest every index header shares, and a patch
+//! day fails on a regression rather than on a length.
 
 use std::error::Error;
 use std::path::Path;
@@ -27,12 +35,15 @@ struct Record {
     sha256_first_1024: String,
 }
 
-fn load_records() -> R<Vec<Record>> {
+fn doc() -> R<Value> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/real_headers.json"
     );
-    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+}
+
+fn load_records(doc: &Value) -> R<Vec<Record>> {
     let raw = doc["records"].as_array().ok_or("records is not an array")?;
     let mut out = Vec::with_capacity(raw.len());
     for r in raw {
@@ -104,10 +115,25 @@ fn assert_matches_record(header: &CommonHeader, rec: &Record) {
     assert_eq!(header.kind, rec.kind, "{}", rec.path);
 }
 
+/// Whether the tree is the patch the recording was taken from, read from the base repository's
+/// version file.
+fn is_recorded_version(game: &GameData, doc: &Value) -> R<bool> {
+    let want = field_str(doc, "version")?;
+    Ok(game
+        .repos()
+        .iter()
+        .any(|r| r.repo == Repo::Base && r.version.as_deref() == Some(want)))
+}
+
 #[test]
 fn parser_reproduces_recorded_real_header_facts() -> R<()> {
-    let records = load_records()?;
+    let doc = doc()?;
+    let records = load_records(&doc)?;
     assert!(!records.is_empty(), "fixture has records");
+    assert!(
+        !field_str(&doc, "version")?.is_empty(),
+        "fixture is versioned"
+    );
     for rec in &records {
         // The pin: a real install was observed to carry exactly the spec's expected values.
         assert_eq!(rec.header_size, 0x400, "{}", rec.path);
@@ -122,34 +148,76 @@ fn parser_reproduces_recorded_real_header_facts() -> R<()> {
         let header = parse_common_header(&build_prefix(rec.header_size, rec.version, rec.kind))?;
         assert_matches_record(&header, rec);
     }
+
+    // Every recorded index header hashes to the same digest, which is the fixture's claim that the
+    // bytes the self-hash covers carry nothing that tells one index container from another.
+    let mut digests = index_digests(&records);
+    digests.dedup();
+    assert_eq!(
+        digests.len(),
+        1,
+        "index headers share one digest: {digests:?}"
+    );
     Ok(())
+}
+
+/// The header digest of every index container in the recording, in fixture order.
+fn index_digests(records: &[Record]) -> Vec<&str> {
+    records
+        .iter()
+        .filter(|rec| rec.kind == SqPackKind::Index)
+        .map(|rec| rec.sha256_first_1024.as_str())
+        .collect()
 }
 
 /// Re-read the real archives named in the fixture and confirm the parser and each header's sha256
 /// still match. Gated on `APOGEE_SQPACK_REAL_INSTALL` (the game subtree holding `sqpack/` and
 /// `ffxivgame.ver`); `#[ignore]` so the hermetic suite stays install-free.
+///
+/// The digests and lengths are the patch's, so only that patch is held to them. On any other the
+/// fields the format fixes still have to hold exactly, each container still has to be within a
+/// tenth of the length it was recorded at, and every index header still has to share one digest.
 #[test]
 #[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
 fn parser_matches_a_live_install() -> R<()> {
     let root = std::env::var("APOGEE_SQPACK_REAL_INSTALL")?;
     let root = Path::new(&root);
-    let records = load_records()?;
+    let doc = doc()?;
+    let records = load_records(&doc)?;
+    let game = GameData::open(root)?;
+    let exact = is_recorded_version(&game, &doc)?;
 
+    let mut live_index_digests = Vec::new();
     for rec in &records {
         let path = root.join("sqpack").join(&rec.path);
         let (len, head) = read_header(&path)?;
-        assert_eq!(len, rec.file_len, "{} length", rec.path);
-        assert_eq!(
-            sha256_hex(&head),
-            rec.sha256_first_1024,
-            "{} header sha256",
-            rec.path
-        );
-        assert_matches_record(&parse_common_header(&head)?, rec);
+        let header = parse_common_header(&head)?;
+        assert_matches_record(&header, rec);
+        let digest = sha256_hex(&head);
+        if header.kind == SqPackKind::Index {
+            live_index_digests.push(digest.clone());
+        }
+        if exact {
+            assert_eq!(len, rec.file_len, "{} length", rec.path);
+            assert_eq!(digest, rec.sha256_first_1024, "{} header sha256", rec.path);
+        } else {
+            // A patch rewrites a container; it does not shrink one to a fraction of itself.
+            assert!(
+                len * 10 >= rec.file_len * 9,
+                "{}: {len} is far below the recorded {}",
+                rec.path,
+                rec.file_len
+            );
+        }
     }
+    live_index_digests.dedup();
+    assert_eq!(
+        live_index_digests.len(),
+        1,
+        "index headers share one digest: {live_index_digests:?}"
+    );
 
     // GameData enumerates every repository the install carries, each with a non-empty version.
-    let game = GameData::open(root)?;
     let repos: Vec<Repo> = game.repos().iter().map(|ri| ri.repo).collect();
     assert!(repos.contains(&Repo::Base), "base repo enumerated");
     for n in 1..=5 {
