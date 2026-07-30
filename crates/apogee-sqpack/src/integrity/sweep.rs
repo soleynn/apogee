@@ -79,13 +79,11 @@ impl GameData {
         // Only worth comparing when both forms parsed: an unreadable container names no locations at
         // all, and reporting every location of the other form as unmatched would bury what went wrong.
         if let (Some(first), Some(second)) = (first, second) {
-            let found = compare_index_forms(&first.locations, &second.locations, archive, opts);
-            // The comparison stops at the budget without saying whether there was more, so a full one
-            // is reported as truncated: over-saying that is better than a report that quietly ends.
-            if found.len() >= opts.max_defects_per_container {
-                out.truncated.push(archive);
-            }
-            out.findings.extend(found);
+            absorb(
+                &mut out,
+                archive,
+                compare_index_forms(&first.locations, &second.locations, archive, opts),
+            );
         }
 
         // The primary form is the `.index` when it parsed, mirroring `lookup` and halving the random
@@ -630,6 +628,25 @@ mod tests {
         assert_eq!(
             report.of_scope(crate::integrity::Scope::Archive).count(),
             report.findings.len()
+        );
+
+        // Under a budget the disagreement outgrows, the archive is named as a container whose checks
+        // stopped and the rest are counted. Those two are all a caller has to size how much of a report
+        // is missing, so a comparison that reported nothing dropped while naming the archive would say
+        // the report is whole and cut short at once.
+        let cap = report.findings.len() / 2;
+        let capped = game.inspect(&SweepOptions {
+            max_defects_per_container: cap,
+            ..SweepOptions::default()
+        });
+        assert_eq!(capped.findings.len(), cap);
+        assert_eq!(
+            capped.truncated,
+            [ContainerRef::new(repo, id, ContainerId::Archive)]
+        );
+        assert_eq!(
+            capped.totals.defects_suppressed as usize,
+            report.findings.len() - cap
         );
     }
 

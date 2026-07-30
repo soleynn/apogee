@@ -131,17 +131,23 @@ pub fn inspect_index(bytes: &[u8], facts: &IndexFacts<'_>, opts: &SweepOptions) 
 /// `first` is the `.index`'s locations and `second` the `.index2`'s, both sorted the way
 /// [`IndexInspection::locations`] is. Findings are filed against whichever form holds the location the
 /// other lacks, derived from `archive` with [`ContainerRef::with_file`]. At most
-/// `opts.max_defects_per_container` are returned; two forms that disagree on more than that have said
-/// what they had to say.
+/// `opts.max_defects_per_container` are carried; the walk still runs to the end of both slices, so what
+/// it declined to carry is counted in [`Totals::defects_suppressed`] rather than left to be guessed at
+/// from how many it returned.
 #[must_use]
 pub fn compare_index_forms(
     first: &[Located],
     second: &[Located],
     archive: ContainerRef,
     opts: &SweepOptions,
-) -> Vec<Finding> {
+) -> ContainerReport {
     let mut out = Vec::new();
-    let only_in = |located: &Located, kind: IndexKind, out: &mut Vec<Finding>| {
+    let mut suppressed = 0u64;
+    let mut only_in = |located: &Located, kind: IndexKind, out: &mut Vec<Finding>| {
+        if out.len() >= opts.max_defects_per_container {
+            suppressed += 1;
+            return;
+        }
         out.push(Finding {
             site: Site {
                 container: archive.with_file(ContainerId::Index(kind)),
@@ -159,7 +165,7 @@ pub fn compare_index_forms(
     // A merge walk over the two sorted slices, comparing where the bytes are and not what named them.
     // Equal locations are consumed pairwise, so a location one form holds twice is reported.
     let (mut i, mut j) = (0, 0);
-    while out.len() < opts.max_defects_per_container {
+    loop {
         match (first.get(i), second.get(j)) {
             (Some(a), Some(b)) => match (a.dat, a.offset).cmp(&(b.dat, b.offset)) {
                 std::cmp::Ordering::Less => {
@@ -187,7 +193,14 @@ pub fn compare_index_forms(
         }
     }
     out.sort_unstable();
-    out
+    ContainerReport {
+        findings: out,
+        totals: Totals {
+            defects_suppressed: suppressed,
+            ..Totals::default()
+        },
+        truncated: suppressed > 0,
+    }
 }
 
 /// The words every container of this kind spells the same. The magic, the platform byte and the
@@ -1636,7 +1649,10 @@ mod tests {
         let archive = container(IndexKind::Index1).with_file(ContainerId::Archive);
         let first = inspect(&one.bytes(), IndexKind::Index1, &[0, 1]).locations;
         let second = inspect(&two.bytes(), IndexKind::Index2, &[0, 1]).locations;
-        assert!(compare_index_forms(&first, &second, archive, &SweepOptions::default()).is_empty());
+        let agree = compare_index_forms(&first, &second, archive, &SweepOptions::default());
+        assert!(agree.findings.is_empty());
+        assert_eq!(agree.totals, Totals::default());
+        assert!(!agree.truncated);
 
         // Move one location in the second form only: the same byte range is then named by one form and
         // not the other, in both directions.
@@ -1647,7 +1663,8 @@ mod tests {
             .path("common/font/font1.tex", packed(1, 0x2000))
             .sort_entries();
         let moved = inspect(&moved.bytes(), IndexKind::Index2, &[0, 1]).locations;
-        let found = compare_index_forms(&first, &moved, archive, &SweepOptions::default());
+        let report = compare_index_forms(&first, &moved, archive, &SweepOptions::default());
+        let found = report.findings;
         assert_eq!(
             found
                 .iter()
@@ -1674,6 +1691,31 @@ mod tests {
             found[1].site.container.file,
             ContainerId::Index(IndexKind::Index2)
         );
+        assert_eq!(report.totals.defects_suppressed, 0);
+        assert!(!report.truncated);
+
+        // The same disagreement under a budget of one: what the comparison declined to carry is what
+        // it counted, so a caller reading the count is not told a report that ends is a whole one, and
+        // a comparison that fits exactly is not reported as one that stopped.
+        let tight = |cap| {
+            compare_index_forms(
+                &first,
+                &moved,
+                archive,
+                &SweepOptions {
+                    max_defects_per_container: cap,
+                    ..SweepOptions::default()
+                },
+            )
+        };
+        let report = tight(1);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.totals.defects_suppressed, 1);
+        assert!(report.truncated);
+        let report = tight(2);
+        assert_eq!(report.findings.len(), 2);
+        assert_eq!(report.totals.defects_suppressed, 0);
+        assert!(!report.truncated);
     }
 
     #[test]
@@ -1695,7 +1737,11 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 2);
         let archive = container(IndexKind::Index1).with_file(ContainerId::Archive);
-        assert!(compare_index_forms(&first, &second, archive, &SweepOptions::default()).is_empty());
+        assert!(
+            compare_index_forms(&first, &second, archive, &SweepOptions::default())
+                .findings
+                .is_empty()
+        );
     }
 
     // --- the budget ---
