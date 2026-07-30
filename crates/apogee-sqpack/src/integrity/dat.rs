@@ -203,7 +203,10 @@ pub fn inspect_dat_entries<S: DatSource>(
     totals.data_region_bytes = region_end.saturating_sub(DATA_REGION_OFFSET);
 
     let mut covered_to = DATA_REGION_OFFSET;
-    let mut previous: Option<(u64, u64, u64)> = None;
+    // The slot reaching furthest so far, as `(offset, key, slot_len)`. Not the one just visited: a
+    // single overgrown slot can span several entries, and the entries it swallowed are the right length
+    // themselves.
+    let mut furthest: Option<(u64, u64, u64)> = None;
     for location in named {
         let offset = location.offset;
         let key = location.key;
@@ -219,38 +222,41 @@ pub fn inspect_dat_entries<S: DatSource>(
         check_entry_header(&header, offset, key, &mut sink);
 
         let slot_len = header.slot_len();
+        let slot_end = offset.saturating_add(slot_len);
         if offset < DATA_REGION_OFFSET {
             sink.push_keyed(offset, key, Defect::SlotBeforeDataRegion);
         }
-        if offset.saturating_add(slot_len) > region_end {
+        if slot_end > region_end {
             sink.push_keyed(
                 offset,
                 key,
                 Defect::SlotBeyondDataRegion {
-                    slot_end: offset.saturating_add(slot_len),
+                    slot_end,
                     region_end,
                 },
             );
         }
         // Reported against the slot that reaches too far rather than the one it reaches into, which is
         // the entry a repair would have to re-place.
-        if let Some((prev_offset, prev_key, prev_len)) = previous
+        if let Some((over_offset, over_key, over_len)) = furthest
             && offset < covered_to
         {
             sink.push_keyed(
-                prev_offset,
-                prev_key,
+                over_offset,
+                over_key,
                 Defect::SlotsOverlap {
-                    slot_len: prev_len,
+                    slot_len: over_len,
                     next_offset: offset,
                 },
             );
         }
-        previous = Some((offset, key, slot_len));
+        if furthest.is_none_or(|(at, _, len)| at.saturating_add(len) < slot_end) {
+            furthest = Some((offset, key, slot_len));
+        }
 
         // Claimed space is the union of the slots, so the accounting closes even where they overlap.
         let start = offset.max(DATA_REGION_OFFSET);
-        let end = offset.saturating_add(slot_len).min(region_end);
+        let end = slot_end.min(region_end);
         if start > covered_to {
             record_gap(dat, covered_to, start, opts, &mut sink, &mut totals);
         }
@@ -1069,6 +1075,36 @@ mod tests {
         assert!(matches!(
             finding.defect,
             Defect::SlotsOverlap { next_offset, .. } if next_offset == built.placed[1].offset
+        ));
+    }
+
+    #[test]
+    fn one_slot_swallowing_several_entries_blames_only_itself() {
+        // The entries a runaway slot covers are the right length themselves, so naming the one just
+        // before each of them would send a repair after files that are not the fault, and would claim a
+        // slot reaches past an entry it in fact ends exactly at.
+        let mut b = DatBuilder::new();
+        for payload in [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()] {
+            b.entry(EntrySpec::standard(vec![payload]));
+        }
+        let built = b.built();
+        let mut bytes = built.bytes.clone();
+        let first = built.placed[0].offset;
+        let last = built.placed[2].offset;
+        let at = usize::try_from(first).unwrap() + ALLOCATED_UNITS_AT;
+        // Reserve the distance to the last entry, so the slot ends one header past it and swallows both
+        // of the others without running off the end of the declared region.
+        let units = u32::try_from((last - first) / u64::from(DATA_UNIT)).unwrap();
+        bytes[at..at + 4].copy_from_slice(&units.to_le_bytes());
+
+        let found = walk(&bytes, &located(&built.placed), &SweepOptions::default()).findings;
+        assert_eq!(found.len(), 2, "one per entry it swallowed: {found:#?}");
+        for finding in &found {
+            assert_eq!(finding.site.offset, Some(first));
+        }
+        assert!(matches!(
+            found[1].defect,
+            Defect::SlotsOverlap { next_offset, .. } if next_offset == last
         ));
     }
 
