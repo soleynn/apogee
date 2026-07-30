@@ -50,6 +50,7 @@ impl RuntimeLauncher {
         &self,
         prefix: &Prefix,
         catalog: Option<&Catalog>,
+        force: bool,
         cancel: &CancellationToken,
         progress: &Progress,
     ) -> Option<DxvkEnv> {
@@ -82,7 +83,9 @@ impl RuntimeLauncher {
             .flatten()
             .and_then(|meta| meta.dxvk)
             .is_some_and(|dxvk| dxvk.version == entry.version);
-        if !installed {
+        // `force` is the repair case: the record says the right version is installed and the files
+        // are not there, which is the one situation where the version gate is the wrong answer.
+        if force || !installed {
             // Companion translation stays off until something asks for it: it is only useful on one
             // vendor's hardware, and nothing here knows which is present.
             if let Err(error) = self
@@ -140,7 +143,7 @@ impl RuntimeLauncher {
                 // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
                 // setting no variable, so believing in it wrongly leaves the prefix with no
                 // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
-                let dxvk = self.ensure_dxvk(&prefix, None, cancel, progress).await;
+                let dxvk = self.recorded_dxvk(&prefix);
                 Ok(Prepared {
                     prefix: Some(prefix),
                     caps: HostCaps {
@@ -174,9 +177,7 @@ impl RuntimeLauncher {
                     .runtime
                     .prepare(&entry, prefix_dir, cancel, progress)
                     .await?;
-                let dxvk = self
-                    .ensure_dxvk(&prefix, Some(&catalog), cancel, progress)
-                    .await;
+                let dxvk = self.recorded_dxvk(&prefix);
                 Ok(Prepared {
                     prefix: Some(prefix),
                     caps: host.for_runner(&entry),
@@ -197,8 +198,15 @@ impl LaunchBackend for RuntimeLauncher {
         events: &UnboundedSender<Event>,
     ) -> Result<Prepared, CoreError> {
         let progress = relay_progress(events);
-        self.prepare_prefix(runner, prefix_dir, cancel, &progress)
-            .await
+        let mut prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        if let Some(prefix) = &prepared.prefix {
+            prepared.dxvk = self
+                .ensure_dxvk(prefix, None, false, cancel, &progress)
+                .await;
+        }
+        Ok(prepared)
     }
 
     async fn check_prefix(
@@ -236,6 +244,14 @@ impl LaunchBackend for RuntimeLauncher {
         if health.is_healthy() {
             return Ok(Some(health));
         }
+        if health
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, apogee_runtime::HealthIssue::MissingDxvkDll { .. }))
+        {
+            self.ensure_dxvk(&prefix, None, true, cancel, &progress)
+                .await;
+        }
         Ok(Some(
             self.runtime
                 .repair_prefix(&prefix, &health.issues, cancel, &progress)
@@ -257,9 +273,12 @@ impl LaunchBackend for RuntimeLauncher {
         let Some(prefix) = prepared.prefix else {
             return Ok(());
         };
-        self.runtime
+        let rebuilt = self
+            .runtime
             .recreate_prefix(&prefix, cancel, &progress)
             .await?;
+        self.ensure_dxvk(&rebuilt, None, false, cancel, &progress)
+            .await;
         Ok(())
     }
 

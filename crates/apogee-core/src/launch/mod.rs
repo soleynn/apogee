@@ -69,8 +69,10 @@ pub(crate) trait LaunchBackend: Send + Sync {
     /// Report the prefix's drift against what it records, changing nothing.
     ///
     /// `None` is a backend with no prefix to examine, which only the test double is. The prefix is
-    /// prepared first, because a prefix that is not there has no drift to report and creating it is
-    /// what a caller asking about it wants.
+    /// created if it is not there, because a prefix that does not exist has no drift to report and
+    /// creating one is what a caller asking about it wants. Nothing else is brought up to date:
+    /// installing something during a question about what is wrong would change the answer while it
+    /// was being asked.
     async fn check_prefix(
         &self,
         runner: &RunnerSelection,
