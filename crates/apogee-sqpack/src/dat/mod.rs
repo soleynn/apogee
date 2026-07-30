@@ -245,6 +245,19 @@ impl<S: DatSource> Dat<S> {
         Entry::parse(&head, offset, &self.limits)
     }
 
+    /// The five words at `offset`, which is what a slot walk needs: reads exactly
+    /// [`ENTRY_HEADER_LEN`] bytes, where [`Dat::entry_at`] reads the whole declared header so it can
+    /// frame the tables too.
+    ///
+    /// # Errors
+    /// - [`Error::Truncated`] if the container ends inside those five words.
+    /// - Everything [`EntryHeader::parse`] raises.
+    pub fn entry_header_at(&self, offset: u64) -> Result<EntryHeader> {
+        let mut lead = [0u8; ENTRY_HEADER_LEN];
+        self.source.read_exact_at(&mut lead, offset)?;
+        EntryHeader::parse(&lead, offset, &self.limits)
+    }
+
     /// The entry at `offset`, extracted. Named apart from [`DatSource::read_at`], which hands back
     /// the container's bytes as they sit rather than the file an entry holds.
     ///
@@ -705,6 +718,35 @@ mod tests {
             placed[0].offset + first.header().slot_len(),
             placed[1].offset
         );
+    }
+
+    #[test]
+    fn a_slot_walk_reads_five_words_where_a_full_parse_reads_a_whole_table() {
+        // A sweep over an archive reads one of these at every location an index names, so it must
+        // agree with the full parse on every word and must not depend on the table fitting.
+        let mut b = DatBuilder::new();
+        b.entry(EntrySpec::standard(vec![b"payload".repeat(400)]));
+        let (bytes, placed) = b.build();
+        let dat = Dat::parse(&bytes).unwrap();
+        let offset = placed[0].offset;
+        assert_eq!(
+            dat.entry_header_at(offset).unwrap(),
+            *dat.entry_at(offset).unwrap().header()
+        );
+        // Only the five words are read, so a container that ends right after them still answers.
+        let short = &bytes[..usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN];
+        assert_eq!(
+            Dat::from_source(short, &DatLimits::default())
+                .unwrap()
+                .entry_header_at(offset)
+                .unwrap()
+                .content_type,
+            ContentType::Standard
+        );
+        assert!(matches!(
+            dat.entry_header_at(bytes.len() as u64 - 4),
+            Err(Error::Truncated { .. })
+        ));
     }
 
     #[test]

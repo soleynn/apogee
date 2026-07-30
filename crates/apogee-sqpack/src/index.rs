@@ -386,22 +386,7 @@ impl Index {
     /// - [`Error::LimitExceeded`] if the file is larger than `limits.max_index_bytes`.
     /// - Everything [`Index::parse`] raises.
     pub fn open_with_limits(path: impl AsRef<Path>, limits: &IndexLimits) -> Result<Self> {
-        let file = File::open(path.as_ref())?;
-        let len = file.metadata()?.len();
-        if len > limits.max_index_bytes {
-            return Err(Error::LimitExceeded);
-        }
-        // The cap is enforced on what is actually read, not on what the directory entry claims: a
-        // character device or a pipe reports a length of zero and would otherwise be read forever.
-        // Reading one byte past the cap is what tells the two apart from a file that exactly fills it.
-        let hint = len.min(READ_RESERVE_HINT);
-        let mut buf = Vec::with_capacity(usize::try_from(hint).unwrap_or(0));
-        file.take(limits.max_index_bytes.saturating_add(1))
-            .read_to_end(&mut buf)?;
-        if buf.len() as u64 > limits.max_index_bytes {
-            return Err(Error::LimitExceeded);
-        }
-        Self::parse(&buf)
+        Self::parse(&read_capped(path.as_ref(), limits)?)
     }
 
     /// Parse an index container from its bytes.
@@ -602,6 +587,33 @@ impl Index {
                 key: format!("{key:#018x}"),
             })
     }
+}
+
+/// Read a whole index container into memory, refusing one longer than `limits` allows.
+///
+/// Answers with the bytes rather than a parse, because the checks that judge a container need both:
+/// the two header digests and the four segment digests cover bytes the parsed form no longer carries.
+///
+/// # Errors
+/// - [`Error::Io`] if the file cannot be read.
+/// - [`Error::LimitExceeded`] if it is longer than `limits.max_index_bytes`.
+pub(crate) fn read_capped(path: &Path, limits: &IndexLimits) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > limits.max_index_bytes {
+        return Err(Error::LimitExceeded);
+    }
+    // The cap is enforced on what is actually read, not on what the directory entry claims: a
+    // character device or a pipe reports a length of zero and would otherwise be read forever.
+    // Reading one byte past the cap is what tells the two apart from a file that exactly fills it.
+    let hint = len.min(READ_RESERVE_HINT);
+    let mut buf = Vec::with_capacity(usize::try_from(hint).unwrap_or(0));
+    file.take(limits.max_index_bytes.saturating_add(1))
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > limits.max_index_bytes {
+        return Err(Error::LimitExceeded);
+    }
+    Ok(buf)
 }
 
 /// Parse the index header at `0x400`. The cursor's base is that absolute offset, so a short read
