@@ -189,13 +189,8 @@ fn extents_of<S: DatSource>(
 fn shared_runs(coverage: &Coverage, extents: &[Option<ByteRange>]) -> Vec<bool> {
     let mut counts = vec![0u32; coverage.dirty().len()];
     for extent in extents.iter().flatten() {
-        let runs = coverage.dirty();
-        let first = runs.partition_point(|run| run.end <= extent.start);
-        for (i, run) in runs.iter().enumerate().skip(first) {
-            if run.start >= extent.end {
-                break;
-            }
-            counts[i] = counts[i].saturating_add(1);
+        for count in &mut counts[coverage.dirty_span(*extent)] {
+            *count = count.saturating_add(1);
         }
     }
     counts.into_iter().map(|n| n > 1).collect()
@@ -209,24 +204,16 @@ fn judge(coverage: &Coverage, extent: ByteRange, shared: &[bool]) -> (Standing, 
     if extent.end > coverage.pristine_len() {
         return (Standing::Foreign, Confidence::Exact);
     }
-    let runs = coverage.dirty();
-    let first = runs.partition_point(|run| run.end <= extent.start);
-    let mut confidence = Confidence::Exact;
-    let mut dirty = false;
-    for (i, run) in runs.iter().enumerate().skip(first) {
-        if run.start >= extent.end {
-            break;
-        }
-        dirty = true;
-        if shared.get(i).copied().unwrap_or(false) {
-            confidence = Confidence::Shared;
-        }
+    let span = coverage.dirty_span(extent);
+    if span.is_empty() {
+        return (Standing::Pristine, Confidence::Exact);
     }
-    if dirty {
-        (Standing::Modified, confidence)
+    let confidence = if shared[span].iter().any(|s| *s) {
+        Confidence::Shared
     } else {
-        (Standing::Pristine, Confidence::Exact)
-    }
+        Confidence::Exact
+    };
+    (Standing::Modified, confidence)
 }
 
 /// How the container itself stands, from its length and its runs alone.

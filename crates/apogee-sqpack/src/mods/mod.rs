@@ -10,10 +10,10 @@
 //!
 //! Three verdicts carry the meaning, and each rests on a different measurement:
 //!
-//! - **[`Standing::Pristine`]** — every byte the file is made of matches the map.
-//! - **[`Standing::Modified`]** — the file sits where the map explains it and some of its bytes
+//! - **[`Standing::Pristine`]**: every byte the file is made of matches the map.
+//! - **[`Standing::Modified`]**: the file sits where the map explains it and some of its bytes
 //!   differ. Something rewrote it in the space the archive already held.
-//! - **[`Standing::Foreign`]** — the file's bytes are past the length a data file should have, or in
+//! - **[`Standing::Foreign`]**: the file's bytes are past the length a data file should have, or in
 //!   a data file the pristine install did not have. Appending content and repointing the index at it
 //!   is what every mod tool does, which is why this arm rather than the last one carries them.
 //!

@@ -91,13 +91,23 @@ impl Coverage {
         self.dirty.is_empty() && actual_len == self.pristine_len
     }
 
-    /// The dirty runs a byte range touches, as a slice. The runs are held ascending and disjoint, so
-    /// this is two binary searches rather than a scan.
+    /// Which of [`Coverage::dirty`] a byte range touches, as an index range. The runs are held
+    /// ascending and disjoint, so this is two binary searches rather than a scan.
+    ///
+    /// Indices rather than a slice because the caller that matters needs to know *which* runs, not
+    /// only how many: a run touching more than one file is what makes a verdict inexact, and that is
+    /// counted per run across the whole container.
     #[must_use]
-    pub fn dirty_in(&self, range: ByteRange) -> &[ByteRange] {
+    pub fn dirty_span(&self, range: ByteRange) -> std::ops::Range<usize> {
         let start = self.dirty.partition_point(|run| run.end <= range.start);
         let end = self.dirty.partition_point(|run| run.start < range.end);
-        self.dirty.get(start..end.max(start)).unwrap_or_default()
+        start..end.max(start)
+    }
+
+    /// The dirty runs a byte range touches.
+    #[must_use]
+    pub fn dirty_in(&self, range: ByteRange) -> &[ByteRange] {
+        &self.dirty[self.dirty_span(range)]
     }
 }
 
