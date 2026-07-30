@@ -727,63 +727,149 @@ fn check_body(entry: &Entry, record: &Value, where_: &str) -> R<()> {
     Ok(())
 }
 
-/// Extract every entry of four archives, which is what says the recorded handful is not a lucky
-/// sample: each entry has to decode, and the length it produces has to be the one it declares.
+/// How many stored bytes one archive's sweep will decode before it widens its stride to fit. The
+/// four archives hold 33 GiB between them and a debug build inflates around a gigabyte a minute, so
+/// decoding all of it is three quarters of an hour in one test; a gigabyte apiece, run as four
+/// tests, is a couple of minutes and still reads a sixth of a million files.
+const SAMPLE_BUDGET: u64 = 1 << 30;
+
+/// Set to sweep every entry rather than a sample, which is what a patch day wants: it costs about
+/// half an hour, bounded by `chara`.
+const FULL_SWEEP: &str = "APOGEE_SQPACK_FULL_SWEEP";
+
+/// Read a whole archive: every entry's header, and the files a sample of them extract to.
 ///
-/// One archive of each shape, because the four content types share almost no code below the header:
-/// `exd` is all standard entries, `ui` is mostly textures, `chara` carries the models, and
+/// The two passes answer different questions. Parsing an entry header reads its tables but decodes
+/// nothing, so every entry in the archive is affordable, and that is where the census comes from: a
+/// content type cannot hide from it. Decoding is what costs, so it runs over a stride wide enough
+/// to fit [`SAMPLE_BUDGET`], and what it proves is that entries spread across the whole archive
+/// come out at the length they declare. Empty entries are decoded whatever the stride, since they
+/// cost nothing and are too rare to survive a sample: `chara` holds eight in a third of a million.
+fn sweep_archive(category: u8, expected: &[ContentType]) -> R<()> {
+    let root = std::env::var("APOGEE_SQPACK_REAL_INSTALL")?;
+    let game = GameData::open(Path::new(&root))?;
+    let id = ArchiveId::new(category, 0, 0);
+    let info = game
+        .archive(Repo::Base, id)
+        .ok_or_else(|| format!("the install has no {} archive", id.stem()))?;
+    let index = game
+        .index_of(info, IndexKind::Index1)?
+        .ok_or_else(|| format!("{} has no index", id.stem()))?;
+
+    let mut entries = Vec::with_capacity(index.entries().len());
+    let mut stored = 0u64;
+    let mut seen = std::collections::BTreeMap::new();
+    for location in index.entries().iter().filter_map(|e| e.location()) {
+        let dat = game.dat_of(info, location.dat)?;
+        let entry = dat.entry_at(location.offset)?;
+        *seen.entry(entry.content_type()).or_insert(0usize) += 1;
+        stored += entry.header().occupied_bytes();
+        entries.push((location, entry.content_type()));
+    }
+    assert!(
+        entries.len() > 1_000,
+        "{} has entries to read: {}",
+        id.stem(),
+        entries.len()
+    );
+    for kind in expected {
+        assert!(
+            seen.get(kind).is_some_and(|n| *n > 0),
+            "{}: no {kind:?} entry in {seen:?}",
+            id.stem()
+        );
+    }
+
+    // Entries within one archive are near enough the same size that a stride over the count spends
+    // about the intended number of bytes.
+    let stride = if std::env::var_os(FULL_SWEEP).is_some() {
+        1
+    } else {
+        usize::try_from(stored.div_ceil(SAMPLE_BUDGET))?.max(1)
+    };
+    let mut read = 0usize;
+    for (n, (location, kind)) in entries.iter().enumerate() {
+        if *kind != ContentType::Empty && !n.is_multiple_of(stride) {
+            continue;
+        }
+        let dat = game.dat_of(info, location.dat)?;
+        let entry = dat.entry_at(location.offset)?;
+        let out = dat.read(&entry)?;
+        let where_ = format!("{} dat{} @{}", id.stem(), location.dat, location.offset);
+        match entry.content_type() {
+            // A volume texture declares padding between mip surfaces that is not stored, so the
+            // bound is what its own table says, never more than the declared size.
+            ContentType::Texture => {
+                assert!(out.len() as u64 <= entry.declared_len(), "{where_}");
+                assert_eq!(Some(out.len() as u64), entry.stored_len(), "{where_}");
+            }
+            // An empty entry holds nothing however large a file its leftover word names; the
+            // `chara` archive has one declaring nearly three megabytes.
+            ContentType::Empty => assert!(out.is_empty(), "{where_}"),
+            _ => assert_eq!(out.len() as u64, entry.declared_len(), "{where_}"),
+        }
+        read += 1;
+    }
+    assert!(
+        read > 1_000,
+        "{} extracted too little of itself: {read}",
+        id.stem()
+    );
+    Ok(())
+}
+
+// One archive of each shape, because the four content types share almost no code below the header,
+// and one test each so they run at once and a failure names the archive it came from. Between them
+// the four cover every content type this crate reads.
+
+/// `exd` is all standard entries, and small enough that the sample is the whole archive.
+#[test]
+#[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
+fn the_exd_archive_reads_every_header_and_a_sample_of_its_files() -> R<()> {
+    sweep_archive(0x0a, &[ContentType::Standard])
+}
+
+/// `ui` is mostly textures, and holds the empty entries in bulk.
+#[test]
+#[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
+fn the_ui_archive_reads_every_header_and_a_sample_of_its_files() -> R<()> {
+    sweep_archive(
+        0x06,
+        &[
+            ContentType::Texture,
+            ContentType::Standard,
+            ContentType::Empty,
+        ],
+    )
+}
+
+/// `chara` carries the models, and is the largest of the four by a factor of two.
+#[test]
+#[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
+fn the_chara_archive_reads_every_header_and_a_sample_of_its_files() -> R<()> {
+    sweep_archive(
+        0x04,
+        &[
+            ContentType::Standard,
+            ContentType::Texture,
+            ContentType::Model,
+        ],
+    )
+}
+
 /// `bgcommon` holds every volume texture in the game, which is the one shape allowed to come out
 /// shorter than it declares.
 #[test]
 #[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
-fn every_entry_of_an_archive_extracts_to_the_length_it_declares() -> R<()> {
-    let root = std::env::var("APOGEE_SQPACK_REAL_INSTALL")?;
-    let game = GameData::open(Path::new(&root))?;
-
-    let mut seen = std::collections::BTreeMap::new();
-    for category in [0x0a, 0x06, 0x04, 0x01] {
-        let id = ArchiveId::new(category, 0, 0);
-        let info = game
-            .archive(Repo::Base, id)
-            .ok_or_else(|| format!("the install has no {} archive", id.stem()))?;
-        let index = game
-            .index_of(info, IndexKind::Index1)?
-            .ok_or_else(|| format!("{} has no index", id.stem()))?;
-
-        let mut read = 0usize;
-        for location in index.entries().iter().filter_map(|e| e.location()) {
-            let dat = game.dat_of(info, location.dat)?;
-            let entry = dat.entry_at(location.offset)?;
-            let out = dat.read(&entry)?;
-            let where_ = format!("{} dat{} @{}", id.stem(), location.dat, location.offset);
-            match entry.content_type() {
-                // A volume texture declares padding between mip surfaces that is not stored, so the
-                // bound is what its own table says, never more than the declared size.
-                ContentType::Texture => {
-                    assert!(out.len() as u64 <= entry.declared_len(), "{where_}");
-                    assert_eq!(Some(out.len() as u64), entry.stored_len(), "{where_}");
-                }
-                // An empty entry holds nothing however large a file its leftover word names; the
-                // `chara` archive has one declaring nearly three megabytes.
-                ContentType::Empty => assert!(out.is_empty(), "{where_}"),
-                _ => assert_eq!(out.len() as u64, entry.declared_len(), "{where_}"),
-            }
-            *seen
-                .entry(format!("{:?}", entry.content_type()))
-                .or_insert(0usize) += 1;
-            read += 1;
-        }
-        assert!(read > 1_000, "{} has entries to read: {read}", id.stem());
-    }
-
-    // Every content type this crate reads was met in bulk, not just in the recorded handful.
-    for kind in ["Empty", "Standard", "Model", "Texture"] {
-        assert!(
-            seen.get(kind).is_some_and(|n| *n > 0),
-            "no {kind} entry in the sweep: {seen:?}"
-        );
-    }
-    Ok(())
+fn the_bgcommon_archive_reads_every_header_and_a_sample_of_its_files() -> R<()> {
+    sweep_archive(
+        0x01,
+        &[
+            ContentType::Standard,
+            ContentType::Model,
+            ContentType::Texture,
+        ],
+    )
 }
 
 /// The repository a record was captured from.
