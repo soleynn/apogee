@@ -15,6 +15,8 @@ crc32fast.workspace = true
 # All four hash fields a container carries (two header self hashes, one per index segment, one over a
 # dat's data region) are SHA-1, so the integrity checks cannot be built without it.
 sha1.workspace = true
+# The whole-install sweep runs its archives, and each archive's data files, in parallel.
+rayon.workspace = true
 
 [dev-dependencies]
 # Temp game trees for install-enumeration and lookup tests.

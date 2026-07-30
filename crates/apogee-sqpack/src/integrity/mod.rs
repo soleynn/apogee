@@ -17,6 +17,10 @@
 mod dat;
 mod finding;
 mod index;
+mod sweep;
+
+#[cfg(test)]
+mod fixture;
 
 use sha1::{Digest, Sha1};
 
