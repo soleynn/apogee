@@ -744,7 +744,13 @@ impl Dalamud {
             troubleshooting_b64: EMPTY_TROUBLESHOOTING_PACK,
             plugins: self.config.plugins,
         }));
-        plan.set_program(version_dir.join("Dalamud.Injector.exe").to_string_lossy());
+        // In Windows form, like every other path handed to the injector. A host path works only
+        // because plain wine happens to accept one; a Proton runner sees a path that is not its own
+        // and routes the program through a launch helper rather than starting it directly, and the
+        // injector's handoff to the game does not survive that. This is the one path whose reader is
+        // the runner rather than the injector, which is the argument for spelling it the way every
+        // runner reads rather than the way one of them tolerates.
+        plan.set_program(to_windows(&version_dir.join("Dalamud.Injector.exe"))?);
         if let Some(basename) = supervised {
             plan.set_supervised(basename);
         }

@@ -110,6 +110,19 @@ fn wrapping_a_launch_keeps_the_game_as_the_supervised_process() {
         "the injector becomes the launched program, got {}",
         plan.program()
     );
+    // In Windows form, because the runner is what executes it. A host path is accepted by plain wine
+    // and not by Proton, which routes a foreign-looking path through a launch helper the injector's
+    // handoff to the game does not survive: the game starts and nothing is ever loaded into it.
+    assert!(
+        plan.program().contains(":\\"),
+        "the injector is named the way every runner reads, got {}",
+        plan.program()
+    );
+    assert!(
+        !plan.program().starts_with('/'),
+        "a host path here works on one runner and silently breaks another, got {}",
+        plan.program()
+    );
     assert_eq!(
         plan.supervised(),
         Some("ffxiv_dx11.exe"),
