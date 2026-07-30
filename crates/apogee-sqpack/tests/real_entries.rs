@@ -9,7 +9,12 @@
 //!
 //! The install-gated test re-reads the real containers from `$APOGEE_SQPACK_REAL_INSTALL`, extracts
 //! every recorded entry, and asserts the crate reproduces all of it down to the sha256 of the file's
-//! bytes; it is `#[ignore]` by default.
+//! bytes; it is `#[ignore]` by default. A patch rewrites the files and moves every slot, so only the
+//! patch the fixture was recorded on is held to the offsets, lengths and digests. On any other
+//! version each recorded path is re-resolved and held to what a patch cannot move: the entry's own
+//! table has to say what its extraction produced, and the bytes reached through the install have to
+//! be the bytes read out of the dat. A record naming no path is a slot and nothing else, so a patch
+//! leaves nothing to check and it is skipped.
 
 use std::error::Error;
 use std::fmt::Write as _;
@@ -55,6 +60,27 @@ fn opt_u64(v: &Value, key: &str) -> Option<u64> {
     v[key].as_u64()
 }
 
+/// Whether the tree is the patch the recording was taken from, read from the base repository's
+/// version file.
+fn is_recorded_version(game: &GameData, doc: &Value) -> R<bool> {
+    let want = field_str(doc, "version")?;
+    Ok(game
+        .repos()
+        .iter()
+        .any(|r| r.repo == Repo::Base && r.version.as_deref() == Some(want)))
+}
+
+/// A count the recording found work in, off the patch it was recorded on: still within a tenth of
+/// what was measured, which is what makes a patch day fail on a finding rather than on a count.
+fn assert_floor(found: u64, want: u64, where_: &str) {
+    if want != 0 {
+        assert!(
+            found * 10 >= want * 9,
+            "{where_}: {found} is far below the recorded {want}"
+        );
+    }
+}
+
 fn content_type(record: &Value) -> R<ContentType> {
     match field_str(record, "content_type")? {
         "empty" => Ok(ContentType::Empty),
@@ -85,6 +111,10 @@ fn the_recording_is_consistent_with_the_formats_this_crate_declares() -> R<()> {
     let doc = doc()?;
     let entries = rows(&doc, "entries")?;
     assert!(entries.len() >= 4, "fixture has records");
+    assert!(
+        !field_str(&doc, "version")?.is_empty(),
+        "fixture is versioned"
+    );
 
     let mut seen = Vec::new();
     for record in entries {
@@ -236,6 +266,11 @@ fn the_recorded_dat_headers_describe_the_files_they_came_from() -> R<()> {
 /// Re-read the real containers named in the fixture and confirm the crate reproduces every recorded
 /// fact, the extracted bytes included. Gated on `APOGEE_SQPACK_REAL_INSTALL` (the game subtree
 /// holding `sqpack/` and `ffxivgame.ver`); `#[ignore]` so the hermetic suite stays install-free.
+///
+/// Only the patch the recording was taken from is held to the offsets, lengths and digests. On any
+/// other version the recorded paths are re-resolved and held to what a patch cannot move: an
+/// entry's own table has to account for what its extraction produced, and the bytes reached through
+/// the install have to be the bytes read out of the dat.
 #[test]
 #[ignore = "set APOGEE_SQPACK_REAL_INSTALL to a real game subtree to run"]
 fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
@@ -243,18 +278,17 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
     let root = Path::new(&root);
     let game = GameData::open(root)?;
     let doc = doc()?;
+    let exact = is_recorded_version(&game, &doc)?;
 
+    let mut without_magic = 0usize;
     for record in rows(&doc, "dats")? {
         let name = field_str(record, "path")?;
         let dat = Dat::open(root.join("sqpack").join(name))?;
-        let _ = &game;
         let header = dat.data_header();
-        assert_eq!(dat.len(), field_u64(record, "file_len")?, "{name} length");
-        assert_eq!(
-            dat.common_header().is_some(),
-            record["has_magic"] == Value::Bool(true),
-            "{name} common header"
-        );
+        if dat.common_header().is_none() {
+            without_magic += 1;
+        }
+        // The words the format fixes, and the one relation tying the header to the file it opens.
         assert_eq!(
             u64::from(header.header_size),
             field_u64(record, "header_size")?,
@@ -266,23 +300,8 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
             "{name}"
         );
         assert_eq!(
-            u64::from(header.data_units),
-            field_u64(record, "data_units")?,
-            "{name}"
-        );
-        assert_eq!(
             u64::from(header.span_index),
             field_u64(record, "span_index")?,
-            "{name}"
-        );
-        assert_eq!(
-            u64::from(header.max_file_size),
-            field_u64(record, "max_file_size")?,
-            "{name}"
-        );
-        assert_eq!(
-            hex(&header.data_sha1),
-            field_str(record, "data_sha1")?,
             "{name}"
         );
         assert_eq!(
@@ -290,7 +309,41 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
             dat.len(),
             "{name} declared length"
         );
+
+        if exact {
+            assert_eq!(dat.len(), field_u64(record, "file_len")?, "{name} length");
+            assert_eq!(
+                dat.common_header().is_some(),
+                record["has_magic"] == Value::Bool(true),
+                "{name} common header"
+            );
+            assert_eq!(
+                u64::from(header.data_units),
+                field_u64(record, "data_units")?,
+                "{name}"
+            );
+            assert_eq!(
+                u64::from(header.max_file_size),
+                field_u64(record, "max_file_size")?,
+                "{name}"
+            );
+            assert_eq!(
+                hex(&header.data_sha1),
+                field_str(record, "data_sha1")?,
+                "{name}"
+            );
+        } else {
+            assert_floor(dat.len(), field_u64(record, "file_len")?, name);
+            assert_floor(
+                u64::from(header.data_units),
+                field_u64(record, "data_units")?,
+                name,
+            );
+        }
     }
+    // A real install carries dat files with no SqPack magic at all, whatever patch it is on, since
+    // refusing them would make a fifth of an install unreadable.
+    assert!(without_magic > 0, "no dat file without a common header");
 
     for record in rows(&doc, "entries")? {
         let stem = field_str(record, "archive")?;
@@ -299,60 +352,82 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
         let info = game
             .archive(repo, archive)
             .ok_or_else(|| format!("{} was not enumerated", archive.stem()))?;
-        let dat_number = u8::try_from(field_u64(record, "dat")?)?;
         let where_ = format!("{}/{}", repo.dir_name(), archive.stem());
+
+        // Where the entry sits: the recorded slot on the patch it was recorded on, and wherever the
+        // path resolves to on any other. A record naming no path is a slot and nothing more, so a
+        // patch that moved it leaves nothing to check.
+        let (dat_number, offset) = match (exact, record["path"].as_str()) {
+            (true, _) => (
+                u8::try_from(field_u64(record, "dat")?)?,
+                field_u64(record, "offset")?,
+            ),
+            (false, Some(path)) => {
+                let found = game
+                    .lookup(path)?
+                    .ok_or_else(|| format!("{path} does not resolve"))?;
+                (found.dat, found.offset)
+            }
+            (false, None) => continue,
+        };
         let dat = game.dat_of(info, dat_number)?;
-        let offset = field_u64(record, "offset")?;
         let entry = dat.entry_at(offset)?;
-
-        assert_eq!(
-            entry.content_type(),
-            content_type(record)?,
-            "{where_} @{offset}"
-        );
-        assert_eq!(
-            u64::from(entry.header().header_size),
-            field_u64(record, "header_size")?,
-            "{where_} @{offset} header size"
-        );
-        assert_eq!(
-            entry.declared_len(),
-            field_u64(record, "raw_size")?,
-            "{where_} @{offset} declared length"
-        );
-        assert_eq!(
-            u64::from(entry.header().allocated_units),
-            field_u64(record, "allocated_units")?,
-            "{where_} @{offset} allocation"
-        );
-        assert_eq!(
-            u64::from(entry.header().occupied_units),
-            field_u64(record, "occupied_units")?,
-            "{where_} @{offset} occupancy"
-        );
-        if let Some(blocks) = opt_u64(record, "blocks") {
-            assert_eq!(
-                entry.block_count() as u64,
-                blocks,
-                "{where_} @{offset} blocks"
-            );
-        }
-        check_body(&entry, record, &where_)?;
-
         let bytes = dat.read(&entry)?;
-        assert_eq!(
-            bytes.len() as u64,
-            field_u64(record, "extracted_len")?,
-            "{where_} @{offset} extracted length"
-        );
-        assert_eq!(
-            sha256_hex(&bytes),
-            field_str(record, "sha256")?,
-            "{where_} @{offset} extracted bytes"
-        );
+
+        // The entry's own table has to account for exactly what came out of it.
+        check_extraction(&entry, &bytes, &where_, offset);
+
+        if exact {
+            assert_eq!(
+                entry.content_type(),
+                content_type(record)?,
+                "{where_} @{offset}"
+            );
+            assert_eq!(
+                u64::from(entry.header().header_size),
+                field_u64(record, "header_size")?,
+                "{where_} @{offset} header size"
+            );
+            assert_eq!(
+                entry.declared_len(),
+                field_u64(record, "raw_size")?,
+                "{where_} @{offset} declared length"
+            );
+            assert_eq!(
+                u64::from(entry.header().allocated_units),
+                field_u64(record, "allocated_units")?,
+                "{where_} @{offset} allocation"
+            );
+            assert_eq!(
+                u64::from(entry.header().occupied_units),
+                field_u64(record, "occupied_units")?,
+                "{where_} @{offset} occupancy"
+            );
+            if let Some(blocks) = opt_u64(record, "blocks") {
+                assert_eq!(
+                    entry.block_count() as u64,
+                    blocks,
+                    "{where_} @{offset} blocks"
+                );
+            }
+            check_body(&entry, record, &where_)?;
+            assert_eq!(
+                bytes.len() as u64,
+                field_u64(record, "extracted_len")?,
+                "{where_} @{offset} extracted length"
+            );
+            assert_eq!(
+                sha256_hex(&bytes),
+                field_str(record, "sha256")?,
+                "{where_} @{offset} extracted bytes"
+            );
+            if entry.content_type() == ContentType::Model {
+                check_recorded_model(&bytes, record, &where_)?;
+            }
+        }
 
         if entry.content_type() == ContentType::Model {
-            check_model_file(&bytes, record, &where_)?;
+            check_model_file(&bytes, &where_)?;
         }
 
         // A record that names a path must reach the same bytes through the install, which is the
@@ -374,6 +449,23 @@ fn the_crate_reproduces_the_recording_on_a_live_install() -> R<()> {
         }
     }
     Ok(())
+}
+
+/// What an entry's own table says it holds, against what came out of it. Nothing here reads the
+/// recording, so it holds whatever patch the tree is on.
+fn check_extraction(entry: &Entry, bytes: &[u8], where_: &str, offset: u64) {
+    let produced = bytes.len() as u64;
+    match entry.content_type() {
+        // A volume texture's declared length counts padding between mip surfaces the archive does
+        // not store, so the table rather than the declaration is what bounds it.
+        ContentType::Texture => {
+            assert!(produced <= entry.declared_len(), "{where_} @{offset}");
+            assert_eq!(entry.stored_len(), Some(produced), "{where_} @{offset}");
+        }
+        // An empty entry holds nothing however large a file its leftover word names.
+        ContentType::Empty => assert_eq!(produced, 0, "{where_} @{offset}"),
+        _ => assert_eq!(produced, entry.declared_len(), "{where_} @{offset}"),
+    }
 }
 
 /// Every word the fixed table carries, against the recording. The reader and the synthetic builder
@@ -476,39 +568,70 @@ fn check_model_table(table: &ModelTable, record: &Value, where_: &str) -> R<()> 
     Ok(())
 }
 
-/// The header a model extraction writes back has to describe the bytes beside it, and the crate is
-/// the only thing that wrote it, so it is checked against the format's own arithmetic rather than
-/// against itself: the vertex-declaration stack is exactly seventeen eight-byte elements per
-/// declaration, each section starts where the one before it ended, and the last one ends at the file.
-fn check_model_file(bytes: &[u8], record: &Value, where_: &str) -> R<()> {
-    let word = |at: usize| -> R<u64> {
-        let raw = bytes
-            .get(at..at + 4)
-            .and_then(|w| <[u8; 4]>::try_from(w).ok())
-            .ok_or_else(|| format!("{where_}: model file is shorter than its header"))?;
-        Ok(u64::from(u32::from_le_bytes(raw)))
-    };
-    let short = |at: usize| -> R<u64> {
-        let raw = bytes
-            .get(at..at + 2)
-            .and_then(|w| <[u8; 2]>::try_from(w).ok())
-            .ok_or_else(|| format!("{where_}: model file is shorter than its header"))?;
-        Ok(u64::from(u16::from_le_bytes(raw)))
-    };
-
-    assert_eq!(word(0x00)?, field_u64(record, "model_version")?, "{where_}");
-    let declarations = short(0x0C)?;
+/// The words the recording took out of the header a model extraction writes back.
+fn check_recorded_model(bytes: &[u8], record: &Value, where_: &str) -> R<()> {
+    let head = ModelFile::new(bytes, where_);
     assert_eq!(
-        declarations,
+        head.word(0x00)?,
+        field_u64(record, "model_version")?,
+        "{where_}"
+    );
+    assert_eq!(
+        head.short(0x0C)?,
         field_u64(record, "vertex_declarations")?,
         "{where_}"
     );
-    assert_eq!(short(0x0E)?, field_u64(record, "materials")?, "{where_}");
+    assert_eq!(
+        head.short(0x0E)?,
+        field_u64(record, "materials")?,
+        "{where_}"
+    );
     assert_eq!(
         u64::from(bytes[0x40]),
         field_u64(record, "lod_count")?,
         "{where_}"
     );
+    Ok(())
+}
+
+/// The little-endian words of the header a model file opens with.
+struct ModelFile<'a> {
+    bytes: &'a [u8],
+    where_: &'a str,
+}
+
+impl<'a> ModelFile<'a> {
+    fn new(bytes: &'a [u8], where_: &'a str) -> Self {
+        Self { bytes, where_ }
+    }
+
+    fn word(&self, at: usize) -> R<u64> {
+        let raw = self
+            .bytes
+            .get(at..at + 4)
+            .and_then(|w| <[u8; 4]>::try_from(w).ok())
+            .ok_or_else(|| format!("{}: model file is shorter than its header", self.where_))?;
+        Ok(u64::from(u32::from_le_bytes(raw)))
+    }
+
+    fn short(&self, at: usize) -> R<u64> {
+        let raw = self
+            .bytes
+            .get(at..at + 2)
+            .and_then(|w| <[u8; 2]>::try_from(w).ok())
+            .ok_or_else(|| format!("{}: model file is shorter than its header", self.where_))?;
+        Ok(u64::from(u16::from_le_bytes(raw)))
+    }
+}
+
+/// The header a model extraction writes back has to describe the bytes beside it, and the crate is
+/// the only thing that wrote it, so it is checked against the format's own arithmetic rather than
+/// against itself: the vertex-declaration stack is exactly seventeen eight-byte elements per
+/// declaration, each section starts where the one before it ended, and the last one ends at the file.
+fn check_model_file(bytes: &[u8], where_: &str) -> R<()> {
+    let head = ModelFile::new(bytes, where_);
+    let word = |at: usize| head.word(at);
+    let declarations = head.short(0x0C)?;
 
     // One vertex declaration is seventeen elements of eight bytes; the stack section is nothing but
     // those, so a stack of any other length would mean the sections were cut in the wrong places.
