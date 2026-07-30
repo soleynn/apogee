@@ -656,7 +656,8 @@ fn check_folders(bytes: &[u8], index: &Index, sink: &mut Sink) {
                 },
             );
         }
-        if row.entries_offset != expected {
+        let tiles = row.entries_offset == expected;
+        if !tiles {
             sink.push_at(
                 offset,
                 Defect::FolderRowsDoNotTile {
@@ -667,7 +668,12 @@ fn check_folders(bytes: &[u8], index: &Index, sink: &mut Sink) {
         }
         expected = row.entries_offset.saturating_add(row.entries_size);
 
-        if let Some(run) = index.folder_entries(row) {
+        // Only a run that starts where the previous one ended is this row's to speak for, and saying so
+        // once per entry of a run the table does not own would repeat the tiling finding above. It is
+        // also what keeps this walk inside the entry table's own length: rows that tile hold disjoint
+        // runs of it, where nothing stops every row of a container naming the whole table and turning
+        // one container's check into the product of its two segments.
+        if tiles && let Some(run) = index.folder_entries(row) {
             let first =
                 (row.entries_offset.saturating_sub(entry_base) / INDEX1_ENTRY_LEN as u32) as usize;
             for (j, entry) in run.iter().enumerate() {
@@ -1573,6 +1579,36 @@ mod tests {
             }
             other => panic!("expected a folder tiling fault, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_row_naming_a_run_that_is_not_its_own_is_reported_rather_than_walked() {
+        // Nothing in the format stops every row of a folder table naming the whole entry table, and the
+        // reader hands back whatever run a row names. Judging the entries of a run the rows do not tile
+        // would cost the product of the two segments, which is minutes over a container the size of a
+        // real `chara` index and hours over one at the reader's cap. The counts are the proof, because
+        // the work and the findings are one walk.
+        let rows = 512u32;
+        let mut b = IndexBuilder::new(IndexKind::Index1);
+        b.data_file_count(1);
+        for i in 0..u64::from(rows) {
+            b.entry(i + 1, packed(0, (i + 1) * 128));
+        }
+        let whole = rows * INDEX1_ENTRY_LEN as u32;
+        b.folders(
+            (0..rows)
+                .map(|i| FolderRow {
+                    hash: i + 1,
+                    entries_offset: FIRST_SEGMENT_OFFSET,
+                    entries_size: whole,
+                })
+                .collect(),
+        );
+        let report = inspect(&b.bytes(), IndexKind::Index1, &[0]).report;
+        // One per row whose run is not where the previous one ended, plus one per entry of the one row
+        // whose is: linear in the container, where walking every row's run is its square.
+        let filed = report.findings.len() as u64 + report.totals.defects_suppressed;
+        assert_eq!(filed, u64::from(rows) * 2 - 1, "{filed} finding(s) filed");
     }
 
     #[test]
