@@ -578,8 +578,12 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
     {
         println!("this deletes the prefix and everything installed into it, including the game's");
         println!("own settings. `backup create` captures those first.");
+        let expected = resolve_profile(core, target)?.name;
         let answer = prompt_line("type the profile name to confirm: ")?;
-        if answer.trim() != resolve_profile(core, target)?.name {
+        // An empty answer never confirms, whatever the profile is called. Without this a profile
+        // created with an empty name would be destroyed by a closed stdin, which is what a script or
+        // a cron job hands this.
+        if answer.trim().is_empty() || answer.trim() != expected {
             println!("not recreating");
             return Ok(ExitCode::SUCCESS);
         }

@@ -20,6 +20,11 @@ use crate::command::{Event, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
 
+/// Whether a prefix has been created at `dir`, by the record every prepared one carries.
+fn prefix_exists(dir: &Path) -> bool {
+    dir.join(apogee_runtime::PREFIX_JSON).is_file()
+}
+
 /// The real launch backend over `apogee-runtime`.
 pub(crate) struct RuntimeLauncher {
     runtime: Runtime,
@@ -53,12 +58,12 @@ impl RuntimeLauncher {
         force: bool,
         cancel: &CancellationToken,
         progress: &Progress,
-    ) -> Option<DxvkEnv> {
+    ) -> Result<Option<DxvkEnv>, CoreError> {
         let fetched;
         let catalog = match catalog {
             Some(catalog) => catalog,
             None => {
-                let (manifest, signature) = catalog_urls().ok()?;
+                let (manifest, signature) = catalog_urls()?;
                 match self
                     .runtime
                     .fetch_catalog(&manifest, &signature, cancel)
@@ -68,14 +73,20 @@ impl RuntimeLauncher {
                         fetched = catalog;
                         &fetched
                     }
+                    // A stop is the user's decision, not a catalog that could not be reached.
+                    Err(error) if error.is_cancellation() => return Err(error.into()),
                     Err(error) => {
                         tracing::info!(%error, "no catalog reached; leaving the prefix as it is");
-                        return self.recorded_dxvk(prefix);
+                        return Ok(self.recorded_dxvk(prefix));
                     }
                 }
             }
         };
-        let entry = catalog.default_dxvk()?;
+        // A catalog that publishes none leaves whatever is already there active, rather than
+        // deactivating an install an earlier build made.
+        let Some(entry) = catalog.default_dxvk() else {
+            return Ok(self.recorded_dxvk(prefix));
+        };
 
         let installed = prefix
             .metadata()
@@ -83,21 +94,33 @@ impl RuntimeLauncher {
             .flatten()
             .and_then(|meta| meta.dxvk)
             .is_some_and(|dxvk| dxvk.version == entry.version);
+        // Whatever the prefix already decided about the companion is kept: turning it off here would
+        // stop overriding libraries that are sitting in the prefix.
+        let nvapi = prefix
+            .metadata()
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.dxvk)
+            .is_some_and(|dxvk| dxvk.nvapi);
         // `force` is the repair case: the record says the right version is installed and the files
         // are not there, which is the one situation where the version gate is the wrong answer.
         if force || !installed {
-            // Companion translation stays off until something asks for it: it is only useful on one
-            // vendor's hardware, and nothing here knows which is present.
-            if let Err(error) = self
+            match self
                 .runtime
-                .install_dxvk(entry, prefix, false, cancel, progress)
+                .install_dxvk(entry, prefix, nvapi, cancel, progress)
                 .await
             {
-                tracing::warn!(%error, "graphics translation was not installed");
-                return self.recorded_dxvk(prefix);
+                Ok(()) => {}
+                // A stopped install stops the launch. Carrying on would spawn the game while the
+                // user was still waiting for the thing they asked to stop.
+                Err(error) if error.is_cancellation() => return Err(error.into()),
+                Err(error) => {
+                    tracing::warn!(%error, "graphics translation was not installed");
+                    return Ok(self.recorded_dxvk(prefix));
+                }
             }
         }
-        Some(self.dxvk_env(prefix, false))
+        Ok(Some(self.dxvk_env(prefix, nvapi)))
     }
 
     /// What the prefix already records, for the paths that could not install anything.
@@ -109,8 +132,18 @@ impl RuntimeLauncher {
     /// The environment that activates a prefix's translation, with its shader cache kept beside the
     /// prefix it belongs to rather than in a location shared between prefixes.
     fn dxvk_env(&self, prefix: &Prefix, nvapi: bool) -> DxvkEnv {
+        let cache = prefix.path().join("dxvk_cache");
+        // Created here because the translation opens a file inside it rather than creating the path,
+        // so a directory that is not there is a cache that silently never persists.
+        if let Err(error) = std::fs::create_dir_all(&cache) {
+            tracing::warn!(%error, path = %cache.display(), "no shader cache directory");
+            return DxvkEnv {
+                state_cache: None,
+                nvapi,
+            };
+        }
         DxvkEnv {
-            state_cache: Some(prefix.path().join("dxvk_cache")),
+            state_cache: Some(cache),
             nvapi,
         }
     }
@@ -151,6 +184,7 @@ impl RuntimeLauncher {
                         ..host
                     },
                     dxvk,
+                    catalog: None,
                 })
             }
             RunnerSelection::Managed { name, version } => {
@@ -182,6 +216,7 @@ impl RuntimeLauncher {
                     prefix: Some(prefix),
                     caps: host.for_runner(&entry),
                     dxvk,
+                    catalog: Some(catalog),
                 })
             }
         }
@@ -203,8 +238,8 @@ impl LaunchBackend for RuntimeLauncher {
             .await?;
         if let Some(prefix) = &prepared.prefix {
             prepared.dxvk = self
-                .ensure_dxvk(prefix, None, false, cancel, &progress)
-                .await;
+                .ensure_dxvk(prefix, prepared.catalog.as_ref(), false, cancel, &progress)
+                .await?;
         }
         Ok(prepared)
     }
@@ -216,6 +251,11 @@ impl LaunchBackend for RuntimeLauncher {
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<Option<PrefixHealth>, CoreError> {
+        // A prefix that was never created has no drift, and building one to say so would be a
+        // question about what is wrong creating the thing it asked about.
+        if !prefix_exists(prefix_dir) {
+            return Ok(None);
+        }
         let progress = relay_progress(events);
         let prepared = self
             .prepare_prefix(runner, prefix_dir, cancel, &progress)
@@ -249,8 +289,8 @@ impl LaunchBackend for RuntimeLauncher {
             .iter()
             .any(|issue| matches!(issue, apogee_runtime::HealthIssue::MissingDxvkDll { .. }))
         {
-            self.ensure_dxvk(&prefix, None, true, cancel, &progress)
-                .await;
+            self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), true, cancel, &progress)
+                .await?;
         }
         Ok(Some(
             self.runtime
@@ -267,18 +307,24 @@ impl LaunchBackend for RuntimeLauncher {
         events: &UnboundedSender<Event>,
     ) -> Result<(), CoreError> {
         let progress = relay_progress(events);
+        // Preparing an absent prefix already builds a fresh one, so tearing it down to build it
+        // again would be paying twice for the same result.
+        let existed = prefix_exists(prefix_dir);
         let prepared = self
             .prepare_prefix(runner, prefix_dir, cancel, &progress)
             .await?;
         let Some(prefix) = prepared.prefix else {
             return Ok(());
         };
-        let rebuilt = self
-            .runtime
-            .recreate_prefix(&prefix, cancel, &progress)
+        let prefix = if existed {
+            self.runtime
+                .recreate_prefix(&prefix, cancel, &progress)
+                .await?
+        } else {
+            prefix
+        };
+        self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), false, cancel, &progress)
             .await?;
-        self.ensure_dxvk(&rebuilt, None, false, cancel, &progress)
-            .await;
         Ok(())
     }
 

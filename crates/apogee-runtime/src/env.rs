@@ -72,6 +72,7 @@ pub enum GpuSelect {
 
 /// gamescope embedding options, composed as the outermost wrapper around the launch.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Gamescope {
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -522,6 +523,22 @@ mod tests {
                 "strace",
             ]
         );
+    }
+
+    /// The wrapper options are the one knob with no command to set them, so a hand-written partial
+    /// object is the realistic way one arrives. Every field defaulting means such an object loads
+    /// rather than making the whole profile unreadable, which is what a missing field would cost when
+    /// one bad profile fails the listing of every profile.
+    #[test]
+    fn a_partly_written_wrapper_configuration_still_loads() {
+        let partial: Gamescope =
+            serde_json::from_str(r#"{"width": 1280, "height": 800}"#).expect("partial loads");
+        assert_eq!(partial.width, Some(1280));
+        assert!(!partial.fullscreen);
+        assert!(partial.extra.is_empty());
+
+        let empty: Gamescope = serde_json::from_str("{}").expect("an empty object loads");
+        assert_eq!(empty, Gamescope::default());
     }
 
     /// A rich, fixed profile pinned as a golden so the full matrix cannot change silently.

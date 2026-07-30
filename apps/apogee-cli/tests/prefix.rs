@@ -98,6 +98,34 @@ fn the_cost_is_stated_before_the_question() -> std::io::Result<()> {
     Ok(())
 }
 
+/// A profile whose name is empty is still a profile, and a closed stdin is what a script hands this.
+/// The two together must not add up to a prefix being destroyed without an answer.
+#[test]
+fn an_empty_answer_never_confirms_even_for_an_empty_profile_name() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    run(
+        home.path(),
+        &[
+            "profile",
+            "add",
+            "--name",
+            "",
+            "--user",
+            "me@example.invalid",
+            "--game-path",
+            "/games/ffxiv",
+        ],
+    )?;
+
+    let out = run_with_input(home.path(), &["prefix", "recreate", "--profile", ""], "")?;
+    assert!(
+        stdout(&out).contains("not recreating"),
+        "an empty answer confirmed an empty name: {}",
+        stdout(&out)
+    );
+    Ok(())
+}
+
 /// A profile that is not there is refused before anything touches a prefix directory.
 #[test]
 fn a_profile_that_does_not_exist_is_refused() -> std::io::Result<()> {

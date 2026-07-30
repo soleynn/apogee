@@ -52,6 +52,9 @@ pub(crate) struct Prepared {
     /// `None` is a prefix with none, which sets no override rather than overriding to a DLL that is
     /// not there.
     pub(crate) dxvk: Option<apogee_runtime::DxvkEnv>,
+    /// The verified catalog this preparation already fetched, when it needed one. Carried so a
+    /// caller that also needs it does not download and re-verify the same signed file twice.
+    pub(crate) catalog: Option<apogee_runtime::Catalog>,
 }
 
 /// Prepares a runner/prefix and launches the supervised game.
@@ -282,6 +285,7 @@ pub(crate) mod fake {
                 prefix: None,
                 caps: self.caps,
                 dxvk: self.dxvk.clone(),
+                catalog: None,
             })
         }
 
