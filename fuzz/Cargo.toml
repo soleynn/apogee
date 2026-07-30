@@ -79,6 +79,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sqpack_inspect"
+path = "fuzz_targets/sqpack_inspect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "zipatch_chunk"
 path = "fuzz_targets/zipatch_chunk.rs"
 test = false
