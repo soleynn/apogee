@@ -205,7 +205,9 @@ pub fn inspect_dat_entries<S: DatSource>(
     let mut covered_to = DATA_REGION_OFFSET;
     // The slot reaching furthest so far, as `(offset, key, slot_len)`. Not the one just visited: a
     // single overgrown slot can span several entries, and the entries it swallowed are the right length
-    // themselves.
+    // themselves. Its own end is also what an overlap is measured against: `covered_to` is where the
+    // accounting has reached, which starts at the region and is clipped to it, so it answers for space
+    // rather than for any one slot.
     let mut furthest: Option<(u64, u64, u64)> = None;
     for location in named {
         let offset = location.offset;
@@ -239,7 +241,7 @@ pub fn inspect_dat_entries<S: DatSource>(
         // Reported against the slot that reaches too far rather than the one it reaches into, which is
         // the entry a repair would have to re-place.
         if let Some((over_offset, over_key, over_len)) = furthest
-            && offset < covered_to
+            && offset < over_offset.saturating_add(over_len)
         {
             sink.push_keyed(
                 over_offset,
@@ -1134,6 +1136,41 @@ mod tests {
         assert_eq!(finding.defect, Defect::SlotBeforeDataRegion);
         assert_eq!(finding.site.offset, Some(in_the_header));
         assert_eq!(finding.site.key, Some(0xF00D));
+    }
+
+    #[test]
+    fn two_entries_inside_the_containers_header_do_not_overlap_each_other() {
+        // Neither slot reaches the data region, so neither reaches the other. Measuring an overlap
+        // against how far the accounting has got instead would call the second of any two locations
+        // below `0x800` an overlap of the first, and send a repair after the entry named in it.
+        let mut b = DatBuilder::new();
+        b.entry(EntrySpec::standard(vec![b"payload".to_vec()]));
+        let mut head = Vec::new();
+        for word in [DATA_UNIT, ContentType::Empty.word(), 0, 0, 0] {
+            head.extend_from_slice(&word.to_le_bytes());
+        }
+        let in_the_header = [0x600u64, 0x700];
+        for at in in_the_header {
+            b.header_pad(usize::try_from(at).unwrap(), &head);
+        }
+        let built = b.built();
+        let mut named = located(&built.placed);
+        for (i, at) in in_the_header.iter().enumerate() {
+            named.insert(
+                i,
+                Located {
+                    dat: 0,
+                    offset: *at,
+                    key: 0xF00D + i as u64,
+                },
+            );
+        }
+        let found = walk(&built.bytes, &named, &SweepOptions::default()).findings;
+        assert_eq!(found.len(), in_the_header.len(), "{found:#?}");
+        for (finding, at) in found.iter().zip(in_the_header) {
+            assert_eq!(finding.defect, Defect::SlotBeforeDataRegion);
+            assert_eq!(finding.site.offset, Some(at));
+        }
     }
 
     #[test]
