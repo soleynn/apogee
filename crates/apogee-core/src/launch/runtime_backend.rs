@@ -8,13 +8,13 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    GameSession, LaunchPlan, Prefix, Progress, RunnerKind, Runtime, RuntimeError, RuntimeEvent,
+    GameSession, HostCaps, LaunchPlan, Progress, RunnerKind, Runtime, RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{GameHandle, LaunchBackend};
+use super::{GameHandle, LaunchBackend, Prepared};
 use crate::command::{Event, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
@@ -42,11 +42,13 @@ impl RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         progress: &Progress,
-    ) -> Result<Prefix, CoreError> {
+    ) -> Result<Prepared, CoreError> {
+        // The host's own capabilities, before the runner narrows them.
+        let host = HostCaps::detect();
         match runner {
             RunnerSelection::SystemWine => {
                 let dir = synthesize_system_wine(&self.runners_dir)?;
-                Ok(self
+                let prefix = self
                     .runtime
                     .prepare_custom(
                         &dir,
@@ -56,7 +58,18 @@ impl RuntimeLauncher {
                         cancel,
                         progress,
                     )
-                    .await?)
+                    .await?;
+                // The host's own wine is not a catalog row, so nothing declares what it supports.
+                // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
+                // setting no variable, so believing in it wrongly leaves the prefix with no
+                // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
+                Ok(Prepared {
+                    prefix: Some(prefix),
+                    caps: HostCaps {
+                        ntsync: false,
+                        ..host
+                    },
+                })
             }
             RunnerSelection::Managed { name, version } => {
                 let (manifest, signature) = catalog_urls()?;
@@ -78,10 +91,14 @@ impl RuntimeLauncher {
                 {
                     self.runtime.ensure_tool(tool, cancel, progress).await?;
                 }
-                Ok(self
+                let prefix = self
                     .runtime
                     .prepare(&entry, prefix_dir, cancel, progress)
-                    .await?)
+                    .await?;
+                Ok(Prepared {
+                    prefix: Some(prefix),
+                    caps: host.for_runner(&entry),
+                })
             }
         }
     }
@@ -95,12 +112,10 @@ impl LaunchBackend for RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<Prefix>, CoreError> {
+    ) -> Result<Prepared, CoreError> {
         let progress = relay_progress(events);
-        Ok(Some(
-            self.prepare_prefix(runner, prefix_dir, cancel, &progress)
-                .await?,
-        ))
+        self.prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await
     }
 
     async fn launch(

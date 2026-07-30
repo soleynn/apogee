@@ -628,6 +628,73 @@ async fn launch_carries_the_profile_env_and_wrappers() {
     assert_eq!(plan.wrappers(), ["gamescope".to_string()]);
 }
 
+/// The synchronization primitive is resolved from what the runner that built the prefix can actually
+/// do, not from the kernel alone. A host with the kernel support but a runner build without it must
+/// fall back rather than select ntsync, because selecting ntsync sets no variable at all: the launch
+/// would run with neither esync nor fsync while every report said otherwise.
+#[tokio::test]
+async fn a_runner_without_ntsync_launches_with_a_fallback_rather_than_with_nothing() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().reporting(apogee_runtime::HostCaps {
+            ntsync: false,
+            fsync: true,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("WINEFSYNC").map(String::as_str), Some("1"));
+}
+
+/// The other side of the same resolution: where the runner does support it, the launch carries no
+/// synchronization variable, because that is how ntsync is selected.
+#[tokio::test]
+async fn a_runner_with_ntsync_launches_carrying_no_sync_variable() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().reporting(apogee_runtime::HostCaps {
+            ntsync: true,
+            fsync: true,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("WINEFSYNC"));
+    assert!(!plan.env().contains_key("WINEESYNC"));
+}
+
+/// A profile's own variable still wins over the one the host resolution computed for it.
+#[tokio::test]
+async fn a_profile_variable_outranks_the_computed_one() {
+    let h = harness_customized(false, |p| {
+        p.launch.extra_env = vec![("WINEFSYNC".to_string(), "0".to_string())];
+    });
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().reporting(apogee_runtime::HostCaps {
+            ntsync: false,
+            fsync: true,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("WINEFSYNC").map(String::as_str), Some("0"));
+}
+
 #[tokio::test]
 async fn close_after_launch_detaches_without_supervising() {
     let h = harness(false);

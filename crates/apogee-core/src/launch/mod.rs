@@ -33,21 +33,34 @@ pub(crate) trait GameHandle: Send + Sync {
     async fn kill(&self) -> Result<(), CoreError>;
 }
 
+/// A prefix that is ready to launch into, and what the host can do through the runner that built it.
+///
+/// The capabilities come back from here rather than being read by the flow, because one of them is
+/// only half a host fact: whether a launch can use ntsync depends on the kernel *and* on the runner
+/// build, and only this seam has ever seen the runner. A flow that detected capabilities itself could
+/// forget the second half, and forgetting it is silent in the worst direction (see
+/// [`apogee_runtime::HostCaps::for_runner`]).
+#[derive(Debug, Clone)]
+pub(crate) struct Prepared {
+    /// The initialized prefix. `None` means the backend has no real prefix to hand back, which only
+    /// the test double does. A caller that needs one treats that as nothing to do rather than as a
+    /// failure, so the flows around a prefix stay drivable without a wine.
+    pub(crate) prefix: Option<apogee_runtime::Prefix>,
+    /// What the host supports as seen through the runner that was just prepared.
+    pub(crate) caps: apogee_runtime::HostCaps,
+}
+
 /// Prepares a runner/prefix and launches the supervised game.
 #[async_trait::async_trait]
 pub(crate) trait LaunchBackend: Send + Sync {
     /// Install the runner if needed and initialize the prefix, without launching anything.
-    ///
-    /// `None` means the backend has no real prefix to hand back, which only the test double does. A
-    /// caller that needs one treats that as nothing to do rather than as a failure, so the flows around
-    /// a prefix stay drivable without a wine.
     async fn prepare(
         &self,
         runner: &RunnerSelection,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<apogee_runtime::Prefix>, CoreError>;
+    ) -> Result<Prepared, CoreError>;
 
     /// Spawn `plan` and supervise the game, relaying download/extract progress onto `events` as
     /// [`Event::Progress`]. Returns a handle to the running game.
@@ -71,7 +84,7 @@ pub(crate) mod fake {
     use tokio::sync::Notify;
 
     use super::{
-        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchPlan,
+        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchPlan, Prepared,
         RunnerSelection, UnboundedSender,
     };
 
@@ -87,6 +100,8 @@ pub(crate) mod fake {
         /// Whether `prepare` stops the way a runner does when the token fires mid-`wineboot`.
         cancel_prepare: bool,
         killed: Arc<AtomicBool>,
+        /// What `prepare` reports the host and runner resolve to.
+        caps: apogee_runtime::HostCaps,
     }
 
     impl FakeLaunchBackend {
@@ -117,7 +132,19 @@ pub(crate) mod fake {
                 auto_exit,
                 cancel_prepare: false,
                 killed: Arc::new(AtomicBool::new(false)),
+                // A host that can do nothing in particular, so a test that does not care about the
+                // environment gets the same answer on every machine.
+                caps: apogee_runtime::HostCaps {
+                    ntsync: false,
+                    fsync: false,
+                },
             }
+        }
+
+        /// Report `caps` from `prepare`, standing in for a host and a runner that resolve to them.
+        pub(crate) fn reporting(mut self, caps: apogee_runtime::HostCaps) -> Self {
+            self.caps = caps;
+            self
         }
 
         /// The prefix directories that were prepared, in order.
@@ -159,7 +186,7 @@ pub(crate) mod fake {
             prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
-        ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
+        ) -> Result<Prepared, CoreError> {
             self.prepared
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -173,7 +200,10 @@ pub(crate) mod fake {
             }
             // No prefix: a fake runner has no wine to initialize one with, and the flows that consume
             // one are written to treat its absence as nothing to do.
-            Ok(None)
+            Ok(Prepared {
+                prefix: None,
+                caps: self.caps,
+            })
         }
 
         async fn launch(
@@ -279,7 +309,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(prepared.is_none());
+        assert!(prepared.prefix.is_none());
     }
 
     #[tokio::test]
