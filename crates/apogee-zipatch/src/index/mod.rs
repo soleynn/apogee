@@ -10,6 +10,7 @@
 
 mod format;
 mod model;
+mod pristine;
 mod reconstruct;
 mod repair;
 mod sink;

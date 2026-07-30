@@ -66,6 +66,20 @@ pub struct BuiltArchive {
     pub index1: Vec<u8>,
     pub index2: Vec<u8>,
     pub dats: Vec<Built>,
+    /// Every path the archive names, with where its entry landed and what it should extract to. The
+    /// answer a reader is checked against, derived from the bytes that were laid down rather than
+    /// declared beside them. Entries nothing names are absent.
+    pub files: Vec<PlacedFile>,
+}
+
+/// One named file of a built archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedFile {
+    pub path: String,
+    pub dat: u8,
+    pub offset: u64,
+    /// What extracting the entry should produce.
+    pub content: Vec<u8>,
 }
 
 impl ArchiveFixture {
@@ -184,22 +198,24 @@ impl ArchiveFixture {
     /// The archive's files, and where everything in them landed.
     pub fn built(&self) -> BuiltArchive {
         let dats: Vec<Built> = self.dats.iter().map(DatBuilder::built).collect();
-        let mut placed: Vec<Named> = Vec::new();
+        let mut files: Vec<PlacedFile> = Vec::new();
         for (n, (built, paths)) in dats.iter().zip(&self.paths).enumerate() {
             for (path, at) in paths.iter().zip(&built.placed) {
                 // An entry no path names is one nothing points at, so no index row is written for it.
                 let Some(path) = path else { continue };
-                placed.push(Named {
+                files.push(PlacedFile {
                     path: path.clone(),
                     dat: n as u8,
                     offset: at.offset,
+                    content: at.content.clone(),
                 });
             }
         }
         BuiltArchive {
-            index1: self.index(IndexKind::Index1, &placed),
-            index2: self.index(IndexKind::Index2, &placed),
+            index1: self.index(IndexKind::Index1, &files),
+            index2: self.index(IndexKind::Index2, &files),
             dats,
+            files,
         }
     }
 
@@ -224,7 +240,7 @@ impl ArchiveFixture {
 
     /// One index form over the placed files: a group of one key becomes an entry, a group of several
     /// becomes a placeholder plus a record apiece, which is how a real container spells a collision.
-    fn index(&self, kind: IndexKind, placed: &[Named]) -> Vec<u8> {
+    fn index(&self, kind: IndexKind, placed: &[PlacedFile]) -> Vec<u8> {
         let mut b = IndexBuilder::new(kind);
         b.data_file_count(self.dats.len() as u32)
             .collision_path_tail(PATH_TAIL)
@@ -232,7 +248,7 @@ impl ArchiveFixture {
         if kind == IndexKind::Index1 {
             b.unclassified(UNCLASSIFIED_LEN);
         }
-        let mut groups: BTreeMap<u64, Vec<&Named>> = BTreeMap::new();
+        let mut groups: BTreeMap<u64, Vec<&PlacedFile>> = BTreeMap::new();
         for file in placed {
             groups
                 .entry(key_of(kind, &file.path))
@@ -254,13 +270,6 @@ impl ArchiveFixture {
         }
         b.bytes()
     }
-}
-
-/// One file of the archive once its entry has been laid down.
-struct Named {
-    path: String,
-    dat: u8,
-    offset: u64,
 }
 
 /// The key one index form holds `path` under.

@@ -4,5 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc a76f87701884fca27a6968c6277c202d5589287c0c54017dd155adeaf18fab57 # shrinks to seed = 0, dirty = {0}
-cc 282793328b7370a4fd3ad641bed5705ba99931f4d2f6d1a064223f1e2c7583dd # shrinks to seed = 7317259748180725779, dirty = {4, 1}
+cc c324f4505db46c90485d6eb713355c66b5f91ba9cb618e1712fd3ab1ad5bbbdd # shrinks to seed = 10671720687684683446, interrupt_at = [2523723, 416836, 573698, 510116]

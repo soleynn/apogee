@@ -45,6 +45,9 @@ trybuild.workspace = true
 # Self dev-dependency: enables `test-fixtures` for this crate's own integration tests without making
 # it a default feature, so `cargo test` sees `apogee_zipatch::fixtures` with no extra flags.
 apogee-zipatch = { path = ".", features = ["test-fixtures"] }
+# The agreement suite applies a patch and reads the result back as an archive. The archive bytes come
+# from the reader's own builders, so this file cannot drift from the layout it is checking.
+apogee-sqpack = { path = "../apogee-sqpack", features = ["test-fixtures"] }
 
 [lints]
 workspace = true

@@ -17,4 +17,4 @@
 pub use crate::dat::builder::{
     Built, DatBuilder, EntrySpec, ModelSpec, Packing, Placed, block_bytes,
 };
-pub use crate::integrity::fixture::{ArchiveFixture, BuiltArchive};
+pub use crate::integrity::fixture::{ArchiveFixture, BuiltArchive, PlacedFile};
