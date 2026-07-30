@@ -70,6 +70,23 @@ enum Commands {
         #[command(subcommand)]
         action: DalamudAction,
     },
+    /// Start a profile from the Steam interface, on a handheld or anywhere else without a desktop.
+    #[cfg(unix)]
+    Steam {
+        #[command(subcommand)]
+        action: SteamAction,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Subcommand)]
+enum SteamAction {
+    /// Say what this machine is and whether Steam has been told about any profile.
+    Status,
+    /// Offer a profile in Steam's compatibility-tool list. Steam has to be restarted to see it.
+    Register(TargetArgs),
+    /// Withdraw the offer. Nothing else in the Steam installation is touched.
+    Unregister,
 }
 
 #[derive(Subcommand)]
@@ -245,6 +262,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode, CliError> {
+    // Reading what the machine is, and withdrawing a registration, are answerable without the store.
+    // They have to be: the environment a game session hands a program is minimal, and these are the
+    // two commands worth running when a launch from that session has gone wrong.
+    #[cfg(unix)]
+    if let Commands::Steam { action } = &cli.command
+        && !matches!(action, SteamAction::Register(_))
+    {
+        return steam_without_store(action);
+    }
+
     let core = build_core()?;
     match cli.command {
         Commands::Profile { action } => {
@@ -320,7 +347,124 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             dalamud(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(unix)]
+        Commands::Steam { action } => steam_register(&core, action),
     }
+}
+
+/// The Steam commands that answer without opening the store: what this machine is, and withdrawing a
+/// registration.
+#[cfg(unix)]
+fn steam_without_store(action: &SteamAction) -> Result<ExitCode, CliError> {
+    let installs = apogee_core::steam_installs();
+    match action {
+        SteamAction::Status => {
+            let identity = apogee_core::HostIdentity::detect();
+            println!(
+                "machine: {}{}{}",
+                describe_machine(identity.deck),
+                if identity.steamos { ", SteamOS" } else { "" },
+                if identity.game_mode {
+                    ", in the Steam session"
+                } else {
+                    ""
+                },
+            );
+            if installs.is_empty() {
+                println!("steam: no installation found");
+                return Ok(ExitCode::SUCCESS);
+            }
+            for install in &installs {
+                let state = match apogee_core::installed_compat_tool(&install.path) {
+                    Some(dir) => format!("registered at {}", dir.display()),
+                    None if install.confined => {
+                        "not registered, and cannot be: this client is confined".to_owned()
+                    }
+                    None => "not registered".to_owned(),
+                };
+                println!("steam: {} -> {state}", install.path.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        SteamAction::Unregister => {
+            let install = first_steam_install(&installs)?;
+            if apogee_core::remove_compat_tool(&install.path)? {
+                println!("unregistered from {}", install.path.display());
+            } else {
+                println!("nothing registered at {}", install.path.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        // Naming the profile to register needs the store, so it is dispatched with the rest.
+        SteamAction::Register(_) => Ok(ExitCode::SUCCESS),
+    }
+}
+
+/// The machine, in the words a user would use for it rather than the name of a variant.
+///
+/// The model a future handheld reports is a model this build has no name for, and saying so beats
+/// printing an identifier out of the library or claiming it is one of the two that existed here.
+#[cfg(unix)]
+fn describe_machine(deck: Option<apogee_core::DeckModel>) -> &'static str {
+    match deck {
+        None => "not a Steam Deck",
+        Some(apogee_core::DeckModel::Lcd) => "Steam Deck (LCD)",
+        Some(apogee_core::DeckModel::Oled) => "Steam Deck (OLED)",
+        Some(_) => "Steam Deck (unrecognized model)",
+    }
+}
+
+/// Offering a profile in Steam's list, so it can be started from an interface with no desktop behind
+/// it.
+///
+/// The registration runs `launch`, which starts from a session already established: on a handheld
+/// there is nowhere to type a password, so signing in stays a thing done once from a desktop and the
+/// Steam entry only starts what is already logged in.
+#[cfg(unix)]
+fn steam_register(core: &Core, action: SteamAction) -> Result<ExitCode, CliError> {
+    let SteamAction::Register(args) = action else {
+        // The other two were answered before the store was opened.
+        return steam_without_store(&action);
+    };
+    let profile = resolve_profile(core, &args.profile)?;
+    let installs = apogee_core::steam_installs();
+    let install = first_steam_install(&installs)?;
+    if install.confined {
+        return Err(format!(
+            "the steam at {} runs confined, so it would not find this launcher where the \
+             registration points; install steam without a sandbox to register a profile with it",
+            install.path.display()
+        )
+        .into());
+    }
+    // The path this process was started from, so the registration keeps working after the shell that
+    // ran it is gone. Moving the binary means registering again.
+    let binary = std::env::current_exe()?;
+    let tool = apogee_core::CompatTool::new(
+        binary,
+        vec![
+            "launch".to_owned(),
+            "--profile".to_owned(),
+            profile.id.to_string(),
+        ],
+    )
+    .display_name(format!("Apogee ({})", profile.name));
+    let written = tool.install(&install.path)?;
+    println!("registered {} at {}", profile.name, written.dir.display());
+    println!("runs: {}", written.command);
+    println!("restart steam for it to appear in the compatibility tool list");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The Steam installation to act on: the first one found, since the search is ordered by how
+/// conventional a location is and a second one is the same client packaged differently.
+#[cfg(unix)]
+fn first_steam_install(
+    installs: &[apogee_core::SteamInstall],
+) -> Result<&apogee_core::SteamInstall, CliError> {
+    installs
+        .first()
+        .ok_or_else(|| "no steam installation found; run steam once first".into())
 }
 
 /// The Dalamud toggle, read from and written back to the profile that owns it.

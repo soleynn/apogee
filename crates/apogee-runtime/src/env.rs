@@ -104,8 +104,10 @@ pub struct EnvConfig {
 }
 
 /// What the host supports, injected so the matrix stays pure and testable. `ntsync` must already
-/// reflect the selected runner's support (the caller ANDs the runner in), since ntsync needs both a
-/// new-enough kernel and a runner build that uses it.
+/// reflect the selected runner's support, which [`HostCaps::for_runner`] is how a caller applies,
+/// since ntsync needs both a new-enough kernel and a runner build that uses it.
+// Deliberately exhaustive, unlike the enums around it: the whole point of the type is that a caller
+// can build one, so a test can compute an environment for a host it is not running on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostCaps {
     /// ntsync is usable: `/dev/ntsync` present, kernel new enough, and the runner supports it.
@@ -116,7 +118,8 @@ pub struct HostCaps {
 
 impl HostCaps {
     /// Detect the host's capabilities from `/dev` and the kernel version. `ntsync` here reflects only
-    /// the host; a caller launching an ntsync-incapable runner should clear it.
+    /// the host; pass the selected runner through [`for_runner`](Self::for_runner) before computing an
+    /// environment.
     #[must_use]
     pub fn detect() -> Self {
         let kernel = read_kernel_version();
@@ -124,6 +127,20 @@ impl HostCaps {
             ntsync: std::path::Path::new("/dev/ntsync").exists()
                 && kernel.is_some_and(|k| k >= (6, 14)),
             fsync: kernel.is_some_and(|k| k >= (5, 16)),
+        }
+    }
+
+    /// The same host as seen through `runner`: ntsync survives only if that build uses it.
+    ///
+    /// Without this the two halves of the requirement drift apart. A kernel that offers `/dev/ntsync`
+    /// is not enough on its own, and the failure is silent in the worst direction: ntsync is selected
+    /// by setting no variable, so a build that ignores it gets no esync or fsync toggle either and
+    /// runs on server-side synchronization while every report says ntsync.
+    #[must_use]
+    pub fn for_runner(self, runner: &crate::catalog::Runner) -> Self {
+        Self {
+            ntsync: self.ntsync && runner.uses_ntsync(),
+            ..self
         }
     }
 }
@@ -310,6 +327,53 @@ mod tests {
 
     fn caps(ntsync: bool, fsync: bool) -> HostCaps {
         HostCaps { ntsync, fsync }
+    }
+
+    /// A catalog row with only the field the sync fold reads set.
+    fn runner_with_ntsync(ntsync: Option<bool>) -> crate::catalog::Runner {
+        crate::catalog::Runner {
+            name: "test".to_owned(),
+            version: "1".to_owned(),
+            kind: crate::catalog::RunnerKind::Wine,
+            url: url::Url::parse("https://example.invalid/r.tar.xz").unwrap(),
+            sha256: [0u8; 32],
+            archive: crate::catalog::ArchiveLayout {
+                format: crate::catalog::ArchiveFormat::TarXz,
+                strip_prefix: None,
+            },
+            ntsync,
+        }
+    }
+
+    /// ntsync needs the kernel *and* the build. Selecting it emits no variable, so a build that does
+    /// not use it would otherwise launch with no accelerated synchronization at all while reporting
+    /// ntsync: the one failure here that looks like success.
+    #[test]
+    fn a_runner_that_does_not_use_ntsync_falls_back_rather_than_losing_sync() {
+        let host = caps(true, true);
+        let without = host.for_runner(&runner_with_ntsync(Some(false)));
+        assert!(!without.ntsync, "the build decides, not the kernel alone");
+        assert!(without.fsync, "the fold touches nothing else");
+
+        let out = compute_environment(&EnvConfig::default(), &without);
+        assert_eq!(out.sync, SyncStatus::Fsync);
+        assert_eq!(out.vars.get("WINEFSYNC").map(String::as_str), Some("1"));
+    }
+
+    /// A row that says nothing is read as no. The cost of being wrong that way is fsync instead of
+    /// ntsync; the cost of the other reading is a prefix with neither.
+    #[test]
+    fn an_unstated_ntsync_capability_is_read_as_no() {
+        let host = caps(true, true);
+        assert!(!host.for_runner(&runner_with_ntsync(None)).ntsync);
+        assert!(host.for_runner(&runner_with_ntsync(Some(true))).ntsync);
+    }
+
+    /// The fold cannot manufacture support the kernel does not have.
+    #[test]
+    fn a_declaring_runner_still_needs_the_kernel() {
+        let host = caps(false, true);
+        assert!(!host.for_runner(&runner_with_ntsync(Some(true))).ntsync);
     }
 
     #[test]

@@ -7,7 +7,17 @@
       "kind": "proton_umu",
       "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-1/GE-Proton11-1.tar.gz",
       "sha256": "ce6dd663ea01725a31805ed5c165723a253cdf0945a6642907330742ae2de5e4",
-      "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-1" }
+      "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-1" },
+      "ntsync": true
+    },
+    {
+      "name": "wine-xiv",
+      "version": "10.8.r0.a2ca9e4",
+      "kind": "wine",
+      "url": "https://github.com/goatcorp/wine-xiv-git/releases/download/10.8.r0.a2ca9e4/wine-xiv-staging-fsync-git-ubuntu-10.8.r0.a2ca9e4-nolsc.tar.xz",
+      "sha256": "ec52b3234d68f7357b2a93e4f6a2bf1c50dc85a641226d2abf6ad47cde117fac",
+      "archive": { "format": "tar.xz", "strip_prefix": "wine-xiv-staging-fsync-git-10.8.r0.a2ca9e4-nolsc" },
+      "ntsync": false
     }
   ],
   "tools": [
