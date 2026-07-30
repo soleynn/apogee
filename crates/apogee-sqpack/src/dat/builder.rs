@@ -10,9 +10,15 @@ use std::io::Write as _;
 use crate::bytes;
 use crate::codec::{BLOCK_HEADER_LEN, STORED_SENTINEL, padded_block_len};
 use crate::container::{COMMON_HEADER_LEN, SQPACK_MAGIC};
+use crate::integrity::{
+    HeaderId, SELF_HASH_AT, SELF_HASH_LEN, UNCLAIMED_DIGEST, self_hash_slot, sha1,
+};
 
 use super::model::{MODEL_LOD_COUNT, MODEL_TABLE_OFFSET};
-use super::{DATA_HEADER_LEN, DATA_HEADER_OFFSET, DATA_UNIT, ENTRY_HEADER_LEN};
+use super::{
+    DATA_HEADER_LEN, DATA_REGION_OFFSET, DATA_UNIT, EMPTY_BLOCK_HEADER_LEN, ENTRY_HEADER_LEN,
+    empty_block_header,
+};
 
 /// How a block's payload is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,18 +200,40 @@ fn pad_header(mut head: Vec<u8>) -> Vec<u8> {
     head
 }
 
-/// Builds a byte-faithful dat container: the common header, the data header, then entries laid out
-/// back to back from `0x800`.
-#[derive(Debug, Clone, Default)]
+/// One thing to lay into the data region, in the order it was asked for.
+#[derive(Debug, Clone)]
+enum Item {
+    /// An entry, with the slack its slot reserves past the data it stores.
+    Entry { spec: EntrySpec, slack_units: u32 },
+    /// Space no entry claims, as a chain of wiped regions of that many units each.
+    Gap(Vec<u32>),
+    /// Space no entry claims, verbatim, padded out to a whole unit.
+    RawGap(Vec<u8>),
+}
+
+/// Builds a byte-faithful dat container: the common header, the data header, then entries and the
+/// space between them laid out back to back from `0x800`.
+///
+/// Byte-faithful includes the four digests a real container carries, so what it builds is clean by
+/// default and every hash check has to be provoked deliberately. The two self hashes are written last
+/// and the data-region digest before them, so a poke inside a hashed run leaves a container whose
+/// hashes are still right about its own bytes.
+#[derive(Debug, Clone)]
 pub(crate) struct DatBuilder {
-    entries: Vec<EntrySpec>,
-    /// Extra slack to leave after each entry's data, in 128-byte units.
+    items: Vec<Item>,
+    /// Slack to leave in the slot of every entry pushed from here on, in 128-byte units.
     slack_units: u32,
     container_kind: Option<u32>,
     /// Write the first twenty-four bytes the way the spanned dat files with no magic carry them.
     no_magic: bool,
     max_file_size: u32,
     span_index: u32,
+    unclassified: u32,
+    reserved: [u32; 3],
+    declared_units: Option<u32>,
+    data_sha1: Option<[u8; 20]>,
+    self_hashes: [Option<[u8; 20]>; 2],
+    header_pokes: Vec<(usize, Vec<u8>)>,
 }
 
 /// Where an entry was written, and what it should extract to.
@@ -215,27 +243,62 @@ pub(crate) struct Placed {
     pub(crate) content: Vec<u8>,
 }
 
+/// A built container: its bytes, where its entries landed, and the extent of every run of its data
+/// region no entry's slot covers.
+#[derive(Debug, Clone)]
+pub(crate) struct Built {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) placed: Vec<Placed>,
+    pub(crate) gaps: Vec<(u64, u64)>,
+}
+
 impl DatBuilder {
     pub(crate) fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            items: Vec::new(),
             slack_units: 0,
             container_kind: None,
             no_magic: false,
             max_file_size: 2_000_000_000,
             span_index: 1,
+            unclassified: 16,
+            reserved: [0; 3],
+            declared_units: None,
+            data_sha1: None,
+            self_hashes: [None; 2],
+            header_pokes: Vec::new(),
         }
     }
 
     pub(crate) fn entry(&mut self, spec: EntrySpec) -> &mut Self {
-        self.entries.push(spec);
+        let slack_units = self.slack_units;
+        self.items.push(Item::Entry { spec, slack_units });
         self
     }
 
-    /// Leave `units` of unused space after every entry's data, the way an archive that shrank a file
-    /// in place leaves the rest of its slot reserved.
+    /// Leave `units` of unused space inside the slot of every entry pushed after this, the way an
+    /// archive that shrank a file in place leaves the rest of its slot reserved. Slack lives *inside*
+    /// a slot; the space between slots is [`DatBuilder::gap`].
     pub(crate) fn slack(&mut self, units: u32) -> &mut Self {
         self.slack_units = units;
+        self
+    }
+
+    /// Leave `units` of space no entry claims, stamped with the marker a patcher writes over a region
+    /// it wiped.
+    pub(crate) fn gap(&mut self, units: u32) -> &mut Self {
+        self.gap_chain(&[units])
+    }
+
+    /// The same, as several wiped regions back to back, which is what adjacent deletions leave.
+    pub(crate) fn gap_chain(&mut self, units: &[u32]) -> &mut Self {
+        self.items.push(Item::Gap(units.to_vec()));
+        self
+    }
+
+    /// Leave space no entry claims holding `bytes` verbatim, padded out to a whole unit.
+    pub(crate) fn raw_gap(&mut self, bytes: Vec<u8>) -> &mut Self {
+        self.items.push(Item::RawGap(bytes));
         self
     }
 
@@ -252,8 +315,114 @@ impl DatBuilder {
         self
     }
 
+    /// Declare a data-region length other than what was laid down.
+    pub(crate) fn declared_units(&mut self, units: u32) -> &mut Self {
+        self.declared_units = Some(units);
+        self
+    }
+
+    /// Declare `sha1` over the data region instead of the digest of its bytes.
+    pub(crate) fn data_sha1(&mut self, sha1: [u8; 20]) -> &mut Self {
+        self.data_sha1 = Some(sha1);
+        self
+    }
+
+    /// Declare all zeros over the data region, which claims nothing about it. Two dat files of a full
+    /// install do this.
+    pub(crate) fn zero_data_sha1(&mut self) -> &mut Self {
+        self.data_sha1(UNCLAIMED_DIGEST)
+    }
+
+    /// Declare `sha1` for one header instead of the digest of its own leading bytes.
+    pub(crate) fn self_hash(&mut self, header: HeaderId, sha1: [u8; 20]) -> &mut Self {
+        self.self_hashes[self_hash_slot(header)] = Some(sha1);
+        self
+    }
+
+    /// Spell the data header's word at `0x08` as something other than the 16 every container spells.
+    pub(crate) fn unclassified(&mut self, word: u32) -> &mut Self {
+        self.unclassified = word;
+        self
+    }
+
+    /// Spell one of the data header's three reserved words as something other than zero.
+    pub(crate) fn reserved(&mut self, index: usize, word: u32) -> &mut Self {
+        self.reserved[index] = word;
+        self
+    }
+
+    /// Declare which of the archive's dat files this is. A full install spells `dat0` and `dat1` both
+    /// as 1 in places, so nothing may check it.
+    pub(crate) fn span_index(&mut self, index: u32) -> &mut Self {
+        self.span_index = index;
+        self
+    }
+
+    /// Declare the length at which the archive rolls over to the next dat file. Eighteen `dat0` files
+    /// of a full install are longer than their own value, so nothing may check it either.
+    pub(crate) fn max_file_size(&mut self, len: u32) -> &mut Self {
+        self.max_file_size = len;
+        self
+    }
+
+    /// Write `bytes` verbatim at absolute offset `at`, which must be inside the two headers. Applied
+    /// before the headers' own digests are computed, so a poke inside a hashed run leaves the
+    /// container's hashes correct and a poke past one does not.
+    pub(crate) fn header_pad(&mut self, at: usize, bytes: &[u8]) -> &mut Self {
+        self.header_pokes.push((at, bytes.to_vec()));
+        self
+    }
+
     /// The container's bytes, and where each entry landed with the content it holds.
     pub(crate) fn build(&self) -> (Vec<u8>, Vec<Placed>) {
+        let built = self.built();
+        (built.bytes, built.placed)
+    }
+
+    /// The container's bytes alone.
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        self.built().bytes
+    }
+
+    /// The container, its entries and the extent of every run between their slots.
+    pub(crate) fn built(&self) -> Built {
+        let mut region = Vec::new();
+        let mut placed = Vec::new();
+        let mut gaps = Vec::new();
+        for item in &self.items {
+            let at = DATA_REGION_OFFSET + region.len() as u64;
+            match item {
+                Item::Entry { spec, slack_units } => {
+                    let (bytes_out, content) = self.entry_bytes(spec, *slack_units);
+                    region.extend_from_slice(&bytes_out);
+                    placed.push(Placed {
+                        offset: at,
+                        content,
+                    });
+                }
+                Item::Gap(regions) => {
+                    let start = region.len();
+                    for units in regions {
+                        region.extend_from_slice(&empty_block_header(*units));
+                        region.resize(
+                            region.len() + *units as usize * DATA_UNIT as usize
+                                - EMPTY_BLOCK_HEADER_LEN,
+                            0,
+                        );
+                    }
+                    gaps.push((at, (region.len() - start) as u64));
+                }
+                Item::RawGap(raw) => {
+                    region.extend_from_slice(raw);
+                    region.resize(
+                        region.len().div_ceil(DATA_UNIT as usize) * DATA_UNIT as usize,
+                        0,
+                    );
+                    gaps.push((at, DATA_REGION_OFFSET + region.len() as u64 - at));
+                }
+            }
+        }
+
         let mut out = vec![0u8; COMMON_HEADER_LEN];
         if self.no_magic {
             for (at, word) in [(0x00, 128u32), (0x0C, 15), (0x14, 2)] {
@@ -267,33 +436,48 @@ impl DatBuilder {
         }
 
         let mut data = vec![0u8; DATA_HEADER_LEN as usize];
-        data[0x00..0x04].copy_from_slice(&bytes::write_u32_le(DATA_HEADER_LEN));
-        data[0x08..0x0C].copy_from_slice(&bytes::write_u32_le(16));
-        data[0x10..0x14].copy_from_slice(&bytes::write_u32_le(self.span_index));
-        data[0x18..0x1C].copy_from_slice(&bytes::write_u32_le(self.max_file_size));
+        let word = |data: &mut Vec<u8>, at: usize, value: u32| {
+            data[at..at + 4].copy_from_slice(&bytes::write_u32_le(value));
+        };
+        word(&mut data, 0x00, DATA_HEADER_LEN);
+        word(&mut data, 0x04, self.reserved[0]);
+        word(&mut data, 0x08, self.unclassified);
+        word(
+            &mut data,
+            0x0C,
+            self.declared_units.unwrap_or_else(|| units(region.len())),
+        );
+        word(&mut data, 0x10, self.span_index);
+        word(&mut data, 0x14, self.reserved[1]);
+        word(&mut data, 0x18, self.max_file_size);
+        word(&mut data, 0x1C, self.reserved[2]);
+        let digest = self.data_sha1.unwrap_or_else(|| sha1(&region));
+        data[0x20..0x20 + SELF_HASH_LEN].copy_from_slice(&digest);
 
-        let mut region = Vec::new();
-        let mut placed = Vec::new();
-        for spec in &self.entries {
-            let offset = DATA_HEADER_OFFSET + u64::from(DATA_HEADER_LEN) + region.len() as u64;
-            let (bytes_out, content) = self.entry_bytes(spec);
-            region.extend_from_slice(&bytes_out);
-            placed.push(Placed { offset, content });
-        }
-
-        data[0x0C..0x10].copy_from_slice(&bytes::write_u32_le(units(region.len())));
         out.extend_from_slice(&data);
         out.extend_from_slice(&region);
-        (out, placed)
-    }
+        for (at, poke) in &self.header_pokes {
+            out[*at..*at + poke.len()].copy_from_slice(poke);
+        }
 
-    /// The container's bytes alone.
-    pub(crate) fn bytes(&self) -> Vec<u8> {
-        self.build().0
+        // Each header's own digest covers everything before it, including a container with no magic
+        // (nineteen of a full install's dat files, whose digest covers the blob written over it).
+        for header in [HeaderId::Common, HeaderId::Second] {
+            let at = header.starts_at();
+            let digest = self.self_hashes[self_hash_slot(header)]
+                .unwrap_or_else(|| sha1(&out[at..at + SELF_HASH_AT]));
+            let field = at + SELF_HASH_AT;
+            out[field..field + SELF_HASH_LEN].copy_from_slice(&digest);
+        }
+        Built {
+            bytes: out,
+            placed,
+            gaps,
+        }
     }
 
     /// One entry: its header, its data region, and the content it extracts to.
-    fn entry_bytes(&self, spec: &EntrySpec) -> (Vec<u8>, Vec<u8>) {
+    fn entry_bytes(&self, spec: &EntrySpec, slack_units: u32) -> (Vec<u8>, Vec<u8>) {
         let (mut head, data, content) = match spec {
             EntrySpec::Empty {
                 raw_size,
@@ -323,7 +507,7 @@ impl DatBuilder {
                 let mut head = entry_head(
                     2,
                     content.len() as u32,
-                    units(data.len()) + self.slack_units,
+                    units(data.len()) + slack_units,
                     units(data.len()),
                 );
                 head.extend_from_slice(&bytes::write_u32_le(chunks.len() as u32));
@@ -360,7 +544,7 @@ impl DatBuilder {
                 let mut head = entry_head(
                     4,
                     declares.unwrap_or(content.len() as u32),
-                    units(data.len()) + self.slack_units,
+                    units(data.len()) + slack_units,
                     units(data.len()),
                 );
                 head.extend_from_slice(&bytes::write_u32_le(mips.len() as u32));
@@ -402,7 +586,7 @@ impl DatBuilder {
                 let mut head = entry_head(
                     3,
                     content.len() as u32,
-                    units(data.len()) + self.slack_units,
+                    units(data.len()) + slack_units,
                     units(data.len()),
                 );
                 head.extend_from_slice(&bytes::write_u32_le(*version));
@@ -431,7 +615,7 @@ impl DatBuilder {
         let header_size = head.len() as u32;
         head[0x00..0x04].copy_from_slice(&bytes::write_u32_le(header_size));
         let mut out = head;
-        let slot = data.len() + (self.slack_units as usize * DATA_UNIT as usize);
+        let slot = data.len() + (slack_units as usize * DATA_UNIT as usize);
         out.extend_from_slice(&data);
         out.resize(
             header_size as usize + slot.div_ceil(DATA_UNIT as usize) * DATA_UNIT as usize,

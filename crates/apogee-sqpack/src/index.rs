@@ -758,7 +758,7 @@ pub(crate) mod build {
     use super::*;
     use crate::bytes;
     use crate::container::{COMMON_HEADER_LEN, SQPACK_MAGIC};
-    use crate::integrity::{HeaderId, SELF_HASH_AT, SELF_HASH_LEN, sha1};
+    use crate::integrity::{HeaderId, SELF_HASH_AT, SELF_HASH_LEN, self_hash_slot, sha1};
 
     /// How the record that ends a collision table is spelled.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1165,7 +1165,7 @@ pub(crate) mod build {
             // Each header's own digest covers everything before it, so it is written last: a poke into
             // a hashed run then leaves a container whose hashes are still right about its bytes.
             for header in [HeaderId::Common, HeaderId::Second] {
-                let at = self_hash_base(header);
+                let at = header.starts_at();
                 let digest = self.self_hashes[self_hash_slot(header)].unwrap_or_else(|| {
                     if self.zero_self_hashes {
                         [0; 20]
@@ -1177,22 +1177,6 @@ pub(crate) mod build {
                 out[field..field + SELF_HASH_LEN].copy_from_slice(&digest);
             }
             out
-        }
-    }
-
-    /// Which slot of the builder's two digest overrides a header owns.
-    fn self_hash_slot(header: HeaderId) -> usize {
-        match header {
-            HeaderId::Common => 0,
-            _ => 1,
-        }
-    }
-
-    /// Where a header starts, and so what its own digest covers from.
-    fn self_hash_base(header: HeaderId) -> usize {
-        match header {
-            HeaderId::Common => 0,
-            _ => COMMON_HEADER_LEN,
         }
     }
 

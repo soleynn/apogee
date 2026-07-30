@@ -67,6 +67,27 @@ pub const DATA_HEADER_OFFSET: u64 = COMMON_HEADER_LEN as u64;
 /// The declared length of the data header, and so the offset of the first entry.
 pub const DATA_HEADER_LEN: u32 = 0x400;
 
+/// Where the data region starts, and so the lowest offset any entry can sit at.
+pub(crate) const DATA_REGION_OFFSET: u64 = DATA_HEADER_OFFSET + DATA_HEADER_LEN as u64;
+
+/// Where the data header declares its own length: the position [`parse_data_header`] reads it from.
+pub(crate) const DATA_HEADER_SIZE_AT: u64 = DATA_HEADER_OFFSET;
+
+/// Where the data header carries the word whose role is not settled and whose value never varies.
+pub(crate) const DATA_UNCLASSIFIED_AT: u64 = DATA_HEADER_OFFSET + 0x08;
+
+/// Where the data header declares the length of the region after it.
+pub(crate) const DATA_UNITS_AT: u64 = DATA_HEADER_OFFSET + 0x0C;
+
+/// The three words the data header reserves, in the order [`parse_data_header`] skips them. Zero in
+/// every dat file of an install, and addressed here because a check that names one has to say where
+/// it is.
+pub(crate) const DATA_RESERVED_AT: [u64; 3] = [
+    DATA_HEADER_OFFSET + 0x04,
+    DATA_HEADER_OFFSET + 0x14,
+    DATA_HEADER_OFFSET + 0x1C,
+];
+
 /// How much of an extraction to reserve up front. The rest grows as bytes arrive, so an entry that
 /// declares a size nothing backs cannot make a reservation out of it.
 const READ_RESERVE_HINT: u64 = 1 << 20;
@@ -214,6 +235,12 @@ impl<S: DatSource> Dat<S> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.source.is_empty()
+    }
+
+    /// The bytes behind the container, for the checks that read spans no entry frames: the two
+    /// headers, the data region as one run, and the space between slots.
+    pub(crate) fn source(&self) -> &S {
+        &self.source
     }
 
     /// The bounds this container reads under.

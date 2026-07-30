@@ -5,24 +5,30 @@
 //! because the same rule was measured to hold over every container of a full retail install, so a
 //! pristine install produces no findings at all and anything reported is a real difference.
 //!
-//! Two layers. The pure one takes a container's bytes and answers with a [`ContainerReport`]:
-//! [`inspect_index`] for an index container, nothing to open and nothing to schedule. The whole-tree
-//! sweep is assembled on top of it and returns one [`Report`].
+//! Two layers. The pure one answers with a [`ContainerReport`] over one container and schedules
+//! nothing: [`inspect_index`] takes an index container's bytes, and [`inspect_dat_headers`],
+//! [`inspect_data_region`] and [`inspect_dat_entries`] take a dat container's random-access bytes,
+//! which are far too many to hold. The whole-tree sweep is assembled on top of them and returns one
+//! [`Report`].
 //!
 //! Accounting is not a finding. Unclaimed space, slack inside slots and the hash fields a container
 //! declines to claim live in [`Totals`], because a pristine install carries plenty of all three.
 
+mod dat;
 mod finding;
 mod index;
 
 use sha1::{Digest, Sha1};
 
+pub use dat::{DatInspection, inspect_dat_entries, inspect_dat_headers, inspect_data_region};
+use finding::Sink;
 pub use finding::{
     ContainerId, ContainerRef, DEFECT_SLUGS, Defect, Finding, HeaderId, HeaderWord, ReadFault,
     Scope, Severity, Site,
 };
 pub use index::{IndexFacts, IndexInspection, Located, compare_index_forms, inspect_index};
 
+use crate::container::COMMON_HEADER_LEN;
 use crate::dat::DatLimits;
 use crate::index::IndexLimits;
 
@@ -36,6 +42,14 @@ pub(crate) const SELF_HASH_AT: usize = 0x3C0;
 
 /// The byte length of every hash field the format carries: all four are SHA-1.
 pub(crate) const SELF_HASH_LEN: usize = 20;
+
+/// A digest field of all zeros claims nothing, so it is skipped and counted rather than compared. Two
+/// dat files of a full install declare this over their data region, where a third declares the digest
+/// of nothing.
+pub(crate) const UNCLAIMED_DIGEST: [u8; SELF_HASH_LEN] = [0; SELF_HASH_LEN];
+
+/// The window a data-region hash reads through: 118 GiB in 1 MiB reads is 120k calls.
+const HASH_CHUNK_BYTES: usize = 1 << 20;
 
 /// The version both of a container's headers declare, in every container of an install.
 pub(crate) const FORMAT_VERSION: u32 = 1;
@@ -242,9 +256,91 @@ impl Totals {
     }
 }
 
+/// The digest each of a container's two headers declares over its own leading bytes.
+///
+/// The same field in the same place in an index and in a dat, including one of the dat files that
+/// carries no `SqPack` magic: its digest covers the blob written over the magic rather than the magic.
+/// A field of all zeros claims nothing, so it is counted instead of compared.
+pub(crate) fn check_self_hashes(bytes: &[u8], sink: &mut Sink, totals: &mut Totals) {
+    for header in [HeaderId::Common, HeaderId::Second] {
+        let at = header.starts_at();
+        let field = at + SELF_HASH_AT;
+        let Some(covered) = bytes.get(at..field) else {
+            continue;
+        };
+        let Some(declared) = digest_at(bytes, field) else {
+            continue;
+        };
+        if declared == UNCLAIMED_DIGEST {
+            totals.unclaimed_hash_fields += 1;
+            continue;
+        }
+        let computed = sha1(covered);
+        totals.bytes_hashed += covered.len() as u64;
+        if computed != declared {
+            sink.push_at(
+                field as u64,
+                Defect::HeaderHashMismatch {
+                    header,
+                    declared,
+                    computed,
+                },
+            );
+        }
+    }
+}
+
+/// The two 44-byte runs that follow each header's own digest field are the only bytes in a container
+/// that no hash covers, which is why they are checked directly and narrowly. Everything before them
+/// sits under a self hash, so a second rule over those bytes would buy nothing but a second way to be
+/// wrong.
+pub(crate) fn check_uncovered_runs(bytes: &[u8], sink: &mut Sink) {
+    for header in [HeaderId::Common, HeaderId::Second] {
+        let start = header.starts_at() + SELF_HASH_AT + SELF_HASH_LEN;
+        let end = header.starts_at() + COMMON_HEADER_LEN;
+        let Some(run) = bytes.get(start..end) else {
+            continue;
+        };
+        if let Some(i) = run.iter().position(|&b| b != 0) {
+            sink.push_at(
+                start as u64,
+                Defect::ZeroRegionDirty {
+                    len: (end - start) as u32,
+                    first_nonzero: (start + i) as u64,
+                },
+            );
+        }
+    }
+}
+
+/// The 20-byte digest at `at`, or `None` if the container is shorter than that.
+pub(crate) fn digest_at(bytes: &[u8], at: usize) -> Option<[u8; SELF_HASH_LEN]> {
+    bytes
+        .get(at..at.checked_add(SELF_HASH_LEN)?)
+        .and_then(|raw| <[u8; SELF_HASH_LEN]>::try_from(raw).ok())
+}
+
+/// A little-endian `u32` at `at`, or `None` if the bytes do not reach.
+pub(crate) fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    bytes
+        .get(at..at.checked_add(4)?)
+        .and_then(|raw| <[u8; 4]>::try_from(raw).ok())
+        .map(u32::from_le_bytes)
+}
+
 /// SHA-1 of `bytes`, the digest all four of the format's hash fields carry.
 pub(crate) fn sha1(bytes: &[u8]) -> [u8; 20] {
     Sha1::digest(bytes).into()
+}
+
+/// Which slot of a two-digest override array a header owns, for the container builders the tests
+/// drive: both of them can be told to declare something other than what their bytes hash to.
+#[cfg(test)]
+pub(crate) fn self_hash_slot(header: HeaderId) -> usize {
+    match header {
+        HeaderId::Common => 0,
+        HeaderId::Second => 1,
+    }
 }
 
 #[cfg(test)]

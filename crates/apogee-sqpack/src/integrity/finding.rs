@@ -13,6 +13,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::archive::ArchiveId;
+use crate::container::COMMON_HEADER_LEN;
 use crate::dat::DATA_UNIT;
 use crate::error::Error;
 use crate::game::Repo;
@@ -280,6 +281,15 @@ pub enum HeaderId {
 }
 
 impl HeaderId {
+    /// Where the header starts, and so what its own digest covers from. An index and a dat lay these
+    /// out alike: the common header at `0x000` and the form-specific one after it.
+    pub(crate) fn starts_at(self) -> usize {
+        match self {
+            HeaderId::Common => 0,
+            HeaderId::Second => COMMON_HEADER_LEN,
+        }
+    }
+
     /// How the header reads in a rendered line.
     fn label(self) -> &'static str {
         match self {

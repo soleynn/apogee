@@ -23,8 +23,8 @@ use crate::index::{
 };
 use crate::integrity::{
     COMMON_HEADER_SIZE_AT, COMMON_VERSION_AT, ContainerId, ContainerRef, ContainerReport, Defect,
-    FORMAT_VERSION, Finding, HeaderId, HeaderWord, SELF_HASH_AT, SELF_HASH_LEN, Site, SweepOptions,
-    Totals, sha1,
+    FORMAT_VERSION, Finding, HeaderWord, Site, SweepOptions, Totals, UNCLAIMED_DIGEST,
+    check_self_hashes, check_uncovered_runs, sha1, u32_at,
 };
 
 /// Where the first segment starts, and so where the segment table has to begin tiling.
@@ -38,9 +38,6 @@ const FOLDER_ROW_PAD_AT: usize = 12;
 
 /// The location word's collision flag: bit 0, and nothing else, on a real placeholder.
 const COLLISION_FLAG: u32 = 1;
-
-/// A digest field of all zeros claims nothing, so it is skipped and counted rather than compared.
-const UNCLAIMED_DIGEST: [u8; 20] = [0; 20];
 
 /// What the archive's directory says, so a container check judges what the container declares against
 /// it without touching a filesystem itself.
@@ -106,7 +103,8 @@ pub fn inspect_index(bytes: &[u8], facts: &IndexFacts<'_>, opts: &SweepOptions) 
     };
 
     check_header_words(&index, facts, &mut sink);
-    check_hashes(bytes, &index, &mut sink, &mut totals);
+    check_self_hashes(bytes, &mut sink, &mut totals);
+    check_segment_hashes(bytes, &index, &mut sink, &mut totals);
     check_uncovered_runs(bytes, &mut sink);
     check_segments(bytes, &index, &mut sink);
     let flagged = check_entries(bytes, &index, facts, &mut sink);
@@ -250,38 +248,9 @@ fn check_header_words(index: &Index, facts: &IndexFacts<'_>, sink: &mut Sink) {
     }
 }
 
-/// The six digests an index container declares: one per header over its own leading bytes, one per
-/// non-empty segment over that segment. A field of all zeros claims nothing and is counted instead.
-fn check_hashes(bytes: &[u8], index: &Index, sink: &mut Sink, totals: &mut Totals) {
-    for (header, at) in [
-        (HeaderId::Common, 0usize),
-        (HeaderId::Second, INDEX_HEADER_OFFSET as usize),
-    ] {
-        let field = at + SELF_HASH_AT;
-        let Some(covered) = bytes.get(at..field) else {
-            continue;
-        };
-        let Some(declared) = digest_at(bytes, field) else {
-            continue;
-        };
-        if declared == UNCLAIMED_DIGEST {
-            totals.unclaimed_hash_fields += 1;
-            continue;
-        }
-        let computed = sha1(covered);
-        totals.bytes_hashed += covered.len() as u64;
-        if computed != declared {
-            sink.push_at(
-                field as u64,
-                Defect::HeaderHashMismatch {
-                    header,
-                    declared,
-                    computed,
-                },
-            );
-        }
-    }
-
+/// The four digests an index container declares beyond its two headers': one per non-empty segment
+/// over that segment's bytes. A field of all zeros claims nothing and is counted instead.
+fn check_segment_hashes(bytes: &[u8], index: &Index, sink: &mut Sink, totals: &mut Totals) {
     for (n, descriptor) in index.header().segments.iter().enumerate() {
         let Some(body) = segment_bytes(bytes, descriptor) else {
             continue;
@@ -300,29 +269,6 @@ fn check_hashes(bytes: &[u8], index: &Index, sink: &mut Sink, totals: &mut Total
                     len: descriptor.size,
                     declared: descriptor.sha1,
                     computed,
-                },
-            );
-        }
-    }
-}
-
-/// The two 44-byte runs that follow each header's own digest field are the only bytes in a container
-/// that no hash covers, which is why they are checked directly and narrowly. Everything before them
-/// sits under a self hash, so a second rule over those bytes would buy nothing but a second way to be
-/// wrong.
-fn check_uncovered_runs(bytes: &[u8], sink: &mut Sink) {
-    for at in [0usize, INDEX_HEADER_OFFSET as usize] {
-        let start = at + SELF_HASH_AT + SELF_HASH_LEN;
-        let end = at + COMMON_HEADER_LEN;
-        let Some(run) = bytes.get(start..end) else {
-            continue;
-        };
-        if let Some(i) = run.iter().position(|&b| b != 0) {
-            sink.push_at(
-                start as u64,
-                Defect::ZeroRegionDirty {
-                    len: (end - start) as u32,
-                    first_nonzero: (start + i) as u64,
                 },
             );
         }
@@ -778,21 +724,6 @@ fn segment_bytes<'a>(bytes: &'a [u8], descriptor: &SegmentDescriptor) -> Option<
     bytes.get(start..start.checked_add(len)?)
 }
 
-/// The 20-byte digest at `at`, or `None` if the container is shorter than that.
-fn digest_at(bytes: &[u8], at: usize) -> Option<[u8; 20]> {
-    bytes
-        .get(at..at.checked_add(SELF_HASH_LEN)?)
-        .and_then(|raw| <[u8; 20]>::try_from(raw).ok())
-}
-
-/// A little-endian `u32` at `at`, or `None` if the bytes do not reach.
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    bytes
-        .get(at..at.checked_add(4)?)
-        .and_then(|raw| <[u8; 4]>::try_from(raw).ok())
-        .map(u32::from_le_bytes)
-}
-
 /// A little-endian `u64` at `at`, or `None` if the bytes do not reach.
 fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
     bytes
@@ -808,7 +739,9 @@ mod tests {
     use crate::game::Repo;
     use crate::index::build::{IndexBuilder, Terminator, packed};
     use crate::index::{FolderRow, SEGMENT_COUNT};
-    use crate::integrity::{ReadFault, Scope, Severity};
+    use crate::integrity::{
+        HeaderId, ReadFault, SELF_HASH_AT, SELF_HASH_LEN, Scope, Severity, digest_at,
+    };
     use proptest::prelude::*;
 
     /// Two paths in one folder whose file-name hashes are equal, so an `.index` keys them the same and
