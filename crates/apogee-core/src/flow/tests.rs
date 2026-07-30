@@ -673,6 +673,55 @@ async fn a_runner_with_ntsync_launches_carrying_no_sync_variable() {
     assert!(!plan.env().contains_key("WINEESYNC"));
 }
 
+/// A prefix that has graphics translation installed launches with the overrides that activate it,
+/// and with its shader cache pointed somewhere prefix-specific. Placing the files is one half; a
+/// launch that does not override the libraries to them loads the prefix's built-in ones instead.
+#[tokio::test]
+async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().with_dxvk(apogee_runtime::DxvkEnv {
+            state_cache: Some(std::path::PathBuf::from("/prefix/dxvk_cache")),
+            nvapi: false,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(
+        plan.env().get("WINEDLLOVERRIDES").map(String::as_str),
+        Some("d3d10core,d3d11,d3d9,dxgi=native")
+    );
+    assert_eq!(
+        plan.env().get("DXVK_STATE_CACHE_PATH").map(String::as_str),
+        Some("/prefix/dxvk_cache")
+    );
+}
+
+/// A prefix without it overrides nothing, rather than pointing the game at libraries that are not
+/// there.
+#[tokio::test]
+async fn a_prefix_without_graphics_translation_overrides_nothing() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert!(
+        !launch
+            .last_plan()
+            .unwrap()
+            .env()
+            .contains_key("WINEDLLOVERRIDES")
+    );
+}
+
 /// A profile's own variable still wins over the one the host resolution computed for it.
 #[tokio::test]
 async fn a_profile_variable_outranks_the_computed_one() {

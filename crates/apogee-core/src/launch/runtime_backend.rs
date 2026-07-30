@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    GameSession, HostCaps, LaunchPlan, Progress, RunnerKind, Runtime, RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, Progress, RunnerKind, Runtime,
+    RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +33,82 @@ impl RuntimeLauncher {
         Self {
             runtime,
             runners_dir,
+        }
+    }
+
+    /// Bring the prefix's graphics translation up to what the catalog publishes, and describe what it
+    /// ended up with.
+    ///
+    /// Never fails a launch. Translation is an improvement to a launch rather than a precondition for
+    /// one, so a catalog that cannot be reached, or an install that goes wrong, leaves the game to
+    /// start on whatever the prefix already had. `catalog` is the one already fetched to resolve a
+    /// managed runner; `None` means fetch it, which is why an unreachable one has to be survivable.
+    ///
+    /// Installing is gated on what the prefix records, because the install itself is not idempotent:
+    /// it re-downloads and re-copies every time it runs, and a launch is not the place for that.
+    async fn ensure_dxvk(
+        &self,
+        prefix: &Prefix,
+        catalog: Option<&Catalog>,
+        cancel: &CancellationToken,
+        progress: &Progress,
+    ) -> Option<DxvkEnv> {
+        let fetched;
+        let catalog = match catalog {
+            Some(catalog) => catalog,
+            None => {
+                let (manifest, signature) = catalog_urls().ok()?;
+                match self
+                    .runtime
+                    .fetch_catalog(&manifest, &signature, cancel)
+                    .await
+                {
+                    Ok(catalog) => {
+                        fetched = catalog;
+                        &fetched
+                    }
+                    Err(error) => {
+                        tracing::info!(%error, "no catalog reached; leaving the prefix as it is");
+                        return self.recorded_dxvk(prefix);
+                    }
+                }
+            }
+        };
+        let entry = catalog.default_dxvk()?;
+
+        let installed = prefix
+            .metadata()
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.dxvk)
+            .is_some_and(|dxvk| dxvk.version == entry.version);
+        if !installed {
+            // Companion translation stays off until something asks for it: it is only useful on one
+            // vendor's hardware, and nothing here knows which is present.
+            if let Err(error) = self
+                .runtime
+                .install_dxvk(entry, prefix, false, cancel, progress)
+                .await
+            {
+                tracing::warn!(%error, "graphics translation was not installed");
+                return self.recorded_dxvk(prefix);
+            }
+        }
+        Some(self.dxvk_env(prefix, false))
+    }
+
+    /// What the prefix already records, for the paths that could not install anything.
+    fn recorded_dxvk(&self, prefix: &Prefix) -> Option<DxvkEnv> {
+        let recorded = prefix.metadata().ok().flatten()?.dxvk?;
+        Some(self.dxvk_env(prefix, recorded.nvapi))
+    }
+
+    /// The environment that activates a prefix's translation, with its shader cache kept beside the
+    /// prefix it belongs to rather than in a location shared between prefixes.
+    fn dxvk_env(&self, prefix: &Prefix, nvapi: bool) -> DxvkEnv {
+        DxvkEnv {
+            state_cache: Some(prefix.path().join("dxvk_cache")),
+            nvapi,
         }
     }
 
@@ -63,12 +140,14 @@ impl RuntimeLauncher {
                 // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
                 // setting no variable, so believing in it wrongly leaves the prefix with no
                 // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
+                let dxvk = self.ensure_dxvk(&prefix, None, cancel, progress).await;
                 Ok(Prepared {
                     prefix: Some(prefix),
                     caps: HostCaps {
                         ntsync: false,
                         ..host
                     },
+                    dxvk,
                 })
             }
             RunnerSelection::Managed { name, version } => {
@@ -95,9 +174,13 @@ impl RuntimeLauncher {
                     .runtime
                     .prepare(&entry, prefix_dir, cancel, progress)
                     .await?;
+                let dxvk = self
+                    .ensure_dxvk(&prefix, Some(&catalog), cancel, progress)
+                    .await;
                 Ok(Prepared {
                     prefix: Some(prefix),
                     caps: host.for_runner(&entry),
+                    dxvk,
                 })
             }
         }

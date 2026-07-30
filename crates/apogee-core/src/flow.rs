@@ -663,7 +663,8 @@ async fn launch_game(
         .prepare(&profile.runner, &prefix_dir, cancel, tx)
         .await?;
 
-    let environment = compute_environment(&launch_env(profile), &prepared.caps);
+    let environment =
+        compute_environment(&launch_env(profile, prepared.dxvk.clone()), &prepared.caps);
     let mut plan = LaunchPlan::new(
         game_dir.join("ffxiv_dx11.exe").to_string_lossy(),
         build_launch_args(session, language_id(&settings.language)),
@@ -806,10 +807,11 @@ fn launch_arguments(session: &UidCacheEntry, language: u8) -> ArgumentBuilder {
 /// merges last and innermost respectively, so a user's setting still outranks anything computed for
 /// them. Note that the addon layer composes onto the plan *after* this, so what it contributes
 /// outranks both: setup a launch cannot run without is not a preference.
-fn launch_env(profile: &Profile) -> EnvConfig {
+fn launch_env(profile: &Profile, dxvk: Option<apogee_runtime::DxvkEnv>) -> EnvConfig {
     EnvConfig {
         env: profile.launch.extra_env.iter().cloned().collect(),
         wrappers: profile.launch.wrappers.clone(),
+        dxvk,
         ..EnvConfig::default()
     }
 }

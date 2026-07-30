@@ -48,6 +48,10 @@ pub(crate) struct Prepared {
     pub(crate) prefix: Option<apogee_runtime::Prefix>,
     /// What the host supports as seen through the runner that was just prepared.
     pub(crate) caps: apogee_runtime::HostCaps,
+    /// The graphics translation the prefix now has, ready for the launch environment to activate.
+    /// `None` is a prefix with none, which sets no override rather than overriding to a DLL that is
+    /// not there.
+    pub(crate) dxvk: Option<apogee_runtime::DxvkEnv>,
 }
 
 /// Prepares a runner/prefix and launches the supervised game.
@@ -102,6 +106,8 @@ pub(crate) mod fake {
         killed: Arc<AtomicBool>,
         /// What `prepare` reports the host and runner resolve to.
         caps: apogee_runtime::HostCaps,
+        /// What `prepare` reports the prefix's graphics translation to be.
+        dxvk: Option<apogee_runtime::DxvkEnv>,
     }
 
     impl FakeLaunchBackend {
@@ -138,12 +144,20 @@ pub(crate) mod fake {
                     ntsync: false,
                     fsync: false,
                 },
+                dxvk: None,
             }
         }
 
         /// Report `caps` from `prepare`, standing in for a host and a runner that resolve to them.
         pub(crate) fn reporting(mut self, caps: apogee_runtime::HostCaps) -> Self {
             self.caps = caps;
+            self
+        }
+
+        /// Report a prefix that has graphics translation installed, standing in for one a real
+        /// preparation brought up to the published build.
+        pub(crate) fn with_dxvk(mut self, dxvk: apogee_runtime::DxvkEnv) -> Self {
+            self.dxvk = Some(dxvk);
             self
         }
 
@@ -203,6 +217,7 @@ pub(crate) mod fake {
             Ok(Prepared {
                 prefix: None,
                 caps: self.caps,
+                dxvk: self.dxvk.clone(),
             })
         }
 
