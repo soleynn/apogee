@@ -329,6 +329,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("runner-1.0".to_owned()),
             },
+            ntsync: None,
         };
 
         let runner_dir = install_runner(
@@ -377,6 +378,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("r-2".to_owned()),
             },
+            ntsync: None,
         };
 
         install_runner(
@@ -433,6 +435,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("stopped-1".to_owned()),
             },
+            ntsync: None,
         };
 
         let cancel = CancellationToken::new();

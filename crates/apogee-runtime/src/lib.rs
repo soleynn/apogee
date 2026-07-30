@@ -13,6 +13,7 @@ mod bench;
 mod catalog;
 #[cfg(target_os = "linux")]
 mod companion;
+mod deck;
 #[cfg(target_os = "linux")]
 mod dosdevices;
 #[cfg(target_os = "linux")]
@@ -37,6 +38,8 @@ mod session;
 mod shim;
 #[cfg(target_os = "linux")]
 mod spawn;
+#[cfg(unix)]
+mod steam;
 #[cfg(target_os = "linux")]
 mod supervise;
 
@@ -52,6 +55,7 @@ pub use catalog::{
 };
 #[cfg(target_os = "linux")]
 pub use companion::{Companion, CompanionExit, CompanionSpec};
+pub use deck::{DeckModel, HostIdentity};
 #[cfg(target_os = "linux")]
 pub use dosdevices::DriveMap;
 pub use env::{
@@ -76,6 +80,11 @@ pub use progress::{Progress, RuntimeEvent};
 pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
+#[cfg(unix)]
+pub use steam::{
+    CompatTool, CompatToolInstall, SteamInstall, installed_compat_tool, remove_compat_tool,
+    steam_installs,
+};
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
 ///

@@ -152,6 +152,47 @@ fn extracts_each_format_stripping_the_prefix() {
     }
 }
 
+/// The loop above compresses with this workspace's own encoder, which is not what a runner is
+/// published with. The catalog's wine rows ship an archive written by the standard `xz` tool, whose
+/// streams carry a CRC64 integrity check where the in-process encoder writes CRC32, so the container
+/// the launcher actually downloads goes through a code path the round-trip never reaches. The fixture
+/// is a real one of those, holding the same three entries under the same prefix.
+#[test]
+fn a_stream_from_the_standard_xz_tool_extracts_like_any_other() {
+    let bytes = include_bytes!("fixtures/xz_utils_runner.tar.xz");
+    // Byte 7 of the header is the stream's check id; 4 is CRC64.
+    assert_eq!(bytes[7] & 0x0f, 4, "the fixture is a CRC64 stream");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let archive = tmp.path().join("runner.tar.xz");
+    std::fs::write(&archive, bytes).expect("write archive");
+    let dest = tmp.path().join("out");
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::TarXz,
+        strip_prefix: Some("runner-1.0".to_owned()),
+    };
+
+    let entries = extract_archive(&archive, &layout, &dest).expect("extract");
+    // One more than the built-in-process archives above yield for the same tree: a real `tar` writes
+    // an entry for `bin/` too, where the builder used here only appends the leaves.
+    assert_eq!(entries, 4, "a directory, two files and a symlink extracted");
+    assert!(dest.join("bin/wine").is_file());
+    assert_eq!(
+        std::fs::read(dest.join("share.txt")).expect("read note"),
+        b"note\n"
+    );
+    assert_ne!(
+        mode_bits(&dest.join("bin/wine")).expect("wine mode") & 0o111,
+        0,
+        "wine executable"
+    );
+    assert_eq!(
+        std::fs::read_link(dest.join("bin/wine64")).expect("readlink"),
+        Path::new("wine")
+    );
+    assert!(!dest.join("runner-1.0").exists(), "prefix stripped");
+}
+
 /// A zip laid out the way a Windows-built companion archive is: a wrapping top directory, one entry
 /// with no mode at all, one marked executable, and a nested path written with backslashes.
 fn build_component_zip(top: &str) -> io::Result<Vec<u8>> {
