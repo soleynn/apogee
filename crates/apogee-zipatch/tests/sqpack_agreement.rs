@@ -6,25 +6,24 @@
 //! entry layout, the index a lookup binary-searches, the offsets a location word packs, was only
 //! ever exercised by each crate against its own fixtures.
 //!
-//! Three things are asserted here, in the order they depend on each other:
+//! What is asserted here is the format half: every file the patch wrote resolves through a real
+//! index and decodes to the bytes that went in, both index forms agree on where each one is, and the
+//! structural sweep finds nothing wrong at any tier.
 //!
-//! 1. every file the patch wrote resolves through a real index and decodes to the bytes that went in;
-//! 2. the same chain's block index, verified against the tree it produced, lowers to a map that finds
-//!    the install entirely pristine;
-//! 3. the same map over a tree a mod tool has been at names exactly the file it moved.
+//! The other half, whether a block index and a verification of it can say which files somebody
+//! modified, needs a crate that holds both an index and an archive reader; it lives beside the layer
+//! that composes them, in `apogee-patcher`.
 //!
 //! The archive bytes come from `apogee-sqpack`'s own builders, through its `test-fixtures` feature,
 //! so the layout has one owner and this file cannot drift from the reader it is checking.
 
 use std::error::Error;
-use std::path::Path;
 
 use apogee_sqpack::fixtures::{ArchiveFixture, EntrySpec};
-use apogee_sqpack::integrity::{ContainerRef, SweepOptions};
-use apogee_sqpack::mods::{ModOptions, PristineMap, Standing};
+use apogee_sqpack::integrity::SweepOptions;
 use apogee_sqpack::{ArchiveId, GameData, IndexKind, MODEL_LOD_COUNT, Repo};
+use apogee_zipatch::fixtures;
 use apogee_zipatch::fixtures::{PatchBuilder, block_deflate, block_stored};
-use apogee_zipatch::{Index, VerifyOptions, VerifyReport, fixtures};
 
 type R<T> = Result<T, Box<dyn Error>>;
 
@@ -163,15 +162,6 @@ fn tree(patches: &[Vec<u8>]) -> R<(tempfile::TempDir, GameData)> {
     Ok((tmp, game))
 }
 
-/// The map a chain and a verification of the tree it produced lower to.
-fn map_from(index: &Index, root: &Path) -> R<(VerifyReport, PristineMap)> {
-    let report = index.verify(root, &VerifyOptions::default())?;
-    let mut builder = PristineMap::builder();
-    builder.accounts_for(Repo::Base);
-    index.describe_containers(&report, &mut builder);
-    Ok((report, builder.build()))
-}
-
 #[test]
 fn every_file_a_patch_writes_resolves_and_decodes_through_the_reader() -> R<()> {
     let fixtures = archives();
@@ -215,129 +205,5 @@ fn every_file_a_patch_writes_resolves_and_decodes_through_the_reader() -> R<()> 
     assert!(report.is_clean(), "{:#?}", report.findings);
     assert!(report.is_complete());
     drop(tmp);
-    Ok(())
-}
-
-#[test]
-fn the_chain_that_built_a_tree_finds_it_entirely_pristine() -> R<()> {
-    let fixtures = archives();
-    let patches = vec![patch_for(&fixtures)];
-    let (tmp, game) = tree(&patches)?;
-    let index = fixtures::build_from(&patches)?;
-
-    let (verify, map) = map_from(&index, tmp.path())?;
-    assert!(verify.is_clean(), "{verify:#?}");
-    // The map has to actually describe every container, or a pristine result would be green for the
-    // wrong reason: an empty map finds nothing wrong with anything.
-    let containers: usize = fixtures.iter().map(|f| 2 + f.built().dats.len()).sum();
-    assert_eq!(map.containers().len(), containers);
-    for (at, coverage) in map.containers() {
-        let on_disk = std::fs::metadata(tmp.path().join(at.relative_path()))?.len();
-        assert_eq!(coverage.pristine_len(), on_disk, "{at:?}");
-        assert!(coverage.dirty().is_empty(), "{at:?}");
-    }
-
-    let mods = game.detect_mods(&map, &ModOptions::default());
-    assert!(mods.is_pristine(), "{:#?}", mods.files);
-    assert!(mods.is_exhaustive());
-    assert_eq!(mods.would_be_replaced(), 0);
-    assert_eq!(mods.totals.pristine as usize, expected(&fixtures).len());
-    // Not one entry header was read to say so.
-    assert_eq!(mods.totals.entry_headers_read, 0);
-    Ok(())
-}
-
-#[test]
-fn a_tree_a_mod_tool_has_been_at_names_the_file_it_moved() -> R<()> {
-    let fixtures = archives();
-    let patches = vec![patch_for(&fixtures)];
-    let (tmp, game) = tree(&patches)?;
-    let index = fixtures::build_from(&patches)?;
-    let (_, map) = map_from(&index, tmp.path())?;
-
-    // Append the modded bytes past where the chain left the container and repoint the row at them,
-    // which is what every mod tool does, then write the result over the tree.
-    let mut modded = archives();
-    modded[1].retarget(
-        0,
-        "exd/item.exh",
-        EntrySpec::standard(vec![b"MODDED BY A TOOL ".repeat(600)]),
-    );
-    modded[1].write_to(&tmp.path().join("sqpack/ffxiv"))?;
-    let game = GameData::open(game.game_dir())?;
-
-    // The map is the one built from the untouched tree: a caller does not re-derive it after the
-    // damage, which is the whole point of it being a record of what the chain wrote.
-    let mods = game.detect_mods(&map, &ModOptions::default());
-    assert!(!mods.is_pristine());
-    assert!(mods.is_exhaustive());
-    assert_eq!(mods.would_be_replaced(), 1, "{:#?}", mods.files);
-    let file = mods.replaced().next().unwrap();
-    assert_eq!(file.standing, Standing::Foreign);
-    assert_eq!(file.key, apogee_sqpack::hash_path("exd/item.exh").key());
-
-    // The file it names is the one that moved, and the bytes it now delivers are the modded ones.
-    let bytes = game.read("exd/item.exh")?.unwrap();
-    assert!(bytes.starts_with(b"MODDED BY A TOOL "));
-    let found = game.lookup("exd/item.exh")?.unwrap();
-    assert_eq!(
-        ContainerRef::from_relative_path(
-            found
-                .dat_path
-                .strip_prefix(tmp.path())
-                .unwrap_or(Path::new(""))
-        ),
-        Some(file.container)
-    );
-
-    // Every other file still reads back exactly as the patch wrote it: a mod tool that appends
-    // leaves the rest of the archive alone, and a detector that said otherwise would be warning
-    // about files a repair has no reason to touch.
-    for (path, content) in expected(&fixtures) {
-        if path == "exd/item.exh" {
-            continue;
-        }
-        assert_eq!(game.read(&path)?.as_ref(), Some(&content), "{path}");
-    }
-
-    // What the block index says about the same tree, independently. The container grew, and *that*
-    // is the signal the verdict above rested on: the appended bytes are past everything the chain
-    // wrote, so no part covers them and none is reported broken over them.
-    let verify = index.verify(tmp.path(), &VerifyOptions::default())?;
-    assert!(!verify.is_clean());
-    assert_eq!(verify.size_mismatches.len(), 1);
-    let grew = &verify.size_mismatches[0];
-    assert!(grew.actual > grew.expected);
-    assert!(grew.path.ends_with("0a0000.win32.dat0"));
-    assert!(
-        verify
-            .broken
-            .iter()
-            .all(|part| part.target_off < grew.expected),
-        "nothing past the pristine end is reported as a broken range: {:#?}",
-        verify.broken
-    );
-
-    // And the same thing again through the flow a launcher actually runs: verify the tree in front
-    // of you, build the map from that, then ask what a repair would revert. The appended file is
-    // still found, and still from a length, because the length the map carries is the chain's.
-    let mut builder = PristineMap::builder();
-    builder.accounts_for(Repo::Base);
-    index.describe_containers(&verify, &mut builder);
-    let live = game.detect_mods(&builder.build(), &ModOptions::default());
-    assert!(live.replaced().any(|f| f.standing == Standing::Foreign
-        && f.key == apogee_sqpack::hash_path("exd/item.exh").key()));
-
-    // It is noisier, and the reason is worth pinning rather than hiding. Rewriting a container
-    // rewrites its header digests too, and every entry sharing a dirty run with them is reported
-    // alongside. Here that is the whole container, because these fixtures are one block each; over
-    // a real chain a write is 9 KB at the median against a mean entry of 61 KB, so the run that
-    // covers a header covers about one entry rather than an archive's worth.
-    for file in live.replaced() {
-        assert!(
-            file.container.repo == Repo::Base && file.container.archive.category == 0x0a,
-            "only the archive the tool touched is implicated: {file}"
-        );
-    }
     Ok(())
 }
