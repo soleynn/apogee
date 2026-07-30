@@ -865,10 +865,14 @@ async fn prefix(
 /// outranks both: setup a launch cannot run without is not a preference.
 fn launch_env(profile: &Profile, dxvk: Option<apogee_runtime::DxvkEnv>) -> EnvConfig {
     EnvConfig {
+        sync: profile.launch.sync,
+        hud: profile.launch.hud.clone(),
+        gpu: profile.launch.gpu.clone(),
+        gamescope: profile.launch.gamescope.clone(),
+        gamemode: profile.launch.gamemode,
         env: profile.launch.extra_env.iter().cloned().collect(),
         wrappers: profile.launch.wrappers.clone(),
         dxvk,
-        ..EnvConfig::default()
     }
 }
 

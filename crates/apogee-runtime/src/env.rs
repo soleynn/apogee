@@ -11,13 +11,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 /// The Direct3D DLL stems DXVK provides. The single source of truth shared with the DXVK install and
 /// health check ([`crate::dxvk`]), so the set overridden to native and the set verified on disk cannot
 /// drift apart.
 pub(crate) const DXVK_DLL_STEMS: [&str; 4] = ["d3d9", "d3d10core", "d3d11", "dxgi"];
 
 /// Which wine synchronization primitive the user wants. `Auto` resolves to the best the host supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyncChoice {
     /// Pick the best available: ntsync, else fsync, else esync.
     #[default]
@@ -40,7 +43,8 @@ pub enum SyncStatus {
 }
 
 /// The in-game overlay. Mutually exclusive by construction: never DXVK's HUD and MangoHud at once.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Hud {
     #[default]
     None,
@@ -52,7 +56,8 @@ pub enum Hud {
 
 /// Hybrid-GPU selection. The per-vendor variable sets are the ones observed on real hybrid laptops; a
 /// bump is a change to one arm, not the launch path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GpuSelect {
     /// The system default GPU; set nothing.
     #[default]
@@ -66,7 +71,7 @@ pub enum GpuSelect {
 }
 
 /// gamescope embedding options, composed as the outermost wrapper around the launch.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Gamescope {
     pub width: Option<u32>,
     pub height: Option<u32>,

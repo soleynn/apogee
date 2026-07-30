@@ -29,7 +29,10 @@ pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
 pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, Trigger};
 pub use apogee_otp::OtpSource;
 pub use apogee_patcher::PatchProgress;
-pub use apogee_runtime::{BenchError, BenchStats, FrameLog, HealthIssue, PrefixHealth};
+pub use apogee_runtime::{
+    BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
+    SyncChoice,
+};
 #[cfg(unix)]
 pub use apogee_runtime::{
     CompatTool, CompatToolInstall, DeckModel, HostIdentity, SteamInstall, installed_compat_tool,

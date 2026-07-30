@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
-    FrameLog, HealthIssue, OtpSource, PatchProgress, PrefixAction, PrefixHealth, Profile, Region,
-    RunIn, RunnerSelection, Secret, SetupEvent, Trigger, Uuid,
+    FrameLog, GpuSelect, HealthIssue, Hud, OtpSource, PatchProgress, PrefixAction, PrefixHealth,
+    Profile, Region, RunIn, RunnerSelection, Secret, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -70,6 +70,11 @@ enum Commands {
         #[command(subcommand)]
         action: DalamudAction,
     },
+    /// Read and change the launcher's own preferences.
+    Settings {
+        #[command(subcommand)]
+        action: SettingsCommand,
+    },
     /// Work on a profile's wine prefix without launching anything.
     Prefix {
         #[command(subcommand)]
@@ -81,6 +86,52 @@ enum Commands {
         #[command(subcommand)]
         action: SteamAction,
     },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommand {
+    /// Print the current preferences.
+    Show,
+    /// Change a preference. Only the ones named are touched.
+    Set(SettingsSetArgs),
+}
+
+#[derive(Args)]
+struct SettingsSetArgs {
+    /// Keep downloaded patches after they apply. Costs disk, and lets a later repair rebuild broken
+    /// ranges from them instead of downloading again.
+    #[arg(long)]
+    keep_patches: Option<bool>,
+    /// Capture the game's settings before applying patches.
+    #[arg(long)]
+    backup_before_patch: Option<bool>,
+    /// How many captures to keep per profile.
+    #[arg(long)]
+    backups_kept: Option<u32>,
+    /// Stop supervising once the game is up.
+    #[arg(long)]
+    close_after_launch: Option<bool>,
+}
+
+/// The graphics and synchronization knobs a profile launches with.
+#[derive(Args)]
+struct ProfileEnvArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Synchronization: `auto`, `ntsync`, `fsync`, `esync`, or `none`. `auto` resolves against the
+    /// host and the selected runner.
+    #[arg(long)]
+    sync: Option<String>,
+    /// Overlay: `none`, `mangohud`, or `dxvk:<spec>` (e.g. `dxvk:fps,frametimes`).
+    #[arg(long)]
+    hud: Option<String>,
+    /// GPU: `default`, `nvidia`, `mesa`, or `vulkan:<vendor>:<device>`.
+    #[arg(long)]
+    gpu: Option<String>,
+    /// Ask the system for its game performance profile.
+    #[arg(long)]
+    gamemode: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -237,6 +288,8 @@ enum ProfileAction {
     List,
     /// Remove a profile (and its account, if no other profile references it).
     Remove(TargetArgs),
+    /// Show or change how a profile's launches are tuned.
+    Env(ProfileEnvArgs),
 }
 
 #[derive(Args)]
@@ -375,9 +428,137 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             dalamud(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Settings { action } => {
+            settings(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Prefix { action } => prefix(&core, action).await,
         #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
+    }
+}
+
+/// The launcher's own preferences, read and written whole.
+fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
+    match action {
+        SettingsCommand::Show => {
+            let s = core.settings()?;
+            println!("language            {}", s.language);
+            println!("close_after_launch  {}", s.close_after_launch);
+            println!("keep_patches        {}", s.keep_patches);
+            println!("backups_kept        {}", s.backups_kept);
+            println!("backup_before_patch {}", s.backup_before_patch);
+            Ok(())
+        }
+        SettingsCommand::Set(args) => {
+            let mut s = core.settings()?;
+            if let Some(v) = args.keep_patches {
+                s.keep_patches = v;
+            }
+            if let Some(v) = args.backup_before_patch {
+                s.backup_before_patch = v;
+            }
+            if let Some(v) = args.backups_kept {
+                s.backups_kept = v;
+            }
+            if let Some(v) = args.close_after_launch {
+                s.close_after_launch = v;
+            }
+            core.save_settings(&s)?;
+            println!("saved");
+            Ok(())
+        }
+    }
+}
+
+/// Show or change how a profile's launches are tuned. With no knob named it prints what is set;
+/// anything left unset resolves against the host and the runner at launch time rather than here.
+fn profile_env(core: &Core, args: ProfileEnvArgs) -> Result<(), CliError> {
+    let mut profile = resolve_profile(core, &args.profile)?;
+    let changing =
+        args.sync.is_some() || args.hud.is_some() || args.gpu.is_some() || args.gamemode.is_some();
+
+    if let Some(spec) = &args.sync {
+        profile.launch.sync = parse_sync(spec)?;
+    }
+    if let Some(spec) = &args.hud {
+        profile.launch.hud = parse_hud(spec)?;
+    }
+    if let Some(spec) = &args.gpu {
+        profile.launch.gpu = parse_gpu(spec)?;
+    }
+    if let Some(v) = args.gamemode {
+        profile.launch.gamemode = v;
+    }
+    if changing {
+        core.save_profile(&profile)?;
+    }
+
+    println!("sync      {}", render_sync(profile.launch.sync));
+    println!("hud       {}", render_hud(&profile.launch.hud));
+    println!("gpu       {}", render_gpu(&profile.launch.gpu));
+    println!("gamemode  {}", profile.launch.gamemode);
+    Ok(())
+}
+
+fn parse_sync(spec: &str) -> Result<SyncChoice, CliError> {
+    Ok(match spec {
+        "auto" => SyncChoice::Auto,
+        "ntsync" => SyncChoice::Ntsync,
+        "fsync" => SyncChoice::Fsync,
+        "esync" => SyncChoice::Esync,
+        "none" => SyncChoice::None,
+        other => return Err(format!("unknown sync {other:?}").into()),
+    })
+}
+
+fn render_sync(sync: SyncChoice) -> &'static str {
+    match sync {
+        SyncChoice::Auto => "auto",
+        SyncChoice::Ntsync => "ntsync",
+        SyncChoice::Fsync => "fsync",
+        SyncChoice::Esync => "esync",
+        SyncChoice::None => "none",
+    }
+}
+
+fn parse_hud(spec: &str) -> Result<Hud, CliError> {
+    Ok(match spec {
+        "none" => Hud::None,
+        "mangohud" => Hud::Mango,
+        other => match other.strip_prefix("dxvk:") {
+            Some(inner) if !inner.is_empty() => Hud::Dxvk(inner.to_owned()),
+            _ => return Err(format!("unknown hud {other:?}").into()),
+        },
+    })
+}
+
+fn render_hud(hud: &Hud) -> String {
+    match hud {
+        Hud::None => "none".to_owned(),
+        Hud::Mango => "mangohud".to_owned(),
+        Hud::Dxvk(spec) => format!("dxvk:{spec}"),
+    }
+}
+
+fn parse_gpu(spec: &str) -> Result<GpuSelect, CliError> {
+    Ok(match spec {
+        "default" => GpuSelect::Default,
+        "nvidia" => GpuSelect::NvidiaPrime,
+        "mesa" => GpuSelect::MesaPrime,
+        other => match other.strip_prefix("vulkan:") {
+            Some(inner) if !inner.is_empty() => GpuSelect::VulkanDevice(inner.to_owned()),
+            _ => return Err(format!("unknown gpu {other:?}").into()),
+        },
+    })
+}
+
+fn render_gpu(gpu: &GpuSelect) -> String {
+    match gpu {
+        GpuSelect::Default => "default".to_owned(),
+        GpuSelect::NvidiaPrime => "nvidia".to_owned(),
+        GpuSelect::MesaPrime => "mesa".to_owned(),
+        GpuSelect::VulkanDevice(sel) => format!("vulkan:{sel}"),
     }
 }
 
@@ -790,6 +971,7 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
             println!("removed profile {}", profile.id);
             Ok(())
         }
+        ProfileAction::Env(args) => profile_env(core, args),
     }
 }
 

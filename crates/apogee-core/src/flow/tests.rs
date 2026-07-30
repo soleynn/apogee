@@ -880,6 +880,52 @@ async fn a_prefix_without_graphics_translation_overrides_nothing() {
     );
 }
 
+/// The knobs a profile persists reach the launch, so what a user set is what the game runs with.
+#[tokio::test]
+async fn the_profile_knobs_reach_the_launch() {
+    let h = harness_customized(false, |p| {
+        p.launch.hud = apogee_runtime::Hud::Mango;
+        p.launch.gpu = apogee_runtime::GpuSelect::NvidiaPrime;
+        p.launch.gamemode = true;
+        p.launch.gamescope = Some(apogee_runtime::Gamescope {
+            width: Some(1280),
+            height: Some(800),
+            fullscreen: true,
+            ..apogee_runtime::Gamescope::default()
+        });
+    });
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("MANGOHUD").map(String::as_str), Some("1"));
+    assert_eq!(
+        plan.env()
+            .get("__NV_PRIME_RENDER_OFFLOAD")
+            .map(String::as_str),
+        Some("1")
+    );
+    // The nested compositor wraps the whole invocation, and its arguments end at the separator, so
+    // the ordering is what makes the game the thing being wrapped rather than one of its arguments.
+    assert_eq!(
+        plan.wrappers(),
+        [
+            "gamescope",
+            "-W",
+            "1280",
+            "-H",
+            "800",
+            "-f",
+            "--",
+            "gamemoderun"
+        ]
+    );
+}
+
 /// A profile's own variable still wins over the one the host resolution computed for it.
 #[tokio::test]
 async fn a_profile_variable_outranks_the_computed_one() {

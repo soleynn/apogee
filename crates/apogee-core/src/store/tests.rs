@@ -319,6 +319,7 @@ fn a_directory_left_readable_by_an_earlier_build_is_narrowed() {
 #[rstest]
 #[case(1)]
 #[case(2)]
+#[case(3)]
 fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) {
     let (dir, store) = store();
     let id = uuid::Uuid::new_v4();
@@ -335,12 +336,23 @@ fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) 
             "components": [{ "id": "ACT", "enabled": true }],
             "launch": launch,
         }),
-        _ => serde_json::json!({
+        2 => serde_json::json!({
             "id": id, "name": "Main", "account": account, "game_path": "/games/ffxiv",
             "runner": "SystemWine", "prefix": { "name": "" },
             "components": [{ "id": "ACT", "enabled": true }],
             "external": [],
             "launch": launch,
+        }),
+        // By this version the component set was gone and the toggle beside the launch settings had
+        // arrived, but none of the graphics or synchronization knobs existed yet.
+        _ => serde_json::json!({
+            "id": id, "name": "Main", "account": account, "game_path": "/games/ffxiv",
+            "runner": "SystemWine", "prefix": { "name": "" },
+            "external": [],
+            "launch": serde_json::json!({
+                "region": "Global", "extra_args": [], "extra_env": [], "wrappers": [],
+                "dalamud": false
+            }),
         }),
     };
     let envelope = serde_json::json!({ "schema_version": version, "data": data });
@@ -354,6 +366,13 @@ fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) 
     // The toggle a profile did not have yet arrives off. Defaulting it on would load third-party code
     // into the client of every profile that predates the setting.
     assert!(!loaded.launch.dalamud);
+    // The knobs a profile never chose arrive unset, so the launch resolves them against the host and
+    // the runner rather than against a value written on the profile's behalf.
+    assert_eq!(loaded.launch.sync, apogee_runtime::SyncChoice::Auto);
+    assert_eq!(loaded.launch.hud, apogee_runtime::Hud::None);
+    assert_eq!(loaded.launch.gpu, apogee_runtime::GpuSelect::Default);
+    assert!(loaded.launch.gamescope.is_none());
+    assert!(!loaded.launch.gamemode);
 
     // A re-save rewrites the envelope at the current schema version, without the set it shed.
     store.save_profile(&loaded).unwrap();
