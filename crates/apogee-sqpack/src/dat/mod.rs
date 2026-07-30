@@ -37,7 +37,7 @@ mod entry;
 mod model;
 mod source;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) mod builder;
 
 use std::io::Write;

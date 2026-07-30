@@ -50,7 +50,7 @@ const PATH_TAIL: &[u8] = b"chara/monster/m0001/obj/body/b0001/model/was_longer.m
 const UNCLASSIFIED_LEN: usize = 32;
 
 /// Builds one archive: an `.index`, an `.index2` and as many data files as it was asked for.
-pub(crate) struct ArchiveFixture {
+pub struct ArchiveFixture {
     repo: Repo,
     id: ArchiveId,
     dats: Vec<DatBuilder>,
@@ -60,15 +60,15 @@ pub(crate) struct ArchiveFixture {
 
 /// A built archive: the bytes of each of its files, and where each data file's entries and unclaimed
 /// runs landed.
-pub(crate) struct BuiltArchive {
-    pub(crate) index1: Vec<u8>,
-    pub(crate) index2: Vec<u8>,
-    pub(crate) dats: Vec<Built>,
+pub struct BuiltArchive {
+    pub index1: Vec<u8>,
+    pub index2: Vec<u8>,
+    pub dats: Vec<Built>,
 }
 
 impl ArchiveFixture {
     /// An empty archive of `dats` data files.
-    pub(crate) fn new(repo: Repo, id: ArchiveId, dats: usize) -> Self {
+    pub fn new(repo: Repo, id: ArchiveId, dats: usize) -> Self {
         Self {
             repo,
             id,
@@ -83,7 +83,7 @@ impl ArchiveFixture {
     /// occupying nothing under a large allocation, slack inside a slot, a `span_index` that is not the
     /// dat number, a `max_file_size` the file exceeds, two data files, a single wiped region and a chain
     /// of three, and a collision in each index form.
-    pub(crate) fn clean(repo: Repo, id: ArchiveId) -> Self {
+    pub fn clean(repo: Repo, id: ArchiveId) -> Self {
         let mut f = Self::new(repo, id, 2);
         f.dat(1).span_index(1).max_file_size(2_000);
         f.file(
@@ -133,36 +133,36 @@ impl ArchiveFixture {
     }
 
     /// Lay `spec` into data file `dat` and name it `path` in both index forms.
-    pub(crate) fn file(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
+    pub fn file(&mut self, dat: usize, path: &str, spec: EntrySpec) -> &mut Self {
         self.dats[dat].entry(spec);
         self.paths[dat].push(path.to_owned());
         self
     }
 
     /// Leave `units` of space no entry claims in data file `dat`.
-    pub(crate) fn gap(&mut self, dat: usize, units: u32) -> &mut Self {
+    pub fn gap(&mut self, dat: usize, units: u32) -> &mut Self {
         self.dats[dat].gap(units);
         self
     }
 
     /// The same as a chain of wiped regions, which is what adjacent deletions leave.
-    pub(crate) fn gap_chain(&mut self, dat: usize, units: &[u32]) -> &mut Self {
+    pub fn gap_chain(&mut self, dat: usize, units: &[u32]) -> &mut Self {
         self.dats[dat].gap_chain(units);
         self
     }
 
     /// One data file's builder, for the knobs that container's own checks need.
-    pub(crate) fn dat(&mut self, dat: usize) -> &mut DatBuilder {
+    pub fn dat(&mut self, dat: usize) -> &mut DatBuilder {
         &mut self.dats[dat]
     }
 
     /// Which repository and archive this is.
-    pub(crate) fn id(&self) -> (Repo, ArchiveId) {
+    pub fn id(&self) -> (Repo, ArchiveId) {
         (self.repo, self.id)
     }
 
     /// The archive's files, and where everything in them landed.
-    pub(crate) fn built(&self) -> BuiltArchive {
+    pub fn built(&self) -> BuiltArchive {
         let dats: Vec<Built> = self.dats.iter().map(DatBuilder::built).collect();
         let mut placed: Vec<Named> = Vec::new();
         for (n, (built, paths)) in dats.iter().zip(&self.paths).enumerate() {
@@ -185,7 +185,7 @@ impl ArchiveFixture {
     ///
     /// # Errors
     /// Whatever the filesystem raises.
-    pub(crate) fn write_to(&self, dir: &Path) -> std::io::Result<()> {
+    pub fn write_to(&self, dir: &Path) -> std::io::Result<()> {
         let built = self.built();
         std::fs::create_dir_all(dir)?;
         for (kind, bytes) in [

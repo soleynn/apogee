@@ -19,8 +19,8 @@ mod finding;
 mod index;
 mod sweep;
 
-#[cfg(test)]
-mod fixture;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub(crate) mod fixture;
 
 use sha1::{Digest, Sha1};
 
@@ -340,7 +340,7 @@ pub(crate) fn sha1(bytes: &[u8]) -> [u8; 20] {
 
 /// Which slot of a two-digest override array a header owns, for the container builders the tests
 /// drive: both of them can be told to declare something other than what their bytes hash to.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 pub(crate) fn self_hash_slot(header: HeaderId) -> usize {
     match header {
         HeaderId::Common => 0,
