@@ -191,6 +191,10 @@ pub enum ReadFault {
     LimitExceeded,
     /// The container was locked by a running game.
     Busy,
+    /// The container is there and this process may not read it.
+    Permission,
+    /// The container was gone by the time the read reached it.
+    Missing,
     /// The read itself failed.
     Io,
     /// Anything else the reader refused.
@@ -209,6 +213,8 @@ impl ReadFault {
             ReadFault::BlockCorrupt => "block corrupt",
             ReadFault::LimitExceeded => "over a caller limit",
             ReadFault::Busy => "archive busy",
+            ReadFault::Permission => "permission denied",
+            ReadFault::Missing => "not on disk",
             ReadFault::Io => "io error",
             ReadFault::Other => "unreadable",
         }
@@ -227,8 +233,20 @@ pub(crate) fn read_fault(error: &Error) -> (ReadFault, &'static str, Option<u64>
         Error::EntryOutOfBounds { offset, .. } => (ReadFault::EntryCorrupt, "", Some(offset)),
         Error::LimitExceeded => (ReadFault::LimitExceeded, "", None),
         Error::Busy => (ReadFault::Busy, "", None),
-        Error::Io(_) => (ReadFault::Io, "", None),
+        Error::Io(ref error) => (io_fault(error.kind()), "", None),
         _ => (ReadFault::Other, "", None),
+    }
+}
+
+/// Which fault an io failure folds to. The kind is all of a `std::io::Error` a `Copy` defect can carry,
+/// and it is the difference between a container whose permissions or ownership are wrong, one that went
+/// away mid-sweep, and a device that answered with an error: three faults with three different things to
+/// do about them. `ErrorKind` is `#[non_exhaustive]`, so everything else stays [`ReadFault::Io`].
+fn io_fault(kind: std::io::ErrorKind) -> ReadFault {
+    match kind {
+        std::io::ErrorKind::PermissionDenied => ReadFault::Permission,
+        std::io::ErrorKind::NotFound => ReadFault::Missing,
+        _ => ReadFault::Io,
     }
 }
 
@@ -1230,6 +1248,43 @@ mod tests {
                 "{slug}"
             );
             assert!(seen.insert(*slug), "duplicate slug {slug}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_container_says_what_kind_of_read_failure_it_was() {
+        // A container this process may not read, one that went away between the directory walk and the
+        // read, and a device that answered with an error are three things to do three different things
+        // about, and one line reading "io error" for all three leaves nothing to act on.
+        let container =
+            ContainerRef::new(Repo::Base, ArchiveId::new(0x0a, 0, 0), ContainerId::Dat(0));
+        let cases = [
+            (std::io::ErrorKind::PermissionDenied, "permission denied"),
+            (std::io::ErrorKind::NotFound, "not on disk"),
+            (std::io::ErrorKind::Other, "io error"),
+        ];
+        let mut faults = std::collections::BTreeSet::new();
+        for (kind, label) in cases {
+            let (fault, detail, offset) = read_fault(&Error::Io(std::io::Error::from(kind)));
+            assert_eq!(detail, "");
+            assert_eq!(offset, None);
+            assert!(
+                faults.insert(fault),
+                "{kind:?} folds to a fault already seen"
+            );
+            let rendered = Finding {
+                site: Site {
+                    container,
+                    offset: None,
+                    key: None,
+                },
+                defect: Defect::ContainerUnreadable { fault, detail },
+            }
+            .to_string();
+            assert_eq!(
+                rendered,
+                format!("sqpack/ffxiv/0a0000.win32.dat0: the container will not parse: {label}")
+            );
         }
     }
 
