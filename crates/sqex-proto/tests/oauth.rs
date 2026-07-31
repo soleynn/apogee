@@ -10,6 +10,7 @@
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use http::HeaderValue;
+use sqex_crypto::{CryptoError, ObfuscatedTicket, ServerTime};
 use sqex_proto::{
     ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext, ProtoError,
     ProtoResponse, Step, begin_login,
@@ -58,6 +59,27 @@ fn success_body(session_id: &str) -> String {
 fn top_response(stored: &str) -> ProtoResponse {
     ProtoResponse::new(200, top_page(stored).into_bytes())
         .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE))
+}
+
+/// The SE account the fixture Steam pages report the ticket is linked to.
+const LINKED_ID: &str = "linked-account";
+
+/// A Steam top page: the standard one plus the hidden input naming the linked account.
+fn steam_top_response(stored: &str, linked: &str) -> ProtoResponse {
+    let body = format!(
+        r#"<html><body><form><input class="item-input" name="sqexid" id="sqexid" type="text" value="">
+        <input name="sqexid" type="hidden" value="{linked}"/>
+        <input type="hidden" name="_STORED_" value="{stored}"></form></body></html>"#
+    );
+    ProtoResponse::new(200, body.into_bytes())
+        .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE))
+}
+
+/// A ticket long enough to carry both characters the query must not escape: 204 raw bytes expand to a
+/// 416-byte block, which base64 pads (a `*`) and overruns the 300-character chunk (a `,`).
+fn long_ticket() -> Result<ObfuscatedTicket, CryptoError> {
+    let raw: Vec<u8> = (0..204u32).map(|i| (i % 251) as u8).collect();
+    ObfuscatedTicket::from_auth_ticket(&raw, ServerTime(1_700_000_000))
 }
 
 #[test]
@@ -125,6 +147,167 @@ fn a_standard_login_builds_both_fingerprinted_requests() {
         ]
         .join("\n")
     );
+}
+
+#[test]
+fn a_steam_login_carries_the_ticket_unescaped_and_submits_the_linked_id() {
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let (text, size) = (ticket.text().to_owned(), ticket.length());
+    let transport = FixtureTransport::new([
+        steam_top_response("STOREDBLOB", LINKED_ID),
+        ProtoResponse::new(200, success_body("SESSIONXYZ").into_bytes()),
+    ]);
+
+    block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Steam {
+                ticket,
+                free_trial: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(flow.steam_linked_id(), Some(LINKED_ID));
+        // Cased differently from the page's id: SE ids are case-insensitive, so this is the same
+        // account and must be accepted.
+        flow.submit(Credentials {
+            sqexid: "LINKED-ACCOUNT",
+            password: "hunter2",
+            otp: None,
+        })
+        .await
+        .unwrap()
+    });
+
+    let recorded = transport.recorded();
+    let request = canonical_request(&recorded[0]);
+    let query = format!("&issteam=1&session_ticket={text}&ticket_size={size}");
+    assert!(
+        request.starts_with(&format!("GET {TOP_URL}{query}\n")),
+        "top request: {request}"
+    );
+    // The two characters form encoding would have escaped. Asserted on the ticket first, so a ticket
+    // that stopped containing them cannot make the escaping check vacuous.
+    assert!(text.contains(','), "ticket carried no separator: {text}");
+    assert!(text.contains('*'), "ticket carried no padding: {text}");
+    assert!(!request.contains("%2C") && !request.contains("%2A"));
+    // The reported size is the encoded length before chunking, so it is short of the text by exactly
+    // the separators. A caller that passed the text's length instead would be off by one here.
+    assert_eq!(size, text.len() - text.matches(',').count());
+
+    // The page's own id is submitted, not the caller's spelling of it.
+    let body = String::from_utf8(recorded[1].body.as_ref().unwrap().as_bytes().to_vec()).unwrap();
+    assert_eq!(
+        body,
+        format!("_STORED_=STOREDBLOB&sqexid={LINKED_ID}&password=hunter2&otppw=")
+    );
+}
+
+#[test]
+fn a_steam_free_trial_sets_isft_beside_the_ticket() {
+    let id = computer_id();
+    let transport = FixtureTransport::once(steam_top_response("S", LINKED_ID));
+
+    block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket: long_ticket().unwrap(),
+            free_trial: true,
+        },
+    ))
+    .unwrap();
+
+    let request = canonical_request(&transport.recorded()[0]);
+    assert!(request.contains("&isft=1&"), "top request: {request}");
+    assert!(request.contains("&issteam=1&"), "top request: {request}");
+}
+
+#[test]
+fn a_steam_login_against_another_account_is_refused_before_the_submit() {
+    let id = computer_id();
+    let transport = FixtureTransport::once(steam_top_response("STOREDBLOB", LINKED_ID));
+
+    let err = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Steam {
+                ticket: long_ticket().unwrap(),
+                free_trial: false,
+            },
+        )
+        .await
+        .unwrap();
+        flow.submit(Credentials {
+            sqexid: "someone-else",
+            password: "hunter2",
+            otp: None,
+        })
+        .await
+        .unwrap_err()
+    });
+
+    let ProtoError::SteamWrongAccount { expected_hint } = err else {
+        panic!("expected SteamWrongAccount, got {err:?}");
+    };
+    assert_eq!(expected_hint, "l***t");
+    // One request only: the credentials were never sent to a page whose account the caller did not
+    // name. The fixture transport holds a single response and would panic on a second request.
+    assert_eq!(transport.recorded().len(), 1);
+}
+
+#[test]
+fn a_restartup_on_a_steam_login_is_the_relink_signal() {
+    let id = computer_id();
+    let transport = FixtureTransport::once(ProtoResponse::new(
+        200,
+        br#"<script>window.external.user("restartup");</script>"#.to_vec(),
+    ));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket: long_ticket().unwrap(),
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+    assert!(matches!(err, ProtoError::SteamLinkNeeded));
+}
+
+#[test]
+fn a_steam_top_page_without_a_linked_id_is_an_invalid_response() {
+    let id = computer_id();
+    // The standard page: `_STORED_` is there to be scraped, but no account is named. Answering it
+    // would leave nothing to check the submitted username against.
+    let transport = FixtureTransport::once(top_response("STOREDBLOB"));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket: long_ticket().unwrap(),
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::OauthTop,
+            ..
+        }
+    ));
 }
 
 #[test]
