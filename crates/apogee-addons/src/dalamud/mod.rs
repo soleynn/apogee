@@ -38,11 +38,6 @@ use wire::{AssetMeta, HashManifest, VersionInfo};
 /// The name this companion is recorded and reported under.
 pub const DALAMUD: &str = "Dalamud";
 
-/// The runner Dalamud's injector is known to work behind. Its name is matched loosely because the
-/// catalog publishes variants (staging, and a version suffix), and the point is to say what the runner
-/// costs rather than to gate on it.
-const STEERED_RUNNER: &str = "wine-xiv";
-
 /// An empty JSON object, base64-encoded: the troubleshooting pack Dalamud's crash reporting expects to
 /// exist. There is nothing this launcher wants to put in it, and the flag is not optional upstream, so
 /// it carries the smallest well-formed value there is.
@@ -258,23 +253,16 @@ impl Dalamud {
     ///
     /// The tier note is not said here. It is said for every injectable by the loop that installs them,
     /// so a second one gets the warning by existing rather than by remembering to announce itself.
-    fn announce(&self, prefix: &Prefix, events: &SetupEvents) {
+    ///
+    /// Nothing is said about the runner either. A compiled-in caveat used to name one runner as the
+    /// supported bet; measurement against the real client found it loads behind the host's own wine,
+    /// wine-xiv and Proton alike, so the claim was wrong and it was the manifest's to make in the
+    /// first place. What a runner costs is published data, correctable by an edit and a re-sign.
+    fn announce(&self, events: &SetupEvents) {
         for caveat in &self.caveats {
             events.emit(SetupEvent::Caveat {
                 what: DALAMUD.to_owned(),
                 note: caveat.clone(),
-            });
-        }
-        // Steering rather than gating. The injector's process handoff was written against a patched
-        // wine, so another runner is a worse bet and the user should hear which one they are on; it is
-        // still their prefix, and refusing to install would take the choice away over a maybe.
-        let runner = prefix.runner().name();
-        if !runner.contains(STEERED_RUNNER) {
-            events.emit(SetupEvent::Caveat {
-                what: DALAMUD.to_owned(),
-                note: format!(
-                    "this prefix runs under {runner}; Dalamud is best supported on a {STEERED_RUNNER} runner"
-                ),
             });
         }
     }
@@ -651,11 +639,14 @@ impl Injectable for Dalamud {
 
     async fn ensure(
         &self,
-        prefix: &Prefix,
+        // Unused since the runner stopped being something this injectable has an opinion about. The
+        // seam still offers it, because another injectable may need to look at the prefix it is about
+        // to install into.
+        _prefix: &Prefix,
         cancel: &CancellationToken,
         events: &SetupEvents,
     ) -> Result<()> {
-        self.announce(prefix, events);
+        self.announce(events);
         self.install(events, cancel).await
     }
 

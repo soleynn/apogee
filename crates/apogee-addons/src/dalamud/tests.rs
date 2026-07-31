@@ -208,25 +208,24 @@ fn nothing_installed_leaves_the_launch_alone() {
     assert!(plan.inserted_args().is_empty());
 }
 
-/// The row's caveats are stated every time, and the runner in front of it is named when it is not the
-/// one the injector was written against. Steering, not gating: it is still the user's prefix.
+/// The row's caveats are stated every time, before anything is fetched.
+///
+/// Nothing is said about the runner. A compiled-in caveat used to name one runner as the supported
+/// bet; measured against the real client it loads behind the host's own wine, wine-xiv and Proton
+/// alike, so the claim was false and what a runner costs is the published row's to say.
 ///
 /// The tier note is not among them and must not be: it is said for every injectable by the loop that
 /// installs them, and said twice it reads as two different warnings.
 #[test]
-fn the_caveats_and_the_runner_are_both_stated_before_anything_is_fetched() {
+fn the_caveats_are_stated_before_anything_is_fetched() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (dalamud, prefix) = dalamud(tmp.path(), "system-wine");
+    let (dalamud, _prefix) = dalamud(tmp.path(), "system-wine");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    dalamud.announce(&prefix, &SetupEvents::new(tx));
+    dalamud.announce(&SetupEvents::new(tx));
 
     let events = drain(&mut rx);
     let notes = notes(&events);
-    assert!(
-        notes.iter().any(|note| note.contains("system-wine")),
-        "the runner it is about to run under has to be named: {notes:?}"
-    );
     assert!(
         notes.iter().any(|note| note.contains("Third-party code")),
         "the row's own caveats have to be said: {notes:?}"
@@ -239,21 +238,24 @@ fn the_caveats_and_the_runner_are_both_stated_before_anything_is_fetched() {
     );
 }
 
-/// A prefix already on the steered runner has nothing to be warned about, so it is not.
+/// No runner draws a warning any more, whichever one it is, because the launcher no longer holds an
+/// opinion about which runner this works behind. The row does.
 #[test]
-fn the_steered_runner_draws_no_runner_warning() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging-10.8");
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+fn no_runner_draws_a_warning_of_its_own() {
+    for runner in ["system-wine", "wine-xiv-staging-10.8", "GE-Proton"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (dalamud, _prefix) = dalamud(tmp.path(), runner);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    dalamud.announce(&prefix, &SetupEvents::new(tx));
+        dalamud.announce(&SetupEvents::new(tx));
 
-    assert!(
-        !notes(&drain(&mut rx))
-            .iter()
-            .any(|note| note.contains("best supported on")),
-        "a prefix already on the steered runner needs no steering"
-    );
+        let events = drain(&mut rx);
+        let notes = notes(&events);
+        assert!(
+            !notes.iter().any(|note| note.contains(runner)),
+            "{runner} was singled out: {notes:?}"
+        );
+    }
 }
 
 /// Every endpoint is a sibling of the pointer the manifest carries, so one row describes the service.
