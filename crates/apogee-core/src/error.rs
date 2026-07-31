@@ -35,6 +35,12 @@ pub enum CoreError {
     Secrets(#[from] apogee_secrets::SecretsError),
     #[error("otp: {0}")]
     Otp(#[from] apogee_otp::OtpError),
+    #[error("launch cryptography: {0}")]
+    Crypto(#[from] sqex_crypto::CryptoError),
+    /// A Steam service account was asked to log in on a build that cannot reach a Steam client. The
+    /// account is fine; this launcher has no way to mint the ticket it needs.
+    #[error("this build cannot obtain a Steam authentication ticket")]
+    NoSteam,
     #[error("no profile with id {0}")]
     NoProfile(Uuid),
     #[error("no account with id {0}")]

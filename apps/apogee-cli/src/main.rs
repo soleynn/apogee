@@ -309,6 +309,9 @@ struct ProfileAddArgs {
     /// The account uses a one-time password.
     #[arg(long)]
     otp: bool,
+    /// How the account is licensed: `standard`, `free-trial`, or `steam:<app-id>`.
+    #[arg(long, default_value = "standard")]
+    licence: String,
     /// The service region: `global`, `korea`, or `china`.
     #[arg(long, default_value = "global")]
     region: String,
@@ -934,7 +937,7 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
         ProfileAction::Add(args) => {
             let account = Account {
                 use_otp: args.otp,
-                ..Account::new(args.user, AccountKind::Standard)
+                ..Account::new(args.user, parse_licence(&args.licence)?)
             };
             let mut profile = Profile::new(args.name, account.id, args.game_path);
             profile.runner = parse_runner(&args.runner)?;
@@ -1218,6 +1221,31 @@ fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
         });
     }
     Err(format!("unknown runner {spec:?} (expected `system` or `managed:<name>@<version>`)").into())
+}
+
+/// The Steam app ids Square Enix publishes the game under, so the common cases need no lookup.
+const STEAM_APP_ID: u32 = 39_210;
+const STEAM_FREE_TRIAL_APP_ID: u32 = 312_060;
+
+fn parse_licence(licence: &str) -> Result<AccountKind, CliError> {
+    match licence {
+        "standard" => Ok(AccountKind::Standard),
+        "free-trial" => Ok(AccountKind::FreeTrial),
+        "steam" => Ok(AccountKind::Steam {
+            app_id: STEAM_APP_ID,
+        }),
+        "steam-free-trial" => Ok(AccountKind::Steam {
+            app_id: STEAM_FREE_TRIAL_APP_ID,
+        }),
+        other => match other.strip_prefix("steam:").map(str::parse::<u32>) {
+            Some(Ok(app_id)) => Ok(AccountKind::Steam { app_id }),
+            _ => Err(format!(
+                "unknown licence {other:?} (expected standard, free-trial, steam, \
+                 steam-free-trial, or steam:<app-id>)"
+            )
+            .into()),
+        },
+    }
 }
 
 fn parse_region(region: &str) -> Result<Region, CliError> {

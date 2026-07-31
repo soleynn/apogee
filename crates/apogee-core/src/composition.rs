@@ -38,6 +38,7 @@ use crate::launch::runtime_backend::RuntimeLauncher;
 use crate::model::{Account, Profile, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
+use crate::steam::{NoSteam, SteamBackend};
 use crate::store::{Store, StoreError};
 use crate::transport::HttpTransport;
 
@@ -141,6 +142,9 @@ pub struct Core {
     launch: Arc<dyn LaunchBackend>,
     /// The companion seam over `apogee-addons`. A trait object so a test can inject a fake.
     addons: Arc<dyn AddonBackend>,
+    /// Where a Steam service account's authentication ticket comes from. A trait object because no
+    /// build here can mint one yet: what is wired refuses, and says so.
+    steam: Arc<dyn SteamBackend>,
     secrets: Secrets,
     otp: Otp,
     store: Store,
@@ -249,6 +253,7 @@ impl Core {
             runtime,
             launch,
             addons: Arc::new(AddonsBackend::new(addons)) as Arc<dyn AddonBackend>,
+            steam: Arc::new(NoSteam) as Arc<dyn SteamBackend>,
             secrets,
             otp,
             store,
@@ -476,6 +481,7 @@ impl Core {
             patch: self.patch.clone(),
             launch: self.launch.clone(),
             addons: self.addons.clone(),
+            steam: self.steam.clone(),
             store: self.store.clone(),
             clock: self.clock.clone(),
             computer_id: self.computer_id,

@@ -18,6 +18,7 @@ mod host;
 mod launch;
 mod model;
 mod patch;
+mod steam;
 mod store;
 mod transport;
 

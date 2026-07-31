@@ -26,6 +26,8 @@ use crate::launch::fake::FakeLaunchBackend;
 use crate::model::{Account, AccountKind, Profile, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
+use crate::steam::fake::FakeSteam;
+use crate::steam::{NoSteam, SteamBackend};
 use crate::store::{Store, UidCacheEntry};
 use apogee_addons::{ExternalAddon, RunIn, Trigger};
 
@@ -66,9 +68,18 @@ fn harness(use_otp: bool) -> Harness {
     harness_customized(use_otp, |_| {})
 }
 
+/// Like [`harness`], but the account is licensed some way other than a standard one.
+fn harness_account(kind: AccountKind) -> Harness {
+    harness_full(false, kind, |_| {})
+}
+
 /// Like [`harness`], but the profile can be customized (runner, launch env/wrappers, prefix) before
 /// it is saved.
 fn harness_customized(use_otp: bool, customize: impl FnOnce(&mut Profile)) -> Harness {
+    harness_full(use_otp, AccountKind::Standard, customize)
+}
+
+fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Profile)) -> Harness {
     let game = game_install();
     let store_dir = TempDir::new().unwrap();
     let prefixes = TempDir::new().unwrap();
@@ -77,7 +88,7 @@ fn harness_customized(use_otp: bool, customize: impl FnOnce(&mut Profile)) -> Ha
 
     let account = Account {
         use_otp,
-        ..Account::new("testuser", AccountKind::Standard)
+        ..Account::new("testuser", kind)
     };
     let mut profile = Profile::new("Main", account.id, game.path().to_path_buf());
     customize(&mut profile);
@@ -131,11 +142,26 @@ fn context_with_addons(
     addons: Arc<dyn AddonBackend>,
     now: u64,
 ) -> FlowContext {
+    context_with_steam(h, transport, patch, launch, addons, Arc::new(NoSteam), now)
+}
+
+/// Like [`context_with_addons`], but with an explicit ticket source. A build wires the refusing one;
+/// a test that drives a Steam login substitutes a fake.
+fn context_with_steam(
+    h: &Harness,
+    transport: Arc<dyn Transport>,
+    patch: Arc<dyn PatchBackend>,
+    launch: Arc<dyn LaunchBackend>,
+    addons: Arc<dyn AddonBackend>,
+    steam: Arc<dyn SteamBackend>,
+    now: u64,
+) -> FlowContext {
     FlowContext {
         transport,
         patch,
         launch,
         addons,
+        steam,
         store: h.store.clone(),
         clock: Arc::new(move || now),
         computer_id: host::computer_id(),
@@ -1756,10 +1782,194 @@ fn launch_arguments_carry_the_fixed_set_in_order() {
     // The plaintext form pins the byte-identity-critical set: order, DEV.TestSID = the unique id,
     // SYS.Region, the language byte, and the game version.
     assert_eq!(
-        launch_arguments(&session, 3).build_plain(),
+        launch_arguments(&session, 3, false).build_plain(),
         " DEV.DataPathType=1 DEV.MaxEntitledExpansionID=4 DEV.TestSID=UID-XYZ DEV.UseSqPack=1 \
          SYS.Region=7 language=3 resetConfig=0 ver=2024.03.28.0000.0000"
     );
+}
+
+#[test]
+fn launch_arguments_append_the_steam_flag_last() {
+    let session = UidCacheEntry {
+        unique_id: "UID-XYZ".to_string(),
+        region: 7,
+        max_expansion: 4,
+        game_version: "2024.03.28.0000.0000".to_string(),
+        expires_at: 0,
+    };
+    // Appended after the fixed set rather than sorted into it: the reference launcher builds it that
+    // way, and the game reads the list in order.
+    assert!(
+        launch_arguments(&session, 3, true)
+            .build_plain()
+            .ends_with(" ver=2024.03.28.0000.0000 IsSteam=1")
+    );
+}
+
+/// The Steam account id the fixture top page reports the ticket is linked to. Deliberately cased
+/// differently from the stored account, which is what SE does: the id it answers with is canonical.
+const STEAM_LINKED_ID: &str = "TestUser";
+
+/// A play scenario for a Steam account: the top page names the linked account.
+fn steam_play_then_current() -> [ProtoResponse; 5] {
+    [
+        fx::login_status_open(),
+        fx::oauth_top_steam("STOREDBLOB", STEAM_LINKED_ID),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::boot_current(),
+        fx::register_current(UNIQUE_ID),
+    ]
+}
+
+#[tokio::test]
+async fn a_steam_account_mints_a_ticket_and_flags_the_launch() {
+    const APP_ID: u32 = 39_210;
+    let h = harness_account(AccountKind::Steam { app_id: APP_ID });
+    let steam = Arc::new(FakeSteam::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let transport = Arc::new(FixtureTransport::new(steam_play_then_current()));
+    let ctx = context_with_steam(
+        &h,
+        transport.clone(),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        Arc::new(FakeAddons::new()),
+        steam.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(errors(&events), Vec::<String>::new());
+    assert_eq!(steam.requested(), vec![APP_ID], "ticket minted for the app");
+
+    // The ticket reached the top page, and the login submitted the id the page named rather than the
+    // stored spelling of it.
+    let recorded = transport.recorded();
+    let top = recorded[1].url.as_str();
+    assert!(top.contains("&issteam=1&session_ticket="), "top url: {top}");
+    assert!(top.contains("&ticket_size="), "top url: {top}");
+    assert!(
+        top.contains("isft=0"),
+        "a paid app is not a free trial: {top}"
+    );
+    let body = String::from_utf8(recorded[2].body.as_ref().unwrap().as_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains(&format!("sqexid={STEAM_LINKED_ID}&")),
+        "submit body: {body}"
+    );
+
+    // Both halves of what the game is told, the argument and the variable set beside it.
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(
+        plan.env()
+            .get("IS_FFXIV_LAUNCH_FROM_STEAM")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert!(
+        decrypt_launch_args(plan.args()).ends_with(" /IsSteam =1"),
+        "the launch arguments did not carry the steam flag"
+    );
+}
+
+#[tokio::test]
+async fn a_standard_account_launches_with_neither_steam_flag() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(play_then_current())),
+        launch.clone(),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("IS_FFXIV_LAUNCH_FROM_STEAM"));
+    assert!(!decrypt_launch_args(plan.args()).contains("IsSteam"));
+}
+
+#[tokio::test]
+async fn a_free_trial_account_flags_the_top_page_without_a_ticket() {
+    let h = harness_account(AccountKind::FreeTrial);
+    let steam = Arc::new(FakeSteam::new());
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let ctx = context_with_steam(
+        &h,
+        transport.clone(),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        Arc::new(FakeAddons::new()),
+        steam.clone(),
+        NOW,
+    );
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(errors(&events), Vec::<String>::new());
+
+    let recorded = transport.recorded();
+    let top = recorded[1].url.as_str();
+    assert!(top.contains("isft=1"), "top url: {top}");
+    assert!(!top.contains("issteam"), "no ticket without Steam: {top}");
+    assert!(steam.requested().is_empty(), "a trial minted no ticket");
+}
+
+#[tokio::test]
+async fn a_steam_account_with_no_client_reachable_says_so_before_logging_in() {
+    let h = harness_account(AccountKind::Steam { app_id: 39_210 });
+    // No responses scripted: reaching the network at all would panic the fixture transport.
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new([fx::login_status_open()])),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(
+        errors(&events),
+        vec!["this build cannot obtain a Steam authentication ticket"]
+    );
+}
+
+/// The plaintext behind an encrypted launch-argument string.
+///
+/// The key is the top half of a tick read from the host clock as the launch was built, so no test can
+/// know it in advance. It is only sixteen bits wide, though, and the wrapper publishes four of them in
+/// its checksum character, so the remaining 4096 are simply tried: the one that decrypts to the `T`
+/// argument the builder always leads with is the key. Restating the checksum table here only narrows
+/// the search; a table that disagreed with the crate's would slow this down, not mislead it.
+fn decrypt_launch_args(encrypted: &str) -> String {
+    const CHECKSUM_TABLE: [char; 16] = [
+        'f', 'X', '1', 'p', 'G', 't', 'd', 'S', '5', 'C', 'A', 'P', '4', '_', 'V', 'L',
+    ];
+
+    let body = encrypted
+        .strip_prefix("//**sqex0003")
+        .and_then(|s| s.strip_suffix("**//"))
+        .expect("not an encrypted argument string");
+    let (base64, checksum) = body.split_at(body.len() - 1);
+    let nibble = CHECKSUM_TABLE
+        .iter()
+        .position(|c| checksum.starts_with(*c))
+        .expect("checksum character outside the table") as u32;
+    let ciphertext = sqex_crypto::sqex_base64::decode(base64).expect("undecodable body");
+
+    for high in 0..0x1000u32 {
+        let key = (high << 20) | (nibble << 16);
+        let mut hex = [0u8; 8];
+        for (i, slot) in hex.iter_mut().enumerate() {
+            slot.clone_from(&b"0123456789abcdef"[((key >> (28 - 4 * i)) & 0xF) as usize]);
+        }
+        let plain = sqex_crypto::LegacyBlowfish::new(&hex).decrypt(&ciphertext);
+        if plain.starts_with(b" /T =") {
+            return String::from_utf8_lossy(&plain)
+                .trim_end_matches('\0')
+                .to_string();
+        }
+    }
+    panic!("no key produced the argument plaintext");
 }
 
 /// The toggle is the whole of the opt-in. What the seam is handed decides whether the distribution is

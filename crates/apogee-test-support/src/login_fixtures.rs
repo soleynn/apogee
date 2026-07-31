@@ -46,6 +46,20 @@ pub fn oauth_top(stored: &str) -> ProtoResponse {
         .with_header(DATE, HeaderValue::from_static(SERVER_DATE))
 }
 
+/// The OAuth top page a Steam login gets: the same blob, plus the hidden input naming the SE account
+/// the ticket is linked to. The empty visible username field is there too, since the scanner has to
+/// pass over it to find the hidden one.
+#[must_use]
+pub fn oauth_top_steam(stored: &str, linked: &str) -> ProtoResponse {
+    let body = format!(
+        r#"<html><body><form><input class="item-input" name="sqexid" id="sqexid" type="text" value="">
+        <input name="sqexid" type="hidden" value="{linked}"/>
+        <input type="hidden" name="_STORED_" value="{stored}"></form></body></html>"#
+    );
+    ProtoResponse::new(200, body.into_bytes())
+        .with_header(DATE, HeaderValue::from_static(SERVER_DATE))
+}
+
 /// The `window.external.user(...)` result line, with per-field values chosen by the caller.
 fn oauth_user_body(
     session_id: &str,
