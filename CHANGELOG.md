@@ -11,6 +11,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
+- Close the defects found by the adversarial pass (#97) _(fixed)_
 
 ### sqex-proto
 - Log in with a Steam service account (#96) _(added)_
