@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# The obfuscated ticket type only, for the Steam login variant. Carrying the type rather than a
+# string and a number keeps the pair inseparable: the size reported beside the ticket is not the
+# text's length, and a caller that computed it here would get it wrong.
+sqex-crypto = { path = "../sqex-crypto" }
 http.workspace = true
 url.workspace = true
 percent-encoding.workspace = true
