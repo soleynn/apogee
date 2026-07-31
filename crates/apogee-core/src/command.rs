@@ -64,6 +64,15 @@ pub enum Command {
     Repair {
         profile: Uuid,
     },
+    /// Work on the profile's prefix without launching anything.
+    ///
+    /// Deliberately its own command rather than a step inside a launch. The drift a check can find
+    /// includes one no targeted fix resolves, whose only resolution discards the prefix and
+    /// everything installed into it, and a launch is not where a user should be asked about that.
+    Prefix {
+        profile: Uuid,
+        action: PrefixAction,
+    },
     FirstRun(FirstRunStep),
     ImportXivLauncher(PathBuf),
     /// Fetch pre-login display data (news, gate status, banners).
@@ -104,6 +113,11 @@ impl fmt::Debug for Command {
             Command::Repair { profile } => {
                 f.debug_struct("Repair").field("profile", profile).finish()
             }
+            Command::Prefix { profile, action } => f
+                .debug_struct("Prefix")
+                .field("profile", profile)
+                .field("action", action)
+                .finish(),
             Command::FirstRun(step) => f.debug_tuple("FirstRun").field(step).finish(),
             Command::ImportXivLauncher(path) => {
                 f.debug_tuple("ImportXivLauncher").field(path).finish()
@@ -123,6 +137,25 @@ fn otp_label(otp: &OtpSource) -> &'static str {
     }
 }
 
+/// What a [`Command::Prefix`] does to the prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PrefixAction {
+    /// Create the prefix if it is not there, and bring it up to what a prepared one has. What a
+    /// launch does first, on its own.
+    Create,
+    /// Report what has drifted, changing nothing.
+    Check,
+    /// Apply a targeted fix for each problem that has one, and report what is left. Never deletes.
+    Fix,
+    /// Delete the prefix and build it again.
+    ///
+    /// The destructive one, and the only resolution for drift no targeted fix covers. Everything
+    /// installed into the prefix goes with it, including the game's own settings, so it is asked for
+    /// explicitly and never chosen on a user's behalf.
+    Recreate,
+}
+
 /// A message emitted while a [`Command`] runs.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -139,6 +172,11 @@ pub enum Event {
     /// since they are only useful while the thing is being set up.
     Setup(apogee_addons::SetupEvent),
     Frontier(FrontierData),
+    /// What a prefix check found, relayed verbatim. Empty is a prefix with nothing wrong.
+    ///
+    /// A report rather than a stream of findings: the whole point is the list a user decides about,
+    /// and a list arriving one item at a time is one a shell has to reassemble before it can ask.
+    PrefixHealth(apogee_runtime::PrefixHealth),
     Error(CoreError),
 }
 
@@ -169,6 +207,16 @@ pub enum FlowState {
     Patching,
     /// The install is being verified and repaired against its block index.
     Repairing,
+    /// The prefix is being examined for drift.
+    CheckingPrefix,
+    /// There is no prefix to examine yet. Its own disposition because otherwise a prefix that was
+    /// never created and one with nothing wrong report identically, and only one of them is an
+    /// answer to the question that was asked.
+    NoPrefix,
+    /// The drift that has a targeted fix is being fixed in place.
+    FixingPrefix,
+    /// The prefix is being deleted and built again.
+    RecreatingPrefix,
     /// The game is being prepared and spawned.
     Launching,
     /// The game process is running.

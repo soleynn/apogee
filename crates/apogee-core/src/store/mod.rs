@@ -92,7 +92,7 @@ trait Migrate: Sized {
 }
 
 impl Migrate for Profile {
-    const CURRENT_VERSION: u32 = 3;
+    const CURRENT_VERSION: u32 = 4;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -117,6 +117,17 @@ impl Migrate for Profile {
                 launch
                     .entry("dalamud")
                     .or_insert(serde_json::Value::Bool(false));
+            }
+            // Gained the graphics and synchronization knobs beside the launch settings that were
+            // already there. Each is absent rather than written out, so a profile that has never been
+            // touched resolves against the host instead of against a value it never chose.
+            3 => {
+                let launch = obj
+                    .entry("launch")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                launch
+                    .as_object_mut()
+                    .ok_or_else(|| "profile launch settings are not a json object".to_string())?;
             }
             other => return Err(format!("no migration from schema version {other}")),
         }

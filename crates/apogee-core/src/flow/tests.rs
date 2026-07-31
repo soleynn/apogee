@@ -19,7 +19,7 @@ use apogee_patcher::{PatchProgress, Repo};
 use super::{FlowContext, drive, language_id, launch_arguments, read_repo_ver};
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
-use crate::command::{Command, Event, FlowState};
+use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
@@ -169,6 +169,17 @@ fn errors(events: &[Event]) -> Vec<String> {
         .iter()
         .filter_map(|e| match e {
             Event::Error(err) => Some(err.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The prefix reports a run emitted, in order.
+fn health_reports(events: &[Event]) -> Vec<apogee_runtime::PrefixHealth> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PrefixHealth(health) => Some(health.clone()),
             _ => None,
         })
         .collect()
@@ -626,6 +637,350 @@ async fn launch_carries_the_profile_env_and_wrappers() {
     let plan = launch.last_plan().unwrap();
     assert_eq!(plan.env().get("DXVK_HUD").map(String::as_str), Some("fps"));
     assert_eq!(plan.wrappers(), ["gamescope".to_string()]);
+}
+
+/// The synchronization primitive is resolved from what the runner that built the prefix can actually
+/// do, not from the kernel alone. A host with the kernel support but a runner build without it must
+/// fall back rather than select ntsync, because selecting ntsync sets no variable at all: the launch
+/// would run with neither esync nor fsync while every report said otherwise.
+#[tokio::test]
+async fn a_runner_without_ntsync_launches_with_a_fallback_rather_than_with_nothing() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().reporting(apogee_runtime::HostCaps {
+            ntsync: false,
+            fsync: true,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("WINEFSYNC").map(String::as_str), Some("1"));
+}
+
+/// The other side of the same resolution: where the runner does support it, the launch carries no
+/// synchronization variable, because that is how ntsync is selected.
+#[tokio::test]
+async fn a_runner_with_ntsync_launches_carrying_no_sync_variable() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().reporting(apogee_runtime::HostCaps {
+            ntsync: true,
+            fsync: true,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("WINEFSYNC"));
+    assert!(!plan.env().contains_key("WINEESYNC"));
+}
+
+/// Checking reports and changes nothing. The report reaches the shell as one value, because the whole
+/// point is the list a user decides about.
+#[tokio::test]
+async fn checking_a_prefix_reports_its_drift_and_changes_nothing() {
+    let h = harness(false);
+    let drift = apogee_runtime::PrefixHealth {
+        issues: vec![apogee_runtime::HealthIssue::MissingSkeleton {
+            path: std::path::PathBuf::from("/prefix/system.reg"),
+        }],
+    };
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().with_health(drift, apogee_runtime::PrefixHealth::default()),
+    );
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Check,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::CheckingPrefix));
+    assert!(
+        !states(&events).contains(&FlowState::NoPrefix),
+        "there was one to examine"
+    );
+    assert_eq!(health_reports(&events).len(), 1);
+    assert_eq!(health_reports(&events)[0].issues.len(), 1);
+    assert!(!launch.was_fixed(), "a check fixes nothing");
+    assert!(!launch.was_recreated(), "a check destroys nothing");
+}
+
+/// A prefix that was never created and one with nothing wrong are different answers, and reporting
+/// them identically leaves a user unable to tell which they got.
+#[tokio::test]
+async fn a_prefix_that_does_not_exist_says_so_rather_than_reporting_nothing_wrong() {
+    let h = harness(false);
+    // The double has no prefix at all, which is the same shape the real backend reports for one that
+    // was never created.
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Check,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::NoPrefix));
+    assert!(
+        health_reports(&events).is_empty(),
+        "nothing was examined, so nothing is reported about it"
+    );
+}
+
+/// Fixing applies the resolutions that leave the prefix in place and reports what is left, so a
+/// problem no targeted fix covers is still in front of the user afterwards rather than silently gone.
+#[tokio::test]
+async fn fixing_a_prefix_reports_what_is_left_and_never_recreates() {
+    let h = harness(false);
+    let before = apogee_runtime::PrefixHealth {
+        issues: vec![
+            apogee_runtime::HealthIssue::MissingSkeleton {
+                path: std::path::PathBuf::from("/prefix/system.reg"),
+            },
+            apogee_runtime::HealthIssue::RunnerMismatch {
+                recorded: apogee_runtime::RunnerRef {
+                    name: "GE-Proton".to_string(),
+                    version: "11-1".to_string(),
+                },
+                expected: apogee_runtime::RunnerRef {
+                    name: "wine-xiv".to_string(),
+                    version: "10.8".to_string(),
+                },
+            },
+        ],
+    };
+    // Only the first has a targeted fix; the runner change is left behind on purpose.
+    let after = apogee_runtime::PrefixHealth {
+        issues: vec![before.issues[1].clone()],
+    };
+    let launch = Arc::new(FakeLaunchBackend::exiting().with_health(before, after));
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Fix,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::FixingPrefix));
+    assert!(launch.was_fixed());
+    assert!(
+        !launch.was_recreated(),
+        "the destructive one is never reached by fixing"
+    );
+    let residual = health_reports(&events);
+    assert_eq!(residual.len(), 1);
+    assert_eq!(
+        residual[0].issues.len(),
+        1,
+        "what no targeted fix covers is still reported"
+    );
+}
+
+/// The destructive one happens only when it is the action that was asked for.
+#[tokio::test]
+async fn recreating_is_the_only_action_that_destroys_the_prefix() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Recreate,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::RecreatingPrefix));
+    assert!(launch.was_recreated());
+    assert!(errors(&events).is_empty());
+}
+
+/// Creating one is what a launch does first, reachable on its own so a user can pay that cost before
+/// they want to play rather than during.
+#[tokio::test]
+async fn creating_a_prefix_prepares_it_without_launching() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Create,
+        },
+    )
+    .await;
+
+    assert!(states(&events).contains(&FlowState::PreparingPrefix));
+    assert_eq!(launch.prepared().len(), 1);
+    assert_eq!(launch.launch_count(), 0, "nothing was launched");
+}
+
+/// A prefix that has graphics translation installed launches with the overrides that activate it,
+/// and with its shader cache pointed somewhere prefix-specific. Placing the files is one half; a
+/// launch that does not override the libraries to them loads the prefix's built-in ones instead.
+#[tokio::test]
+async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().with_dxvk(apogee_runtime::DxvkEnv {
+            state_cache: Some(std::path::PathBuf::from("/prefix/dxvk_cache")),
+            nvapi: false,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(
+        plan.env().get("WINEDLLOVERRIDES").map(String::as_str),
+        Some("d3d10core,d3d11,d3d9,dxgi=native")
+    );
+    assert_eq!(
+        plan.env().get("DXVK_STATE_CACHE_PATH").map(String::as_str),
+        Some("/prefix/dxvk_cache")
+    );
+}
+
+/// A prefix without it overrides nothing, rather than pointing the game at libraries that are not
+/// there.
+#[tokio::test]
+async fn a_prefix_without_graphics_translation_overrides_nothing() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert!(
+        !launch
+            .last_plan()
+            .unwrap()
+            .env()
+            .contains_key("WINEDLLOVERRIDES")
+    );
+}
+
+/// The knobs a profile persists reach the launch, so what a user set is what the game runs with.
+#[tokio::test]
+async fn the_profile_knobs_reach_the_launch() {
+    let h = harness_customized(false, |p| {
+        p.launch.hud = apogee_runtime::Hud::Mango;
+        p.launch.gpu = apogee_runtime::GpuSelect::NvidiaPrime;
+        p.launch.gamemode = true;
+        p.launch.gamescope = Some(apogee_runtime::Gamescope {
+            width: Some(1280),
+            height: Some(800),
+            fullscreen: true,
+            ..apogee_runtime::Gamescope::default()
+        });
+    });
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("MANGOHUD").map(String::as_str), Some("1"));
+    assert_eq!(
+        plan.env()
+            .get("__NV_PRIME_RENDER_OFFLOAD")
+            .map(String::as_str),
+        Some("1")
+    );
+    // The nested compositor wraps the whole invocation, and its arguments end at the separator, so
+    // the ordering is what makes the game the thing being wrapped rather than one of its arguments.
+    assert_eq!(
+        plan.wrappers(),
+        [
+            "gamescope",
+            "-W",
+            "1280",
+            "-H",
+            "800",
+            "-f",
+            "--",
+            "gamemoderun"
+        ]
+    );
+}
+
+/// A profile's own variable still wins over the one the host resolution computed for it.
+#[tokio::test]
+async fn a_profile_variable_outranks_the_computed_one() {
+    let h = harness_customized(false, |p| {
+        p.launch.extra_env = vec![("WINEFSYNC".to_string(), "0".to_string())];
+    });
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().reporting(apogee_runtime::HostCaps {
+            ntsync: false,
+            fsync: true,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(plan.env().get("WINEFSYNC").map(String::as_str), Some("0"));
 }
 
 #[tokio::test]

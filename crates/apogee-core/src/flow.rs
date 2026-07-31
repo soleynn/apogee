@@ -5,13 +5,12 @@
 //! disposition as a [`FlowState`] rather than a failure. The session cache lets a re-login inside its
 //! window skip authentication and registration entirely.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use apogee_otp::OtpSource;
 use apogee_patcher::{InstallRequest, Repo, SePatch};
-use apogee_runtime::LaunchPlan;
+use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
 use apogee_secrets::Secret;
 use sqex_crypto::{ArgKey, ArgumentBuilder, TickCount};
 use sqex_proto::{
@@ -25,7 +24,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::addons::AddonBackend;
-use crate::command::{Command, Event, FlowState};
+use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
@@ -134,6 +133,7 @@ pub(crate) async fn drive(
             .await
         }
         Command::Repair { profile } => repair(&ctx, profile, &tx, &cancel).await,
+        Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
         Command::FirstRun(_) => todo!("walk the initial setup"),
         Command::ImportXivLauncher(_) => todo!("import an existing launcher configuration"),
         Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
@@ -659,24 +659,26 @@ async fn launch_game(
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
 
     emit(tx, FlowState::PreparingPrefix);
-    let prefix = ctx
+    let prepared = ctx
         .launch
         .prepare(&profile.runner, &prefix_dir, cancel, tx)
         .await?;
 
+    let environment =
+        compute_environment(&launch_env(profile, prepared.dxvk.clone()), &prepared.caps);
     let mut plan = LaunchPlan::new(
         game_dir.join("ffxiv_dx11.exe").to_string_lossy(),
         build_launch_args(session, language_id(&settings.language)),
-        launch_env(profile),
+        environment.vars,
     )
     .in_directory(&game_dir)
-    .with_wrappers(profile.launch.wrappers.clone());
-    if let Some(prefix) = &prefix {
+    .with_wrappers(environment.wrappers);
+    if let Some(prefix) = &prepared.prefix {
         plan = plan.prefix(prefix);
     }
     ctx.addons
         .prepare_launch(
-            prefix,
+            prepared.prefix,
             dalamud_config(profile, session, &settings),
             &mut plan,
             cancel,
@@ -800,9 +802,81 @@ fn launch_arguments(session: &UidCacheEntry, language: u8) -> ArgumentBuilder {
         .add("ver", &session.game_version)
 }
 
-/// The launch environment: the profile's extra variables (DXVK passthrough, etc.).
-fn launch_env(profile: &Profile) -> BTreeMap<String, String> {
-    profile.launch.extra_env.iter().cloned().collect()
+/// Work on a profile's prefix without launching anything.
+///
+/// Each action narrates its own disposition and, where it has one, ends with the report of what is
+/// wrong. Nothing here decides on the user's behalf: a check changes nothing, a fix applies only the
+/// resolutions that leave the prefix in place, and the destructive one happens only when it is the
+/// action that was asked for.
+async fn prefix(
+    ctx: &FlowContext,
+    profile_id: Uuid,
+    action: PrefixAction,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<(), CoreError> {
+    let profile = ctx.store.load_profile(profile_id)?;
+    let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
+
+    match action {
+        PrefixAction::Create => {
+            emit(tx, FlowState::PreparingPrefix);
+            ctx.launch
+                .prepare(&profile.runner, &prefix_dir, cancel, tx)
+                .await?;
+        }
+        PrefixAction::Check => {
+            emit(tx, FlowState::CheckingPrefix);
+            match ctx
+                .launch
+                .check_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .await?
+            {
+                Some(health) => {
+                    let _ = tx.send(Event::PrefixHealth(health));
+                }
+                None => emit(tx, FlowState::NoPrefix),
+            }
+        }
+        PrefixAction::Fix => {
+            emit(tx, FlowState::FixingPrefix);
+            if let Some(residual) = ctx
+                .launch
+                .fix_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .await?
+            {
+                // What is left after the fix, which is what a user has to decide about. An empty
+                // report is the fix having resolved everything.
+                let _ = tx.send(Event::PrefixHealth(residual));
+            }
+        }
+        PrefixAction::Recreate => {
+            emit(tx, FlowState::RecreatingPrefix);
+            ctx.launch
+                .recreate_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// The launch environment a profile asks for, before the host resolves it.
+///
+/// The profile's own variables and wrapper commands go in as the free-form arms, which the matrix
+/// merges last and innermost respectively, so a user's setting still outranks anything computed for
+/// them. Note that the addon layer composes onto the plan *after* this, so what it contributes
+/// outranks both: setup a launch cannot run without is not a preference.
+fn launch_env(profile: &Profile, dxvk: Option<apogee_runtime::DxvkEnv>) -> EnvConfig {
+    EnvConfig {
+        sync: profile.launch.sync,
+        hud: profile.launch.hud.clone(),
+        gpu: profile.launch.gpu.clone(),
+        gamescope: profile.launch.gamescope.clone(),
+        gamemode: profile.launch.gamemode,
+        env: profile.launch.extra_env.iter().cloned().collect(),
+        wrappers: profile.launch.wrappers.clone(),
+        dxvk,
+    }
 }
 
 /// The prefix directory name for a profile: its named prefix, or the profile id when unnamed.

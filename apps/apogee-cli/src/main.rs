@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
-    FrameLog, OtpSource, PatchProgress, Profile, Region, RunIn, RunnerSelection, Secret,
-    SetupEvent, Trigger, Uuid,
+    FrameLog, GpuSelect, HealthIssue, Hud, OtpSource, PatchProgress, PrefixAction, PrefixHealth,
+    Profile, Region, RunIn, RunnerSelection, Secret, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -70,12 +70,91 @@ enum Commands {
         #[command(subcommand)]
         action: DalamudAction,
     },
+    /// Read and change the launcher's own preferences.
+    Settings {
+        #[command(subcommand)]
+        action: SettingsCommand,
+    },
+    /// Work on a profile's wine prefix without launching anything.
+    Prefix {
+        #[command(subcommand)]
+        action: PrefixCommand,
+    },
     /// Start a profile from the Steam interface, on a handheld or anywhere else without a desktop.
     #[cfg(unix)]
     Steam {
         #[command(subcommand)]
         action: SteamAction,
     },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommand {
+    /// Print the current preferences.
+    Show,
+    /// Change a preference. Only the ones named are touched.
+    Set(SettingsSetArgs),
+}
+
+#[derive(Args)]
+struct SettingsSetArgs {
+    /// Keep downloaded patches after they apply. Costs disk, and lets a later repair rebuild broken
+    /// ranges from them instead of downloading again.
+    #[arg(long)]
+    keep_patches: Option<bool>,
+    /// Capture the game's settings before applying patches.
+    #[arg(long)]
+    backup_before_patch: Option<bool>,
+    /// How many captures to keep per profile.
+    #[arg(long)]
+    backups_kept: Option<u32>,
+    /// Stop supervising once the game is up.
+    #[arg(long)]
+    close_after_launch: Option<bool>,
+}
+
+/// The graphics and synchronization knobs a profile launches with.
+#[derive(Args)]
+struct ProfileEnvArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Synchronization: `auto`, `ntsync`, `fsync`, `esync`, or `none`. `auto` resolves against the
+    /// host and the selected runner.
+    #[arg(long)]
+    sync: Option<String>,
+    /// Overlay: `none`, `mangohud`, or `dxvk:<spec>` (e.g. `dxvk:fps,frametimes`).
+    #[arg(long)]
+    hud: Option<String>,
+    /// GPU: `default`, `nvidia`, `mesa`, or `vulkan:<vendor>:<device>`.
+    #[arg(long)]
+    gpu: Option<String>,
+    /// Ask the system for its game performance profile.
+    #[arg(long)]
+    gamemode: Option<bool>,
+}
+
+#[derive(Subcommand)]
+enum PrefixCommand {
+    /// Create it if it is not there and bring it up to what a launch would.
+    Create(TargetArgs),
+    /// Report what has drifted. Changes nothing.
+    Health(TargetArgs),
+    /// Fix what can be fixed in place, and report what is left.
+    Fix(TargetArgs),
+    /// Delete it and build it again. Everything installed into it is lost, including the game's own
+    /// settings, so it asks first unless told not to.
+    Recreate(PrefixRecreateArgs),
+}
+
+#[derive(Args)]
+struct PrefixRecreateArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Skip the confirmation. For scripts, which have no one to ask.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[cfg(unix)]
@@ -209,6 +288,8 @@ enum ProfileAction {
     List,
     /// Remove a profile (and its account, if no other profile references it).
     Remove(TargetArgs),
+    /// Show or change how a profile's launches are tuned.
+    Env(ProfileEnvArgs),
 }
 
 #[derive(Args)]
@@ -347,8 +428,219 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             dalamud(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Settings { action } => {
+            settings(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Prefix { action } => prefix(&core, action).await,
         #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
+    }
+}
+
+/// The launcher's own preferences, read and written whole.
+fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
+    match action {
+        SettingsCommand::Show => {
+            let s = core.settings()?;
+            println!("language            {}", s.language);
+            println!("close_after_launch  {}", s.close_after_launch);
+            println!("keep_patches        {}", s.keep_patches);
+            println!("backups_kept        {}", s.backups_kept);
+            println!("backup_before_patch {}", s.backup_before_patch);
+            Ok(())
+        }
+        SettingsCommand::Set(args) => {
+            let mut s = core.settings()?;
+            if let Some(v) = args.keep_patches {
+                s.keep_patches = v;
+            }
+            if let Some(v) = args.backup_before_patch {
+                s.backup_before_patch = v;
+            }
+            if let Some(v) = args.backups_kept {
+                s.backups_kept = v;
+            }
+            if let Some(v) = args.close_after_launch {
+                s.close_after_launch = v;
+            }
+            core.save_settings(&s)?;
+            println!("saved");
+            Ok(())
+        }
+    }
+}
+
+/// Show or change how a profile's launches are tuned. With no knob named it prints what is set;
+/// anything left unset resolves against the host and the runner at launch time rather than here.
+fn profile_env(core: &Core, args: ProfileEnvArgs) -> Result<(), CliError> {
+    let mut profile = resolve_profile(core, &args.profile)?;
+    let changing =
+        args.sync.is_some() || args.hud.is_some() || args.gpu.is_some() || args.gamemode.is_some();
+
+    if let Some(spec) = &args.sync {
+        profile.launch.sync = parse_sync(spec)?;
+    }
+    if let Some(spec) = &args.hud {
+        profile.launch.hud = parse_hud(spec)?;
+    }
+    if let Some(spec) = &args.gpu {
+        profile.launch.gpu = parse_gpu(spec)?;
+    }
+    if let Some(v) = args.gamemode {
+        profile.launch.gamemode = v;
+    }
+    if changing {
+        core.save_profile(&profile)?;
+    }
+
+    println!("sync      {}", render_sync(profile.launch.sync));
+    println!("hud       {}", render_hud(&profile.launch.hud));
+    println!("gpu       {}", render_gpu(&profile.launch.gpu));
+    println!("gamemode  {}", profile.launch.gamemode);
+    Ok(())
+}
+
+fn parse_sync(spec: &str) -> Result<SyncChoice, CliError> {
+    Ok(match spec {
+        "auto" => SyncChoice::Auto,
+        "ntsync" => SyncChoice::Ntsync,
+        "fsync" => SyncChoice::Fsync,
+        "esync" => SyncChoice::Esync,
+        "none" => SyncChoice::None,
+        other => return Err(format!("unknown sync {other:?}").into()),
+    })
+}
+
+fn render_sync(sync: SyncChoice) -> &'static str {
+    match sync {
+        SyncChoice::Auto => "auto",
+        SyncChoice::Ntsync => "ntsync",
+        SyncChoice::Fsync => "fsync",
+        SyncChoice::Esync => "esync",
+        SyncChoice::None => "none",
+    }
+}
+
+fn parse_hud(spec: &str) -> Result<Hud, CliError> {
+    Ok(match spec {
+        "none" => Hud::None,
+        "mangohud" => Hud::Mango,
+        other => match other.strip_prefix("dxvk:") {
+            Some(inner) if !inner.is_empty() => Hud::Dxvk(inner.to_owned()),
+            _ => return Err(format!("unknown hud {other:?}").into()),
+        },
+    })
+}
+
+fn render_hud(hud: &Hud) -> String {
+    match hud {
+        Hud::None => "none".to_owned(),
+        Hud::Mango => "mangohud".to_owned(),
+        Hud::Dxvk(spec) => format!("dxvk:{spec}"),
+    }
+}
+
+fn parse_gpu(spec: &str) -> Result<GpuSelect, CliError> {
+    Ok(match spec {
+        "default" => GpuSelect::Default,
+        "nvidia" => GpuSelect::NvidiaPrime,
+        "mesa" => GpuSelect::MesaPrime,
+        other => match other.strip_prefix("vulkan:") {
+            Some(inner) if !inner.is_empty() => GpuSelect::VulkanDevice(inner.to_owned()),
+            _ => return Err(format!("unknown gpu {other:?}").into()),
+        },
+    })
+}
+
+fn render_gpu(gpu: &GpuSelect) -> String {
+    match gpu {
+        GpuSelect::Default => "default".to_owned(),
+        GpuSelect::NvidiaPrime => "nvidia".to_owned(),
+        GpuSelect::MesaPrime => "mesa".to_owned(),
+        GpuSelect::VulkanDevice(sel) => format!("vulkan:{sel}"),
+    }
+}
+
+/// Working on a profile's prefix. The destructive one confirms first: it discards everything
+/// installed into the prefix, including the settings the game keeps there.
+async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError> {
+    let (target, act) = match &action {
+        PrefixCommand::Create(args) => (&args.profile, PrefixAction::Create),
+        PrefixCommand::Health(args) => (&args.profile, PrefixAction::Check),
+        PrefixCommand::Fix(args) => (&args.profile, PrefixAction::Fix),
+        PrefixCommand::Recreate(args) => (&args.profile, PrefixAction::Recreate),
+    };
+    let profile = resolve_profile(core, target)?.id;
+
+    if let PrefixCommand::Recreate(args) = &action
+        && !args.yes
+    {
+        println!("this deletes the prefix and everything installed into it, including the game's");
+        println!("own settings. `backup create` captures those first.");
+        let expected = resolve_profile(core, target)?.name;
+        let answer = prompt_line("type the profile name to confirm: ")?;
+        // An empty answer never confirms, whatever the profile is called. Without this a profile
+        // created with an empty name would be destroyed by a closed stdin, which is what a script or
+        // a cron job hands this.
+        if answer.trim().is_empty() || answer.trim() != expected {
+            println!("not recreating");
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+
+    Ok(drive(
+        core,
+        Command::Prefix {
+            profile,
+            action: act,
+        },
+    )
+    .await)
+}
+
+/// One line per problem found, or a line saying there were none.
+fn render_health(health: &PrefixHealth) -> String {
+    if health.is_healthy() {
+        return "prefix: nothing wrong".to_owned();
+    }
+    let mut out = format!("prefix: {} problem(s)", health.issues.len());
+    for issue in &health.issues {
+        out.push('\n');
+        out.push_str("  ");
+        out.push_str(&render_health_issue(issue));
+    }
+    out
+}
+
+fn render_health_issue(issue: &HealthIssue) -> String {
+    match issue {
+        HealthIssue::MissingSkeleton { path } => {
+            format!("missing prefix file {} (fix rebuilds it)", path.display())
+        }
+        HealthIssue::DriveMapping {
+            letter,
+            expected,
+            found,
+        } => match found {
+            Some(found) => format!(
+                "drive {letter}: points at {} instead of {} (fix rewrites it)",
+                found.display(),
+                expected.display()
+            ),
+            None => format!(
+                "drive {letter}: is missing, should be {} (fix rewrites it)",
+                expected.display()
+            ),
+        },
+        HealthIssue::RunnerMismatch { recorded, expected } => format!(
+            "built with {} {} but the profile now selects {} {}: only `prefix recreate` resolves this",
+            recorded.name, recorded.version, expected.name, expected.version
+        ),
+        HealthIssue::MissingDxvkDll { dll, .. } => {
+            format!("{dll} is recorded as installed but is not there (fix reinstalls it)")
+        }
+        _ => "an unrecognized problem".to_owned(),
     }
 }
 
@@ -683,6 +975,7 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
             println!("removed profile {}", profile.id);
             Ok(())
         }
+        ProfileAction::Env(args) => profile_env(core, args),
     }
 }
 
@@ -954,6 +1247,7 @@ fn render(event: &Event) -> String {
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
         Event::Frontier(_) => "frontier data received".to_owned(),
+        Event::PrefixHealth(health) => render_health(health),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
     }

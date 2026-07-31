@@ -8,16 +8,22 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    GameSession, LaunchPlan, Prefix, Progress, RunnerKind, Runtime, RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, PrefixHealth, Progress,
+    RunnerKind, Runtime, RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{GameHandle, LaunchBackend};
+use super::{GameHandle, LaunchBackend, Prepared};
 use crate::command::{Event, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
+
+/// Whether a prefix has been created at `dir`, by the record every prepared one carries.
+fn prefix_exists(dir: &Path) -> bool {
+    dir.join(apogee_runtime::PREFIX_JSON).is_file()
+}
 
 /// The real launch backend over `apogee-runtime`.
 pub(crate) struct RuntimeLauncher {
@@ -35,6 +41,113 @@ impl RuntimeLauncher {
         }
     }
 
+    /// Bring the prefix's graphics translation up to what the catalog publishes, and describe what it
+    /// ended up with.
+    ///
+    /// Never fails a launch. Translation is an improvement to a launch rather than a precondition for
+    /// one, so a catalog that cannot be reached, or an install that goes wrong, leaves the game to
+    /// start on whatever the prefix already had. `catalog` is the one already fetched to resolve a
+    /// managed runner; `None` means fetch it, which is why an unreachable one has to be survivable.
+    ///
+    /// Installing is gated on what the prefix records, because the install itself is not idempotent:
+    /// it re-downloads and re-copies every time it runs, and a launch is not the place for that.
+    async fn ensure_dxvk(
+        &self,
+        prefix: &Prefix,
+        catalog: Option<&Catalog>,
+        force: bool,
+        cancel: &CancellationToken,
+        progress: &Progress,
+    ) -> Result<Option<DxvkEnv>, CoreError> {
+        let fetched;
+        let catalog = match catalog {
+            Some(catalog) => catalog,
+            None => {
+                let (manifest, signature) = catalog_urls()?;
+                match self
+                    .runtime
+                    .fetch_catalog(&manifest, &signature, cancel)
+                    .await
+                {
+                    Ok(catalog) => {
+                        fetched = catalog;
+                        &fetched
+                    }
+                    // A stop is the user's decision, not a catalog that could not be reached.
+                    Err(error) if error.is_cancellation() => return Err(error.into()),
+                    Err(error) => {
+                        tracing::info!(%error, "no catalog reached; leaving the prefix as it is");
+                        return Ok(self.recorded_dxvk(prefix));
+                    }
+                }
+            }
+        };
+        // A catalog that publishes none leaves whatever is already there active, rather than
+        // deactivating an install an earlier build made.
+        let Some(entry) = catalog.default_dxvk() else {
+            return Ok(self.recorded_dxvk(prefix));
+        };
+
+        let installed = prefix
+            .metadata()
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.dxvk)
+            .is_some_and(|dxvk| dxvk.version == entry.version);
+        // Whatever the prefix already decided about the companion is kept: turning it off here would
+        // stop overriding libraries that are sitting in the prefix.
+        let nvapi = prefix
+            .metadata()
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.dxvk)
+            .is_some_and(|dxvk| dxvk.nvapi);
+        // `force` is the repair case: the record says the right version is installed and the files
+        // are not there, which is the one situation where the version gate is the wrong answer.
+        if force || !installed {
+            match self
+                .runtime
+                .install_dxvk(entry, prefix, nvapi, cancel, progress)
+                .await
+            {
+                Ok(()) => {}
+                // A stopped install stops the launch. Carrying on would spawn the game while the
+                // user was still waiting for the thing they asked to stop.
+                Err(error) if error.is_cancellation() => return Err(error.into()),
+                Err(error) => {
+                    tracing::warn!(%error, "graphics translation was not installed");
+                    return Ok(self.recorded_dxvk(prefix));
+                }
+            }
+        }
+        Ok(Some(self.dxvk_env(prefix, nvapi)))
+    }
+
+    /// What the prefix already records, for the paths that could not install anything.
+    fn recorded_dxvk(&self, prefix: &Prefix) -> Option<DxvkEnv> {
+        let recorded = prefix.metadata().ok().flatten()?.dxvk?;
+        Some(self.dxvk_env(prefix, recorded.nvapi))
+    }
+
+    /// The environment that activates a prefix's translation, with its shader cache kept beside the
+    /// prefix it belongs to rather than in a location shared between prefixes.
+    fn dxvk_env(&self, prefix: &Prefix, nvapi: bool) -> DxvkEnv {
+        let cache = prefix.path().join("dxvk_cache");
+        // Created here because the translation opens a file inside it rather than creating the path,
+        // so a directory that is not there is a cache that silently never persists.
+        if let Err(error) = std::fs::create_dir_all(&cache) {
+            tracing::warn!(%error, path = %cache.display(), "no shader cache directory");
+            return DxvkEnv {
+                state_cache: None,
+                nvapi,
+            };
+        }
+        DxvkEnv {
+            state_cache: Some(cache),
+            nvapi,
+        }
+    }
+
     /// Prepare the prefix for `runner`, downloading a managed runner (and its umu tool) when needed.
     async fn prepare_prefix(
         &self,
@@ -42,11 +155,13 @@ impl RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         progress: &Progress,
-    ) -> Result<Prefix, CoreError> {
+    ) -> Result<Prepared, CoreError> {
+        // The host's own capabilities, before the runner narrows them.
+        let host = HostCaps::detect();
         match runner {
             RunnerSelection::SystemWine => {
                 let dir = synthesize_system_wine(&self.runners_dir)?;
-                Ok(self
+                let prefix = self
                     .runtime
                     .prepare_custom(
                         &dir,
@@ -56,7 +171,21 @@ impl RuntimeLauncher {
                         cancel,
                         progress,
                     )
-                    .await?)
+                    .await?;
+                // The host's own wine is not a catalog row, so nothing declares what it supports.
+                // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
+                // setting no variable, so believing in it wrongly leaves the prefix with no
+                // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
+                let dxvk = self.recorded_dxvk(&prefix);
+                Ok(Prepared {
+                    prefix: Some(prefix),
+                    caps: HostCaps {
+                        ntsync: false,
+                        ..host
+                    },
+                    dxvk,
+                    catalog: None,
+                })
             }
             RunnerSelection::Managed { name, version } => {
                 let (manifest, signature) = catalog_urls()?;
@@ -78,10 +207,17 @@ impl RuntimeLauncher {
                 {
                     self.runtime.ensure_tool(tool, cancel, progress).await?;
                 }
-                Ok(self
+                let prefix = self
                     .runtime
                     .prepare(&entry, prefix_dir, cancel, progress)
-                    .await?)
+                    .await?;
+                let dxvk = self.recorded_dxvk(&prefix);
+                Ok(Prepared {
+                    prefix: Some(prefix),
+                    caps: host.for_runner(&entry),
+                    dxvk,
+                    catalog: Some(catalog),
+                })
             }
         }
     }
@@ -95,12 +231,101 @@ impl LaunchBackend for RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<Prefix>, CoreError> {
+    ) -> Result<Prepared, CoreError> {
         let progress = relay_progress(events);
+        let mut prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        if let Some(prefix) = &prepared.prefix {
+            prepared.dxvk = self
+                .ensure_dxvk(prefix, prepared.catalog.as_ref(), false, cancel, &progress)
+                .await?;
+        }
+        Ok(prepared)
+    }
+
+    async fn check_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<PrefixHealth>, CoreError> {
+        // A prefix that was never created has no drift, and building one to say so would be a
+        // question about what is wrong creating the thing it asked about.
+        if !prefix_exists(prefix_dir) {
+            return Ok(None);
+        }
+        let progress = relay_progress(events);
+        let prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        let Some(prefix) = prepared.prefix else {
+            return Ok(None);
+        };
+        Ok(Some(self.runtime.check_prefix(&prefix).await?))
+    }
+
+    async fn fix_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<PrefixHealth>, CoreError> {
+        let progress = relay_progress(events);
+        let prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        let Some(prefix) = prepared.prefix else {
+            return Ok(None);
+        };
+        let health = self.runtime.check_prefix(&prefix).await?;
+        if health.is_healthy() {
+            return Ok(Some(health));
+        }
+        if health
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, apogee_runtime::HealthIssue::MissingDxvkDll { .. }))
+        {
+            self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), true, cancel, &progress)
+                .await?;
+        }
         Ok(Some(
-            self.prepare_prefix(runner, prefix_dir, cancel, &progress)
+            self.runtime
+                .repair_prefix(&prefix, &health.issues, cancel, &progress)
                 .await?,
         ))
+    }
+
+    async fn recreate_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<(), CoreError> {
+        let progress = relay_progress(events);
+        // Preparing an absent prefix already builds a fresh one, so tearing it down to build it
+        // again would be paying twice for the same result.
+        let existed = prefix_exists(prefix_dir);
+        let prepared = self
+            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .await?;
+        let Some(prefix) = prepared.prefix else {
+            return Ok(());
+        };
+        let prefix = if existed {
+            self.runtime
+                .recreate_prefix(&prefix, cancel, &progress)
+                .await?
+        } else {
+            prefix
+        };
+        self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), false, cancel, &progress)
+            .await?;
+        Ok(())
     }
 
     async fn launch(
