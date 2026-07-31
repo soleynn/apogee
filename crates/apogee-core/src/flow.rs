@@ -28,7 +28,7 @@ use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
-use crate::model::{Account, AccountKind, Profile, Region, Settings};
+use crate::model::{Account, AccountKind, Profile, Region, STEAM_FREE_TRIAL_APP_ID, Settings};
 use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo_ver_path};
 use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
@@ -354,10 +354,6 @@ async fn authenticate(
     }
     Ok(Some(auth))
 }
-
-/// The Steam app id a free-trial licence is entitled to. The paid one is the account's own; only this
-/// one also means the login must set the free-trial flag.
-const STEAM_FREE_TRIAL_APP_ID: u32 = 312_060;
 
 /// Which login variant an account logs in with, minting a Steam ticket when it needs one.
 ///

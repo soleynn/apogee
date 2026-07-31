@@ -23,7 +23,7 @@ use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, Profile, Settings};
+use crate::model::{Account, AccountKind, Profile, STEAM_APP_ID, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::steam::fake::FakeSteam;
@@ -1917,11 +1917,15 @@ async fn a_free_trial_account_flags_the_top_page_without_a_ticket() {
 
 #[tokio::test]
 async fn a_steam_account_with_no_client_reachable_says_so_before_logging_in() {
-    let h = harness_account(AccountKind::Steam { app_id: 39_210 });
-    // No responses scripted: reaching the network at all would panic the fixture transport.
+    let h = harness_account(AccountKind::Steam {
+        app_id: STEAM_APP_ID,
+    });
+    // One response scripted, the service-open gate that precedes a login. The top page is not, so a
+    // flow that got as far as asking for one would panic the fixture transport instead of passing.
+    let transport = Arc::new(FixtureTransport::new([fx::login_status_open()]));
     let ctx = context(
         &h,
-        Arc::new(FixtureTransport::new([fx::login_status_open()])),
+        transport.clone(),
         Arc::new(FakeLaunchBackend::exiting()),
         NOW,
     );
@@ -1930,6 +1934,46 @@ async fn a_steam_account_with_no_client_reachable_says_so_before_logging_in() {
     assert_eq!(
         errors(&events),
         vec!["this build cannot obtain a Steam authentication ticket"]
+    );
+    assert_eq!(transport.recorded().len(), 1, "no login was attempted");
+}
+
+#[tokio::test]
+async fn a_profile_that_sets_the_steam_variable_itself_keeps_its_value() {
+    // The computed entry is an addition to what the profile asked for, not an override of it: the
+    // free-form arm outranks anything the launcher decides on the user's behalf.
+    let game = game_install();
+    let h = harness_full(
+        false,
+        AccountKind::Steam {
+            app_id: STEAM_APP_ID,
+        },
+        |p| {
+            p.game_path = game.path().to_path_buf();
+            p.launch
+                .extra_env
+                .push(("IS_FFXIV_LAUNCH_FROM_STEAM".to_owned(), "0".to_owned()));
+        },
+    );
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with_steam(
+        &h,
+        Arc::new(FixtureTransport::new(steam_play_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        launch.clone(),
+        Arc::new(FakeAddons::new()),
+        Arc::new(FakeSteam::new()),
+        NOW,
+    );
+
+    run(ctx, play_no_otp(h.profile)).await;
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(
+        plan.env()
+            .get("IS_FFXIV_LAUNCH_FROM_STEAM")
+            .map(String::as_str),
+        Some("0")
     );
 }
 

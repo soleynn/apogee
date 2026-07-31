@@ -277,9 +277,10 @@ jobs:
       # never needs more than a few times its input.
       - run: cargo +nightly-2026-07-23 fuzz run steam_ticket --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build launch_args --target x86_64-unknown-linux-gnu
-      # Bounded allocation too: the argument plaintext is built into one reservation computed from the
-      # inputs, and the point of the target is that it holds.
-      - run: cargo +nightly-2026-07-23 fuzz run launch_args --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      # No malloc bound here, unlike the two above: this target's allocations are bounded by the input
+      # length rather than by a number read out of it, so a limit could only fire on a bug the builder's
+      # own debug assertion catches first (which a fuzz build has enabled).
+      - run: cargo +nightly-2026-07-23 fuzz run launch_args --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build runner_manifest --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build sqpack_codec --target x86_64-unknown-linux-gnu

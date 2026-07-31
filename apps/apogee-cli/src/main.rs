@@ -12,7 +12,8 @@ use std::process::ExitCode;
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
     FrameLog, GpuSelect, HealthIssue, Hud, OtpSource, PatchProgress, PrefixAction, PrefixHealth,
-    Profile, Region, RunIn, RunnerSelection, Secret, SetupEvent, SyncChoice, Trigger, Uuid,
+    Profile, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
+    SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -309,7 +310,8 @@ struct ProfileAddArgs {
     /// The account uses a one-time password.
     #[arg(long)]
     otp: bool,
-    /// How the account is licensed: `standard`, `free-trial`, or `steam:<app-id>`.
+    /// How the account is licensed: `standard`, `free-trial`, `steam`, `steam-free-trial`, or
+    /// `steam:<app-id>` for an app id none of those name.
     #[arg(long, default_value = "standard")]
     licence: String,
     /// The service region: `global`, `korea`, or `china`.
@@ -1222,10 +1224,6 @@ fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
     }
     Err(format!("unknown runner {spec:?} (expected `system` or `managed:<name>@<version>`)").into())
 }
-
-/// The Steam app ids Square Enix publishes the game under, so the common cases need no lookup.
-const STEAM_APP_ID: u32 = 39_210;
-const STEAM_FREE_TRIAL_APP_ID: u32 = 312_060;
 
 fn parse_licence(licence: &str) -> Result<AccountKind, CliError> {
     match licence {

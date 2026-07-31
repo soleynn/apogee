@@ -180,7 +180,9 @@ impl LoginFlow<'_> {
     ///
     /// The credentials are written once into a zeroizing form body and dropped when this returns. A
     /// non-success callback is [`ProtoError::OauthFailed`] with an excerpt scrubbed of the submitted
-    /// credentials; a malformed `launchParams` list is [`ProtoError::LaunchParamsUnparseable`].
+    /// credentials; a malformed `launchParams` list is [`ProtoError::LaunchParamsUnparseable`]. On a
+    /// Steam login a username naming a different account than the ticket's is
+    /// [`ProtoError::SteamWrongAccount`], raised before anything is sent.
     pub async fn submit(&self, creds: Credentials<'_>) -> Result<Authenticated, ProtoError> {
         let otp = creds.otp.unwrap_or("");
         let sqexid = self.submitted_username(creds.sqexid)?;
@@ -395,12 +397,12 @@ fn build_top_url(context: &OauthContext<'_>, kind: &LoginKind) -> Result<Url, Tr
 
     if let Some(ticket) = kind.ticket() {
         // Appended to the query text rather than through the form-encoding serializer above, which
-        // would escape the two characters the ticket alphabet holds beyond the unreserved set: `*`
-        // (mangled base64's padding) and `,` (the chunk separator). The launcher concatenates the
-        // ticket in verbatim, and SE compares what arrives against what it issued, so an escaped
-        // ticket is a rejected login. Re-setting the query re-encodes nothing: what `set_query`
-        // escapes (space, `"`, `#`, `<`, `>`, controls) appears neither in what the serializer emitted
-        // above nor in the ticket, whose alphabet is base64's with `-_*` and the `,` separator.
+        // would escape the chunk separator (`,` becomes `%2C`; the padding `*` it happens to leave
+        // alone). The launcher concatenates the ticket in verbatim, and SE compares what arrives
+        // against what it issued, so an escaped separator is a rejected login. Re-setting the query
+        // re-encodes nothing: what `set_query` escapes (space, `"`, `#`, `<`, `>`, controls) appears
+        // neither in what the serializer emitted above nor in the ticket, whose alphabet is base64's
+        // with `-_*` and the separator.
         let mut query = url.query().unwrap_or_default().to_owned();
         query.push_str("&issteam=1&session_ticket=");
         query.push_str(ticket.text());

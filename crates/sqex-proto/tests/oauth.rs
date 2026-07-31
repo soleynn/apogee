@@ -192,11 +192,12 @@ fn a_steam_login_carries_the_ticket_unescaped_and_submits_the_linked_id() {
         request.starts_with(&format!("GET {TOP_URL}{query}\n")),
         "top request: {request}"
     );
-    // The two characters form encoding would have escaped. Asserted on the ticket first, so a ticket
-    // that stopped containing them cannot make the escaping check vacuous.
+    // The separator is what form encoding would have escaped, so it is the one worth checking, and it
+    // is asserted present on the ticket first: a ticket that stopped carrying one would otherwise make
+    // the escaping check vacuous. (The padding `*` rides along unescaped either way.)
     assert!(text.contains(','), "ticket carried no separator: {text}");
     assert!(text.contains('*'), "ticket carried no padding: {text}");
-    assert!(!request.contains("%2C") && !request.contains("%2A"));
+    assert!(!request.contains("%2C"), "separator escaped: {request}");
     // The reported size is the encoded length before chunking, so it is short of the text by exactly
     // the separators. A caller that passed the text's length instead would be off by one here.
     assert_eq!(size, text.len() - text.matches(',').count());
