@@ -50,6 +50,34 @@ commit_preprocessors = [
   { pattern = '^(\w+)\(sqpack\)', replace = '${1}(apogee-sqpack)' },
   { pattern = '^(\w+)\(zipatch\)', replace = '${1}(apogee-zipatch)' },
   { pattern = '^(\w+)\(test-support\)', replace = '${1}(apogee-test-support)' },
+  # One-time backfill: the v0.4.0 cycle's squash-merge titles briefly dropped `type(scope):` (fixed by
+  # the pr-title.yml check), so these commits parsed with no scope and several with the wrong group.
+  # Keyed by PR number since the subjects are otherwise plain text; rewrites the raw subject line to
+  # what a compliant title would have been so history need not be rewritten.
+  { pattern = '^feat: prefix lifecycle, health check, and in-process path translation \(#64\)', replace = 'feat(apogee-runtime): prefix lifecycle, health check, and in-process path translation (#64)' },
+  { pattern = '^feat: environment matrix and DXVK install \(#65\)', replace = 'feat(apogee-runtime): environment matrix and DXVK install (#65)' },
+  { pattern = '^fix: Proton prefix init and broad stop under umu 1\.4\.1 \(#66\)', replace = 'fix(apogee-runtime): Proton prefix init and broad stop under umu 1.4.1 (#66)' },
+  { pattern = '^feat: frame-consistency metrics and a bench analyze command \(#67\)', replace = 'feat(apogee-runtime): frame-consistency metrics and a bench analyze command (#67)' },
+  { pattern = '^feat: spawn and stop companion programs alongside the game \(#68\)', replace = 'feat(apogee-runtime): spawn and stop companion programs alongside the game (#68)' },
+  { pattern = '^feat: choose config backup contents by rules that cannot silently match nothing \(#69\)', replace = 'feat(apogee-addons): choose config backup contents by rules that cannot silently match nothing (#69)' },
+  { pattern = '^feat: config backup archive, restore, and retention \(#70\)', replace = 'feat(apogee-addons): config backup archive, restore, and retention (#70)' },
+  { pattern = "^feat: run the user's own tools alongside the game \\(#71\\)", replace = "feat(apogee-addons): run the user's own tools alongside the game (#71)" },
+  { pattern = '^feat: drive companion tools from the launch flow and the command line \(#73\)', replace = 'feat(apogee-core): drive companion tools from the launch flow and the command line (#73)' },
+  { pattern = "^feat: back up, restore, and prune the game's settings from the launcher \\(#74\\)", replace = "feat(apogee-core): back up, restore, and prune the game's settings from the launcher (#74)" },
+  { pattern = '^feat: keep the launcher store private, and capture settings before a patch \(#75\)', replace = 'feat(apogee-core): keep the launcher store private, and capture settings before a patch (#75)' },
+  { pattern = '^feat: prefix verbs, a signed component manifest, and the withdrawal of the catalog \(#76\)', replace = 'feat(apogee-addons): prefix verbs, a signed component manifest, and the withdrawal of the catalog (#76)' },
+  { pattern = '^feat: Dalamud as a launch setting, and the catalog of installable programs removed \(#77\)', replace = 'feat(apogee-addons): Dalamud as a launch setting, and the catalog of installable programs removed (#77)' },
+  { pattern = '^Read SqPack indexes and resolve a game path to its bytes \(#79\)', replace = 'feat(apogee-sqpack): read SqPack indexes and resolve a game path to its bytes (#79)' },
+  { pattern = '^Extract a file from a SqPack dat entry \(#80\)', replace = 'feat(apogee-sqpack): extract a file from a SqPack dat entry (#80)' },
+  { pattern = '^fix: bring boot current before registering, and read a 204 boot check as current \(#83\)', replace = 'fix(apogee-core): bring boot current before registering, and read a 204 boot check as current (#83)' },
+  { pattern = '^Probe a derived current boot version in the live boot check \(#84\)', replace = 'feat(tools): probe a derived current boot version in the live boot check (#84)' },
+  { pattern = "^Sweep an install's SqPack containers and report what disagrees with what they declare \\(#86\\)", replace = "feat(apogee-sqpack): sweep an install's SqPack containers and report what disagrees with what they declare (#86)" },
+  { pattern = "^Say which of an install's files are not the ones Square Enix shipped \\(#87\\)", replace = "feat(apogee-sqpack): say which of an install's files are not the ones Square Enix shipped (#87)" },
+  { pattern = '^Runner sync capability, Steam Deck detection, and a Steam registration \(#88\)', replace = 'feat(apogee-runtime): runner sync capability, Steam Deck detection, and a Steam registration (#88)' },
+  { pattern = '^Resolve the launch environment, install DXVK, and make prefix trouble answerable \(#89\)', replace = 'feat(apogee-runtime): resolve the launch environment, install DXVK, and make prefix trouble answerable (#89)' },
+  { pattern = '^Stop claiming one runner is the supported one \(#90\)', replace = 'fix(apogee-addons): stop claiming one runner is the supported one (#90)' },
+  { pattern = '^Ship the license inside the release tarball \(#91\)', replace = 'fix: ship the license inside the release tarball (#91)' },
+  { pattern = '^ci: fix changelog and release-notes generation for stable releases', replace = 'fix(ci): fix changelog and release-notes generation for stable releases' },
 ]
 commit_parsers = [
   { message = "^feat", group = "Added" },
