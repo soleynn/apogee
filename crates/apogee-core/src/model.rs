@@ -82,6 +82,15 @@ pub enum AccountKind {
     FreeTrial,
 }
 
+/// The Steam app id the game is licensed under, for an account that bought it there.
+pub const STEAM_APP_ID: u32 = 39_210;
+/// The Steam app id the free trial is licensed under.
+///
+/// It decides two things at once, which is why it lives beside the paid one rather than in whichever
+/// caller needed it first: the ticket is minted against the app the licence belongs to, and this app
+/// is also the one whose login carries the trial flag.
+pub const STEAM_FREE_TRIAL_APP_ID: u32 = 312_060;
+
 /// Which Wine/Proton runner a profile launches under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

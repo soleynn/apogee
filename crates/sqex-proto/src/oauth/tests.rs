@@ -3,8 +3,10 @@
 
 use proptest::prelude::*;
 
+use super::mask_id;
 use super::scan::{
-    CallbackReject, is_restartup, parse_launch_params, parse_login_callback, scrape_stored,
+    CallbackReject, is_restartup, parse_launch_params, parse_login_callback, scrape_steam_id,
+    scrape_stored,
 };
 use crate::error::ProtoError;
 
@@ -52,6 +54,56 @@ fn scrape_stored_caps_a_runaway_value() {
         scrape_stored(&html),
         Err(ProtoError::StoredNotFound { .. })
     ));
+}
+
+/// The visible login form's own username input, present on every top page including a Steam one.
+const VISIBLE_INPUT: &str =
+    r#"<input class="item-input" name="sqexid" id="sqexid" type="text" value="" tabindex="1">"#;
+
+#[test]
+fn steam_id_is_read_from_the_hidden_input() {
+    let html = format!(
+        r#"{VISIBLE_INPUT}<input name="sqexid" type="hidden" value="linked@example.invalid"/>"#
+    );
+    assert_eq!(scrape_steam_id(&html), Some("linked@example.invalid"));
+}
+
+#[test]
+fn steam_id_ignores_the_visible_input() {
+    // The empty visible input precedes the hidden one on the page and carries the same `name`. An
+    // anchor that matched it would read a blank id, and the flow would submit against no account.
+    assert_eq!(scrape_steam_id(VISIBLE_INPUT), None);
+}
+
+#[test]
+fn steam_id_treats_an_empty_value_as_absent() {
+    let html = r#"<input name="sqexid" type="hidden" value=""/>"#;
+    assert_eq!(scrape_steam_id(html), None);
+}
+
+#[test]
+fn steam_id_caps_a_runaway_value() {
+    let html = format!(
+        r#"<input name="sqexid" type="hidden" value="{}">"#,
+        "x".repeat(500)
+    );
+    assert_eq!(scrape_steam_id(&html), None);
+}
+
+#[test]
+fn a_masked_id_keeps_the_ends_and_reports_no_length() {
+    assert_eq!(mask_id("testuser"), "t***r");
+    // Two ids of different lengths mask alike, so the hint cannot be counted back to one.
+    assert_eq!(mask_id("tr"), "***");
+    assert_eq!(mask_id("t"), "***");
+    assert_eq!(mask_id(""), "***");
+}
+
+#[test]
+fn a_masked_id_splits_on_characters_not_bytes() {
+    // A byte-indexed mask would panic here, and a byte count would call this id four long.
+    assert_eq!(mask_id("héllo"), "h***o");
+    assert_eq!(mask_id("åä"), "***");
 }
 
 #[test]
@@ -166,6 +218,17 @@ proptest! {
     #[test]
     fn scrape_stored_never_panics(s in ".{0,300}") {
         let _ = scrape_stored(&s);
+    }
+
+    #[test]
+    fn scrape_steam_id_never_panics(s in ".{0,300}") {
+        let _ = scrape_steam_id(&s);
+    }
+
+    #[test]
+    fn mask_id_never_panics(s in ".{0,300}") {
+        let masked = mask_id(&s);
+        prop_assert!(masked.chars().count() <= 5);
     }
 
     #[test]

@@ -16,6 +16,9 @@ pub const SESSION_ID: &str = "SESSIONXYZ";
 pub const UNIQUE_ID: &str = "UID-TOKEN-0123456789";
 pub const BOOT_VERSION: &str = "2024.02.01.0000.0000";
 pub const GAME_VERSION: &str = "2024.03.28.0000.0000";
+/// The SE account a Steam top page reports its ticket is linked to. Cased unlike the stored account
+/// id on purpose: the page's spelling is the canonical one, and the check against it ignores case.
+pub const STEAM_LINKED_ID: &str = "TestUser";
 
 /// The `Date` header stamped on the OAuth top page (the flow uses it for TOTP clock-skew correction).
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";
@@ -41,6 +44,20 @@ pub fn login_status_closed(message: &str) -> ProtoResponse {
 pub fn oauth_top(stored: &str) -> ProtoResponse {
     let body = format!(
         r#"<html><body><form><input type="hidden" name="_STORED_" value="{stored}"></form></body></html>"#
+    );
+    ProtoResponse::new(200, body.into_bytes())
+        .with_header(DATE, HeaderValue::from_static(SERVER_DATE))
+}
+
+/// The OAuth top page a Steam login gets: the same blob, plus the hidden input naming the SE account
+/// the ticket is linked to. The empty visible username field is there too, since the scanner has to
+/// pass over it to find the hidden one.
+#[must_use]
+pub fn oauth_top_steam(stored: &str, linked: &str) -> ProtoResponse {
+    let body = format!(
+        r#"<html><body><form><input class="item-input" name="sqexid" id="sqexid" type="text" value="">
+        <input name="sqexid" type="hidden" value="{linked}"/>
+        <input type="hidden" name="_STORED_" value="{stored}"></form></body></html>"#
     );
     ProtoResponse::new(200, body.into_bytes())
         .with_header(DATE, HeaderValue::from_static(SERVER_DATE))

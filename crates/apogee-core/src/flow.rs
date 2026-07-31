@@ -12,7 +12,7 @@ use apogee_otp::OtpSource;
 use apogee_patcher::{InstallRequest, Repo, SePatch};
 use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
 use apogee_secrets::Secret;
-use sqex_crypto::{ArgKey, ArgumentBuilder, TickCount};
+use sqex_crypto::{ArgKey, ArgumentBuilder, ObfuscatedTicket, ServerTime, TickCount};
 use sqex_proto::{
     Authenticated, ClientContext, ComputerId, Credentials, FrontierContext, InstallPaths,
     LoginKind, OauthContext, PatchListEntry, Registration, Transport, VersionReport, begin_login,
@@ -28,8 +28,9 @@ use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
-use crate::model::{Account, Profile, Region, Settings};
+use crate::model::{Account, AccountKind, Profile, Region, STEAM_FREE_TRIAL_APP_ID, Settings};
 use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo_ver_path};
+use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
 
 /// The most register→patch rounds a single flow will attempt before giving up. The normal chain is
@@ -59,6 +60,7 @@ pub(crate) struct FlowContext {
     pub(crate) patch: Arc<dyn PatchBackend>,
     pub(crate) launch: Arc<dyn LaunchBackend>,
     pub(crate) addons: Arc<dyn AddonBackend>,
+    pub(crate) steam: Arc<dyn SteamBackend>,
     pub(crate) store: Store,
     pub(crate) clock: Clock,
     pub(crate) computer_id: ComputerId,
@@ -232,7 +234,7 @@ async fn play(
         && launch
         && let Some(session) = valid_cached_session(ctx, &profile)?
     {
-        return launch_game(ctx, &profile, &session, tx, cancel).await;
+        return launch_game(ctx, &profile, &account, &session, tx, cancel).await;
     }
     let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx).await? else {
         return Ok(());
@@ -241,7 +243,7 @@ async fn play(
         return Ok(());
     };
     if launch {
-        launch_game(ctx, &profile, &session, tx, cancel).await?;
+        launch_game(ctx, &profile, &account, &session, tx, cancel).await?;
     }
     Ok(())
 }
@@ -282,9 +284,9 @@ async fn launch_cached(
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
-    let (profile, _account) = resolve(ctx, profile_id)?;
+    let (profile, account) = resolve(ctx, profile_id)?;
     match valid_cached_session(ctx, &profile)? {
-        Some(session) => launch_game(ctx, &profile, &session, tx, cancel).await,
+        Some(session) => launch_game(ctx, &profile, &account, &session, tx, cancel).await,
         None => {
             emit(tx, FlowState::NeedsLogin);
             Ok(())
@@ -332,7 +334,7 @@ async fn authenticate(
         &*ctx.transport,
         &oauth,
         &now,
-        LoginKind::Standard { free_trial: false },
+        login_kind(ctx, account).await?,
     )
     .await?;
     let auth = flow
@@ -351,6 +353,28 @@ async fn authenticate(
         return Ok(None);
     }
     Ok(Some(auth))
+}
+
+/// Which login variant an account logs in with, minting a Steam ticket when it needs one.
+///
+/// The free-trial flag and the ticket are independent on the wire, and for a Steam account the app id
+/// decides both: a ticket is minted against the app the licence belongs to, and the trial app is the
+/// one that also flags the login.
+async fn login_kind(ctx: &FlowContext, account: &Account) -> Result<LoginKind, CoreError> {
+    Ok(match account.kind {
+        AccountKind::Standard => LoginKind::Standard { free_trial: false },
+        AccountKind::FreeTrial => LoginKind::Standard { free_trial: true },
+        AccountKind::Steam { app_id } => {
+            let ticket = ctx.steam.auth_ticket(app_id).await?;
+            LoginKind::Steam {
+                ticket: ObfuscatedTicket::from_auth_ticket(
+                    ticket.raw.expose(),
+                    ServerTime(ticket.server_time),
+                )?,
+                free_trial: app_id == STEAM_FREE_TRIAL_APP_ID,
+            }
+        }
+    })
 }
 
 /// Drive the register→patch loop until the install is current, applying pending boot and game patches
@@ -650,6 +674,7 @@ fn read_repo_ver(game_root: &Path, repo: Repo) -> Option<String> {
 async fn launch_game(
     ctx: &FlowContext,
     profile: &Profile,
+    account: &Account,
     session: &UidCacheEntry,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
@@ -664,11 +689,14 @@ async fn launch_game(
         .prepare(&profile.runner, &prefix_dir, cancel, tx)
         .await?;
 
-    let environment =
-        compute_environment(&launch_env(profile, prepared.dxvk.clone()), &prepared.caps);
+    let steam = is_steam(account);
+    let environment = compute_environment(
+        &launch_env(profile, prepared.dxvk.clone(), steam),
+        &prepared.caps,
+    );
     let mut plan = LaunchPlan::new(
         game_dir.join("ffxiv_dx11.exe").to_string_lossy(),
-        build_launch_args(session, language_id(&settings.language)),
+        build_launch_args(session, language_id(&settings.language), steam),
         environment.vars,
     )
     .in_directory(&game_dir)
@@ -779,16 +807,23 @@ fn resolve(ctx: &FlowContext, profile_id: Uuid) -> Result<(Profile, Account), Co
     Ok((profile, account))
 }
 
+/// Whether this account's game runs as a Steam launch: the extra argument and environment entry
+/// below, and nothing else about the launch, hang off it.
+fn is_steam(account: &Account) -> bool {
+    matches!(account.kind, AccountKind::Steam { .. })
+}
+
 /// The ordered game arguments, encrypted under a fresh tick key.
-fn build_launch_args(session: &UidCacheEntry, language: u8) -> String {
-    launch_arguments(session, language)
+fn build_launch_args(session: &UidCacheEntry, language: u8, steam: bool) -> String {
+    launch_arguments(session, language, steam)
         .build_encrypted(&ArgKey::from_tick(TickCount::now_for_game()))
 }
 
 /// The ordered game arguments before encryption. `DEV.TestSID` is the registration unique id (not the
-/// OAuth session id), and the fixed set and order match the reference launcher (byte-identity oracle).
-fn launch_arguments(session: &UidCacheEntry, language: u8) -> ArgumentBuilder {
-    ArgumentBuilder::new()
+/// OAuth session id), and the fixed set and order match the reference launcher (byte-identity oracle),
+/// including `IsSteam` trailing the fixed set on a Steam launch.
+fn launch_arguments(session: &UidCacheEntry, language: u8, steam: bool) -> ArgumentBuilder {
+    let args = ArgumentBuilder::new()
         .add("DEV.DataPathType", "1")
         .add(
             "DEV.MaxEntitledExpansionID",
@@ -799,7 +834,12 @@ fn launch_arguments(session: &UidCacheEntry, language: u8) -> ArgumentBuilder {
         .add("SYS.Region", session.region.to_string())
         .add("language", language.to_string())
         .add("resetConfig", "0")
-        .add("ver", &session.game_version)
+        .add("ver", &session.game_version);
+    if steam {
+        args.add("IsSteam", "1")
+    } else {
+        args
+    }
 }
 
 /// Work on a profile's prefix without launching anything.
@@ -866,14 +906,23 @@ async fn prefix(
 /// merges last and innermost respectively, so a user's setting still outranks anything computed for
 /// them. Note that the addon layer composes onto the plan *after* this, so what it contributes
 /// outranks both: setup a launch cannot run without is not a preference.
-fn launch_env(profile: &Profile, dxvk: Option<apogee_runtime::DxvkEnv>) -> EnvConfig {
+fn launch_env(profile: &Profile, dxvk: Option<apogee_runtime::DxvkEnv>, steam: bool) -> EnvConfig {
+    let mut env: std::collections::BTreeMap<String, String> =
+        profile.launch.extra_env.iter().cloned().collect();
+    if steam {
+        // The reference launcher sets this beside the `IsSteam` argument, both being what the game
+        // sees when its own boot binary is started as a Steam launch. Inserted only where the profile
+        // has not spoken, so the free-form arm keeps outranking what is computed for it.
+        env.entry("IS_FFXIV_LAUNCH_FROM_STEAM".to_owned())
+            .or_insert_with(|| "1".to_owned());
+    }
     EnvConfig {
         sync: profile.launch.sync,
         hud: profile.launch.hud.clone(),
         gpu: profile.launch.gpu.clone(),
         gamescope: profile.launch.gamescope.clone(),
         gamemode: profile.launch.gamemode,
-        env: profile.launch.extra_env.iter().cloned().collect(),
+        env,
         wrappers: profile.launch.wrappers.clone(),
         dxvk,
     }

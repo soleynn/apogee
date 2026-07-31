@@ -1,11 +1,12 @@
 //! The OAuth page scanners.
 //!
-//! Two hand-written, anchored scanners read the SE login pages: one lifts the opaque `_STORED_` blob
-//! out of the top page, the other reads the `launchParams` list out of the success callback. Both see
-//! hostile input over plain HTTP, so they follow the patchlist parser's discipline: fixed ASCII
-//! anchors, bounded search windows, length-capped captures, and no panics on any byte sequence. They
-//! hold no transport and no credentials, and their errors carry a count or a length-capped page
-//! excerpt, never the submitted secrets or the session id.
+//! Hand-written, anchored scanners read the SE login pages: two lift attribute values out of the top
+//! page (the opaque `_STORED_` blob, and on a Steam login the linked account id), the third reads the
+//! `launchParams` list out of the success callback. All see hostile input over plain HTTP, so they
+//! follow the patchlist parser's discipline: fixed ASCII anchors, bounded search windows,
+//! length-capped captures, and no panics on any byte sequence. They hold no transport and no
+//! credentials, and their errors carry a count or a length-capped page excerpt, never the submitted
+//! secrets or the session id.
 
 use zeroize::Zeroizing;
 
@@ -22,6 +23,15 @@ const ATTR_WINDOW: usize = 64;
 /// The most bytes the `_STORED_` capture keeps before giving up: the blob is opaque but bounded, so a
 /// missing closing quote cannot make the capture run away.
 const MAX_STORED: usize = 4096;
+/// The attribute pair that anchors the Steam-linked id. The page also carries the *visible* login
+/// form's `<input class="item-input" name="sqexid" id="sqexid" type="text" value="">`, whose value is
+/// empty, so anchoring on the name alone would find the wrong element and read a blank id. The
+/// hidden-input shape is the one XL matches (`Launcher.cs:502`), and its working in the wild is the
+/// only evidence for the markup: no capture of a Steam top page exists here.
+const STEAM_ID_ANCHOR: &str = "name=\"sqexid\" type=\"hidden\"";
+/// The most bytes the linked-id capture keeps. SE ids are short; the page caps its own input at 16
+/// characters, and this leaves room for an address-shaped one.
+const MAX_STEAM_ID: usize = 128;
 /// The login callback wrapper. The status field (`ok` / `ng`) and its payload run from here to the
 /// next `"`. Double-quoted, so the single-quoted commented-out samples on the page do not match.
 const CALLBACK_OPEN: &str = "window.external.user(\"login=auth,";
@@ -61,26 +71,35 @@ pub(crate) enum CallbackReject {
 /// carrying a length-capped page excerpt (the top page carries no submitted credentials). The returned
 /// slice borrows `html`.
 pub fn scrape_stored(html: &str) -> Result<&str, ProtoError> {
-    let not_found = || ProtoError::StoredNotFound {
+    attribute_value(html, STORED_ANCHOR, MAX_STORED).ok_or_else(|| ProtoError::StoredNotFound {
         excerpt: excerpt(html.as_bytes()),
-    };
+    })
+}
 
-    let anchor = html.find(STORED_ANCHOR).ok_or_else(not_found)?;
-    let after = &html[anchor + STORED_ANCHOR.len()..];
+/// Lift the SE account id the Steam ticket is linked to out of the login top page.
+///
+/// Present only on a `issteam=1` top page; a standard page carries the empty visible input this
+/// deliberately does not match ([`STEAM_ID_ANCHOR`]). `None` covers both the missing element and an
+/// empty value, which the flow treats alike: without an id there is nothing to check the submitted
+/// username against, and submitting anyway would send credentials to a page whose account is unknown.
+pub(crate) fn scrape_steam_id(html: &str) -> Option<&str> {
+    attribute_value(html, STEAM_ID_ANCHOR, MAX_STEAM_ID).filter(|id| !id.is_empty())
+}
 
-    // `find` returns an ASCII boundary, so every slice below lands between ASCII delimiters and can
-    // never split a multi-byte character.
-    let vpos = after
-        .find(VALUE_OPEN)
-        .filter(|&p| p <= ATTR_WINDOW)
-        .ok_or_else(not_found)?;
-    let value = &after[vpos + VALUE_OPEN.len()..];
+/// The `value="…"` following `anchor` within a bounded window, capped at `max` bytes.
+///
+/// `find` returns an ASCII boundary and every delimiter here is ASCII, so no slice can split a
+/// multi-byte character. A closing quote past the cap reads as absent rather than truncating, so a
+/// page with no closing quote cannot hand back a runaway capture.
+fn attribute_value<'h>(html: &'h str, anchor: &str, max: usize) -> Option<&'h str> {
+    let at = html.find(anchor)?;
+    let after = &html[at + anchor.len()..];
 
-    let end = value
-        .find('"')
-        .filter(|&e| e <= MAX_STORED)
-        .ok_or_else(not_found)?;
-    Ok(&value[..end])
+    let open = after.find(VALUE_OPEN).filter(|&p| p <= ATTR_WINDOW)?;
+    let value = &after[open + VALUE_OPEN.len()..];
+
+    let end = value.find('"').filter(|&e| e <= max)?;
+    Some(&value[..end])
 }
 
 /// Whether the top page asked the client to relink a Steam account.

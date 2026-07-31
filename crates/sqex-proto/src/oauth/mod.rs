@@ -15,6 +15,7 @@ use std::fmt;
 
 use http::{HeaderName, HeaderValue, Method};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use sqex_crypto::ObfuscatedTicket;
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -29,7 +30,7 @@ mod scan;
 #[cfg(test)]
 mod tests;
 
-use scan::{CallbackReject, is_restartup, parse_login_callback};
+use scan::{CallbackReject, is_restartup, parse_login_callback, scrape_steam_id};
 pub use scan::{LaunchParams, parse_launch_params, scrape_stored};
 
 const TOP_URL: &str = "https://ffxiv-login.square-enix.com/oauth/ffxivarr/login/top";
@@ -59,12 +60,38 @@ pub struct OauthContext<'a> {
     pub region: u16,
 }
 
-/// Which login variant to begin. `#[non_exhaustive]` so a Steam variant can join without a break.
-#[derive(Clone)]
+/// Which login variant to begin. `#[non_exhaustive]` so a further variant can join without a break.
+///
+/// Not `Clone`: the Steam arm owns a bearer ticket that deliberately cannot be copied.
 #[non_exhaustive]
 pub enum LoginKind {
     /// A standard username/password (optionally OTP) login. `free_trial` sets the top-page `isft` flag.
     Standard { free_trial: bool },
+    /// A Steam service account. The ticket rides in the top-page query and the page answers with the
+    /// SE account it is linked to, which [`LoginFlow::submit`] checks the submitted username against.
+    /// `free_trial` is independent of the ticket: the launcher sets `isft` from the app id it
+    /// initialized Steam with, and sends both flags together.
+    Steam {
+        ticket: ObfuscatedTicket,
+        free_trial: bool,
+    },
+}
+
+impl LoginKind {
+    /// The top-page `isft` flag for this variant.
+    fn free_trial(&self) -> bool {
+        match self {
+            Self::Standard { free_trial } | Self::Steam { free_trial, .. } => *free_trial,
+        }
+    }
+
+    /// The ticket a Steam login carries, or `None` for a standard one.
+    fn ticket(&self) -> Option<&ObfuscatedTicket> {
+        match self {
+            Self::Standard { .. } => None,
+            Self::Steam { ticket, .. } => Some(ticket),
+        }
+    }
 }
 
 /// Borrowed login credentials. Deliberately implements no `Debug`/`Clone`/`Serialize`: it is borrowed
@@ -153,16 +180,19 @@ impl LoginFlow<'_> {
     ///
     /// The credentials are written once into a zeroizing form body and dropped when this returns. A
     /// non-success callback is [`ProtoError::OauthFailed`] with an excerpt scrubbed of the submitted
-    /// credentials; a malformed `launchParams` list is [`ProtoError::LaunchParamsUnparseable`].
+    /// credentials; a malformed `launchParams` list is [`ProtoError::LaunchParamsUnparseable`]. On a
+    /// Steam login a username naming a different account than the ticket's is
+    /// [`ProtoError::SteamWrongAccount`], raised before anything is sent.
     pub async fn submit(&self, creds: Credentials<'_>) -> Result<Authenticated, ProtoError> {
         let otp = creds.otp.unwrap_or("");
+        let sqexid = self.submitted_username(creds.sqexid)?;
 
         // Assemble the form body directly into zeroizing memory, percent-encoding each field.
         let mut body = Zeroizing::new(String::with_capacity(256));
         body.push_str("_STORED_=");
         body.extend(utf8_percent_encode(self.stored.as_str(), UNRESERVED));
         body.push_str("&sqexid=");
-        body.extend(utf8_percent_encode(creds.sqexid, UNRESERVED));
+        body.extend(utf8_percent_encode(sqexid, UNRESERVED));
         body.push_str("&password=");
         body.extend(utf8_percent_encode(creds.password, UNRESERVED));
         body.push_str("&otppw=");
@@ -177,7 +207,15 @@ impl LoginFlow<'_> {
                 status: response.status,
                 excerpt: scrubbed_excerpt(
                     &response.body,
-                    &[creds.sqexid, creds.password, otp, self.stored.as_str()],
+                    // Both usernames: a Steam login submits the page's own id, which differs from the
+                    // caller's by case, and a verbatim scrub matches neither for the other.
+                    &[
+                        sqexid,
+                        creds.sqexid,
+                        creds.password,
+                        otp,
+                        self.stored.as_str(),
+                    ],
                 ),
             });
         }
@@ -201,7 +239,15 @@ impl LoginFlow<'_> {
                     .map(|m| {
                         scrubbed_excerpt(
                             m.as_bytes(),
-                            &[creds.sqexid, creds.password, otp, self.stored.as_str()],
+                            // Both usernames: a Steam login submits the page's own id, which differs from the
+                            // caller's by case, and a verbatim scrub matches neither for the other.
+                            &[
+                                sqexid,
+                                creds.sqexid,
+                                creds.password,
+                                otp,
+                                self.stored.as_str(),
+                            ],
                         )
                     })
                     .unwrap_or_default();
@@ -210,6 +256,32 @@ impl LoginFlow<'_> {
             Err(CallbackReject::Unparseable { got_fields }) => {
                 Err(ProtoError::LaunchParamsUnparseable { got_fields })
             }
+        }
+    }
+
+    /// The username this flow submits, given the one the caller offered.
+    ///
+    /// A standard login submits the caller's. A Steam login submits the id the top page reported the
+    /// ticket is linked to, having first checked the caller meant that account: the ticket already
+    /// decides which SE account the login lands on, so submitting a different username would either
+    /// fail confusingly or sign the user into an account they did not pick. The comparison is
+    /// case-insensitive, matching the launcher (`Launcher.cs:572`), because SE ids are.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtoError::SteamWrongAccount`] when the two name different accounts, carrying only a masked
+    /// hint: the linked id is another account's identifier and the caller has just proved they do not
+    /// know it.
+    fn submitted_username<'a>(&'a self, offered: &'a str) -> Result<&'a str, ProtoError> {
+        let Some(linked) = self.steam_linked_id.as_deref() else {
+            return Ok(offered);
+        };
+        if linked.eq_ignore_ascii_case(offered) {
+            Ok(linked)
+        } else {
+            Err(ProtoError::SteamWrongAccount {
+                expected_hint: mask_id(linked),
+            })
         }
     }
 
@@ -257,11 +329,9 @@ pub async fn begin_login<'t>(
     now: &LauncherTime,
     kind: LoginKind,
 ) -> Result<LoginFlow<'t>, ProtoError> {
-    let LoginKind::Standard { free_trial } = kind;
-
     let (user_agent, referer) = context.client.user_agent_and_referer(now);
 
-    let top_url = build_top_url(context, free_trial)?;
+    let top_url = build_top_url(context, &kind)?;
     let request = build_top_request(
         top_url.clone(),
         &user_agent,
@@ -275,12 +345,31 @@ pub async fn begin_login<'t>(
     }
 
     let text = String::from_utf8_lossy(&response.body);
+    let steam = kind.ticket().is_some();
 
-    // A standard login sends no Steam ticket, so `restartup` here is an anomalous response, not the
-    // Steam relink signal (which the Steam variant maps to `SteamLinkNeeded`).
     if is_restartup(&text) {
-        return Err(ProtoError::invalid_response(Step::OauthTop, &response));
+        // With a ticket on the query this is SE saying the Steam account has no SE account behind it,
+        // the one disposition a user can act on. Without one there was no account to link, so the same
+        // page is an anomalous response rather than a relink prompt.
+        return Err(if steam {
+            ProtoError::SteamLinkNeeded
+        } else {
+            ProtoError::invalid_response(Step::OauthTop, &response)
+        });
     }
+
+    // Read before `_STORED_` so a Steam page that answers without an id fails before the flow exists
+    // to submit credentials through. An id is the only thing the submitted username can be checked
+    // against, and the launcher submits the id itself, so there is nothing to send without one.
+    let steam_linked_id = if steam {
+        Some(
+            scrape_steam_id(&text)
+                .ok_or_else(|| ProtoError::invalid_response(Step::OauthTop, &response))?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
 
     let stored = scrape_stored(&text)?.to_owned();
     let server_date = read_date(&response);
@@ -290,21 +379,38 @@ pub async fn begin_login<'t>(
         top_url,
         stored: Zeroizing::new(stored),
         server_date,
-        steam_linked_id: None,
+        steam_linked_id,
         user_agent,
         accept_language: context.client.accept_language.to_owned(),
     })
 }
 
-fn build_top_url(context: &OauthContext<'_>, free_trial: bool) -> Result<Url, TransportError> {
+fn build_top_url(context: &OauthContext<'_>, kind: &LoginKind) -> Result<Url, TransportError> {
     let mut url = parse_base(TOP_URL, "invalid top URL")?;
     url.query_pairs_mut()
         .append_pair("lng", context.lng)
         .append_pair("rgn", &context.region.to_string())
-        .append_pair("isft", if free_trial { "1" } else { "0" })
+        .append_pair("isft", if kind.free_trial() { "1" } else { "0" })
         .append_pair("cssmode", "1")
         .append_pair("isnew", "1")
         .append_pair("launchver", "3");
+
+    if let Some(ticket) = kind.ticket() {
+        // Appended to the query text rather than through the form-encoding serializer above, which
+        // would escape the chunk separator (`,` becomes `%2C`; the padding `*` it happens to leave
+        // alone). The launcher concatenates the ticket in verbatim, and SE compares what arrives
+        // against what it issued, so an escaped separator is a rejected login. Re-setting the query
+        // re-encodes nothing: what `set_query` escapes (space, `"`, `#`, `<`, `>`, controls) appears
+        // neither in what the serializer emitted above nor in the ticket, whose alphabet is base64's
+        // with `-_*` and the separator.
+        let mut query = url.query().unwrap_or_default().to_owned();
+        query.push_str("&issteam=1&session_ticket=");
+        query.push_str(ticket.text());
+        query.push_str("&ticket_size=");
+        query.push_str(&ticket.length().to_string());
+        url.set_query(Some(&query));
+    }
+
     Ok(url)
 }
 
@@ -337,6 +443,20 @@ fn build_top_request(
             HeaderValue::from_static(RSID_COOKIE),
         )
         .header(HeaderName::from_static("referer"), dynamic_header(referer)?))
+}
+
+/// A recognizable but non-disclosing form of an account id: its first and last characters around a
+/// fixed mask.
+///
+/// Fixed rather than one `*` per hidden character, so the hint does not report the id's length, and
+/// nothing under three characters survives at all. The user is being told which account the ticket
+/// belongs to; the id itself belongs to whoever linked it and is not the caller's to read back.
+fn mask_id(id: &str) -> String {
+    let mut chars = id.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(first), Some(last)) if id.chars().count() > 2 => format!("{first}***{last}"),
+        _ => "***".to_owned(),
+    }
 }
 
 /// The `Date` response header as an owned string, if the transport surfaced it.

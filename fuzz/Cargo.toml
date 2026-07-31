@@ -155,5 +155,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "launch_args"
+path = "fuzz_targets/launch_args.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1

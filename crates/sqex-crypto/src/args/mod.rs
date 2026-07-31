@@ -81,6 +81,15 @@ impl ArgumentBuilder {
         for (k, v) in self.args.iter().skip(usize::from(skip_first)) {
             push_pair(&mut plaintext, k, v);
         }
+        // Checked here rather than in a test, because the value it is about is this local buffer and
+        // nothing outside can see it. A reservation that came up short would have grown the string
+        // above, leaving a cleartext copy of the session id in freed heap that the zeroizing wrapper
+        // can no longer reach: the failure is silent, and the only witness is this line. Debug
+        // assertions are on in the fuzzer, which is what drives it over adversarial argument sets.
+        debug_assert!(
+            plaintext.len() <= cap,
+            "the argument plaintext outgrew its reservation"
+        );
 
         let key_bytes = Zeroizing::new(key.key_bytes());
         let ciphertext = LegacyBlowfish::new(key_bytes.as_slice()).encrypt(plaintext.as_bytes());

@@ -18,6 +18,7 @@ mod host;
 mod launch;
 mod model;
 mod patch;
+mod steam;
 mod store;
 mod transport;
 
@@ -46,7 +47,7 @@ pub use composition::{Core, CoreConfig};
 pub use error::CoreError;
 pub use model::{
     Account, AccountKind, LaunchSettings, PrefixSelection, Profile, Region, RunnerSelection,
-    Settings,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Settings,
 };
 pub use sqex_proto::Transport;
 pub use store::StoreError;

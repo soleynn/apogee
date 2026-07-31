@@ -24,6 +24,7 @@ jobs:
           - oauth_launch_params
           - sqex_base64
           - steam_ticket
+          - launch_args
           - runner_manifest
           - sqpack_codec
           - sqpack_index

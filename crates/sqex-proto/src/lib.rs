@@ -30,6 +30,8 @@ pub use oauth::{
 };
 pub use patchlist::{BlockHashes, PatchListEntry, parse_patch_list};
 pub use register::{Registration, UniqueId, register_session};
+// A Steam login is begun with these, so a consumer can build one without naming the crypto crate.
+pub use sqex_crypto::{ObfuscatedTicket, ServerTime};
 pub use time::LauncherTime;
 pub use transport::{
     ProtoRequest, ProtoResponse, RequestBody, Transport, TransportError,
