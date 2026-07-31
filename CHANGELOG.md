@@ -6,6 +6,9 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### ci
+- Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
+
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
 ## [0.4.0] - 2026-07-31
