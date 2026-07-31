@@ -7,8 +7,10 @@ mod bytes;
 mod crtrand;
 mod error;
 pub mod sqex_base64;
+mod ticket;
 
 pub use args::{ArgKey, ArgumentBuilder, TickCount};
 pub use blowfish::{Blowfish, LegacyBlowfish};
 pub use crtrand::CrtRand;
 pub use error::CryptoError;
+pub use ticket::{ObfuscatedTicket, ServerTime};
