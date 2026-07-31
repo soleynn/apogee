@@ -33,21 +33,73 @@ pub(crate) trait GameHandle: Send + Sync {
     async fn kill(&self) -> Result<(), CoreError>;
 }
 
+/// A prefix that is ready to launch into, and what the host can do through the runner that built it.
+///
+/// The capabilities come back from here rather than being read by the flow, because one of them is
+/// only half a host fact: whether a launch can use ntsync depends on the kernel *and* on the runner
+/// build, and only this seam has ever seen the runner. A flow that detected capabilities itself could
+/// forget the second half, and forgetting it is silent in the worst direction (see
+/// [`apogee_runtime::HostCaps::for_runner`]).
+#[derive(Debug, Clone)]
+pub(crate) struct Prepared {
+    /// The initialized prefix. `None` means the backend has no real prefix to hand back, which only
+    /// the test double does. A caller that needs one treats that as nothing to do rather than as a
+    /// failure, so the flows around a prefix stay drivable without a wine.
+    pub(crate) prefix: Option<apogee_runtime::Prefix>,
+    /// What the host supports as seen through the runner that was just prepared.
+    pub(crate) caps: apogee_runtime::HostCaps,
+    /// The graphics translation the prefix now has, ready for the launch environment to activate.
+    /// `None` is a prefix with none, which sets no override rather than overriding to a DLL that is
+    /// not there.
+    pub(crate) dxvk: Option<apogee_runtime::DxvkEnv>,
+    /// The verified catalog this preparation already fetched, when it needed one. Carried so a
+    /// caller that also needs it does not download and re-verify the same signed file twice.
+    pub(crate) catalog: Option<apogee_runtime::Catalog>,
+}
+
 /// Prepares a runner/prefix and launches the supervised game.
 #[async_trait::async_trait]
 pub(crate) trait LaunchBackend: Send + Sync {
     /// Install the runner if needed and initialize the prefix, without launching anything.
-    ///
-    /// `None` means the backend has no real prefix to hand back, which only the test double does. A
-    /// caller that needs one treats that as nothing to do rather than as a failure, so the flows around
-    /// a prefix stay drivable without a wine.
     async fn prepare(
         &self,
         runner: &RunnerSelection,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<apogee_runtime::Prefix>, CoreError>;
+    ) -> Result<Prepared, CoreError>;
+
+    /// Report the prefix's drift against what it records, changing nothing.
+    ///
+    /// `None` is nothing to examine: a prefix that was never created, or a backend that has none at
+    /// all (which only the test double is). It is not created here, and nothing is brought up to
+    /// date: building or installing during a question about what is wrong would change the answer
+    /// while it was being asked.
+    async fn check_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
+
+    /// Apply a targeted fix for each problem that has one, and report what is left.
+    async fn fix_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
+
+    /// Delete the prefix and build it again.
+    async fn recreate_prefix(
+        &self,
+        runner: &RunnerSelection,
+        prefix_dir: &std::path::Path,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Result<(), CoreError>;
 
     /// Spawn `plan` and supervise the game, relaying download/extract progress onto `events` as
     /// [`Event::Progress`]. Returns a handle to the running game.
@@ -71,7 +123,7 @@ pub(crate) mod fake {
     use tokio::sync::Notify;
 
     use super::{
-        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchPlan,
+        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchPlan, Prepared,
         RunnerSelection, UnboundedSender,
     };
 
@@ -87,6 +139,16 @@ pub(crate) mod fake {
         /// Whether `prepare` stops the way a runner does when the token fires mid-`wineboot`.
         cancel_prepare: bool,
         killed: Arc<AtomicBool>,
+        /// What `prepare` reports the host and runner resolve to.
+        caps: apogee_runtime::HostCaps,
+        /// What `prepare` reports the prefix's graphics translation to be.
+        dxvk: Option<apogee_runtime::DxvkEnv>,
+        /// What a check reports, and what a fix is asked to resolve.
+        health: Option<apogee_runtime::PrefixHealth>,
+        /// What a fix reports is left afterwards.
+        residual: Option<apogee_runtime::PrefixHealth>,
+        fixed: Arc<AtomicBool>,
+        recreated: Arc<AtomicBool>,
     }
 
     impl FakeLaunchBackend {
@@ -117,7 +179,52 @@ pub(crate) mod fake {
                 auto_exit,
                 cancel_prepare: false,
                 killed: Arc::new(AtomicBool::new(false)),
+                // A host that can do nothing in particular, so a test that does not care about the
+                // environment gets the same answer on every machine.
+                caps: apogee_runtime::HostCaps {
+                    ntsync: false,
+                    fsync: false,
+                },
+                dxvk: None,
+                health: None,
+                residual: None,
+                fixed: Arc::new(AtomicBool::new(false)),
+                recreated: Arc::new(AtomicBool::new(false)),
             }
+        }
+
+        /// Report `health` from a check, and `residual` from a fix.
+        pub(crate) fn with_health(
+            mut self,
+            health: apogee_runtime::PrefixHealth,
+            residual: apogee_runtime::PrefixHealth,
+        ) -> Self {
+            self.health = Some(health);
+            self.residual = Some(residual);
+            self
+        }
+
+        /// Whether a fix was applied.
+        pub(crate) fn was_fixed(&self) -> bool {
+            self.fixed.load(Ordering::SeqCst)
+        }
+
+        /// Whether the prefix was destroyed and built again.
+        pub(crate) fn was_recreated(&self) -> bool {
+            self.recreated.load(Ordering::SeqCst)
+        }
+
+        /// Report `caps` from `prepare`, standing in for a host and a runner that resolve to them.
+        pub(crate) fn reporting(mut self, caps: apogee_runtime::HostCaps) -> Self {
+            self.caps = caps;
+            self
+        }
+
+        /// Report a prefix that has graphics translation installed, standing in for one a real
+        /// preparation brought up to the published build.
+        pub(crate) fn with_dxvk(mut self, dxvk: apogee_runtime::DxvkEnv) -> Self {
+            self.dxvk = Some(dxvk);
+            self
         }
 
         /// The prefix directories that were prepared, in order.
@@ -159,7 +266,7 @@ pub(crate) mod fake {
             prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
-        ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
+        ) -> Result<Prepared, CoreError> {
             self.prepared
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -173,7 +280,46 @@ pub(crate) mod fake {
             }
             // No prefix: a fake runner has no wine to initialize one with, and the flows that consume
             // one are written to treat its absence as nothing to do.
-            Ok(None)
+            Ok(Prepared {
+                prefix: None,
+                caps: self.caps,
+                dxvk: self.dxvk.clone(),
+                catalog: None,
+            })
+        }
+
+        async fn check_prefix(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError> {
+            Ok(self.health.clone())
+        }
+
+        async fn fix_prefix(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError> {
+            self.fixed.store(true, Ordering::SeqCst);
+            // A fix resolves whatever the double was told to report, which is what lets a test tell
+            // "the fix ran" from "the fix ran and something is still wrong".
+            Ok(self.residual.clone())
+        }
+
+        async fn recreate_prefix(
+            &self,
+            _runner: &RunnerSelection,
+            _prefix_dir: &std::path::Path,
+            _cancel: &CancellationToken,
+            _events: &UnboundedSender<Event>,
+        ) -> Result<(), CoreError> {
+            self.recreated.store(true, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn launch(
@@ -279,7 +425,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(prepared.is_none());
+        assert!(prepared.prefix.is_none());
     }
 
     #[tokio::test]

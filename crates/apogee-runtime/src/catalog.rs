@@ -160,6 +160,16 @@ impl Catalog {
     pub fn tool(&self, name: &str) -> Option<&ToolEntry> {
         self.tools.iter().find(|t| t.name == name)
     }
+
+    /// The DXVK build to install when nothing names a particular one.
+    ///
+    /// The first row, so which build that is stays the publisher's decision and moves by re-ordering
+    /// the manifest rather than by changing a caller. `None` is a catalog that publishes none, which
+    /// a caller reads as nothing to install rather than as a failure.
+    #[must_use]
+    pub fn default_dxvk(&self) -> Option<&DxvkEntry> {
+        self.dxvk.first()
+    }
 }
 
 // ---- raw deserialization + validation -------------------------------------------------------
@@ -595,6 +605,31 @@ mod tests {
         assert_eq!(
             wine.archive.strip_prefix.as_deref(),
             Some("wine-xiv-staging-fsync-git-10.8.r0.a2ca9e4-nolsc")
+        );
+
+        // The graphics translation a prepared prefix installs. Its companion is pinned alongside it
+        // so turning that on later is a setting rather than another manifest edit.
+        let dxvk = catalog.default_dxvk().expect("a dxvk row is published");
+        assert_eq!(dxvk.version, "3.0.2");
+        assert!(dxvk.nvapi.is_some(), "the companion is pinned too");
+    }
+
+    /// Which build a launch installs is the publisher's ordering, so the resolver is that rule and
+    /// not a search. A catalog that publishes none is nothing to install rather than an error.
+    #[test]
+    fn the_first_dxvk_row_is_the_one_a_launch_installs() {
+        let empty = Catalog::from_json_bytes(br#"{ "version": 1 }"#).expect("parses");
+        assert!(empty.default_dxvk().is_none());
+
+        let two = format!(
+            r#"{{ "version": 1, "dxvk": [
+                {{ "version": "first", "url": "https://example.invalid/a.tar.gz", "sha256": "{GOOD_PIN}" }},
+                {{ "version": "second", "url": "https://example.invalid/b.tar.gz", "sha256": "{GOOD_PIN}" }} ] }}"#
+        );
+        let cat = Catalog::from_json_bytes(two.as_bytes()).expect("parses");
+        assert_eq!(
+            cat.default_dxvk().map(|d| d.version.as_str()),
+            Some("first")
         );
     }
 

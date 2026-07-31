@@ -149,8 +149,9 @@ fn kill_command(prefix: &Prefix, umu_run: Option<PathBuf>) -> Result<Command, Ru
     }
 }
 
-/// Set the launch environment: prefix/runner variables first, user overrides merged last so they
-/// always win. Sync (fsync/esync/ntsync) is left to wine/Proton defaults at this phase.
+/// Set the launch environment: prefix/runner variables first, then the plan's own, merged last so
+/// they win. The plan's variables are already resolved (synchronization, graphics, the user's
+/// overrides), so nothing is decided here.
 fn apply_env(cmd: &mut Command, plan: &LaunchPlan, prefix: &Prefix) {
     prefix_env(cmd, prefix);
     for (key, value) in plan.env() {

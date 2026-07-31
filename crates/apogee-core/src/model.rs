@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use apogee_addons::ExternalAddon;
+use apogee_runtime::{Gamescope, GpuSelect, Hud, SyncChoice};
 
 /// A launch configuration: one account, one game path, one runner and prefix, and the tools to run
 /// beside the game.
@@ -104,6 +105,24 @@ pub struct LaunchSettings {
     pub extra_args: Vec<String>,
     pub extra_env: Vec<(String, String)>,
     pub wrappers: Vec<String>,
+    /// Which synchronization primitive to ask for. The default resolves against what the host and
+    /// the selected runner can actually do; naming one is for pinning a comparison or working around
+    /// a build, and is honored even where the host cannot back it.
+    #[serde(default)]
+    pub sync: SyncChoice,
+    /// The in-game overlay. One or the other, never both.
+    #[serde(default)]
+    pub hud: Hud,
+    /// Which GPU to run on, where the machine has more than one.
+    #[serde(default)]
+    pub gpu: GpuSelect,
+    /// Run inside a nested compositor, and how. Absent leaves the launch in whatever session started
+    /// it.
+    #[serde(default)]
+    pub gamescope: Option<Gamescope>,
+    /// Ask the system to switch to its game performance profile for the duration.
+    #[serde(default)]
+    pub gamemode: bool,
     /// Load Dalamud into the game.
     ///
     /// Off by default and per profile, because it is third-party code injected into the client and
@@ -143,7 +162,10 @@ impl Default for Settings {
         Self {
             language: "en".to_string(),
             close_after_launch: false,
-            keep_patches: false,
+            // On, because a repair re-fetches broken ranges from the patch files first when they are
+            // there and from the network when they are not, and the second is hours where the first
+            // is minutes. It costs disk, which is why it is a setting and why it is stated.
+            keep_patches: true,
             backups_kept: 5,
             backup_before_patch: true,
         }
