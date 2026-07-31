@@ -43,6 +43,11 @@ pub enum CoreError {
     /// account is fine; this launcher has no way to mint the ticket it needs.
     #[error("this build cannot obtain a Steam authentication ticket")]
     NoSteam,
+    /// The host exposes no clock the game will re-derive its launch-argument key from. The game reads
+    /// `GetTickCount`, which Wine maps onto the host `CLOCK_MONOTONIC_RAW`; where the game is not a
+    /// Wine process, no host clock is known to match it.
+    #[error("this host has no tick source the game can re-derive its launch key from")]
+    NoTickSource,
     #[error("no profile with id {0}")]
     NoProfile(Uuid),
     #[error("no account with id {0}")]

@@ -169,7 +169,8 @@ fn build_buffer(raw: &[u8], first: u8, rounded: u32) -> Vec<u8> {
     // Two sum bytes, two hex digits per raw byte, one terminator, then padded up to a block
     // multiple. Exact rather than an estimate, so the buffer never grows: a reallocation would
     // strand a plaintext copy of the credential in freed heap that no wrapper can reach.
-    let mut buf = Vec::with_capacity((2 * raw.len() + 3).next_multiple_of(8));
+    let reserved = (2 * raw.len() + 3).next_multiple_of(8);
+    let mut buf = Vec::with_capacity(reserved);
 
     // The sum's two bytes are written last, once the sum is known; reserve their slots first so the
     // hex lands at the offset the rest of the transform expects.
@@ -223,6 +224,14 @@ fn build_buffer(raw: &[u8], first: u8, rounded: u32) -> Vec<u8> {
     // After the overwrite, so this swaps the low two bytes of the running sum, not the ticket sum.
     buf.swap(0, 1);
 
+    // The only witness that the reservation above still matches what the loops below it wrote.
+    // Nothing observable in the output changes when it does not, so under-reserving here is silent:
+    // the ticket is byte-identical and a plaintext copy of the credential is left in freed heap.
+    debug_assert_eq!(
+        buf.len(),
+        reserved,
+        "the ticket buffer outgrew its reservation"
+    );
     buf
 }
 
@@ -230,7 +239,8 @@ fn build_buffer(raw: &[u8], first: u8, rounded: u32) -> Vec<u8> {
 fn split_join(b64: &str) -> String {
     let raw = b64.as_bytes();
     let chunks = raw.len().div_ceil(CHUNK);
-    let mut text = String::with_capacity(raw.len() + chunks.saturating_sub(1));
+    let reserved = raw.len() + chunks.saturating_sub(1);
+    let mut text = String::with_capacity(reserved);
     for (i, chunk) in raw.chunks(CHUNK).enumerate() {
         if i > 0 {
             text.push(',');
@@ -239,6 +249,11 @@ fn split_join(b64: &str) -> String {
         // could split a multi-byte sequence.
         text.extend(chunk.iter().map(|&b| b as char));
     }
+    debug_assert_eq!(
+        text.len(),
+        reserved,
+        "the chunked text outgrew its reservation"
+    );
     text
 }
 

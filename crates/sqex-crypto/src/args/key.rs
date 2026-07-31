@@ -1,64 +1,34 @@
-//! The launch-argument key and its tick source.
+//! The launch-argument key and its tick.
 //!
 //! The key is the high 16 bits of a monotonic tick; the full tick also travels in the `T` argument so
-//! the game can re-derive the key. Key material is zeroized on drop and never rendered (no `Debug`,
-//! `Display`, `Clone`, or `Serialize`).
+//! the game can re-derive the key.
+//!
+//! The tick is supplied, never read here: reading it means naming a host clock, and which clock is
+//! correct depends on how the game is being launched, which only the composition root knows. That
+//! keeps this crate pure, so every transform in it is reproducible from its inputs alone.
+//!
+//! Neither type renders itself (no `Debug`, `Display`, `Clone`, or `Serialize`) and both zeroize on
+//! drop. That is hygiene, not secrecy: the protocol puts the tick in the `T` argument as decimal
+//! text, and the checksum character publishes four of its bits, so the key is recoverable from the
+//! emitted string by anyone who wants it.
 
 use zeroize::ZeroizeOnDrop;
 
 /// A monotonic millisecond tick, the sole nondeterministic input to argument encryption.
+///
+/// Whatever produces this must read the same clock the game will read when it re-derives the key, and
+/// must do so close enough to the launch that the value still matches. The game masks off the low 16
+/// bits and retries exactly one 65536 ms step below its own reading, so a tick more than two of those
+/// steps stale cannot be recovered.
 #[derive(ZeroizeOnDrop)]
 pub struct TickCount(u32);
 
 impl TickCount {
-    /// Read the host monotonic tick the game will re-derive its key from.
-    ///
-    /// The game runs under Wine, which maps `GetTickCount` onto the host `CLOCK_MONOTONIC_RAW`, so the
-    /// launcher must read that same clock or the game can't recover the key. Mirrors XL's Linux
-    /// `GetRawTickCount` (`ArgumentBuilder.cs:122-132`): `CLOCK_MONOTONIC_RAW`, then
-    /// `tv_sec * 1000 + tv_nsec / 1_000_000`, truncated to `u32`.
-    #[cfg(target_os = "linux")]
-    #[must_use]
-    pub fn now_for_game() -> Self {
-        use rustix::time::{ClockId, clock_gettime};
-        let ts = clock_gettime(ClockId::MonotonicRaw);
-        Self(timespec_to_tick(ts.tv_sec, ts.tv_nsec))
-    }
-
-    /// Off-Linux there is no game to launch as a native process; the host tick source is unimplemented.
-    #[cfg(not(target_os = "linux"))]
-    #[must_use]
-    pub fn now_for_game() -> Self {
-        todo!("host monotonic tick source is Linux-only")
-    }
-
-    /// Construct from a fixed raw tick. Deterministic; the entry point for tests and goldens.
+    /// Construct from a raw tick. The only constructor, so the transform is deterministic and the
+    /// clock read stays outside this crate.
     #[must_use]
     pub fn from_raw(raw: u32) -> Self {
         Self(raw)
-    }
-}
-
-/// The pure fold from a `CLOCK_MONOTONIC_RAW` timespec to SE's 32-bit tick.
-///
-/// Byte-identical to XL's `(uint)((tv_sec * 1000) + (tv_nsec / 1000000))`: wrapping `i64` arithmetic
-/// then a 32-bit truncation reproduce C#'s unchecked `long` math and `(uint)` cast for every input.
-#[cfg(target_os = "linux")]
-fn timespec_to_tick(sec: i64, nsec: i64) -> u32 {
-    sec.wrapping_mul(1000).wrapping_add(nsec / 1_000_000) as u32
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::timespec_to_tick;
-
-    #[test]
-    fn fold_matches_xl_oracle() {
-        assert_eq!(timespec_to_tick(0, 0), 0);
-        assert_eq!(timespec_to_tick(1, 0), 1000);
-        assert_eq!(timespec_to_tick(0, 1_000_000), 1);
-        assert_eq!(timespec_to_tick(0, 999_999), 0); // sub-ms truncated
-        assert_eq!(timespec_to_tick(4_294_967, 301_000_000), 5); // (uint) 32-bit wrap
     }
 }
 
@@ -72,8 +42,7 @@ pub struct ArgKey {
 }
 
 impl ArgKey {
-    /// Construct from a tick, the sole source of an `ArgKey`. `TickCount::from_raw` is the
-    /// deterministic entry point tests and goldens use; `TickCount::now_for_game` is the live source.
+    /// Construct from a tick, the sole source of an `ArgKey`.
     #[must_use]
     pub fn from_tick(tick: TickCount) -> Self {
         Self { raw: tick.0 }
