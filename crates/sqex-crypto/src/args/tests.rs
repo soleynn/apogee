@@ -71,6 +71,22 @@ fn checksum_indexes_one_nibble() {
     assert_eq!(derive_checksum(0x1234_0000), 'G');
 }
 
+/// Every entry of the checksum table, not the three a hand-picked key happens to select.
+///
+/// The table has no internal structure an entry could be derived from, so it is a transcription, and
+/// a wrong character in it is invisible: the string keeps its shape, its length and a valid body, and
+/// only the game rejects it. The selecting nibble cycles about once a minute and is uniform across
+/// launches, so one wrong entry breaks one launch in sixteen. Restated here as a flat string rather
+/// than the array literal, so a mutation of the table under test cannot travel into its own oracle.
+#[test]
+fn every_checksum_entry_is_pinned() {
+    const ORACLE: &[u8; 16] = b"fX1pGtdS5CAP4_VL";
+    for (index, &want) in ORACLE.iter().enumerate() {
+        let key = (index as u32) << 16;
+        assert_eq!(derive_checksum(key), char::from(want), "entry {index}");
+    }
+}
+
 #[test]
 fn key_is_high_half_as_ascii_hex() {
     let key = arg_key(0x1234_5678);

@@ -84,6 +84,32 @@ fn block_endianness_split_is_pinned() {
     insta::assert_snapshot!("standard_be_block", to_hex(&be));
 }
 
+/// The launcher variant's block order, anchored to the published vectors instead of to a snapshot.
+///
+/// `assert_ne!` above catches a straight swap to big-endian, and the snapshot catches a change that
+/// someone reviews. Neither catches a word order that is neither LE nor BE and arrives with the
+/// snapshot regenerated: that ships wrong bytes with a green suite. This states the order as an
+/// equation instead. With a low-byte key the two schedules are provably identical (the test above),
+/// so reversing each four-byte word on the way into and out of the standard cipher has to reproduce
+/// the launcher variant exactly. The right-hand side reaches the published Eric Young vectors through
+/// `Blowfish`, so no snapshot regeneration can move it.
+#[test]
+fn legacy_block_order_is_anchored_to_the_published_vectors() {
+    fn reverse_words(bytes: &[u8]) -> Vec<u8> {
+        bytes
+            .chunks_exact(4)
+            .flat_map(|w| w.iter().rev().copied())
+            .collect()
+    }
+
+    let legacy = LegacyBlowfish::new(LOW_KEY).encrypt(PLAINTEXT);
+    let via_standard = reverse_words(&Blowfish::new(LOW_KEY).encrypt(&reverse_words(PLAINTEXT)));
+    assert_eq!(
+        legacy, via_standard,
+        "the launcher variant must be the standard cipher read and written word-reversed",
+    );
+}
+
 proptest! {
     #[test]
     fn legacy_round_trips(
