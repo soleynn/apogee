@@ -11,6 +11,12 @@ name: Changelog
 # changelog" so a stray run stays idempotent. (paths-ignore is intentionally not used: it does not
 # apply cleanly to tag pushes, and the guards above already prevent looping.) Until the
 # APP_ID / APP_PRIVATE_KEY secrets exist the job skips with a warning.
+#
+# The checkout pins ref: main rather than the triggering event's own ref. A tag push checks out that
+# tag's commit by default, which is behind main's tip for any tag not created at main's current HEAD
+# (a checkpoint tag placed at an earlier commit, or an ordinary race with another merge landing
+# mid-run); regenerating there would both miss later commits and make the push below a rejected
+# non-fast-forward. Building on main's current tip keeps the changelog complete and the push safe.
 on:
   push:
     branches: [main]
@@ -40,6 +46,7 @@ jobs:
           permission-contents: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
       - name: Regenerate the changelog
