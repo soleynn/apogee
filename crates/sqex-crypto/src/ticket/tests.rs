@@ -115,6 +115,23 @@ fn rounding_table(#[case] time: u32, #[case] expected: u32) {
     assert_eq!(round_to_minute(time), expected);
 }
 
+/// The 64-to-32 narrowing keeps the low word rather than saturating.
+///
+/// Asserted on the word itself rather than on a ticket built from it. Rounding folds `0..=4` and
+/// `u32::MAX` onto the same minute, so a reading one second either side of a boundary produces an
+/// identical ticket under truncation and under clamping; only the rows more than a minute out
+/// distinguish the two.
+#[rstest]
+#[case(0, 0)]
+#[case(1_785_000_000, 1_785_000_000)]
+#[case(-1, 0xffff_ffff)]
+#[case(-60, 0xffff_ffc4)]
+#[case(0x1_0000_0000, 0)]
+#[case(0x1_0000_005b, 0x5b)]
+fn from_unix_seconds_keeps_the_low_word(#[case] secs: i64, #[case] expected: u32) {
+    assert_eq!(ServerTime::from_unix_seconds(secs).0, expected);
+}
+
 #[test]
 fn rand_seed_sign_extends_rather_than_widening() {
     // A 200-byte run of 0xff sums to 0x9f60, which has bit 15 set.
