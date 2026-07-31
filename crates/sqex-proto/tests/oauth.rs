@@ -10,10 +10,12 @@
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use http::HeaderValue;
-use sqex_crypto::{CryptoError, ObfuscatedTicket, ServerTime};
+use sqex_crypto::CryptoError;
+// The ticket types through the re-export, which is how a consumer that has only this crate reaches
+// them.
 use sqex_proto::{
-    ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext, ProtoError,
-    ProtoResponse, Step, begin_login,
+    ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext,
+    ObfuscatedTicket, ProtoError, ProtoResponse, ServerTime, Step, begin_login,
 };
 
 const ACCEPT: &str = "image/gif, image/jpeg, image/pjpeg, application/x-ms-application, \

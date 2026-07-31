@@ -398,8 +398,9 @@ fn build_top_url(context: &OauthContext<'_>, kind: &LoginKind) -> Result<Url, Tr
         // would escape the two characters the ticket alphabet holds beyond the unreserved set: `*`
         // (mangled base64's padding) and `,` (the chunk separator). The launcher concatenates the
         // ticket in verbatim, and SE compares what arrives against what it issued, so an escaped
-        // ticket is a rejected login. Re-setting the query leaves the pairs above untouched: the
-        // characters `set_query` escapes are disjoint from what the serializer emits.
+        // ticket is a rejected login. Re-setting the query re-encodes nothing: what `set_query`
+        // escapes (space, `"`, `#`, `<`, `>`, controls) appears neither in what the serializer emitted
+        // above nor in the ticket, whose alphabet is base64's with `-_*` and the `,` separator.
         let mut query = url.query().unwrap_or_default().to_owned();
         query.push_str("&issteam=1&session_ticket=");
         query.push_str(ticket.text());
