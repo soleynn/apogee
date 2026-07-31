@@ -1,16 +1,20 @@
 //! Host identity and time for the login flow.
 //!
 //! The composition root owns identity and the clock: `sqex-proto`'s own `ComputerId::from_host` and
-//! `LauncherTime::now` defer here by design. [`computer_id`] builds the launcher's machine
-//! fingerprint from best-effort host facts (not server-validated, so a stable-per-host value is
-//! enough). [`launcher_time_now`] stamps requests with the current UTC wall clock. [`Clock`] is the
-//! injectable now-in-seconds source the session cache measures its validity window against, so the
-//! window is deterministically testable.
+//! `LauncherTime::now`, and `sqex-crypto`'s `TickCount`, defer here by design. [`computer_id`] builds
+//! the launcher's machine fingerprint from best-effort host facts (not server-validated, so a
+//! stable-per-host value is enough). [`launcher_time_now`] stamps requests with the current UTC wall
+//! clock. [`game_tick`] reads the monotonic tick the game re-derives its launch-argument key from.
+//! [`Clock`] is the injectable now-in-seconds source the session cache measures its validity window
+//! against, so the window is deterministically testable.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sqex_crypto::TickCount;
 use sqex_proto::{ComputerId, LauncherTime};
+
+use crate::error::CoreError;
 
 /// A source of the current time in whole seconds since the Unix epoch. Injectable so the session
 /// cache's validity window can be driven deterministically in tests.
@@ -38,6 +42,42 @@ pub fn computer_id() -> ComputerId {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1) as u32;
     ComputerId::from_facts(&machine, &user, "Linux", processors)
+}
+
+/// The monotonic tick the game will re-derive its launch-argument key from.
+///
+/// The game runs under Wine, which maps `GetTickCount` onto the host `CLOCK_MONOTONIC_RAW`, so the
+/// launcher reads that same clock. Mirrors the reference launcher's Linux tick source: read
+/// `CLOCK_MONOTONIC_RAW`, then `tv_sec * 1000 + tv_nsec / 1_000_000` truncated to 32 bits.
+///
+/// Read this as late as possible. The game masks the tick to its high 16 bits and retries exactly one
+/// 65536 ms step down, so a reading more than two of those steps old cannot be recovered and the
+/// launch fails with nothing to see.
+///
+/// # Errors
+///
+/// [`CoreError::NoTickSource`] where the host exposes no such clock, which is every non-Linux target:
+/// there the game is not a Wine process and this mapping does not hold.
+#[cfg(target_os = "linux")]
+pub fn game_tick() -> Result<TickCount, CoreError> {
+    use rustix::time::{ClockId, clock_gettime};
+    let ts = clock_gettime(ClockId::MonotonicRaw);
+    Ok(TickCount::from_raw(timespec_to_tick(ts.tv_sec, ts.tv_nsec)))
+}
+
+/// Off Linux the game is not a Wine process, so no host clock is known to match what it reads.
+#[cfg(not(target_os = "linux"))]
+pub fn game_tick() -> Result<TickCount, CoreError> {
+    Err(CoreError::NoTickSource)
+}
+
+/// The pure fold from a `CLOCK_MONOTONIC_RAW` timespec to the launcher's 32-bit tick.
+///
+/// Wrapping 64-bit arithmetic then a 32-bit truncation, reproducing the reference launcher's
+/// unchecked `long` math and `(uint)` cast for every input.
+#[cfg(target_os = "linux")]
+fn timespec_to_tick(sec: i64, nsec: i64) -> u32 {
+    sec.wrapping_mul(1000).wrapping_add(nsec / 1_000_000) as u32
 }
 
 /// The current UTC instant as a [`LauncherTime`].
@@ -112,5 +152,23 @@ mod tests {
     #[test]
     fn computer_id_is_stable_for_a_host() {
         assert_eq!(computer_id(), computer_id());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tick_fold_matches_the_reference() {
+        assert_eq!(timespec_to_tick(0, 0), 0);
+        assert_eq!(timespec_to_tick(1, 0), 1000);
+        assert_eq!(timespec_to_tick(0, 1_000_000), 1);
+        assert_eq!(timespec_to_tick(0, 999_999), 0); // sub-ms truncated
+        assert_eq!(timespec_to_tick(4_294_967, 301_000_000), 5); // 32-bit wrap
+    }
+
+    /// The clock this host actually exposes. `TickCount` deliberately has no accessor, so what is
+    /// checkable from here is that the read succeeds; the fold above is where the logic lives.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn game_tick_reads_the_host_clock() {
+        assert!(game_tick().is_ok());
     }
 }

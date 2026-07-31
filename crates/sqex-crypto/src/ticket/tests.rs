@@ -10,6 +10,68 @@ use rstest::rstest;
 
 use super::*;
 
+/// A second spelling of the ticket plaintext, following the reference's step order.
+///
+/// Independent where it counts: the head word is read back out of the buffer instead of derived from
+/// the sum and the first byte's digits, and the padding count is computed up front instead of falling
+/// out of the loop bound. Those are the two places the implementation departs from how the reference
+/// is written, and a divergence in either fails `buffer_matches_an_independent_model`. The byte-order
+/// conversions still go through [`bytes`], which is the crate's one endianness home and is pinned by
+/// its own tests; restating them here would put a second spelling of the LE/BE split in the tree.
+fn model_buffer(raw: &[u8], rounded: u32) -> Vec<u8> {
+    let mut hex = Vec::new();
+    let mut sum: u16 = 0;
+    for &b in raw {
+        for digit in [HEX_LOWER[(b >> 4) as usize], HEX_LOWER[(b & 0x0F) as usize]] {
+            hex.push(digit);
+            sum = sum.wrapping_add(u16::from(digit));
+        }
+    }
+    hex.push(0);
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&bytes::write_u16_le(sum));
+    buf.extend_from_slice(&hex);
+
+    let total = (hex.len() + 9) & !7;
+    let padding = total - 2 - hex.len();
+    let mut rng = CrtRand::new(rounded ^ (sum as i16 as i32 as u32));
+    let mut running = bytes::u32_le([buf[0], buf[1], buf[2], buf[3]]);
+    for _ in 0..padding {
+        let ch = PAD_ALPHABET[(running.wrapping_add(rng.next()) & 0x3F) as usize];
+        buf.push(ch);
+        running = running.wrapping_add(u32::from(ch));
+    }
+
+    buf[..4].copy_from_slice(&bytes::write_u32_le(running));
+    buf.swap(0, 1);
+    buf
+}
+
+/// Every slot of the padding alphabet, derived from its structure instead of re-typed.
+///
+/// The recorded vectors draw only half the table, so the other half rests on the literal being typed
+/// correctly once. A wrong slot yields a well-formed, correctly-sized, correctly-encoded ticket that
+/// only the server rejects. Deriving the sequence here (digits, uppercase, lowercase, then `-` and
+/// `_`) is an independent statement of the same table, so a transcription slip fails this.
+#[test]
+fn every_padding_slot_is_pinned() {
+    let derived: Vec<u8> = (b'0'..=b'9')
+        .chain(b'A'..=b'Z')
+        .chain(b'a'..=b'z')
+        .chain(*b"-_")
+        .collect();
+    assert_eq!(PAD_ALPHABET.as_slice(), derived.as_slice());
+}
+
+/// The hex table, same reasoning: it expands the ticket and builds the cipher key, and a wrong digit
+/// in the tail of it survives every vector whose bytes never reach that nibble.
+#[test]
+fn every_hex_digit_is_pinned() {
+    let derived: Vec<u8> = (b'0'..=b'9').chain(b'a'..=b'f').collect();
+    assert_eq!(HEX_LOWER.as_slice(), derived.as_slice());
+}
+
 /// The smallest possible ticket, worked end to end.
 ///
 /// A one-byte ticket expands to the two hex digits `61 62`, so the whole plaintext is a single
@@ -277,32 +339,37 @@ proptest! {
         prop_assert_eq!(buf.len(), (2 * raw.len() + 3).next_multiple_of(8));
     }
 
-    /// The readable rounding form and the reference's mask form agree on every length the transform
-    /// can produce. This is the bridge between how we spell it and how the launcher spells it.
+    /// The length the transform actually produces, against the mask form the reference spells it in.
+    ///
+    /// Driven through `build_buffer` rather than asserted as arithmetic: the earlier form compared
+    /// two constant expressions and held by algebra alone, so it stayed green for any sizing the
+    /// implementation might have used.
     #[test]
-    fn block_rounding_matches_the_mask_form(hex_len in 1usize..100_000) {
-        prop_assert_eq!((hex_len + 2).next_multiple_of(8), (hex_len + 9) & !7);
+    fn buffer_length_matches_the_mask_form(
+        raw in prop::collection::vec(any::<u8>(), 1..2000),
+        time: u32,
+    ) {
+        let buf = build_buffer(&raw, raw[0], round_to_minute(time));
+        // The reference sizes from the NUL-terminated hex expansion plus the two sum bytes.
+        let hex_len = 2 * raw.len() + 1;
+        prop_assert_eq!(buf.len(), (hex_len + 9) & !7);
     }
 
-    /// The head word is derived from the sum and the first byte's digits rather than read back out
-    /// of the buffer. The two must agree, or the generator starts from the wrong value.
+    /// `build_buffer` against a second model of the same transform, written from the reference's step
+    /// order rather than the implementation's.
+    ///
+    /// The model reads the head word back out of the buffer where the implementation derives it from
+    /// the values in hand, and counts the padding up front where the implementation makes it the loop
+    /// bound. Those are exactly the two places the implementation departs from how the reference is
+    /// written, and the earlier form asserted the first of them against a restatement of itself
+    /// without ever calling the code.
     #[test]
-    fn head_word_matches_a_read_of_the_buffer(raw in prop::collection::vec(any::<u8>(), 1..100)) {
-        let mut prefix = vec![0u8, 0];
-        let mut sum: u16 = 0;
-        for &b in &raw {
-            let (hi, lo) = hex_digits(b);
-            prefix.push(hi);
-            prefix.push(lo);
-            sum = sum.wrapping_add(u16::from(hi)).wrapping_add(u16::from(lo));
-        }
-        let sum_bytes = bytes::write_u16_le(sum);
-        prefix[..2].copy_from_slice(&sum_bytes);
-
-        let (first_hi, first_lo) = hex_digits(raw[0]);
-        let derived = bytes::u32_le([sum_bytes[0], sum_bytes[1], first_hi, first_lo]);
-        let read_back = bytes::u32_le([prefix[0], prefix[1], prefix[2], prefix[3]]);
-        prop_assert_eq!(derived, read_back);
+    fn buffer_matches_an_independent_model(
+        raw in prop::collection::vec(any::<u8>(), 1..300),
+        time: u32,
+    ) {
+        let rounded = round_to_minute(time);
+        prop_assert_eq!(build_buffer(&raw, raw[0], rounded), model_buffer(&raw, rounded));
     }
 
     /// Length accounting, against a chunking written the other way round.

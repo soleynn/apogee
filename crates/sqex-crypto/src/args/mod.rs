@@ -48,13 +48,24 @@ impl ArgumentBuilder {
     /// `/`, no space before `=`, no escaping, no `T` (matches the launcher's plain build).
     #[must_use]
     pub fn build_plain(&self) -> String {
-        let mut out = String::new();
+        // Sized exactly (a space and an `=` per pair, nothing escaped) rather than grown. Growing
+        // from empty reallocates once per doubling, and on a fragmented heap each move leaves the
+        // session id readable in a freed block that nothing can reach to wipe.
+        let cap = self
+            .args
+            .iter()
+            .map(|(k, v)| 2 + k.len() + v.len())
+            .sum::<usize>();
+        let mut out = String::with_capacity(cap);
         for (k, v) in &self.args {
             out.push(' ');
             out.push_str(k);
             out.push('=');
             out.push_str(v);
         }
+        // Exact, not a bound: the only witness that the reservation above still matches the loop
+        // below it. Debug assertions are on in the fuzzer, which drives this over arbitrary pairs.
+        debug_assert_eq!(out.len(), cap, "the plain form outgrew its reservation");
         out
     }
 
