@@ -271,6 +271,11 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build steam_ticket --target x86_64-unknown-linux-gnu
+      # A malloc bound as well as an RSS one: the ticket buffer is sized from the input length, so an
+      # over-large reservation is exactly the failure this target exists to catch, and the transform
+      # never needs more than a few times its input.
+      - run: cargo +nightly-2026-07-23 fuzz run steam_ticket --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build runner_manifest --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build sqpack_codec --target x86_64-unknown-linux-gnu

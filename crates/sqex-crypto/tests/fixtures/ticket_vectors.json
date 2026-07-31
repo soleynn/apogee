@@ -1,0 +1,78 @@
+{
+  "note": "Synthetic inputs, deterministic outputs. Every ticket_hex is an invented pattern, never a captured credential: the single-byte and repeated-0xff rows are written out by hand, and the longer rows are the sequence (i * 7 + 3) & 0xff for i in 0..n. The text and length columns were produced out of process by a reference launcher build on a maintainer machine and recorded here; the test suite only diffs against them and never invokes the reference, which is not a build or test dependency. 'time' is the unadjusted reading handed to the transform, not the rounded value. Each row's 'why' names the specific mistake it rejects: to check a row is still discriminating, make that mistake in the source and confirm this row alone fails.",
+  "format_version": 1,
+  "vectors": [
+    {
+      "name": "one_byte",
+      "why": "The smallest ticket there is: a single block, three padding characters. Rejects an off-by-one in the block rounding.",
+      "ticket_hex": "ab",
+      "time": 100,
+      "text": "l9frZA-zmLg*",
+      "length": 12
+    },
+    {
+      "name": "clock_wraps_below_five",
+      "why": "A clock reading below five, where the five-second subtraction wraps past zero. Rejects a saturating or 64-bit-widened subtraction, both of which pick a different key.",
+      "ticket_hex": "ab",
+      "time": 3,
+      "text": "3Jfy2-greQ0*",
+      "length": 12
+    },
+    {
+      "name": "clock_rounds_to_zero",
+      "why": "Rounds to exactly zero, so the key carries eight zero digits. Rejects a key render that trims leading zeros or formats fewer than eight.",
+      "ticket_hex": "ab",
+      "time": 64,
+      "text": "GYbgK8XS6BM*",
+      "length": 12
+    },
+    {
+      "name": "sign_extended_sum",
+      "why": "The 16-bit sum is 0x9f60, which has bit 15 set. Rejects folding the sum in unsigned: that seeds the generator 0x65536f8c instead of 0x9aac6f8c, and every padding character downstream differs.",
+      "ticket_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "time": 1700000000,
+      "text": "D4wiuvjXctfEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzE,JYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfMQlgm3malV8xCWCbeZqVXzEJYJt5mpVfFXpQGQ0DUKI",
+      "length": 544
+    },
+    {
+      "name": "head_write_carries",
+      "why": "The sum sits near the 16-bit wrap, so the padding carries into the running sum's high half and the head write alters the first hex digit instead of rewriting it unchanged. Rejects appending the running sum rather than overwriting the head.",
+      "ticket_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "time": 100,
+      "text": "42ZHMjZqeI_h25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh,25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHb,mDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVeHbmDW0GwpV4duYNbQbClXh25g1tBsKVUHZtlHGTZM6",
+      "length": 864
+    },
+    {
+      "name": "no_separator_at_limit",
+      "why": "Encodes to exactly 300 characters, the longest ticket that still carries no separator.",
+      "ticket_hex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe",
+      "time": 1700000000,
+      "text": "tQ0Qz8uP20748kVsoUNLRxpeiQXZGTLjgtXjStsyhpUVhiwN7Cptwb6d1gTPX9e155HCd7BonLJxk-uSPdRXoW7rXoQqt1lPjyEYyD76m5QWTIbgJoIIprXWY0kiBC-rozfR5VX-bSYR57oIXUiLBntcqoVNXFMdZTVTpOiHgo1Nu7x_NuwL0tbbF5FTIhkNJrRS7V9lT9H_DszcOP5AW0JOkbEDs8FIv3DC-WLhMB6eui43WN1ImKxOUMJ3rGS6NTQXQM3GZDLGve2neY9ATLvJnBhK8MzR5mzCxqUmtFY*",
+      "length": 300
+    },
+    {
+      "name": "first_separator",
+      "why": "One byte past the last unsplit ticket: the first separator appears here, and the reported length first diverges from the text length.",
+      "ticket_hex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe05",
+      "time": 1700000000,
+      "text": "MRWVoTV3Lyr48kVsoUNLRxpeiQXZGTLjgtXjStsyhpUVhiwN7Cptwb6d1gTPX9e155HCd7BonLJxk-uSPdRXoW7rXoQqt1lPjyEYyD76m5QWTIbgJoIIprXWY0kiBC-rozfR5VX-bSYR57oIXUiLBntcqoVNXFMdZTVTpOiHgo1Nu7x_NuwL0tbbF5FTIhkNJrRS7V9lT9H_DszcOP5AW0JOkbEDs8FIv3DC-WLhMB6eui43WN1ImKxOUMJ3rGS6NTQXQM3GZDLGve2neY9ATLvJnBhK8MzRbb4Xn9JQUl1i,tXu58gl9wA**",
+      "length": 312
+    },
+    {
+      "name": "second_separator",
+      "why": "The shortest ticket carrying two separators.",
+      "ticket_hex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e15",
+      "time": 1700000000,
+      "text": "bpqnweruHTf48kVsoUNLRxpeiQXZGTLjgtXjStsyhpUVhiwN7Cptwb6d1gTPX9e155HCd7BonLJxk-uSPdRXoW7rXoQqt1lPjyEYyD76m5QWTIbgJoIIprXWY0kiBC-rozfR5VX-bSYR57oIXUiLBntcqoVNXFMdZTVTpOiHgo1Nu7x_NuwL0tbbF5FTIhkNJrRS7V9lT9H_DszcOP5AW0JOkbEDs8FIv3DC-WLhMB6eui43WN1ImKxOUMJ3rGS6NTQXQM3GZDLGve2neY9ATLvJnBhK8MzRbb4Xn9JQUl2N,BNuonQUgGZcPNzAY1t9sRsod-qSKT4NNXQFDCcjI0aeqFD5qewe-KoswjjhnMp3NR4jD_ZCI8869O6BjDGOiR9l6OrvFjfnXxCYct1gH4IB6axd0miCcKzTF3ml1KyrJo2bGIZiWRCfR8nBKmmdFe8_HHtkRgoXFtbHScPicaKxVLZ0aT4nFAjmWmDezMfiy58jalnN_Czpse0n9FKElUPdqkztFeZVCrVhZ6O-mgPUJTlGS3HtAd3SRbTFkjU1QDsERp_SLfs-zLxFOP0XncV_vymQ2VzaOZX7YYwNt7xvB,SfiiHtjs",
+      "length": 608
+    },
+    {
+      "name": "realistic_length",
+      "why": "The size a real ticket runs to, with nine separators. Rejects a chunk size that is off by one.",
+      "ticket_hex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc",
+      "time": 1700000000,
+      "text": "_eg_yvGhb3T48kVsoUNLRxpeiQXZGTLjgtXjStsyhpUVhiwN7Cptwb6d1gTPX9e155HCd7BonLJxk-uSPdRXoW7rXoQqt1lPjyEYyD76m5QWTIbgJoIIprXWY0kiBC-rozfR5VX-bSYR57oIXUiLBntcqoVNXFMdZTVTpOiHgo1Nu7x_NuwL0tbbF5FTIhkNJrRS7V9lT9H_DszcOP5AW0JOkbEDs8FIv3DC-WLhMB6eui43WN1ImKxOUMJ3rGS6NTQXQM3GZDLGve2neY9ATLvJnBhK8MzRbb4Xn9JQUl2N,BNuonQUgGZcPNzAY1t9sRsod-qSKT4NNXQFDCcjI0aeqFD5qewe-KoswjjhnMp3NR4jD_ZCI8869O6BjDGOiR9l6OrvFjfnXxCYct1gH4IB6axd0miCcKzTF3ml1KyrJo2bGIZiWRCfR8nBKmmdFe8_HHtkRgoXFtbHScPicaKxVLZ0aT4nFAjmWmDezMfiy58jalnN_Czpse0n9FKElUPdqkztFeZVCrVhZ6O-mgPUJTlGS3HtAd3SRbTFkjU1QDsERp_SLfs-zLxFOP0XncV_vymQ2VzaOZX7YYwNt7_RC,9msQyMEe8zbOxTUMZ1e6Q4eHqLwPvb3lzbDmKW_6ZQ8vD3kcYuMbDf7t0RiYdKcL2ClvcmkPZywQTnK_ZAd_hDBj-Fhyj_jyRWyhQ0tHGl6JBdkZMuOC1eNK2zKGlRWGLA3sKm3Bvp3WBM9f17XnkcJ3sGicsnGT65I91FehbutehCq3WU-PIRjIPvqblBZMhuAmggimtdZjSSIEL6ujN9HlVf5tJhHnughdSIsGe1yqhU1cUx1lNVOk6IeCjU27vH827AvS1tsXkVMiGQ0mtFLtX2VP0f8OzNw4_kBbQk6R,sQOzwUi_cML5YuEwHp66LjdY3UiYrE5QwnesZLo1NBdAzcZkMsa97ad5j0BMu8mcGErwzNFtvhef0lBSXY0E26idBSAZlw83MBjW32xGyh36pIpPg01dAUMJyMjRp6oUPmp7B74qizCOOGcync1HiMP9kIjzzr07oGMMY6JH2Xo6u8WN-dfEJhy3WAfggHprF3SaIJwrNMXeaXUrKsmjZsYhmJZEJ9HycEqaZ0V7z8ce2RGChcW1sdJw-JxorFUtnRpPicUCOZaYN7Mx-LLnyNqWc38LOmx7Sf0UoSVQ92qT,O0V5lUKtWFno76aA9QlOUZLce0B3dJFtMWSNTVAOwRGn9It-z7MvEU4_RedxX-_KZDZXNo5lfthjA23v9EL2axDIwR7zNs7FNQxnV7pDh4eovA-9veXNsOYpb_plDy8PeRxi4xsN_u3RGJh0pwvYKW9yaQ9nLBBOcr9kB3-EMGP4WHKP-PJFbKFDS0caXokF2Rky44LV40rbMoaVFYYsDewqbcG-ndYEz1_XteeRwnewaJyycZPrkj3UV6Fu616EKrdZT48hGMg--puUFkyG4CaCCKa11mNJIgQvq6M30eVV,_m0mEee6CF1IiwZ7XKqFTVxTHWU1U6Toh4KNTbu8fzbsC9LW2xeRUyIZDSa0Uu1fZU_R_w7M3Dj-QFtCTpGxA7PBSL9wwvli4TAenrouN1jdSJisTlDCd6xkujU0F0DNxmQyxr3tp3mPQEy7yZwYSvDM0W2-F5_SUFJdjQTbqJ0FIBmXDzcwGNbfbEbKHfqkik-DTV0BQwnIyNGnqhQ-ansHviqLMI44ZzKdzUeIw_2QiPPOvTugYwxjokfZejq7xY3518QmHLdYB-CAemsXdJognCs0xd5pdSsqyaNmxiGY,lkQn0fJwSppnRXvPxx7ZEYKFxbWx0nD4nGisVS2dGk-JxQI5lpg3szH4sufI2pZzfws6bHtJ_RShJVD3apM7RXmVQq1YWejvpoD1CU5Rktx7QHd0kW0xZI1NUA7BEaf0i37Psy8RTj9F53Ff78pkNlc2jmV-2GMDbe_0QvZrEMjBHvM2zsU1DGdXukOHh6i8D7295c2w5ilv-mUPLw95HGLjGw3-7dEYmHSnC9gpb3JpD2csEE5yv2QHf4QwY_hYco_48kVsoUNLRxpeiQXZGTLjgtXjStsyhpUVhiwN7Cpt,wb6d1gTPX9e155HCd7BonLJxk-uSPdRXoW7rXoQqt1lPjyEYyD76m5QWTIbgJoIIprXWY0kiBC-rozfR5VX-bSYR57oIXUiLBntcqoVNXFMdZTVTpOiHgo1Nu7x_NuwL0tbbF5FTIhkNJrRS7V9lT9H_DszcOP5AW0JOkbEDs8FIv3DC-WLhMB6eui43WN1ImKxOUMJ3rGS6NTQXQM3GZDLGve2neY9ATLvJnBhK8MzRbb4Xn9JQUl2NBNuonQUgGZcPNzAY1t9sRsod-qSKT4NNXQFDCcjI0aeqFD5qewe-,KoswjjhnMp3NR4jD_ZCI8869O6BjDGOiR9l6OrvFjfnXxCYct1gH4IB6axd0miCcKzTF3ml1KyrJo2bGIZiWRCfR8nBKmmdFe8_HHtkRgoXFtbHScPicaKxVLZ0aT4nFAjmWmDezMfiy58jalnN_Czpse0n9FKElUPdqkztFeZVCrVhZ6O-mgPUJTlGS3HtAd3SRbTFkjU1QDsERp_SLfs-zLxFOP0XncV_vymQ2VzaOZX7YYwNt7_RC9msQyMEe8zbOxTUMZ1e6Q4eHqLwPvb3lzbDmKW_6ZQ8vD3kcYuMb,Df7t0RiYdKcL2ClvcmkPZywQTnK_ZAf64ihkWlHssA**",
+      "length": 2744
+    }
+  ]
+}
