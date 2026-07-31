@@ -34,6 +34,7 @@ is tagged with its change type. Versioning aims to follow
 - Say which of an install's files are not the ones Square Enix shipped (#87) _(changed)_
 - Runner sync capability, Steam Deck detection, and a Steam registration (#88) _(changed)_
 - Resolve the launch environment, install DXVK, and make prefix trouble answerable (#89) _(changed)_
+- Stop claiming one runner is the supported one (#90) _(changed)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
