@@ -39,8 +39,10 @@ fn expected_plaintext(ticks: u32, pairs: &[(String, String)]) -> String {
 // Beyond panic-freedom it pins two things the type system does not. The output round-trips: the body
 // decodes and decrypts back to exactly the serialization above, so no input can be silently mangled or
 // truncated by the codec. And the `T` argument always leads and always carries the tick the key was
-// derived from, however many `T`s the caller supplies, since a login whose key and `T` disagree fails
-// at the game with nothing to see.
+// derived from, since a login whose leading `T` and key disagree fails at the game with nothing to
+// see. Only a leading `T` is displaced; one supplied later in the list survives into the plaintext,
+// which is what the reference launcher does too, so the oracle above reproduces it rather than
+// asserting it away.
 //
 // A third invariant rides along without being restated here: the builder's own debug assertion that
 // the plaintext fits the buffer it reserved. Checking it from out here would mean copying the

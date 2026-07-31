@@ -19,8 +19,17 @@ pub(crate) enum Endian {
 }
 
 /// The keyed cipher state: 18 subkeys plus four 256-entry S-boxes, and the block-word byte order
-/// this variant reads and writes. Zeroized on drop because the expanded schedule is key-equivalent
-/// secret material.
+/// this variant reads and writes.
+///
+/// Zeroized on drop as hygiene, not as a security boundary, and the distinction matters because the
+/// wipe is weaker than it looks and the thing wiped is worth less than it looks. The wipe is
+/// address-scoped: this is a 4 KiB by-value type, so every move copies the schedule and the derived
+/// `Drop` clears only the address the value finally dies at, leaving the source copies behind. And
+/// the schedule is not the cheapest way to the plaintext anyway. Both key spaces are tiny: the
+/// launch-argument key is a tick masked to its high 16 bits with four of those bits published in the
+/// trailing checksum character, so 4096 candidates remain and each is confirmed or rejected against
+/// the known `" /T ="` prefix; the ticket key is a minute-rounded clock, about 1440 candidates a day.
+/// Anyone holding the emitted string can recover the key without touching process memory at all.
 #[derive(zeroize::ZeroizeOnDrop)]
 pub(crate) struct BlowfishCore {
     p: [u32; 18],
@@ -47,7 +56,7 @@ impl BlowfishCore {
     }
 
     /// XOR the key into the P-array, cycling the key bytes. Each 32-bit fragment is assembled
-    /// big-endian; the launcher variant sign-extends each byte first (see [`legacy`]).
+    /// big-endian; the launcher variant sign-extends each byte first (see [`LegacyBlowfish`]).
     fn mix_key(&mut self, key: &[u8], sign_extend: bool) {
         if key.is_empty() {
             return;
