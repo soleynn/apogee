@@ -35,6 +35,7 @@ is tagged with its change type. Versioning aims to follow
 - Runner sync capability, Steam Deck detection, and a Steam registration (#88) _(changed)_
 - Resolve the launch environment, install DXVK, and make prefix trouble answerable (#89) _(changed)_
 - Stop claiming one runner is the supported one (#90) _(changed)_
+- Ship the license inside the release tarball (#91) _(changed)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
