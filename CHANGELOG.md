@@ -11,35 +11,45 @@ is tagged with its change type. Versioning aims to follow
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
+- Choose config backup contents by rules that cannot silently match nothing (#69) _(added)_
+- Config backup archive, restore, and retention (#70) _(added)_
+- Run the user's own tools alongside the game (#71) _(added)_
+- Prefix verbs, a signed component manifest, and the withdrawal of the catalog (#76) _(added)_
+- Dalamud as a launch setting, and the catalog of installable programs removed (#77) _(added)_
 - A frozen error taxonomy, an audited Dalamud boundary, and rotatable signing keys (#78) _(added)_
+- Stop claiming one runner is the supported one (#90) _(fixed)_
 
-### workspace
-- Fix changelog and release-notes generation for stable releases _(ci)_
-- Pin the fuzz nightly to dodge a rustc ICE (#63) _(ci)_
+### apogee-core
+- Drive companion tools from the launch flow and the command line (#73) _(added)_
+- Back up, restore, and prune the game's settings from the launcher (#74) _(added)_
+- Keep the launcher store private, and capture settings before a patch (#75) _(added)_
+- Bring boot current before registering, and read a 204 boot check as current (#83) _(fixed)_
+
+### apogee-runtime
 - Prefix lifecycle, health check, and in-process path translation (#64) _(added)_
 - Environment matrix and DXVK install (#65) _(added)_
 - Proton prefix init and broad stop under umu 1.4.1 (#66) _(fixed)_
 - Frame-consistency metrics and a bench analyze command (#67) _(added)_
 - Spawn and stop companion programs alongside the game (#68) _(added)_
-- Choose config backup contents by rules that cannot silently match nothing (#69) _(added)_
-- Config backup archive, restore, and retention (#70) _(added)_
-- Run the user's own tools alongside the game (#71) _(added)_
+- Runner sync capability, Steam Deck detection, and a Steam registration (#88) _(added)_
+- Resolve the launch environment, install DXVK, and make prefix trouble answerable (#89) _(added)_
+
+### apogee-sqpack
+- Read SqPack indexes and resolve a game path to its bytes (#79) _(added)_
+- Extract a file from a SqPack dat entry (#80) _(added)_
+- Sweep an install's SqPack containers and report what disagrees with what they declare (#86) _(added)_
+- Say which of an install's files are not the ones Square Enix shipped (#87) _(added)_
+
+### ci
+- Fix changelog and release-notes generation for stable releases _(fixed)_
+
+### tools
+- Probe a derived current boot version in the live boot check (#84) _(added)_
+
+### workspace
+- Pin the fuzz nightly to dodge a rustc ICE (#63) _(ci)_
 - Stop paying for work a change cannot affect (#72) _(ci)_
-- Drive companion tools from the launch flow and the command line (#73) _(added)_
-- Back up, restore, and prune the game's settings from the launcher (#74) _(added)_
-- Keep the launcher store private, and capture settings before a patch (#75) _(added)_
-- Prefix verbs, a signed component manifest, and the withdrawal of the catalog (#76) _(added)_
-- Dalamud as a launch setting, and the catalog of installable programs removed (#77) _(added)_
-- Read SqPack indexes and resolve a game path to its bytes (#79) _(changed)_
-- Extract a file from a SqPack dat entry (#80) _(changed)_
-- Bring boot current before registering, and read a 204 boot check as current (#83) _(fixed)_
-- Probe a derived current boot version in the live boot check (#84) _(changed)_
-- Sweep an install's SqPack containers and report what disagrees with what they declare (#86) _(changed)_
-- Say which of an install's files are not the ones Square Enix shipped (#87) _(changed)_
-- Runner sync capability, Steam Deck detection, and a Steam registration (#88) _(changed)_
-- Resolve the launch environment, install DXVK, and make prefix trouble answerable (#89) _(changed)_
-- Stop claiming one runner is the supported one (#90) _(changed)_
-- Ship the license inside the release tarball (#91) _(changed)_
+- Ship the license inside the release tarball (#91) _(fixed)_
 ## [0.3.0] - 2026-07-23
 
 ### apogee-cli
