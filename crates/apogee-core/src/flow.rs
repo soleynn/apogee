@@ -12,7 +12,7 @@ use apogee_otp::OtpSource;
 use apogee_patcher::{InstallRequest, Repo, SePatch};
 use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
 use apogee_secrets::Secret;
-use sqex_crypto::{ArgKey, ArgumentBuilder, ObfuscatedTicket, ServerTime, TickCount};
+use sqex_crypto::{ArgKey, ArgumentBuilder, ObfuscatedTicket, ServerTime};
 use sqex_proto::{
     Authenticated, ClientContext, ComputerId, Credentials, FrontierContext, InstallPaths,
     LoginKind, OauthContext, PatchListEntry, Registration, Transport, VersionReport, begin_login,
@@ -696,7 +696,7 @@ async fn launch_game(
     );
     let mut plan = LaunchPlan::new(
         game_dir.join("ffxiv_dx11.exe").to_string_lossy(),
-        build_launch_args(session, language_id(&settings.language), steam),
+        build_launch_args(session, language_id(&settings.language), steam)?,
         environment.vars,
     )
     .in_directory(&game_dir)
@@ -814,9 +814,17 @@ fn is_steam(account: &Account) -> bool {
 }
 
 /// The ordered game arguments, encrypted under a fresh tick key.
-fn build_launch_args(session: &UidCacheEntry, language: u8, steam: bool) -> String {
-    launch_arguments(session, language, steam)
-        .build_encrypted(&ArgKey::from_tick(TickCount::now_for_game()))
+///
+/// # Errors
+///
+/// [`CoreError::NoTickSource`] on a host with no clock the game can re-derive the key from.
+fn build_launch_args(
+    session: &UidCacheEntry,
+    language: u8,
+    steam: bool,
+) -> Result<String, CoreError> {
+    let tick = host::game_tick()?;
+    Ok(launch_arguments(session, language, steam).build_encrypted(&ArgKey::from_tick(tick)))
 }
 
 /// The ordered game arguments before encryption. `DEV.TestSID` is the registration unique id (not the
