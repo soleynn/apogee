@@ -2111,6 +2111,8 @@ dependencies = [
  "proptest",
  "rstest",
  "rustix",
+ "serde",
+ "serde_json",
  "thiserror",
  "zeroize",
 ]
