@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Entries are grouped by 
 is tagged with its change type. Versioning aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-31
 
 ### apogee-addons
 - A frozen error taxonomy, an audited Dalamud boundary, and rotatable signing keys (#78) _(added)_
