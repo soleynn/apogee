@@ -148,5 +148,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "steam_ticket"
+path = "fuzz_targets/steam_ticket.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1

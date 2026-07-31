@@ -14,6 +14,12 @@ pub fn u32_be(bytes: [u8; 4]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 
+/// Write a `u16` as two little-endian bytes.
+#[must_use]
+pub fn write_u16_le(v: u16) -> [u8; 2] {
+    v.to_le_bytes()
+}
+
 /// Write a `u32` as four little-endian bytes.
 #[must_use]
 pub fn write_u32_le(v: u32) -> [u8; 4] {
@@ -44,5 +50,6 @@ mod tests {
         assert_eq!(u32_be(write_u32_be(v)), v);
         assert_eq!(write_u32_le(v), [0xef, 0xbe, 0xad, 0xde]);
         assert_eq!(write_u32_be(v), [0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(write_u16_le(0xbeef), [0xef, 0xbe]);
     }
 }
