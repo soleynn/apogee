@@ -16,6 +16,9 @@ pub const SESSION_ID: &str = "SESSIONXYZ";
 pub const UNIQUE_ID: &str = "UID-TOKEN-0123456789";
 pub const BOOT_VERSION: &str = "2024.02.01.0000.0000";
 pub const GAME_VERSION: &str = "2024.03.28.0000.0000";
+/// The SE account a Steam top page reports its ticket is linked to. Cased unlike the stored account
+/// id on purpose: the page's spelling is the canonical one, and the check against it ignores case.
+pub const STEAM_LINKED_ID: &str = "TestUser";
 
 /// The `Date` header stamped on the OAuth top page (the flow uses it for TOTP clock-skew correction).
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";

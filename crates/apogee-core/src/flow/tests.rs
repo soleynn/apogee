@@ -31,7 +31,7 @@ use crate::steam::{NoSteam, SteamBackend};
 use crate::store::{Store, UidCacheEntry};
 use apogee_addons::{ExternalAddon, RunIn, Trigger};
 
-use fx::{BOOT_VERSION, GAME_VERSION, SESSION_ID, UNIQUE_ID};
+use fx::{BOOT_VERSION, GAME_VERSION, SESSION_ID, STEAM_LINKED_ID, UNIQUE_ID};
 
 const REGION: u16 = 3;
 const MAX_EXPANSION: u8 = 4;
@@ -1805,10 +1805,6 @@ fn launch_arguments_append_the_steam_flag_last() {
             .ends_with(" ver=2024.03.28.0000.0000 IsSteam=1")
     );
 }
-
-/// The Steam account id the fixture top page reports the ticket is linked to. Deliberately cased
-/// differently from the stored account, which is what SE does: the id it answers with is canonical.
-const STEAM_LINKED_ID: &str = "TestUser";
 
 /// A play scenario for a Steam account: the top page names the linked account.
 fn steam_play_then_current() -> [ProtoResponse; 5] {
