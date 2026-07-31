@@ -1,0 +1,38 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional:
+    name: conventional
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A squash merge takes the pull request's title as the commit subject, so the title is the only
+      # moment the scope is still known. The changelog groups by that scope and tags by that type; a
+      # title without them lands the entry in an undifferentiated bucket labelled "changed", which is
+      # how a release cycle ends up reading as a list of undifferentiated pull request titles.
+      - name: Check the title carries a type and a scope
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          types='feat|fix|perf|refactor|docs?|test|ci|build|style|revert|chore'
+          if printf '%s' "$TITLE" | grep -qE "^($types)(\([a-z0-9._-]+\))?!?: .+"; then
+            scope=$(printf '%s' "$TITLE" | sed -nE "s/^($types)\(([a-z0-9._-]+)\).*/\2/p")
+            if [ -z "$scope" ]; then
+              echo "::warning::'$TITLE' has a type but no scope, so its entry groups under 'workspace'."
+              echo "Prefer 'type(crate): subject', e.g. 'feat(apogee-runtime): detect the Steam Deck'."
+            fi
+            exit 0
+          fi
+          echo "::error::Pull request title must be 'type(scope): subject'."
+          echo "  got:      $TITLE"
+          echo "  expected: feat(apogee-runtime): detect the Steam Deck"
+          echo "  types:    ${types//|/, }"
+          echo "The squash commit takes this title, and the changelog is generated from it."
+          exit 1
