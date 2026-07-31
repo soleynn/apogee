@@ -13,7 +13,7 @@ pub use variants::{Blowfish, LegacyBlowfish};
 /// Block-word byte order. The launcher variant reads/writes little-endian; the standard variant
 /// big-endian.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Endian {
+pub enum Endian {
     Little,
     Big,
 }
@@ -31,7 +31,7 @@ pub(crate) enum Endian {
 /// the known `" /T ="` prefix; the ticket key is a minute-rounded clock, about 1440 candidates a day.
 /// Anyone holding the emitted string can recover the key without touching process memory at all.
 #[derive(zeroize::ZeroizeOnDrop)]
-pub(crate) struct BlowfishCore {
+pub struct BlowfishCore {
     p: [u32; 18],
     s: [[u32; 256]; 4],
     // Endianness is an immutable property of the variant, not of an operation, so it is fixed at
@@ -68,9 +68,9 @@ impl BlowfishCore {
                 let byte = key[j];
                 let contrib = if sign_extend {
                     // Fold the byte in as signed: values >= 0x80 sign-extend into the high bits.
-                    (byte as i8) as i32 as u32
+                    i32::from(byte.cast_signed()).cast_unsigned()
                 } else {
-                    byte as u32
+                    u32::from(byte)
                 };
                 data = (data << 8) | contrib;
                 j = (j + 1) % key.len();
@@ -107,7 +107,10 @@ impl BlowfishCore {
     }
 
     /// The Feistel round function: `((S0[a] + S1[b]) XOR S2[c]) + S3[d]`, additions mod 2^32.
-    fn f(&self, x: u32) -> u32 {
+    // `a`, `b`, `c`, `d` and `x` are this function's names in every published description of
+    // Blowfish's F-function; renaming them would just make the two harder to compare.
+    #[allow(clippy::many_single_char_names)]
+    const fn f(&self, x: u32) -> u32 {
         let a = self.s[0][(x >> 24) as usize & 0xff];
         let b = self.s[1][(x >> 16) as usize & 0xff];
         let c = self.s[2][(x >> 8) as usize & 0xff];
@@ -168,26 +171,30 @@ impl BlowfishCore {
 
     #[cfg(test)]
     pub(crate) fn state_dump(&self) -> String {
-        use std::fmt::Write as _;
         let mut out = String::new();
         out.push_str("P:\n");
-        for (i, v) in self.p.iter().enumerate() {
-            let _ = write!(out, "{v:08x}");
-            out.push(if i % 6 == 5 { '\n' } else { ' ' });
-        }
+        dump_row(&mut out, &self.p, 6);
         for (bi, sbox) in self.s.iter().enumerate() {
+            use std::fmt::Write as _;
             let _ = write!(out, "\nS{bi}:\n");
-            for (i, v) in sbox.iter().enumerate() {
-                let _ = write!(out, "{v:08x}");
-                out.push(if i % 8 == 7 { '\n' } else { ' ' });
-            }
+            dump_row(&mut out, sbox, 8);
         }
         out
     }
 }
 
+/// Append each value as 8 hex digits to `out`, wrapping to a new line every `per_line` values.
+#[cfg(test)]
+fn dump_row(out: &mut String, values: &[u32], per_line: usize) {
+    use std::fmt::Write as _;
+    for (i, v) in values.iter().enumerate() {
+        let _ = write!(out, "{v:08x}");
+        out.push(if i % per_line == per_line - 1 { '\n' } else { ' ' });
+    }
+}
+
 fn pad8(data: &[u8]) -> Vec<u8> {
-    let padded = data.len() + (8 - data.len() % 8) % 8;
+    let padded = data.len().next_multiple_of(8);
     let mut buf = Vec::with_capacity(padded);
     buf.extend_from_slice(data);
     buf.resize(padded, 0);

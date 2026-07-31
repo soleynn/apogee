@@ -6,7 +6,9 @@
 //! char, and wrapped in `//**sqex0003…**//`. Byte-identity with the SE launcher is the bar, so every
 //! quirk is reproduced deliberately.
 
-use zeroize::Zeroizing;
+use std::fmt::Write as _;
+
+use zeroize::{Zeroizing, ZeroizeOnDrop};
 
 use crate::{LegacyBlowfish, sqex_base64};
 
@@ -25,9 +27,22 @@ const CHECKSUM_TABLE: [char; 16] = [
 ];
 
 /// Builds the launcher's argument string, plain or encrypted.
-#[derive(Default)]
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::{ArgKey, ArgumentBuilder, TickCount};
+///
+/// let key = ArgKey::from_tick(TickCount::from_raw(0x1234_5678));
+/// let encrypted = ArgumentBuilder::new()
+///     .add("DEV.UseSqPack", "1")
+///     .build_encrypted(&key);
+///
+/// assert!(encrypted.starts_with("//**sqex0003"));
+/// ```
+#[derive(Default, ZeroizeOnDrop)]
 pub struct ArgumentBuilder {
-    args: Vec<(String, String)>,
+    args: Vec<(Zeroizing<String>, Zeroizing<String>)>,
 }
 
 impl ArgumentBuilder {
@@ -38,14 +53,36 @@ impl ArgumentBuilder {
     }
 
     /// Append a key/value pair, preserving insertion order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::ArgumentBuilder;
+    ///
+    /// let plain = ArgumentBuilder::new()
+    ///     .add("language", "1")
+    ///     .add("resetConfig", "0")
+    ///     .build_plain();
+    /// assert_eq!(plain, " language=1 resetConfig=0");
+    /// ```
     #[must_use]
     pub fn add(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.args.push((key.into(), value.into()));
+        self.args
+            .push((Zeroizing::new(key.into()), Zeroizing::new(value.into())));
         self
     }
 
     /// The plaintext form used when argument encryption is disabled: `" {key}={value}"` per pair, no
     /// `/`, no space before `=`, no escaping, no `T` (matches the launcher's plain build).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::ArgumentBuilder;
+    ///
+    /// let plain = ArgumentBuilder::new().add("language", "1").build_plain();
+    /// assert_eq!(plain, " language=1");
+    /// ```
     #[must_use]
     pub fn build_plain(&self) -> String {
         // Sized exactly (a space and an `=` per pair, nothing escaped) rather than grown. Growing
@@ -73,6 +110,18 @@ impl ArgumentBuilder {
     ///
     /// `T={ticks}` is inserted as the first pair from `key` itself (overwriting a caller-supplied `T`
     /// at index 0 rather than duplicating it), so the key and the `T` value cannot desync.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::{ArgKey, ArgumentBuilder, TickCount};
+    ///
+    /// let key = ArgKey::from_tick(TickCount::from_raw(0x1234_5678));
+    /// let encrypted = ArgumentBuilder::new().add("a", "b").build_encrypted(&key);
+    ///
+    /// assert!(encrypted.starts_with("//**sqex0003"));
+    /// assert!(encrypted.ends_with("G**//")); // 'G' is this key's checksum char
+    /// ```
     #[must_use]
     pub fn build_encrypted(&self, key: &ArgKey) -> String {
         // The serialized plaintext carries the session id and other credential-bearing args in the
@@ -87,8 +136,11 @@ impl ArgumentBuilder {
             .sum::<usize>()
             + 20;
         let mut plaintext = Zeroizing::new(String::with_capacity(cap));
-        push_pair(&mut plaintext, "T", &key.ticks().to_string());
-        let skip_first = self.args.first().is_some_and(|(k, _)| k == "T");
+        // Written directly rather than through `push_pair`: `T`'s value is a plain decimal tick, so
+        // it can never contain the space `push_escaped` would double, and writing it in place skips
+        // an intermediate heap `String` that would otherwise hold the key's own digits unzeroized.
+        let _ = write!(plaintext, " /T ={}", key.ticks());
+        let skip_first = self.args.first().is_some_and(|(k, _)| k.as_str() == "T");
         for (k, v) in self.args.iter().skip(usize::from(skip_first)) {
             push_pair(&mut plaintext, k, v);
         }
@@ -106,7 +158,17 @@ impl ArgumentBuilder {
         let ciphertext = LegacyBlowfish::new(key_bytes.as_slice()).encrypt(plaintext.as_bytes());
         let body = sqex_base64::encode(&ciphertext);
         let checksum = derive_checksum(key.key());
-        format!("//**sqex{:04}{}{}**//", VERSION, body, checksum)
+
+        // Pre-sized rather than built with `format!`: `body`'s length isn't known to a format
+        // string, so `format!` would under-reserve and reallocate-and-copy while writing it. 17 is
+        // the fixed literal bytes: `//**sqex` (8) + the 4-digit version + the checksum (1) + `**//` (4).
+        let mut out = String::with_capacity(17 + body.len());
+        out.push_str("//**sqex");
+        let _ = write!(out, "{VERSION:04}");
+        out.push_str(&body);
+        out.push(checksum);
+        out.push_str("**//");
+        out
     }
 }
 

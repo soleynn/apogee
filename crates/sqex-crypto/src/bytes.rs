@@ -4,31 +4,31 @@
 
 /// Read a `u32` from four little-endian bytes.
 #[must_use]
-pub fn u32_le(bytes: [u8; 4]) -> u32 {
+pub const fn u32_le(bytes: [u8; 4]) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
 /// Read a `u32` from four big-endian bytes.
 #[must_use]
-pub fn u32_be(bytes: [u8; 4]) -> u32 {
+pub const fn u32_be(bytes: [u8; 4]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 
 /// Write a `u16` as two little-endian bytes.
 #[must_use]
-pub fn write_u16_le(v: u16) -> [u8; 2] {
+pub const fn write_u16_le(v: u16) -> [u8; 2] {
     v.to_le_bytes()
 }
 
 /// Write a `u32` as four little-endian bytes.
 #[must_use]
-pub fn write_u32_le(v: u32) -> [u8; 4] {
+pub const fn write_u32_le(v: u32) -> [u8; 4] {
     v.to_le_bytes()
 }
 
 /// Write a `u32` as four big-endian bytes.
 #[must_use]
-pub fn write_u32_be(v: u32) -> [u8; 4] {
+pub const fn write_u32_be(v: u32) -> [u8; 4] {
     v.to_be_bytes()
 }
 

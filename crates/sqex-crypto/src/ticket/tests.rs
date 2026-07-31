@@ -22,7 +22,7 @@ fn model_buffer(raw: &[u8], rounded: u32) -> Vec<u8> {
     let mut hex = Vec::new();
     let mut sum: u16 = 0;
     for &b in raw {
-        for digit in [HEX_LOWER[(b >> 4) as usize], HEX_LOWER[(b & 0x0F) as usize]] {
+        for digit in [hex::LOWER[(b >> 4) as usize], hex::LOWER[(b & 0x0F) as usize]] {
             hex.push(digit);
             sum = sum.wrapping_add(u16::from(digit));
         }
@@ -35,7 +35,7 @@ fn model_buffer(raw: &[u8], rounded: u32) -> Vec<u8> {
 
     let total = (hex.len() + 9) & !7;
     let padding = total - 2 - hex.len();
-    let mut rng = CrtRand::new(rounded ^ (sum as i16 as i32 as u32));
+    let mut rng = CrtRand::new(rounded ^ i32::from(sum.cast_signed()).cast_unsigned());
     let mut running = bytes::u32_le([buf[0], buf[1], buf[2], buf[3]]);
     for _ in 0..padding {
         let ch = PAD_ALPHABET[(running.wrapping_add(rng.next()) & 0x3F) as usize];
@@ -62,14 +62,6 @@ fn every_padding_slot_is_pinned() {
         .chain(*b"-_")
         .collect();
     assert_eq!(PAD_ALPHABET.as_slice(), derived.as_slice());
-}
-
-/// The hex table, same reasoning: it expands the ticket and builds the cipher key, and a wrong digit
-/// in the tail of it survives every vector whose bytes never reach that nibble.
-#[test]
-fn every_hex_digit_is_pinned() {
-    let derived: Vec<u8> = (b'0'..=b'9').chain(b'a'..=b'f').collect();
-    assert_eq!(HEX_LOWER.as_slice(), derived.as_slice());
 }
 
 /// The smallest possible ticket, worked end to end.
@@ -148,7 +140,7 @@ fn trace_clock_wraps_below_five() {
 #[test]
 fn the_head_write_changes_the_hex_digits_only_on_a_carry() {
     let rounded = round_to_minute(100);
-    let digits = hex_digits(0xff);
+    let digits = hex::digits(0xff);
 
     // Sum 0x9f60, far from the wrap: the digits are rewritten with themselves.
     let short = [0xff_u8; 200];
@@ -211,6 +203,8 @@ fn rand_seed_sign_extends_rather_than_widening() {
 /// draws in-range characters from the same alphabet, so neither a bounds check nor an
 /// alphabet-membership assertion notices. Only a divergence test states that the distinction matters.
 #[test]
+// `idx` is masked to `0x3F` just above, so it never exceeds 63 and the cast back never truncates.
+#[allow(clippy::cast_possible_truncation)]
 fn padding_folds_the_character_not_the_index() {
     fn pad_bytes(seed: u32, mut running: u32, count: usize, fold_index: bool) -> Vec<u8> {
         let mut rng = CrtRand::new(seed);
