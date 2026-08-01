@@ -79,6 +79,8 @@ fn checksum_indexes_one_nibble() {
 /// launches, so one wrong entry breaks one launch in sixteen. Restated here as a flat string rather
 /// than the array literal, so a mutation of the table under test cannot travel into its own oracle.
 #[test]
+// `index` never exceeds ORACLE's fixed 16 entries, so the widening cast below never truncates.
+#[allow(clippy::cast_possible_truncation)]
 fn every_checksum_entry_is_pinned() {
     const ORACLE: &[u8; 16] = b"fX1pGtdS5CAP4_VL";
     for (index, &want) in ORACLE.iter().enumerate() {

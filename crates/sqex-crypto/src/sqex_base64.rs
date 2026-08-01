@@ -6,6 +6,15 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 const PAD: char = '*';
 
 /// Encode `input` to mangled base64 with padding retained.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::sqex_base64::encode;
+///
+/// assert_eq!(encode(b"Hello, world"), "SGVsbG8sIHdvcmxk"); // no mangled chars
+/// assert_eq!(encode(&[0xff, 0xff, 0xff]), "____"); // standard base64 would emit "////"
+/// ```
 #[must_use]
 pub fn encode(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -31,6 +40,18 @@ pub fn encode(input: &[u8]) -> String {
 }
 
 /// Decode mangled base64. Returns `None` on any malformed input (never panics).
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::sqex_base64::decode;
+///
+/// assert_eq!(decode("____").as_deref(), Some(&[0xff, 0xff, 0xff][..]));
+/// assert_eq!(decode("not valid!"), None);
+/// ```
+// `n` only ever accumulates 4 six-bit sextets (24 bits), so each `as u8` below extracts exactly
+// one of its three whole bytes and never truncates live data.
+#[allow(clippy::cast_possible_truncation)]
 #[must_use]
 pub fn decode(input: &str) -> Option<Vec<u8>> {
     let bytes = input.as_bytes();
@@ -115,6 +136,10 @@ mod tests {
         assert_eq!(decode("**AA"), None); // pad before data
         assert_eq!(decode("AA**AAAA"), None); // padding outside the final group
         assert_eq!(decode("=AAA"), None); // standard-base64 pad char is not the mangled alphabet
+        // The two data characters this alphabet exists to replace: accepting either would mean
+        // ordinary base64 output silently decodes here, defeating the whole point of the mangling.
+        assert_eq!(decode("AA+A"), None);
+        assert_eq!(decode("AA/A"), None);
     }
 
     proptest! {

@@ -84,6 +84,26 @@ fn block_endianness_split_is_pinned() {
     insta::assert_snapshot!("standard_be_block", to_hex(&be));
 }
 
+/// An empty key takes `mix_key`'s early-return guard, the only thing standing between an empty key
+/// and a `% 0` panic; every other test here keys with at least one byte, so this path is otherwise
+/// untested. `mix_key` becomes a no-op (P/S reach `expand()` still at their init tables), but
+/// `expand()` always runs regardless, so the snapshotted state is that unmixed schedule *after*
+/// expansion, not the init tables themselves. Pins that expanded state and that ECB still
+/// round-trips from it, rather than only checking that encrypt/decrypt happen to agree with each
+/// other.
+#[test]
+fn empty_key_leaves_state_unmixed_and_still_round_trips() {
+    let legacy = LegacyBlowfish::new(&[]);
+    assert_eq!(legacy.decrypt(&legacy.encrypt(PLAINTEXT)), pad8(PLAINTEXT));
+    insta::assert_snapshot!("legacy_empty_key_state", legacy.state_dump());
+
+    let standard = Blowfish::new(&[]);
+    assert_eq!(
+        standard.decrypt(&standard.encrypt(PLAINTEXT)),
+        pad8(PLAINTEXT)
+    );
+}
+
 /// The launcher variant's block order, anchored to the published vectors instead of to a snapshot.
 ///
 /// `assert_ne!` above catches a straight swap to big-endian, and the snapshot catches a change that

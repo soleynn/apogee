@@ -2,6 +2,16 @@
 //! Reproduced with wrapping 32-bit arithmetic to match C's overflow semantics.
 
 /// Stateful MSVCRT-style pseudo-random generator.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::CrtRand;
+///
+/// let mut rng = CrtRand::new(1);
+/// let first_four: Vec<u32> = (0..4).map(|_| rng.next()).collect();
+/// assert_eq!(first_four, [41, 18467, 6334, 26500]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct CrtRand {
     seed: u32,
@@ -9,14 +19,32 @@ pub struct CrtRand {
 
 impl CrtRand {
     /// Seed the generator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::CrtRand;
+    ///
+    /// let rng = CrtRand::new(0x1234_5678);
+    /// ```
     #[must_use]
-    pub fn new(seed: u32) -> Self {
+    pub const fn new(seed: u32) -> Self {
         Self { seed }
     }
 
     /// Advance and return the next 15-bit value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::CrtRand;
+    ///
+    /// let mut rng = CrtRand::new(1);
+    /// assert_eq!(rng.next(), 41);
+    /// assert_eq!(rng.next(), 18467);
+    /// ```
     #[allow(clippy::should_implement_trait)] // not an Iterator: yields a bare u32, mirrors C rand()
-    pub fn next(&mut self) -> u32 {
+    pub const fn next(&mut self) -> u32 {
         self.seed = self
             .seed
             .wrapping_mul(0x0003_43fd)

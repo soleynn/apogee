@@ -20,14 +20,31 @@ use zeroize::ZeroizeOnDrop;
 /// must do so close enough to the launch that the value still matches. The game masks off the low 16
 /// bits and retries exactly one 65536 ms step below its own reading, so a tick more than two of those
 /// steps stale cannot be recovered.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::{ArgKey, TickCount};
+///
+/// let tick = TickCount::from_raw(0x1234_5678);
+/// let key = ArgKey::from_tick(tick);
+/// ```
 #[derive(ZeroizeOnDrop)]
 pub struct TickCount(u32);
 
 impl TickCount {
     /// Construct from a raw tick. The only constructor, so the transform is deterministic and the
     /// clock read stays outside this crate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::TickCount;
+    ///
+    /// let tick = TickCount::from_raw(0x1234_5678);
+    /// ```
     #[must_use]
-    pub fn from_raw(raw: u32) -> Self {
+    pub const fn from_raw(raw: u32) -> Self {
         Self(raw)
     }
 }
@@ -36,6 +53,14 @@ impl TickCount {
 ///
 /// `raw` is the full tick (decimal-serialized into the `T` argument); the Blowfish key is its high 16
 /// bits (`raw & 0xFFFF_0000`), rendered as 8 lowercase-hex ASCII bytes.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::{ArgKey, TickCount};
+///
+/// let key = ArgKey::from_tick(TickCount::from_raw(0x1234_5678));
+/// ```
 #[derive(ZeroizeOnDrop)]
 pub struct ArgKey {
     raw: u32,
@@ -43,6 +68,17 @@ pub struct ArgKey {
 
 impl ArgKey {
     /// Construct from a tick, the sole source of an `ArgKey`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::{ArgKey, TickCount};
+    ///
+    /// let key = ArgKey::from_tick(TickCount::from_raw(0x1234_5678));
+    /// ```
+    // Takes `tick` by value rather than by reference: `TickCount` zeroizes on drop, and consuming
+    // it here means the caller's tick is wiped once the key is derived instead of living on.
+    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn from_tick(tick: TickCount) -> Self {
         Self { raw: tick.0 }
@@ -50,13 +86,13 @@ impl ArgKey {
 
     /// The full raw tick, serialized decimal into the `T` argument.
     #[must_use]
-    pub(super) fn ticks(&self) -> u32 {
+    pub(super) const fn ticks(&self) -> u32 {
         self.raw
     }
 
     /// The Blowfish key: the high 16 bits of the tick.
     #[must_use]
-    pub(super) fn key(&self) -> u32 {
+    pub(super) const fn key(&self) -> u32 {
         self.raw & 0xFFFF_0000
     }
 
@@ -65,13 +101,7 @@ impl ArgKey {
     /// Rendered nibble by nibble rather than through `format!` so the secret key digits never occupy
     /// an un-zeroized heap `String`; the output is byte-identical to `{:08x}`.
     #[must_use]
-    pub(super) fn key_bytes(&self) -> [u8; 8] {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let k = self.key();
-        let mut out = [0u8; 8];
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = HEX[((k >> (28 - 4 * i)) & 0xF) as usize];
-        }
-        out
+    pub(super) const fn key_bytes(&self) -> [u8; 8] {
+        crate::hex::u32_lower(self.key())
     }
 }

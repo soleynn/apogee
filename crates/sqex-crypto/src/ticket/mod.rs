@@ -16,7 +16,7 @@ use core::fmt;
 
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-use crate::{Blowfish, CrtRand, CryptoError, bytes, sqex_base64};
+use crate::{Blowfish, CrtRand, CryptoError, bytes, hex, sqex_base64};
 
 #[cfg(test)]
 mod tests;
@@ -27,9 +27,6 @@ mod tests;
 /// different order, so reusing [`sqex_base64`]'s table here would produce plausible output that the
 /// server rejects.
 const PAD_ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
-
-/// Lowercase hex digits, for the ticket expansion and the cipher key.
-const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 /// The fixed tail of the cipher key, appended to eight hex digits of the rounded clock.
 const KEY_SUFFIX: &[u8; 8] = b"#un@e=x>";
@@ -42,8 +39,20 @@ const CHUNK: usize = 300;
 /// A newtype so a millisecond value cannot be passed by mistake, and 32-bit because the launcher's
 /// clock word is: the value is rendered as exactly eight hex digits into the cipher key, so a wider
 /// integer would silently produce a longer key and a different ticket.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_crypto::ServerTime;
+///
+/// let time = ServerTime(1_700_000_000);
+/// assert_eq!(time.0, 1_700_000_000);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ServerTime(pub u32);
+pub struct ServerTime(
+    /// A server clock reading in whole Unix seconds.
+    pub u32,
+);
 
 impl ServerTime {
     /// Truncate a signed Unix-seconds reading to the 32-bit clock word.
@@ -51,8 +60,22 @@ impl ServerTime {
     /// Keeps the low 32 bits and discards sign and any high bits, reproducing the narrowing the
     /// launcher performs on its own 64-bit clock. Callers holding a `SystemTime` seconds count go
     /// through here rather than spelling the cast at each call site.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::ServerTime;
+    ///
+    /// assert_eq!(ServerTime::from_unix_seconds(1_785_000_000).0, 1_785_000_000);
+    ///
+    /// // Negative and out-of-range readings narrow rather than saturate.
+    /// assert_eq!(ServerTime::from_unix_seconds(-1).0, u32::MAX);
+    /// ```
+    // The narrowing (dropping the sign and any bits above 32) is the documented behavior, not an
+    // accident: it reproduces what the launcher's own 64-to-32-bit narrowing does.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[must_use]
-    pub fn from_unix_seconds(secs: i64) -> Self {
+    pub const fn from_unix_seconds(secs: i64) -> Self {
         Self(secs as u32)
     }
 }
@@ -66,6 +89,19 @@ impl ServerTime {
 ///
 /// The text is a bearer credential, so it zeroizes on drop, implements no `Display`, `Clone`, or
 /// `Serialize`, and its [`Debug`] redacts.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> Result<(), sqex_crypto::CryptoError> {
+/// use sqex_crypto::{ObfuscatedTicket, ServerTime};
+///
+/// let ticket = ObfuscatedTicket::from_auth_ticket(&[0xab], ServerTime(100))?;
+/// assert_eq!(ticket.text(), "l9frZA-zmLg*");
+/// assert_eq!(ticket.length(), 12);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(ZeroizeOnDrop)]
 pub struct ObfuscatedTicket {
     text: String,
@@ -81,6 +117,18 @@ impl ObfuscatedTicket {
     ///
     /// Returns [`CryptoError::EmptyTicket`] when `raw` is empty. Every other input, including any
     /// `time` value whatsoever, yields a ticket.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), sqex_crypto::CryptoError> {
+    /// use sqex_crypto::{ObfuscatedTicket, ServerTime};
+    ///
+    /// let ticket = ObfuscatedTicket::from_auth_ticket(&[0xab], ServerTime(100))?;
+    /// assert_eq!(ticket.text(), "l9frZA-zmLg*");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn from_auth_ticket(raw: &[u8], time: ServerTime) -> Result<Self, CryptoError> {
         // The generator's running sum is seeded by reading the first four bytes back out of the
         // buffer, which exist only once the ticket has contributed at least two hex digits.
@@ -104,14 +152,38 @@ impl ObfuscatedTicket {
     }
 
     /// The query text, chunk separators included.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), sqex_crypto::CryptoError> {
+    /// use sqex_crypto::{ObfuscatedTicket, ServerTime};
+    ///
+    /// let ticket = ObfuscatedTicket::from_auth_ticket(&[0xab], ServerTime(100))?;
+    /// assert_eq!(ticket.text(), "l9frZA-zmLg*");
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 
     /// The reported length: the encoded length *before* chunking, so it excludes the separators.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), sqex_crypto::CryptoError> {
+    /// use sqex_crypto::{ObfuscatedTicket, ServerTime};
+    ///
+    /// let ticket = ObfuscatedTicket::from_auth_ticket(&[0xab], ServerTime(100))?;
+    /// assert_eq!(ticket.length(), 12);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
-    pub fn length(&self) -> usize {
+    pub const fn length(&self) -> usize {
         self.length
     }
 }
@@ -132,7 +204,7 @@ impl fmt::Debug for ObfuscatedTicket {
 /// `u32::MAX` instead of saturating, and every value in `0..=4` lands on the same rounded result as
 /// `u32::MAX`. Widening either operation to 64 bits, or to a signed type, changes the answer: signed
 /// remainder would make the second step subtract a negative.
-fn round_to_minute(time: u32) -> u32 {
+const fn round_to_minute(time: u32) -> u32 {
     let t = time.wrapping_sub(5);
     // Total rather than wrapping: `t % 60` is never greater than `t`.
     t - t % 60
@@ -145,9 +217,7 @@ fn round_to_minute(time: u32) -> u32 {
 /// byte-identical to `{rounded:08x}` for every input, which a test pins rather than a comment.
 fn blowfish_key(rounded: u32) -> Zeroizing<[u8; 16]> {
     let mut key = Zeroizing::new([0u8; 16]);
-    for (i, slot) in key.iter_mut().take(8).enumerate() {
-        *slot = HEX_LOWER[((rounded >> (28 - 4 * i)) & 0xF) as usize];
-    }
+    key[..8].copy_from_slice(&hex::u32_lower(rounded));
     key[8..].copy_from_slice(KEY_SUFFIX);
     key
 }
@@ -158,8 +228,10 @@ fn blowfish_key(rounded: u32) -> Zeroizing<[u8; 16]> {
 /// half with ones and flips the top sixteen bits of the clock. Folding the sum in unsigned instead
 /// produces a well-formed ticket with entirely different padding, which only the server would
 /// reject, so the cast chain is spelled out and pinned by a vector.
+// Not `const`: `i32::from` (used to widen without an `as`) isn't a const-stable trait method yet.
+#[allow(clippy::missing_const_for_fn)]
 fn rand_seed(rounded: u32, ticket_sum: u16) -> u32 {
-    rounded ^ (ticket_sum as i16 as i32 as u32)
+    rounded ^ i32::from(ticket_sum.cast_signed()).cast_unsigned()
 }
 
 /// Build the plaintext block: the sum, the hex-expanded ticket, its terminator, and the padding.
@@ -178,7 +250,7 @@ fn build_buffer(raw: &[u8], first: u8, rounded: u32) -> Vec<u8> {
 
     let mut ticket_sum: u16 = 0;
     for &b in raw {
-        let (hi, lo) = hex_digits(b);
+        let (hi, lo) = hex::digits(b);
         buf.push(hi);
         buf.push(lo);
         // Accumulated as 16-bit and wrapping: the launcher truncates on every step, and for any
@@ -199,7 +271,7 @@ fn build_buffer(raw: &[u8], first: u8, rounded: u32) -> Vec<u8> {
     // bytes followed by the two hex digits of the ticket's first byte. Derived from the values in
     // hand rather than read back out of the buffer: identical by construction, and it keeps the
     // read that the launcher performs host-endian from becoming a latent portability bug here.
-    let (first_hi, first_lo) = hex_digits(first);
+    let (first_hi, first_lo) = hex::digits(first);
     let mut running = bytes::u32_le([sum_bytes[0], sum_bytes[1], first_hi, first_lo]);
 
     // The padding count is the distance to the next block boundary, so it is the loop bound itself
@@ -255,9 +327,4 @@ fn split_join(b64: &str) -> String {
         "the chunked text outgrew its reservation"
     );
     text
-}
-
-/// One byte as its two lowercase hex digits, high nibble first.
-fn hex_digits(b: u8) -> (u8, u8) {
-    (HEX_LOWER[(b >> 4) as usize], HEX_LOWER[(b & 0x0F) as usize])
 }
