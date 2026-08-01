@@ -188,6 +188,112 @@ jobs:
           WINEDEBUG: "-all"
         run: cargo test -p apogee-cli --features wine-integration --test e2e -- --test-threads=1
 
+  # A real credential store in headless CI. The three conditions the store has to tell apart (an
+  # unlocked round trip, a locked collection, a bus with no provider on it) plus the proof of what
+  # actually crosses the socket. The classification is unit-tested hermetically in test-linux, but
+  # only a real provider produces the errors it classifies, and only a real socket shows whether the
+  # secret crossed it in the clear.
+  test-linux-secret-service:
+    name: test-linux-secret-service
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: secret-service
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `dbus` carries dbus-run-session; socat is the relay the wire capture reads through. No
+      # libsecret: the client speaks D-Bus directly and links nothing.
+      - name: Install a session bus, a credential store, and the bus relay
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring socat
+      # Build outside the bus session, so a compile error cannot look like a bus failure.
+      - run: cargo test -p apogee-secrets --features testing --no-run
+      # The unlock password has to be non-empty: an empty one leaves the daemon holding only its
+      # in-memory collection, and every call then fails in a way that reads as a locked store.
+      # XDG_DATA_HOME is a temp dir so running this same command locally cannot touch a real keyring.
+      - name: Round trip against an unlocked store
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          dbus-run-session -- bash -c '
+            echo -n "apogee-ci" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p apogee-secrets --features testing --test secret_service -- --test-threads=1
+          '
+      # Locking is one-way here: unlocking again needs a prompt a headless session cannot answer, so
+      # this gets a keyring of its own and leaves it locked behind it. Only the probe is asserted;
+      # a store operation against a locked collection blocks on that same prompt for an unpredictable
+      # time, so those classifications are pinned by unit tests instead.
+      - name: A locked store probes as locked
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          dbus-run-session -- bash -c '
+            echo -n "apogee-ci" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p apogee-secrets --features testing --test secret_service_locked -- --test-threads=1
+          '
+      # No unlock here, deliberately: the daemon then never creates a login keyring, so the default
+      # collection does not resolve. That is what a passwordless or autologin session looks like, and
+      # it is the shape that reads as healthy unless the probe resolves the same collection the store
+      # writes to. The in-memory session collection is always present and always unlocked.
+      - name: Probe a provider that has never been initialized
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          dbus-run-session -- bash -c '
+            gnome-keyring-daemon --components=secrets &
+            sleep 2
+            cargo test -p apogee-secrets --features testing --test probe_no_collection -- --test-threads=1
+          '
+      # This leg needs its own bus. With a keyring installed, D-Bus activates the credential store on
+      # demand from its service file, so an empty service directory is the only way to get a session
+      # that genuinely cannot produce one.
+      - name: Probe a bus that cannot produce a credential store
+        run: |
+          conf="$(mktemp)"
+          svc="$(mktemp -d)"
+          cat > "$conf" <<EOF
+          <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+           "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+          <busconfig>
+            <type>session</type>
+            <listen>unix:tmpdir=/tmp</listen>
+            <servicedir>$svc</servicedir>
+            <!-- receive_sender is not optional: without it the daemon drops every reply and any
+                 client hangs waiting for one it will never get. -->
+            <policy context="default">
+              <allow send_destination="*"/>
+              <allow receive_sender="*"/>
+              <allow own="*"/>
+            </policy>
+          </busconfig>
+          EOF
+          dbus-run-session --config-file="$conf" -- \
+            cargo test -p apogee-secrets --features testing --test probe_no_backend -- --test-threads=1
+      # The client talks to a relay socket rather than the bus socket, so the raw stream is on disk
+      # afterwards: the secret must not be in it and the encrypted transport must be named in it.
+      - name: What crosses the session bus
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          export APOGEE_BUS_CAPTURE="$(mktemp -d)"
+          dbus-run-session -- bash -c '
+            echo -n "apogee-ci" | gnome-keyring-daemon --unlock --components=secrets
+            real="${DBUS_SESSION_BUS_ADDRESS#unix:path=}"; real="${real%%,*}"
+            socat -r "$APOGEE_BUS_CAPTURE/c2s.bin" -R "$APOGEE_BUS_CAPTURE/s2c.bin" \
+              UNIX-LISTEN:"$APOGEE_BUS_CAPTURE/bus.sock",fork UNIX-CONNECT:"$real" &
+            relay=$!
+            sleep 1
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$APOGEE_BUS_CAPTURE/bus.sock" \
+              cargo test -p apogee-secrets --features testing --test bus_encrypted -- --test-threads=1
+            status=$?
+            kill "$relay" 2>/dev/null || true
+            exit "$status"
+          '
+
   build-windows-cross:
     name: build-windows-cross
     runs-on: ubuntu-latest

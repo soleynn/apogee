@@ -10,5 +10,57 @@ thiserror.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
+# The Secret Service backend speaks D-Bus through zbus rather than libdbus: the pure-Rust path needs
+# no C system library at build time, and its error type is the one that separates "nothing owns the
+# name" from "collection locked", which is what the backend report has to say.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+keyring = { workspace = true, features = ["async-secret-service"] }
+# Classification happens below keyring, which boxes every connection failure into one variant.
+# `rt-async-io-crypto-rust` names the zbus runtime here rather than relying on feature unification.
+secret-service = { workspace = true, features = ["rt-async-io-crypto-rust"] }
+zbus.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[features]
+default = ["encrypted-session"]
+# Forces the Secret Service session onto the Diffie-Hellman-agreed AES transport. A dependency's
+# features are not visible as a cfg, so this passthrough is what the build gate in lib.rs tests.
+encrypted-session = ["keyring/crypto-rust"]
+# Gates the tests that need a live session bus and a real Secret Service provider. Never enabled by
+# a shipping build.
+testing = []
+
+[dev-dependencies]
+# Compile-fail proof that Secret implements none of the leaking traits.
+trybuild.workspace = true
+# Only so the derive-Serialize compile-fail case has the derive macro in scope; the crate itself
+# never serializes anything.
+serde.workspace = true
+
+[[test]]
+name = "secret_service"
+required-features = ["testing"]
+
+[[test]]
+name = "secret_service_locked"
+required-features = ["testing"]
+
+[[test]]
+name = "probe_no_backend"
+required-features = ["testing"]
+
+[[test]]
+name = "probe_no_collection"
+required-features = ["testing"]
+
+[[test]]
+name = "bus_encrypted"
+required-features = ["testing"]
+
 [lints]
 workspace = true
