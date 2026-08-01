@@ -52,6 +52,22 @@ blowfish_variant! {
     ///
     /// Textbook Blowfish: unsigned key schedule, big-endian blocks. Built for the ticket path; it
     /// matches published Blowfish test vectors.
+    ///
+    /// # Examples
+    ///
+    /// Matches Eric Young's canonical `bftest` vector (an all-zero key and block):
+    ///
+    /// ```
+    /// use sqex_crypto::Blowfish;
+    ///
+    /// let cipher = Blowfish::new(&[0; 8]);
+    /// let ciphertext = cipher.encrypt(&[0; 8]);
+    /// assert_eq!(
+    ///     ciphertext,
+    ///     [0x4e, 0xf9, 0x97, 0x45, 0x61, 0x98, 0xdd, 0x78],
+    /// );
+    /// assert_eq!(cipher.decrypt(&ciphertext), [0; 8]);
+    /// ```
     Blowfish, sign_extend = false, endian = Endian::Big,
 }
 
@@ -64,5 +80,15 @@ blowfish_variant! {
     /// high-byte golden. The launch-argument key is ASCII hex (all bytes < 0x80), so the divergence
     /// is dormant there but is tested explicitly so it can never drift unnoticed. Blocks are
     /// little-endian.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_crypto::LegacyBlowfish;
+    ///
+    /// let cipher = LegacyBlowfish::new(b"1a2b3c4d");
+    /// let ciphertext = cipher.encrypt(b"apogee!!");
+    /// assert_eq!(cipher.decrypt(&ciphertext), *b"apogee!!");
+    /// ```
     LegacyBlowfish, sign_extend = true, endian = Endian::Little,
 }

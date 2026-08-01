@@ -12,6 +12,8 @@
 //! - [`recorded_vectors_are_self_consistent`] decrypts every row and checks its structure against
 //!   the row's own declared input, so a mis-recorded row fails without any reference to our output.
 
+use std::fmt::Write as _;
+
 use apogee_test_support::golden::from_hex;
 use serde::Deserialize;
 use sqex_crypto::{Blowfish, ObfuscatedTicket, ServerTime, sqex_base64};
@@ -137,7 +139,10 @@ fn recorded_vectors_are_self_consistent() {
         );
 
         // The hex expansion, from offset 4 onward; the first two digits sit under the head write.
-        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = raw.iter().fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        });
         let tail_start = 4;
         let hex_end = 2 + hex.len();
         assert_eq!(
