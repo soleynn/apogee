@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use zeroize::{Zeroizing, ZeroizeOnDrop};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::{LegacyBlowfish, sqex_base64};
 

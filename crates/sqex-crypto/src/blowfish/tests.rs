@@ -98,7 +98,10 @@ fn empty_key_leaves_state_unmixed_and_still_round_trips() {
     insta::assert_snapshot!("legacy_empty_key_state", legacy.state_dump());
 
     let standard = Blowfish::new(&[]);
-    assert_eq!(standard.decrypt(&standard.encrypt(PLAINTEXT)), pad8(PLAINTEXT));
+    assert_eq!(
+        standard.decrypt(&standard.encrypt(PLAINTEXT)),
+        pad8(PLAINTEXT)
+    );
 }
 
 /// The launcher variant's block order, anchored to the published vectors instead of to a snapshot.

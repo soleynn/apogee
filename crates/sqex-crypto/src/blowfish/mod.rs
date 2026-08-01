@@ -189,7 +189,11 @@ fn dump_row(out: &mut String, values: &[u32], per_line: usize) {
     use std::fmt::Write as _;
     for (i, v) in values.iter().enumerate() {
         let _ = write!(out, "{v:08x}");
-        out.push(if i % per_line == per_line - 1 { '\n' } else { ' ' });
+        out.push(if i % per_line == per_line - 1 {
+            '\n'
+        } else {
+            ' '
+        });
     }
 }
 

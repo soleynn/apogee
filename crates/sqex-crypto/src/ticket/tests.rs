@@ -22,7 +22,10 @@ fn model_buffer(raw: &[u8], rounded: u32) -> Vec<u8> {
     let mut hex = Vec::new();
     let mut sum: u16 = 0;
     for &b in raw {
-        for digit in [hex::LOWER[(b >> 4) as usize], hex::LOWER[(b & 0x0F) as usize]] {
+        for digit in [
+            hex::LOWER[(b >> 4) as usize],
+            hex::LOWER[(b & 0x0F) as usize],
+        ] {
             hex.push(digit);
             sum = sum.wrapping_add(u16::from(digit));
         }
