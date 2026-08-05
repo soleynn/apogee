@@ -1,5 +1,10 @@
 //! The MSVCRT `rand()` generator: a linear congruential generator returning a 15-bit value.
 //! Reproduced with wrapping 32-bit arithmetic to match C's overflow semantics.
+//!
+//! The recurrence is `seed = 0x343FD * seed + 0x269EC3`, and the value is the middle 15 bits of the
+//! result. Both constants and the shift are interoperability contract rather than an implementation
+//! choice: the ticket's padding is drawn from this sequence, and Square Enix regenerates the same
+//! sequence to read it back.
 
 /// Stateful MSVCRT-style pseudo-random generator.
 ///
