@@ -6,6 +6,9 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-secrets
+- Store account secrets in the platform credential store (#99) _(added)_
+
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
 
