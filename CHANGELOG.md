@@ -18,6 +18,7 @@ is tagged with its change type. Versioning aims to follow
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
 - Close the defects found by the adversarial pass (#97) _(fixed)_
 - Finish the 1.0 documentation and hardening pass (#98) _(documentation)_
+- Record what pins the byte order and the generator (#107) _(documentation)_
 
 ### sqex-proto
 - Log in with a Steam service account (#96) _(added)_
