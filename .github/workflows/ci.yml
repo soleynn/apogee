@@ -354,12 +354,15 @@ jobs:
       # agrees with itself, and the target string is the whole contract.
       #
       # `cmdkey` writes the blob as UTF-16, which is what the store this reads holds text in.
-      # Run through the runner's own shell rather than naming one: the target holding a space is
-      # quoted as a single argument instead, which is all the other shell was buying.
+      # The shell is named on purpose. The legacy target contains spaces, and the quoting that
+      # survives to `cmdkey` differs between the two shells: quoted the other way the credential is
+      # filed under a name the test then cannot find, which is a green seeding step and a red test.
+      # Nothing here is interpolated and nothing is attacker-controlled.
       - name: Seed a credential the way the other launcher would
+        shell: cmd # zizmor: ignore[misfeature] quoting for a target with spaces, no interpolation
         run: |
           cmdkey /generic:XIVLAUNCHER-ci-current /user:ci-current /pass:current-password
-          cmdkey "/generic:FINAL FANTASY XIV-ci-legacy" /user:ci-legacy /pass:legacy-password
+          cmdkey /generic:"FINAL FANTASY XIV-ci-legacy" /user:ci-legacy /pass:legacy-password
       # The lib's own tests run here too, and only here: the blob decode is Windows-gated, so
       # `--test windows_credentials` alone would build the lib as a plain dependency and never
       # compile it. Named separately because the other integration targets in this crate need a
