@@ -1,0 +1,111 @@
+//! The secret value and what it addresses.
+
+use zeroize::Zeroizing;
+
+/// A secret value, zeroized when it drops.
+///
+/// It deliberately implements no `Debug`, `Display`, `Clone`, `PartialEq`, `Default`, or
+/// `serde::Serialize`. Printing one, comparing two, or serializing one into config is a compile
+/// error rather than a review comment, and the compile-fail suite pins that.
+///
+/// Zeroization covers this buffer, including the capacity past its length. It cannot reach a copy
+/// that existed before the bytes arrived here: a `String` that grew while it was being typed may
+/// have left its earlier allocations on the heap, and only the buffer handed to [`Secret::new`] is
+/// erased. Read a secret straight into one of these and drop it as soon as it has been used.
+pub struct Secret(Zeroizing<Vec<u8>>);
+
+impl Secret {
+    /// Wrap raw secret bytes. Takes the `Vec` by value, so no un-erased copy stays behind at the
+    /// call site.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Wrap a secret held as text. `String::into_bytes` moves the heap buffer rather than copying
+    /// it, so the text is not duplicated on the way in.
+    #[must_use]
+    pub fn from_string(text: String) -> Self {
+        Self::new(text.into_bytes())
+    }
+
+    /// Borrow the raw bytes. Callers use them and drop them: they must not be logged, persisted, or
+    /// copied into a longer-lived buffer.
+    #[must_use]
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// How many bytes the secret holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the secret holds no bytes at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+// No `impl Drop`: `Zeroizing` supplies one, and a manual `Drop` would additionally forbid moving the
+// field out, which is not the invariant being protected here.
+
+/// Which secret is addressed for an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SecretKind {
+    /// The Square Enix account password.
+    Password,
+    /// The shared secret a one-time code is generated from.
+    TotpSecret,
+}
+
+impl SecretKind {
+    /// The kind's component of the stored key.
+    ///
+    /// This is on-disk contract: changing a slug orphans every secret already stored under the old
+    /// one, with no error at the point of the change.
+    pub(crate) const fn slug(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::TotpSecret => "totp",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A secret is moved into a command and then into a spawned task, so it has to stay `Send` and
+    /// `'static`. It must not become `Clone`: a clone is a second buffer with its own lifetime.
+    const _: fn() = || {
+        fn assert_send_static<T: Send + 'static>() {}
+        assert_send_static::<Secret>();
+    };
+
+    #[test]
+    fn text_survives_the_round_trip_without_a_copy_step() {
+        let secret = Secret::from_string("correct horse".to_owned());
+        assert_eq!(secret.expose(), b"correct horse");
+        assert_eq!(secret.len(), 13);
+        assert!(!secret.is_empty());
+    }
+
+    #[test]
+    fn an_empty_secret_reports_itself_empty() {
+        let secret = Secret::new(Vec::new());
+        assert!(secret.is_empty());
+        assert_eq!(secret.len(), 0);
+    }
+
+    /// The slugs are half of the stored key, so they are frozen here rather than left to whatever
+    /// the enum's variant names happen to be.
+    #[test]
+    fn kind_slugs_are_frozen() {
+        assert_eq!(SecretKind::Password.slug(), "password");
+        assert_eq!(SecretKind::TotpSecret.slug(), "totp");
+    }
+}
