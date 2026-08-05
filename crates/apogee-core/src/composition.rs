@@ -21,7 +21,9 @@ use apogee_fetch::Fetcher;
 use apogee_otp::Otp;
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
-use apogee_secrets::Secrets;
+use apogee_secrets::{
+    BackendReport, ForeignKey, ImportSource, Secret, SecretKind, Secrets, SecretsError,
+};
 use sqex_proto::{ComputerId, Transport};
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
@@ -125,6 +127,42 @@ fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf, CoreError> {
     Ok(resolved)
 }
 
+/// What deleting a profile took with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProfileRemoval {
+    /// The account that went too, when the profile removed was the last one using it. `None` means
+    /// another profile still signs in as that account, so it was left alone.
+    pub account_removed: Option<Uuid>,
+    /// Whether the account's secrets were actually swept.
+    ///
+    /// `false` when no store answered at all. Nothing was deleted, and whatever that store holds
+    /// for this account has outlived the record naming it, so a caller has to say so rather than
+    /// report a clean removal.
+    pub secrets_swept: bool,
+}
+
+/// Whether a store that failed this way may still be holding the secret.
+///
+/// The question is not whether the call succeeded but whether anything could be left behind, because
+/// the answer decides whether an account may be deleted on top of it. Everything that reached a
+/// store and was refused counts as dangerous.
+///
+/// What is left is the conditions where no store answered at all. Those are *not* proof that nothing
+/// is stored: a password saved on a desktop session is still in the keyring when the same account is
+/// removed from a TTY with no bus. They are treated as non-blocking anyway, because the alternative
+/// is that a user with no keyring can never delete a profile, and the residue is reported instead of
+/// assumed away (see [`ProfileRemoval::secrets_swept`]).
+///
+/// The enum belongs to another crate and is `#[non_exhaustive]`, so an unrecognized condition is
+/// assumed to be the dangerous kind.
+fn could_hold_secrets(err: &SecretsError) -> bool {
+    !matches!(
+        err,
+        SecretsError::NoBackend | SecretsError::NoCollection | SecretsError::NotStoring
+    )
+}
+
 /// The launcher core: every subsystem, constructed once and injected.
 ///
 /// The subsystem fields are held so the dependency graph is wired and type-checked from the start;
@@ -189,6 +227,22 @@ impl Core {
         config: CoreConfig,
         transport: Arc<dyn Transport>,
     ) -> Result<Self, CoreError> {
+        Self::with_secrets(config, transport, Secrets::new())
+    }
+
+    /// Construct and wire every subsystem from `config`, using the injected `transport` and the
+    /// caller's `secrets` in place of the platform credential store.
+    ///
+    /// The seam a test drives so it never touches whatever keyring is really on the machine, and the
+    /// one a caller uses to run against a store the user picked instead of the default.
+    ///
+    /// # Errors
+    /// Returns the wrapped subsystem error if a subsystem fails to construct.
+    pub fn with_secrets(
+        config: CoreConfig,
+        transport: Arc<dyn Transport>,
+        secrets: Secrets,
+    ) -> Result<Self, CoreError> {
         // `config` is consumed here, so move its owned paths into each subsystem rather than clone.
         let CoreConfig {
             store_dir,
@@ -243,7 +297,6 @@ impl Core {
             fetcher.clone(),
             AddonPaths::new(addons_dir),
         );
-        let secrets = Secrets::new();
         let otp = Otp::new();
 
         Ok(Self {
@@ -348,10 +401,163 @@ impl Core {
 
     /// Delete the account with `id`.
     ///
+    /// Deletes the record only. Prefer [`Core::forget_account`], which also clears what the account
+    /// left elsewhere.
+    ///
     /// # Errors
-    /// Returns a [`CoreError::Store`] if no such account exists or on an IO failure.
+    /// Returns [`CoreError::NoAccount`] if no such account exists, or a [`CoreError::Store`] on an
+    /// IO failure.
     pub fn delete_account(&self, id: Uuid) -> Result<(), CoreError> {
-        Ok(self.store.delete_account(id)?)
+        self.store.delete_account(id).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoAccount(id),
+            other => other.into(),
+        })
+    }
+
+    /// Delete `id`, and the account behind it if no other profile still signs in as that account.
+    ///
+    /// The account is shared: two profiles can point at one login, and removing one of them must
+    /// leave the other able to sign in. Only the last one out takes the account, its stored secrets,
+    /// and its cached session with it.
+    ///
+    /// The rule lives here rather than in a caller so that every front end deletes the same way. A
+    /// shell that reimplemented it would eventually reimplement it differently.
+    ///
+    /// Nothing is unlinked until the sweep is done. The whole removal is decided first, then the
+    /// secrets go, and only then do the records: a failure anywhere before the first unlink leaves
+    /// the profile exactly as it was, so the user can unlock the store and run the same command
+    /// again. Deleting the profile first would strand the account behind it, and the account is
+    /// reachable only *through* a profile.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
+    /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
+    pub fn remove_profile(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
+        let account = self.profile(id)?.account;
+        // Decided before anything is removed, and excluding the profile on its way out: this is the
+        // last user of the account if no *other* profile signs in as it.
+        let last_user = !self
+            .profiles()?
+            .iter()
+            .any(|p| p.id != id && p.account == account);
+
+        if !last_user {
+            self.delete_profile(id)?;
+            return Ok(ProfileRemoval {
+                account_removed: None,
+                secrets_swept: false,
+            });
+        }
+
+        let secrets_swept = self.forget_secrets(account)?;
+        self.delete_profile(id)?;
+        self.store.clear_uid_cache(account)?;
+        self.delete_account(account)?;
+        Ok(ProfileRemoval {
+            account_removed: Some(account),
+            secrets_swept,
+        })
+    }
+
+    /// Delete the account with `id`, every secret stored for it, and its cached session.
+    ///
+    /// Answers whether the secrets were actually swept; see [`Core::forget_secrets`].
+    ///
+    /// The order is the point. Secrets go first, because they are the only part that cannot be found
+    /// again once the record naming them is gone: the store is keyed by the account's id, so an
+    /// account deleted while its password survived would leave that password unreachable and
+    /// permanent. A sweep that fails therefore stops the deletion, and nothing has been removed yet,
+    /// so the caller can retry once the store is reachable.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Secrets`] if a sweep failed in a way that could have left a secret,
+    /// [`CoreError::NoAccount`] if there is no such account, or a [`CoreError::Store`] on an IO
+    /// failure.
+    pub fn forget_account(&self, id: Uuid) -> Result<bool, CoreError> {
+        let swept = self.forget_secrets(id)?;
+        self.store.clear_uid_cache(id)?;
+        self.delete_account(id)?;
+        Ok(swept)
+    }
+
+    /// Delete every secret stored for `account`, leaving the account itself.
+    ///
+    /// What a user asks for when they want to stop the launcher remembering a password without
+    /// giving up the login it belongs to.
+    ///
+    /// Answers `false` when no store answered at all: nothing was deleted, and anything a store
+    /// holds for this account is still there. That is not an error, because a machine with no
+    /// keyring must still be able to delete its accounts, but it is not a clean sweep either and a
+    /// caller has to be able to say which happened.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Secrets`] if the sweep failed in a way that could have left a secret
+    /// behind.
+    pub fn forget_secrets(&self, account: Uuid) -> Result<bool, CoreError> {
+        match self.secrets.store().forget_account(account) {
+            Ok(()) => Ok(true),
+            Err(err) if could_hold_secrets(&err) => Err(err.into()),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// What the credential store this launcher is using reports about itself.
+    ///
+    /// Codes, not prose: the caller writes the sentence. Never prompts.
+    #[must_use]
+    pub fn secrets_report(&self) -> BackendReport {
+        self.secrets.store().probe()
+    }
+
+    /// Save `value` for `account`, replacing whatever was stored for that kind.
+    ///
+    /// Write-only by design: there is no matching read on this type. A stored secret is fetched
+    /// where it is used, inside the login flow, so no front end ever holds one.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Secrets`] with [`SecretsError::NotStoring`] if the account is set to
+    /// keep nothing, [`CoreError::NoAccount`] if there is no such account, or the store's own
+    /// failure.
+    pub fn store_secret(
+        &self,
+        account: Uuid,
+        kind: SecretKind,
+        value: Secret,
+    ) -> Result<(), CoreError> {
+        if self.account_or_missing(account)?.never_store {
+            return Err(SecretsError::NotStoring.into());
+        }
+        Ok(self.secrets.store().set(account, kind, value)?)
+    }
+
+    /// The account with `id`, reporting a miss as [`CoreError::NoAccount`] rather than as a store
+    /// failure. [`Core::account`] predates the distinction and keeps its own contract.
+    fn account_or_missing(&self, id: Uuid) -> Result<Account, CoreError> {
+        self.store.load_account(id).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoAccount(id),
+            other => other.into(),
+        })
+    }
+
+    /// Copy the password another launcher saved for `key` into this one's store for `account`.
+    ///
+    /// Answers whether there was one to copy. Reads `source` and writes ours; the other launcher's
+    /// entry is left exactly as it was, because it is not this program's to remove and a user may
+    /// still be running it.
+    ///
+    /// # Errors
+    /// As [`Core::store_secret`], plus the source's own failure to read.
+    pub fn import_password(
+        &self,
+        account: Uuid,
+        source: &dyn ImportSource,
+        key: &ForeignKey,
+    ) -> Result<bool, CoreError> {
+        let Some(password) = source.password(key)? else {
+            return Ok(false);
+        };
+        self.store_secret(account, SecretKind::Password, password)?;
+        Ok(true)
     }
 
     /// Back up the game config in `profile`'s prefix, then prune to the retention setting.
@@ -533,6 +739,322 @@ mod tests {
         match core.delete_profile(id).unwrap_err() {
             CoreError::NoProfile(missing) => assert_eq!(missing, id),
             other => panic!("expected NoProfile, got {other:?}"),
+        }
+    }
+
+    /// The account lifecycle, driven against an in-memory store.
+    ///
+    /// Never against the platform one: these call the secret store for real, and the default backend
+    /// is whatever keyring the machine running the tests has. A suite that wrote into a developer's
+    /// login keyring, or raised its unlock dialog and waited on a human, would be a worse bug than
+    /// anything it caught.
+    mod lifecycle {
+        use std::sync::Arc;
+
+        use apogee_secrets::{
+            Call, FailAt, ForeignKey, ForeignSecretsFile, MemoryStore, Secret, SecretKind,
+            SecretStore, Secrets, SecretsError,
+        };
+        use apogee_test_support::transport::FixtureTransport;
+        use tempfile::TempDir;
+        use uuid::Uuid;
+
+        use super::*;
+
+        /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
+        fn core_with(store: Arc<MemoryStore>) -> (TempDir, Core) {
+            let dir = TempDir::new().unwrap();
+            let core = Core::with_secrets(
+                CoreConfig::with_base(dir.path()),
+                Arc::new(FixtureTransport::new([])),
+                Secrets::with_backend(Box::new(SharedStore(Arc::clone(&store)))),
+            )
+            .unwrap();
+            (dir, core)
+        }
+
+        /// Lets a test keep a handle on the store the core is using. `Secrets` takes ownership of its
+        /// backend, so without this the recorded calls would be unreachable.
+        struct SharedStore(Arc<MemoryStore>);
+
+        impl apogee_secrets::SecretStore for SharedStore {
+            fn get(&self, account: Uuid, kind: SecretKind) -> Result<Option<Secret>, SecretsError> {
+                self.0.get(account, kind)
+            }
+            fn set(
+                &self,
+                account: Uuid,
+                kind: SecretKind,
+                value: Secret,
+            ) -> Result<(), SecretsError> {
+                self.0.set(account, kind, value)
+            }
+            fn delete(&self, account: Uuid, kind: SecretKind) -> Result<(), SecretsError> {
+                self.0.delete(account, kind)
+            }
+            fn probe(&self) -> apogee_secrets::BackendReport {
+                self.0.probe()
+            }
+        }
+
+        fn seeded(core: &Core, store: &MemoryStore) -> (Account, Profile) {
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+            core.save_account(&account).unwrap();
+            core.save_profile(&profile).unwrap();
+            for kind in SecretKind::ALL {
+                store
+                    .set(account.id, kind, Secret::new(b"stored".to_vec()))
+                    .unwrap();
+            }
+            (account, profile)
+        }
+
+        /// Where the cached session for `account` lands under a core built with
+        /// [`CoreConfig::with_base`]. Written and read as a path rather than through the store,
+        /// which is private: what is being asserted is that no file survives, and that is a fact
+        /// about the directory.
+        fn uid_cache_path(base: &std::path::Path, account: Uuid) -> std::path::PathBuf {
+            base.join("store")
+                .join("uid-cache")
+                .join(format!("{account}.json"))
+        }
+
+        /// The last profile out takes the account with it, and everything the account left behind:
+        /// both stored secrets and the cached session. The cache is the one that had no caller on
+        /// this path, so an account could be deleted while its session token stayed on disk.
+        #[test]
+        fn the_last_profile_removed_takes_the_account_and_its_residue() {
+            let store = Arc::new(MemoryStore::new());
+            let (dir, core) = core_with(Arc::clone(&store));
+            let (account, profile) = seeded(&core, &store);
+            let cached = uid_cache_path(dir.path(), account.id);
+            std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            std::fs::write(&cached, "{}").unwrap();
+
+            let removal = core.remove_profile(profile.id).unwrap();
+
+            assert_eq!(removal.account_removed, Some(account.id));
+            assert!(store.is_empty(), "a secret survived the account");
+            assert!(matches!(
+                core.account(account.id),
+                Err(CoreError::Store { .. } | CoreError::NoAccount(_))
+            ));
+            assert!(!cached.exists(), "the cached session survived the account");
+        }
+
+        /// An account shared by two profiles must survive the first of them. Sweeping its secrets
+        /// here would log the other profile out of a login it still has.
+        #[test]
+        fn a_shared_account_survives_a_profile_that_used_it() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let (account, profile) = seeded(&core, &store);
+            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            core.save_profile(&second).unwrap();
+
+            let removal = core.remove_profile(profile.id).unwrap();
+
+            assert_eq!(removal.account_removed, None);
+            assert_eq!(store.len(), SecretKind::ALL.len());
+            assert_eq!(core.account(account.id).unwrap().sqex_id, account.sqex_id);
+        }
+
+        /// A store that would not give a secret up blocks the deletion rather than orphaning it. The
+        /// secrets are keyed by the account id, so an account removed while its password survived
+        /// would leave that password with nothing left to name it.
+        ///
+        /// The profile has to survive too, and that is the half worth pinning: the account is
+        /// reachable only through a profile, so a run that unlinked the profile and then failed the
+        /// sweep would leave both the account and its secrets with nothing able to address them, and
+        /// re-running the same command would report that there is no such profile.
+        #[test]
+        fn a_sweep_that_could_have_left_a_secret_stops_the_deletion() {
+            let store = Arc::new(MemoryStore::new().failing(FailAt::Delete(SecretKind::Password)));
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let (account, profile) = seeded(&core, &store);
+
+            let err = core.remove_profile(profile.id).unwrap_err();
+
+            assert!(matches!(err, CoreError::Secrets(_)), "{err:?}");
+            assert_eq!(core.account(account.id).unwrap().sqex_id, account.sqex_id);
+            assert_eq!(
+                core.profile(profile.id).unwrap().id,
+                profile.id,
+                "the profile was unlinked before the sweep, so the removal cannot be retried"
+            );
+            // Both kinds were still attempted. Giving up on the first would leave the other behind.
+            assert_eq!(
+                store.calls(),
+                vec![
+                    Call::Set(account.id, SecretKind::Password),
+                    Call::Set(account.id, SecretKind::TotpSecret),
+                    Call::Delete(account.id, SecretKind::Password),
+                    Call::Delete(account.id, SecretKind::TotpSecret),
+                ]
+            );
+        }
+
+        /// The retry the failure path exists to allow. Once the store starts cooperating, the same
+        /// command completes: nothing about the first attempt left the profile in a state the second
+        /// cannot act on.
+        #[test]
+        fn a_removal_that_failed_on_the_sweep_succeeds_when_it_is_retried() {
+            let failing =
+                Arc::new(MemoryStore::new().failing(FailAt::Delete(SecretKind::Password)));
+            let (dir, core) = core_with(Arc::clone(&failing));
+            let (account, profile) = seeded(&core, &failing);
+            core.remove_profile(profile.id).unwrap_err();
+
+            // The same store, now cooperating, reached through a second core over the same files.
+            let working = Arc::new(MemoryStore::new());
+            let core = Core::with_secrets(
+                CoreConfig::with_base(dir.path()),
+                Arc::new(FixtureTransport::new([])),
+                Secrets::with_backend(Box::new(SharedStore(Arc::clone(&working)))),
+            )
+            .unwrap();
+
+            let removal = core.remove_profile(profile.id).unwrap();
+
+            assert_eq!(removal.account_removed, Some(account.id));
+            assert!(removal.secrets_swept);
+        }
+
+        /// A store that answered nothing is reported rather than assumed empty. Its deletes did not
+        /// happen, so anything it holds for this account has outlived the record naming it, and a
+        /// caller has to be able to say so instead of printing a clean removal.
+        #[test]
+        fn a_removal_over_an_unreachable_store_says_the_secrets_were_not_swept() {
+            let store = Arc::new(
+                MemoryStore::new().failing_with(FailAt::Everything, || SecretsError::NoBackend),
+            );
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+            core.save_account(&account).unwrap();
+            core.save_profile(&profile).unwrap();
+
+            let removal = core.remove_profile(profile.id).unwrap();
+
+            assert_eq!(removal.account_removed, Some(account.id));
+            assert!(
+                !removal.secrets_swept,
+                "an unreachable store was reported as a clean sweep"
+            );
+        }
+
+        /// Which conditions block a deletion and which do not, asserted one variant at a time.
+        ///
+        /// Both directions matter and they fail differently. A condition wrongly treated as
+        /// dangerous strands a user with no keyring, who can then never remove a profile; one
+        /// wrongly treated as harmless deletes the account on top of a secret the store still holds.
+        #[test]
+        fn only_a_store_that_answered_blocks_a_deletion() {
+            let cases: [(fn() -> SecretsError, bool); 5] = [
+                (|| SecretsError::NoBackend, false),
+                (|| SecretsError::NoCollection, false),
+                (|| SecretsError::NotStoring, false),
+                (|| SecretsError::Locked, true),
+                (|| SecretsError::Denied, true),
+            ];
+
+            for (error, blocks) in cases {
+                let store = Arc::new(MemoryStore::new().failing_with(FailAt::Everything, error));
+                let (_dir, core) = core_with(Arc::clone(&store));
+                let account = Account::new("me@example.invalid", AccountKind::Standard);
+                let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+                core.save_account(&account).unwrap();
+                core.save_profile(&profile).unwrap();
+
+                let removed = core.remove_profile(profile.id);
+                let condition = error();
+
+                assert_eq!(
+                    removed.is_err(),
+                    blocks,
+                    "{condition} blocked the deletion: {blocks}"
+                );
+                // A blocked deletion leaves the profile behind, which is what makes it retryable.
+                assert_eq!(core.profile(profile.id).is_ok(), blocks, "{condition}");
+            }
+        }
+
+        /// The switch is enforced where the policy lives, not by whatever store happens to be wired:
+        /// one `Secrets` serves every account, so a per-account rule cannot be a backend swap.
+        #[test]
+        fn an_account_set_to_keep_nothing_refuses_a_write() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                never_store: true,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+
+            let err = core
+                .store_secret(
+                    account.id,
+                    SecretKind::Password,
+                    Secret::new(b"pw".to_vec()),
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(err, CoreError::Secrets(SecretsError::NotStoring)),
+                "{err:?}"
+            );
+            assert!(store.is_empty(), "the refusal still reached the store");
+        }
+
+        /// The import reads the other launcher's copy and writes ours. Its copy is not this
+        /// program's to remove, and a user who tries this launcher and goes back must find their
+        /// old one working.
+        #[test]
+        fn an_imported_password_is_copied_and_the_source_is_left_alone() {
+            let store = Arc::new(MemoryStore::new());
+            let (dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("Me@Example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            let path = dir.path().join("secrets.json");
+            std::fs::write(&path, r#"{"me@example.invalid":"imported-pw"}"#).unwrap();
+            let source = ForeignSecretsFile::at(&path);
+            let key = ForeignKey::from_stored_name(account.sqex_id.to_lowercase());
+
+            assert!(core.import_password(account.id, &source, &key).unwrap());
+
+            assert_eq!(
+                store.stored(account.id, SecretKind::Password),
+                Some(b"imported-pw".to_vec())
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                r#"{"me@example.invalid":"imported-pw"}"#,
+                "the other launcher's copy was modified"
+            );
+        }
+
+        /// Nothing to import is an answer, not a failure: it is what a user who never saved a
+        /// password there sees, and it must not look like a broken import.
+        #[test]
+        fn an_account_the_other_launcher_never_saved_imports_nothing() {
+            let store = Arc::new(MemoryStore::new());
+            let (dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            let path = dir.path().join("secrets.json");
+            std::fs::write(&path, r#"{"someone-else":"pw"}"#).unwrap();
+
+            let imported = core
+                .import_password(
+                    account.id,
+                    &ForeignSecretsFile::at(&path),
+                    &ForeignKey::from_stored_name("me@example.invalid"),
+                )
+                .unwrap();
+
+            assert!(!imported);
+            assert!(store.is_empty());
         }
     }
 }

@@ -33,6 +33,10 @@ rustix = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
+# The in-memory secret store, so no test reaches the machine's real keyring. `mock`, never
+# `testing`: that feature gates tests that drive whatever provider is on the session bus, and
+# depending on it here would unify it on for every workspace run and start raising unlock prompts.
+apogee-secrets = { path = "../apogee-secrets", features = ["mock"] }
 insta.workspace = true
 rstest.workspace = true
 proptest.workspace = true

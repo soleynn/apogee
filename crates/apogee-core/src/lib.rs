@@ -39,11 +39,14 @@ pub use apogee_runtime::{
     CompatTool, CompatToolInstall, DeckModel, HostIdentity, SteamInstall, installed_compat_tool,
     remove_compat_tool, steam_installs,
 };
-pub use apogee_secrets::Secret;
+pub use apogee_secrets::{
+    Backend, BackendReport, BackendState, ForeignCredentialStore, ForeignKey, ForeignSecretsFile,
+    ImportSource, Sandbox, Secret, SecretKind,
+};
 pub use command::{
     Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, PrefixAction, Progress,
 };
-pub use composition::{Core, CoreConfig};
+pub use composition::{Core, CoreConfig, ProfileRemoval};
 pub use error::CoreError;
 pub use model::{
     Account, AccountKind, LaunchSettings, PrefixSelection, Profile, Region, RunnerSelection,
