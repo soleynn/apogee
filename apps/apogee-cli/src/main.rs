@@ -10,13 +10,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
-    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud,
-    ImportSource, OtpSource, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn,
-    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretKind, SetupEvent,
-    SyncChoice, Trigger, Uuid,
+    Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
+    EncryptedFile, Event, ExternalAddon, FileState, ForeignCredentialStore, ForeignKey,
+    ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportSource, KdfCost, OtpSource,
+    Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn, RunnerSelection,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretsError,
+    SetupEvent, SyncChoice, Trigger, Uuid,
 };
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -116,6 +117,41 @@ enum SecretsCommand {
     NeverStore(NeverStoreArgs),
     /// Copy a password saved by XIVLauncher into this launcher's store, leaving its copy alone.
     Import(ImportArgs),
+    /// Choose where secrets are kept on this machine. Moves nothing: whatever the store being left
+    /// behind holds stays there until it is deleted.
+    Backend(BackendArgs),
+    /// Change the passphrase the sealed file is kept under, and re-seal it under a fresh salt.
+    Passphrase,
+    /// Delete the sealed file and every secret in it. The answer for a forgotten passphrase.
+    DestroyFile,
+}
+
+/// Where secrets go, as a user names it.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BackendChoice {
+    /// The credential store this platform provides.
+    Platform,
+    /// A file sealed under a passphrase typed once per run.
+    File,
+    /// Nothing at all: the password is asked for every time.
+    Nothing,
+}
+
+impl From<BackendChoice> for SecretBackend {
+    fn from(choice: BackendChoice) -> Self {
+        match choice {
+            BackendChoice::Platform => Self::Platform,
+            BackendChoice::File => Self::EncryptedFile,
+            BackendChoice::Nothing => Self::Nothing,
+        }
+    }
+}
+
+#[derive(Args)]
+struct BackendArgs {
+    /// Which store to use from the next run onwards.
+    #[arg(long = "to", value_enum)]
+    to: BackendChoice,
 }
 
 #[derive(Args)]
@@ -504,6 +540,11 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             let report = core.secrets_report();
             println!("backend  {:?}", report.backend);
             println!("state    {:?}", report.state);
+            if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
+                let store = sealed_store(core)?;
+                println!("file     {}", store.path().display());
+                println!("at path  {:?}", store.inspect());
+            }
             match &report.sandbox {
                 Some(sandbox) => println!("sandbox  {sandbox:?}"),
                 None => println!("sandbox  none"),
@@ -544,6 +585,50 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
+        SecretsCommand::Backend(args) => {
+            secrets_backend(core, args.to)?;
+            Ok(())
+        }
+        SecretsCommand::Passphrase => {
+            let store = sealed_store(core)?;
+            if !matches!(store.inspect(), FileState::Sealed { .. }) {
+                println!(
+                    "there is no sealed secret file at {}",
+                    store.path().display()
+                );
+                return Ok(());
+            }
+            let current = read_passphrase("Current secret file passphrase: ")?;
+            let new = read_new_passphrase()?;
+            store.change_passphrase(&current, &new)?;
+            println!("re-sealed the secret file under the new passphrase");
+            Ok(())
+        }
+        SecretsCommand::DestroyFile => {
+            let store = sealed_store(core)?;
+            if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
+                println!(
+                    "the launcher is still set to use the secret file; run `secrets backend --to platform` \
+                     or `--to nothing` first"
+                );
+                return Ok(());
+            }
+            println!(
+                "this deletes {} and every password and one-time-password secret in it. \
+                 Nothing recovers them.",
+                store.path().display()
+            );
+            if !confirmed("destroy")? {
+                println!("left alone");
+                return Ok(());
+            }
+            if store.remove(Consent::granted())? {
+                println!("deleted the secret file");
+            } else {
+                println!("there was no secret file to delete");
+            }
+            Ok(())
+        }
         SecretsCommand::Import(args) => {
             let profile = resolve_profile(core, &args.profile)?;
             let account = core.account(profile.account)?;
@@ -563,12 +648,92 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
     }
 }
 
+/// A handle over the sealed secret file, whichever backend is currently selected.
+///
+/// Its own handle rather than the one the core is holding, because these verbs act on the file
+/// itself: creating it, re-sealing it, deleting it. None of that is reachable through the storage
+/// seam, which is what stops anything else in the launcher doing it by accident.
+fn sealed_store(core: &Core) -> Result<EncryptedFile, CliError> {
+    Ok(EncryptedFile::open(
+        core.secrets_path(),
+        std::sync::Arc::new(TerminalPassphrase),
+    ))
+}
+
+/// Switch where secrets are kept from the next run onwards.
+///
+/// Switching to the sealed file is the one direction that needs anything of the user, because it is
+/// the only one that creates something: a typed confirmation and a new passphrase, in that order.
+/// Nothing is moved in either direction, and the reason is said out loud rather than left to be
+/// discovered: this shell cannot read a password out of the store it is leaving, by design.
+fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
+    let mut settings = core.settings()?;
+    let chosen = SecretBackend::from(choice);
+
+    if chosen == SecretBackend::EncryptedFile {
+        let store = sealed_store(core)?;
+        match store.inspect() {
+            FileState::Sealed { work } => {
+                println!(
+                    "using the secret file already at {} ({} KiB over {} passes)",
+                    store.path().display(),
+                    work.memory_kib(),
+                    work.passes()
+                );
+            }
+            FileState::Absent => {
+                println!("a secret file is weaker than a platform credential store, not stronger:");
+                println!("  it protects a copy of the file taken off this machine, no more");
+                println!("  anything running as you can read the file and watch you type");
+                println!("  a forgotten passphrase means the saved passwords are gone");
+                println!("  the passphrase is asked for once per run of the launcher");
+                if !confirmed("encrypt")? {
+                    println!("left alone");
+                    return Ok(());
+                }
+                let passphrase = read_new_passphrase()?;
+                store.create(Consent::granted(), &passphrase, KdfCost::CURRENT)?;
+                println!("created {}", store.path().display());
+            }
+            FileState::Unreadable => {
+                return Err(
+                    format!("something at {} cannot be read", store.path().display()).into(),
+                );
+            }
+            // Anything else at the path, including a condition a later build reports, is refused
+            // rather than created over: the one thing that must never happen here is overwriting a
+            // store whose passphrase this run does not have.
+            _ => {
+                return Err(format!(
+                    "something at {} is not a secret file this build can open",
+                    store.path().display()
+                )
+                .into());
+            }
+        }
+    }
+
+    settings.secret_backend = chosen;
+    core.save_settings(&settings)?;
+    match chosen {
+        SecretBackend::Platform => println!("secrets will go to the platform credential store"),
+        SecretBackend::EncryptedFile => println!("secrets will go to the sealed file"),
+        SecretBackend::Nothing => {
+            println!("no secret will be kept, and a password is asked every time")
+        }
+        _ => println!("secret backend changed"),
+    }
+    println!("takes effect on the next run; nothing already saved was moved or deleted");
+    Ok(())
+}
+
 /// The launcher's own preferences, read and written whole.
 fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
     match action {
         SettingsCommand::Show => {
             let s = core.settings()?;
             println!("language            {}", s.language);
+            println!("secret_backend      {:?}", s.secret_backend);
             println!("close_after_launch  {}", s.close_after_launch);
             println!("keep_patches        {}", s.keep_patches);
             println!("backups_kept        {}", s.backups_kept);
@@ -1022,11 +1187,14 @@ fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), Cli
 /// feature a scripted transport may be substituted (the launch backend stays real).
 fn build_core() -> Result<Core, CliError> {
     let config = CoreConfig::try_from_env()?;
+    let passphrase = std::sync::Arc::new(TerminalPassphrase);
     #[cfg(feature = "fixtures")]
     if let Some(transport) = fixtures::transport() {
-        return Ok(Core::with_transport(config, transport)?);
+        return Ok(Core::with_transport_and_passphrase(
+            config, transport, passphrase,
+        )?);
     }
-    Ok(Core::new(config)?)
+    Ok(Core::with_passphrase(config, passphrase)?)
 }
 
 /// Run `cmd`, printing each event and wiring Ctrl-C to a targeted shutdown of the game.
@@ -1135,6 +1303,78 @@ fn read_password() -> Result<Secret, CliError> {
     }
     let password = rpassword::prompt_password("Square Enix password: ")?;
     Ok(Secret::new(password.into_bytes()))
+}
+
+/// The sealed secret file's passphrase, read from the terminal at the moment the store needs it.
+///
+/// The library never prompts, so this is the half only a front end can supply. It reads on every
+/// call and keeps nothing: the store caches the key it derived, and a second copy of the passphrase
+/// living out here would be one the store's own erasure could not reach.
+struct TerminalPassphrase;
+
+impl Passphrase for TerminalPassphrase {
+    fn unlock(&self) -> Result<Secret, SecretsError> {
+        #[cfg(feature = "fixtures")]
+        if let Some(secret) = fixtures::passphrase() {
+            return Ok(secret);
+        }
+        // A prompt that cannot be answered is an unlock that was not completed, which is what the
+        // condition below means. Rendering the terminal error would put the failure in a variant a
+        // caller reads as a broken store rather than as a missing answer.
+        rpassword::prompt_password("Secret file passphrase: ")
+            .map(|text| Secret::new(text.into_bytes()))
+            .map_err(|_| SecretsError::Locked)
+    }
+
+    fn can_prompt(&self) -> bool {
+        #[cfg(feature = "fixtures")]
+        if fixtures::passphrase().is_some() {
+            return true;
+        }
+        // A run with no terminal cannot be asked, and a store that claimed otherwise would report
+        // itself usable and then fail every write.
+        std::io::IsTerminal::is_terminal(&io::stdin())
+    }
+}
+
+/// Read a passphrase once, for a call that is about to check it against something.
+fn read_passphrase(prompt: &str) -> Result<Secret, CliError> {
+    #[cfg(feature = "fixtures")]
+    if let Some(secret) = fixtures::passphrase() {
+        return Ok(secret);
+    }
+    Ok(Secret::new(
+        rpassword::prompt_password(prompt)?.into_bytes(),
+    ))
+}
+
+/// Read a passphrase that is about to seal a file, so it is asked for twice and compared.
+///
+/// Nothing can check a new passphrase later: a typo here is a store that opens for nobody, including
+/// the person who made it.
+fn read_new_passphrase() -> Result<Secret, CliError> {
+    #[cfg(feature = "fixtures")]
+    if let Some(secret) = fixtures::passphrase() {
+        return Ok(secret);
+    }
+    let first = rpassword::prompt_password("New secret file passphrase: ")?;
+    if first.is_empty() {
+        return Err("a secret file needs a passphrase".into());
+    }
+    let again = rpassword::prompt_password("Again: ")?;
+    if first != again {
+        return Err("the two passphrases were not the same".into());
+    }
+    Ok(Secret::new(first.into_bytes()))
+}
+
+/// Require the user to type `word` before something destructive or irreversible happens.
+///
+/// A typed word rather than a yes-or-no, because both of the things this guards are answered wrongly
+/// by a reflex: one destroys stored passwords and the other creates a store whose passphrase, once
+/// forgotten, takes them with it.
+fn confirmed(word: &str) -> Result<bool, CliError> {
+    Ok(prompt_line(&format!("Type `{word}` to continue: "))? == word)
 }
 
 /// The one-time-password source: the flag, else an interactive prompt when the account uses one.
