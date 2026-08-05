@@ -183,6 +183,36 @@ fn an_account_round_trips_through_the_store() {
     ));
 }
 
+/// An account written before the never-store switch existed has to keep loading. Without the
+/// migration step the field is simply missing from the payload, every account file fails to
+/// deserialize, and a user loses every login they had configured the moment they upgrade.
+#[test]
+fn accounts_migrate_forward_from_every_historical_version() {
+    let (dir, store) = store();
+    let id = uuid::Uuid::new_v4();
+    let data = serde_json::json!({
+        "id": id, "sqex_id": "me@example.invalid", "kind": "Standard", "use_otp": true,
+    });
+    let envelope = serde_json::json!({ "schema_version": 1, "data": data });
+    let path = dir.path().join("accounts").join(format!("{id}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let loaded = store.load_account(id).unwrap();
+    assert_eq!(loaded.sqex_id, "me@example.invalid");
+    assert!(loaded.use_otp);
+    // Off for an account that predates the switch: it was already saving its password, and arriving
+    // with it on would look like the launcher had forgotten one it still holds.
+    assert!(!loaded.never_store);
+
+    store.save_account(&loaded).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        raw["schema_version"],
+        serde_json::json!(Account::CURRENT_VERSION)
+    );
+}
+
 #[test]
 fn a_session_cache_entry_round_trips_and_is_absent_when_unwritten() {
     let (_dir, store) = store();

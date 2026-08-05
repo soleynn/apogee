@@ -249,6 +249,8 @@ dependencies = [
  "keyring",
  "secret-service",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "trybuild",
  "uuid",

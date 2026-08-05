@@ -11,9 +11,10 @@ use std::process::ExitCode;
 
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Core, CoreConfig, Event, ExternalAddon,
-    FrameLog, GpuSelect, HealthIssue, Hud, OtpSource, PatchProgress, PrefixAction, PrefixHealth,
-    Profile, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
-    SetupEvent, SyncChoice, Trigger, Uuid,
+    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud,
+    ImportSource, OtpSource, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn,
+    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretKind, SetupEvent,
+    SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand};
 use tokio_stream::StreamExt;
@@ -76,6 +77,11 @@ enum Commands {
         #[command(subcommand)]
         action: SettingsCommand,
     },
+    /// Manage the passwords the launcher keeps for an account.
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsCommand,
+    },
     /// Work on a profile's wine prefix without launching anything.
     Prefix {
         #[command(subcommand)]
@@ -95,6 +101,47 @@ enum SettingsCommand {
     Show,
     /// Change a preference. Only the ones named are touched.
     Set(SettingsSetArgs),
+}
+
+#[derive(Subcommand)]
+enum SecretsCommand {
+    /// Report which credential store answered and what condition it is in.
+    Status,
+    /// Save a profile's account password, read from the terminal.
+    Save(TargetArgs),
+    /// Delete every secret stored for a profile's account.
+    Forget(TargetArgs),
+    /// Stop keeping a profile's account password, or start again. Turning it on deletes whatever is
+    /// already stored.
+    NeverStore(NeverStoreArgs),
+    /// Copy a password saved by XIVLauncher into this launcher's store, leaving its copy alone.
+    Import(ImportArgs),
+}
+
+#[derive(Args)]
+struct NeverStoreArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Whether to keep nothing for the account.
+    #[arg(long)]
+    on: bool,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// The account name the other launcher filed the password under. Defaults to this account's
+    /// Square Enix id, lowercased, which is what that launcher stores. Pass it explicitly if the
+    /// account was created on a machine whose language folds letters differently.
+    #[arg(long)]
+    name: Option<String>,
+    /// Read from the plaintext password file that launcher writes when it is configured to keep one,
+    /// instead of from the platform credential store.
+    #[arg(long)]
+    file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -433,6 +480,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             dalamud(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Secrets { action } => {
+            secrets(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Settings { action } => {
             settings(&core, action)?;
             Ok(ExitCode::SUCCESS)
@@ -440,6 +491,75 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Commands::Prefix { action } => prefix(&core, action).await,
         #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
+    }
+}
+
+/// The passwords the launcher keeps, and where they come from.
+///
+/// There is no verb that prints one. A saved secret is read inside the login flow and nowhere else,
+/// so no amount of driving this binary gets a password back out of the store.
+fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
+    match action {
+        SecretsCommand::Status => {
+            let report = core.secrets_report();
+            println!("backend  {:?}", report.backend);
+            println!("state    {:?}", report.state);
+            match &report.sandbox {
+                Some(sandbox) => println!("sandbox  {sandbox:?}"),
+                None => println!("sandbox  none"),
+            }
+            println!("usable   {}", report.is_usable());
+            Ok(())
+        }
+        SecretsCommand::Save(args) => {
+            let account = resolve_profile(core, &args.profile)?.account;
+            core.store_secret(account, SecretKind::Password, read_password()?)?;
+            println!("saved the password for account {account}");
+            Ok(())
+        }
+        SecretsCommand::Forget(args) => {
+            let account = resolve_profile(core, &args.profile)?.account;
+            if core.forget_secrets(account)? {
+                println!("forgot every secret stored for account {account}");
+            } else {
+                println!("no secret store answered, so nothing was deleted for account {account}");
+            }
+            Ok(())
+        }
+        SecretsCommand::NeverStore(args) => {
+            let id = resolve_profile(core, &args.profile)?.account;
+            let mut account = core.account(id)?;
+            account.never_store = args.on;
+            // Sweep before recording the choice. A user who asks the launcher to stop keeping a
+            // password means the one it already has, and a run that saved the flag and then failed
+            // to sweep would report success over a password still in the store.
+            if args.on && !core.forget_secrets(id)? {
+                println!("no secret store answered, so nothing already saved was deleted");
+            }
+            core.save_account(&account)?;
+            if args.on {
+                println!("account {id} will be asked for its password every time");
+            } else {
+                println!("account {id} will keep its password again");
+            }
+            Ok(())
+        }
+        SecretsCommand::Import(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            let account = core.account(profile.account)?;
+            let name = args.name.unwrap_or_else(|| account.sqex_id.to_lowercase());
+            let key = ForeignKey::from_stored_name(name);
+            let source: Box<dyn ImportSource> = match args.file {
+                Some(path) => Box::new(ForeignSecretsFile::at(path)),
+                None => Box::new(ForeignCredentialStore::new()),
+            };
+            if core.import_password(account.id, source.as_ref(), &key)? {
+                println!("imported the password for {}", key.name());
+            } else {
+                println!("no saved password found for {}", key.name());
+            }
+            Ok(())
+        }
     }
 }
 
@@ -971,13 +1091,18 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
         }
         ProfileAction::Remove(args) => {
             let profile = resolve_profile(core, &args.profile)?;
-            let account = profile.account;
-            core.delete_profile(profile.id)?;
-            // Prune the account only if no remaining profile still references it.
-            if !core.profiles()?.iter().any(|p| p.account == account) {
-                let _ = core.delete_account(account);
-            }
+            let removal = core.remove_profile(profile.id)?;
             println!("removed profile {}", profile.id);
+            if let Some(account) = removal.account_removed {
+                println!("removed account {account}");
+                if removal.secrets_swept {
+                    println!("deleted every secret stored for it");
+                } else {
+                    println!(
+                        "no secret store answered, so anything it holds for that account is still there"
+                    );
+                }
+            }
             Ok(())
         }
         ProfileAction::Env(args) => profile_env(core, args),

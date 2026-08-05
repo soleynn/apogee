@@ -36,6 +36,12 @@ pub enum SecretsError {
     /// Reachable whenever another program has written a matching item.
     #[error("more than one stored secret matches this account and kind")]
     Ambiguous,
+    /// The store keeps nothing by the user's choice, so the write was refused. Distinct from
+    /// [`Denied`](Self::Denied), which is a sandbox or platform rule the user did not set and would
+    /// send them off to change a permission: this one is answered by asking for the secret again
+    /// next time.
+    #[error("the secret store keeps nothing")]
+    NotStoring,
     /// The store failed for a reason outside the classified set. `step` names what was being done.
     #[error("the secret backend failed to {step}")]
     Backend {
@@ -72,6 +78,7 @@ mod tests {
                 SecretsError::Denied => (),
                 SecretsError::NoCollection => (),
                 SecretsError::Ambiguous => (),
+                SecretsError::NotStoring => (),
                 SecretsError::Backend { .. } => (),
                 SecretsError::Io(_) => (),
             }
@@ -89,6 +96,7 @@ mod tests {
                 SecretsError::Ambiguous,
                 "more than one stored secret matches this account and kind",
             ),
+            (SecretsError::NotStoring, "the secret store keeps nothing"),
             (
                 SecretsError::Backend { step: "read" },
                 "the secret backend failed to read",
