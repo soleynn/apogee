@@ -56,7 +56,7 @@ zip              = { version = "8", default-features = false, features = ["defla
 # in-process, pure-Rust streaming archive decoders for runner tarballs (no system tar, no C linkage)
 tar              = "0.4"
 lzma-rs          = "0.3"
-ruzstd           = "0.8"
+ruzstd           = "0.9"
 # work-stealing data parallelism for the block-index CRC sweep (build + verify), gated to apogee-zipatch
 rayon            = "1"
 # CLI: argument parsing and a no-echo password prompt, gated to the apogee-cli app.
