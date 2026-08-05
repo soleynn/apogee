@@ -32,6 +32,25 @@ pub trait SecretStore {
     /// Report which store this is and what condition it is in, without reading, writing, or raising
     /// an unlock prompt.
     fn probe(&self) -> BackendReport;
+
+    /// Delete every secret stored for `account`, whatever kinds it has.
+    ///
+    /// Every kind is attempted even after one of them fails, and the first failure is reported once
+    /// the sweep is over. Stopping at the first would leave the rest of the account's secrets in a
+    /// store the user asked to be emptied, which is the residue this exists to prevent; the caller
+    /// still learns that the sweep was not clean.
+    ///
+    /// # Errors
+    /// As [`SecretStore::delete`], for the first kind that failed.
+    fn forget_account(&self, account: Uuid) -> Result<(), SecretsError> {
+        let mut first = None;
+        for kind in SecretKind::ALL {
+            if let Err(err) = self.delete(account, kind) {
+                first.get_or_insert(err);
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
 }
 
 /// The concrete secret store the composition root holds, wrapping one chosen backend.
@@ -50,6 +69,16 @@ impl Secrets {
         Self {
             backend: Box::new(OsKeyring::new()),
         }
+    }
+
+    /// Wrap a backend the caller chose, rather than the platform default.
+    ///
+    /// The choice is the composition root's: this is how a user who has turned storage off, or who
+    /// picked the fallback, gets the store that matches. Nothing here probes to make the decision,
+    /// for the same reason [`Secrets::new`] does not.
+    #[must_use]
+    pub fn with_backend(backend: Box<dyn SecretStore + Send + Sync>) -> Self {
+        Self { backend }
     }
 
     /// Borrow the active backend.
