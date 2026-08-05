@@ -1,0 +1,16 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/consent_forged.rs:8:13
+  |
+8 |     let _ = Consent(());
+  |             ^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/encrypted_file/mod.rs
+  |
+  | pub struct Consent(());
+  |                    ^^ private field
+help: you might have meant to use the `granted` associated function
+  |
+8 -     let _ = Consent(());
+8 +     let _ = Consent::granted();
+  |
