@@ -197,11 +197,13 @@ fn be32(head: &[u8; HEADER_LEN], at: usize) -> u32 {
 }
 
 /// Copy a fixed-width field out. The width comes from the destination type, so a field cannot be read
-/// at the wrong length without the assignment failing to compile.
+/// at the wrong length without the call failing to compile.
+///
+/// Built element by element rather than zeroed and then overwritten. The result is the same, and the
+/// intermediate array of zeros is not: a salt or a nonce that briefly holds a constant is what a
+/// dataflow scan reads as one, and it is right to.
 fn fixed<const N: usize>(head: &[u8; HEADER_LEN], at: usize) -> [u8; N] {
-    let mut out = [0u8; N];
-    out.copy_from_slice(&head[at..at + N]);
-    out
+    std::array::from_fn(|i| head[at + i])
 }
 
 // A sibling file rather than an inline module, unlike the rest of this crate. These tests need

@@ -23,7 +23,10 @@ use crate::SecretsError;
 /// default: a store sealed under a predictable nonce is a store with no seal, and it would look
 /// exactly like a working one.
 pub(crate) fn draw<const N: usize>() -> Result<[u8; N], SecretsError> {
-    let mut out = [0u8; N];
+    // The buffer has to exist before the generator can fill it, so it starts as zeros and a dataflow
+    // scan sees a constant reaching a nonce. It never leaves this function unfilled: the `?` below
+    // returns on any failure, and there is no path that hands back what was allocated here.
+    let mut out = [0u8; N]; // codeql[rust/hard-coded-cryptographic-value]
     getrandom::fill(&mut out).map_err(|_| SecretsError::Backend {
         step: "draw random bytes",
     })?;
