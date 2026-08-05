@@ -1341,9 +1341,22 @@ fn read_passphrase(prompt: &str) -> Result<Secret, CliError> {
     if let Some(secret) = fixtures::passphrase() {
         return Ok(secret);
     }
-    Ok(Secret::new(
-        rpassword::prompt_password(prompt)?.into_bytes(),
-    ))
+    Ok(Secret::new(typed(prompt)?.into_bytes()))
+}
+
+/// Read one line with the echo off.
+///
+/// The failure worth naming is the only one that happens in practice: there is no terminal to ask on,
+/// because the launcher was run from a script or a service. The library's own error for that is an
+/// operating-system code with no bearing on what to do about it.
+fn typed(prompt: &str) -> Result<String, CliError> {
+    rpassword::prompt_password(prompt).map_err(|err| -> CliError {
+        if std::io::IsTerminal::is_terminal(&io::stdin()) {
+            Box::new(err)
+        } else {
+            "there is no terminal to type a passphrase on".into()
+        }
+    })
 }
 
 /// Read a passphrase that is about to seal a file, so it is asked for twice and compared.
@@ -1355,11 +1368,11 @@ fn read_new_passphrase() -> Result<Secret, CliError> {
     if let Some(secret) = fixtures::passphrase() {
         return Ok(secret);
     }
-    let first = rpassword::prompt_password("New secret file passphrase: ")?;
+    let first = typed("New secret file passphrase: ")?;
     if first.is_empty() {
         return Err("a secret file needs a passphrase".into());
     }
-    let again = rpassword::prompt_password("Again: ")?;
+    let again = typed("Again: ")?;
     if first != again {
         return Err("the two passphrases were not the same".into());
     }
