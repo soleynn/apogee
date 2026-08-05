@@ -226,6 +226,16 @@ jobs:
             echo -n "apogee-ci" | gnome-keyring-daemon --unlock --components=secrets
             cargo test -p apogee-secrets --features testing --test secret_service -- --test-threads=1
           '
+      # The import reads keys another launcher owns, so these cases seed the item onto the bus
+      # directly instead of writing it through this crate. A test that wrote it with the same code
+      # that reads it would pass whatever key strings it used, which is the one thing worth proving.
+      - name: Import a password another launcher stored
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          dbus-run-session -- bash -c '
+            echo -n "apogee-ci" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p apogee-secrets --features testing --test foreign_import -- --test-threads=1
+          '
       # Locking is one-way here: unlocking again needs a prompt a headless session cannot answer, so
       # this gets a keyring of its own and leaves it locked behind it. Only the probe is asserted;
       # a store operation against a locked collection blocks on that same prompt for an unpredictable
@@ -315,6 +325,42 @@ jobs:
       - name: Install the MinGW-w64 cross toolchain
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
       - run: cargo build --target x86_64-pc-windows-gnu --workspace
+
+  # The one path no other job can reach. `build-windows-cross` runs `cargo build`, not
+  # `--all-targets`, so a Windows test target is never even type-checked there, and the credential
+  # store the import reads exists only here. Advisory: the branch ruleset's required contexts are
+  # fixed, and adding one is a separate change.
+  test-windows-credential-store:
+    name: test-windows-credential-store
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: windows-credential-store
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Seeded with the platform's own tool rather than through this crate, for the same reason the
+      # bus job seeds its item directly: a fixture written by the code under test proves only that it
+      # agrees with itself, and the target string is the whole contract.
+      #
+      # `cmdkey` writes the blob as UTF-16, which is what the store this reads holds text in.
+      - name: Seed a credential the way the other launcher would
+        shell: cmd
+        run: |
+          cmdkey /generic:XIVLAUNCHER-ci-current /user:ci-current /pass:current-password
+          cmdkey /generic:"FINAL FANTASY XIV-ci-legacy" /user:ci-legacy /pass:legacy-password
+      # The lib's own tests run here too, and only here: the blob decode is Windows-gated, so
+      # `--test windows_credentials` alone would build the lib as a plain dependency and never
+      # compile it. Named separately because the other integration targets in this crate need a
+      # session bus and do not build on this platform.
+      - run: cargo test -p apogee-secrets --features mock --lib
+      - run: cargo test -p apogee-secrets --features testing --test windows_credentials -- --test-threads=1
 
   deny:
     name: deny
