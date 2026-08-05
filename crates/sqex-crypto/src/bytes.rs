@@ -1,6 +1,11 @@
 //! The one endianness home. Every `from_*_bytes`/`to_*_bytes` in the crate lives here, behind named
 //! little- and big-endian helpers, so a block can't be read in the wrong order by accident: the
 //! launcher Blowfish variant is little-endian, the standard variant big-endian.
+//!
+//! Reading a block the wrong way round produces well-formed output that nothing here can tell from
+//! the right answer, and only Square Enix rejects it. That is why the rule is mechanical rather than
+//! a matter of care: `scripts/audit.sh` fails the build if a byte-order conversion appears anywhere
+//! else in the crate.
 
 /// Read a `u32` from four little-endian bytes.
 #[must_use]
