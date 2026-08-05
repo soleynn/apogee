@@ -22,15 +22,18 @@ use crate::SecretsError;
 /// A failure is reported and nothing is written. There is no fallback to a weaker source and no zero
 /// default: a store sealed under a predictable nonce is a store with no seal, and it would look
 /// exactly like a working one.
+///
+/// The buffer is never given a value of its own on the way. Filling a zeroed array would produce the
+/// same bytes, and it would also mean a salt or a nonce briefly holds a constant, which is a thing to
+/// be one edit away from rather than to write on purpose. Nothing here is `unsafe`: the generator
+/// hands back the initialized slice, and the length is checked rather than assumed.
 pub(crate) fn draw<const N: usize>() -> Result<[u8; N], SecretsError> {
-    // The buffer has to exist before the generator can fill it, so it starts as zeros and a dataflow
-    // scan sees a constant reaching a nonce. It never leaves this function unfilled: the `?` below
-    // returns on any failure, and there is no path that hands back what was allocated here.
-    let mut out = [0u8; N]; // codeql[rust/hard-coded-cryptographic-value]
-    getrandom::fill(&mut out).map_err(|_| SecretsError::Backend {
+    let failed = || SecretsError::Backend {
         step: "draw random bytes",
-    })?;
-    Ok(out)
+    };
+    let mut out = [std::mem::MaybeUninit::<u8>::uninit(); N];
+    let filled = getrandom::fill_uninit(&mut out).map_err(|_| failed())?;
+    <[u8; N]>::try_from(&*filled).map_err(|_| failed())
 }
 
 /// Close the check envelope over `aad`, producing the tag the file carries.
