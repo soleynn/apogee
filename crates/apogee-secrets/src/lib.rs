@@ -51,11 +51,16 @@ compile_error!(
 compile_error!("apogee-secrets has no credential store for this target");
 
 mod error;
+mod import;
 mod keyring_store;
+mod null;
 mod report;
 mod secret;
 mod store;
 mod stub;
+
+#[cfg(feature = "mock")]
+mod memory;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 mod probe;
@@ -63,8 +68,15 @@ mod probe;
 mod probe_native;
 
 pub use error::SecretsError;
+pub use import::{
+    FOREIGN_SCHEMA, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, ImportSource,
+};
 pub use keyring_store::OsKeyring;
+pub use null::Null;
 pub use report::{Backend, BackendReport, BackendState, Sandbox};
 pub use secret::{Secret, SecretKind};
 pub use store::{SecretStore, Secrets};
-pub use stub::{EncryptedFile, Null};
+pub use stub::EncryptedFile;
+
+#[cfg(feature = "mock")]
+pub use memory::{Call, FailAt, MemoryStore};
