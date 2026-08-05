@@ -50,6 +50,7 @@ compile_error!(
 )))]
 compile_error!("apogee-secrets has no credential store for this target");
 
+mod encrypted_file;
 mod error;
 mod import;
 mod keyring_store;
@@ -57,7 +58,6 @@ mod null;
 mod report;
 mod secret;
 mod store;
-mod stub;
 
 #[cfg(feature = "mock")]
 mod memory;
@@ -67,6 +67,7 @@ mod probe;
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
 mod probe_native;
 
+pub use encrypted_file::{Consent, EncryptedFile, FileState, KdfCost, Passphrase, Unprompted};
 pub use error::SecretsError;
 pub use import::{
     FOREIGN_SCHEMA, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, ImportSource,
@@ -76,7 +77,22 @@ pub use null::Null;
 pub use report::{Backend, BackendReport, BackendState, Sandbox};
 pub use secret::{Secret, SecretKind};
 pub use store::{SecretStore, Secrets};
-pub use stub::EncryptedFile;
 
 #[cfg(feature = "mock")]
 pub use memory::{Call, FailAt, MemoryStore};
+
+/// Parse arbitrary bytes as the fallback store's file header, for the fuzz workspace.
+///
+/// Behind a feature that no shipping build enables: this is a decoder taking hostile input, and it is
+/// not part of the crate's API.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_frame(bytes: &[u8]) {
+    encrypted_file::parse_frame(bytes);
+}
+
+/// Parse arbitrary bytes as the fallback store's record table, for the fuzz workspace. As
+/// [`fuzz_parse_frame`].
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_records(bytes: &[u8]) {
+    encrypted_file::parse_records(bytes);
+}
