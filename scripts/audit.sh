@@ -145,6 +145,22 @@ hits=$(grep -rnE '(\.|\bpub )components\b|\bcomponents:' \
   crates/apogee-core/src apps/apogee-cli/src --include='*.rs' || true)
 [ -z "$hits" ] || report "a component set is back on the launcher's own model" "$hits"
 
+# 7. The fallback secret store's cryptography has one home. Key derivation, sealing, and the system
+#    random source live in the module that documents what each of them is for and what none of them
+#    buys; a second path to a key grown elsewhere in the crate would be one nobody reviewed against
+#    that. The other backends do no cryptography of their own: the platform stores encrypt their own
+#    items, which is the whole reason they are preferred.
+hits=$(grep -rnE 'XChaCha20Poly1305|Argon2|getrandom::' crates/apogee-secrets/src --include='*.rs'   | grep -v '/encrypted_file/' || true)
+[ -z "$hits" ] || report "cryptography outside the fallback store's module" "$hits"
+
+# 8. Only a front end may say the user asked for the encrypted fallback. The token that authorizes
+#    creating or destroying that store has one constructor, and a library minting its own would be
+#    creating a store on the user's behalf, which is the silent fallback the design refuses. The crate
+#    that defines the token is exempt, because its own tests construct one; `apps/` is where the
+#    layers that can actually ask a user live, so it is not scanned.
+hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^crates/apogee-secrets/src/' || true)
+[ -z "$hits" ] || report "a library mints its own fallback-store consent" "$hits"
+
 # Informational: remaining stub markers (never fails).
 printf 'stub markers (todo!/unimplemented!): %s\n' \
   "$(grep -roE 'todo!|unimplemented!' crates/*/src --include='*.rs' | wc -l | tr -d ' ')"

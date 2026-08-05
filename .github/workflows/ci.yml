@@ -44,7 +44,7 @@ jobs:
           # The crates behind the fuzz targets, plus the fuzz workspace itself. Every name has to be a
           # real directory: `crates/sqex-cryptography` matched nothing, and a crate left off this list
           # means a change to it skips the target that covers it.
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons)/)'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons|apogee-secrets)/)'; then
             echo "fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "fuzz=false" >> "$GITHUB_OUTPUT"
@@ -130,6 +130,11 @@ jobs:
       # it needs the test-only `fixtures` feature (scripted transport), so it runs as its own step. No
       # wine (the patch command never launches), so it belongs in the hermetic job, not the wine one.
       - run: cargo test -p apogee-cli --features fixtures --test patch_e2e
+      # The sealed secret file through the binary: created behind a typed confirmation, written to,
+      # re-sealed, and destroyed. Same feature and the same reason (the passphrase and the account
+      # password both come from the fixture environment, so no terminal is in the loop), and the same
+      # trap: a gated test nothing runs still compiles under clippy and passes silently.
+      - run: cargo test -p apogee-cli --features fixtures --test secrets_file
 
   # Process supervision on stock wine: launches a stub PE and proves the /proc scanner resolves it,
   # kills it targeted, and that wineserver -k is the separate broad stop. A required gate: the
@@ -436,6 +441,14 @@ jobs:
       # over-large reservation is exactly the failure this target exists to catch, and the transform
       # never needs more than a few times its input.
       - run: cargo +nightly-2026-07-23 fuzz run steam_ticket --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build secrets_frame --target x86_64-unknown-linux-gnu
+      # A malloc bound as well as an RSS one: the header names a work factor and the reader has to
+      # refuse an impossible one on the comparison rather than by trying to allocate for it, which is
+      # the failure this target exists to catch.
+      - run: cargo +nightly-2026-07-23 fuzz run secrets_frame --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build secrets_records --target x86_64-unknown-linux-gnu
+      # Same bound, same reason: every record's length comes out of the buffer being decoded.
+      - run: cargo +nightly-2026-07-23 fuzz run secrets_records --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build launch_args --target x86_64-unknown-linux-gnu
       # No malloc bound here, unlike the two above: this target's allocations are bounded by the input
       # length rather than by a number read out of it, so a limit could only fire on a bug the builder's
