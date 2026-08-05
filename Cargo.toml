@@ -31,8 +31,17 @@ percent-encoding = "2"
 uuid             = { version = "1", features = ["v4", "serde"] }
 tracing          = "0.1"
 zeroize          = { version = "1", features = ["derive"] }
-# domain-adjacent, gated to the crates that use them
+# domain-adjacent, gated to the crates that use them.
+# keyring has no `default` feature key: with no store feature named it selects an in-memory mock on
+# Linux, so the backend features are set per-target in apogee-secrets, the only crate that uses it.
 keyring          = "3"
+# A direct dependency of apogee-secrets alongside keyring, which folds "no session bus", "nothing
+# owns the name" and "collection locked" into one opaque variant. Backend classification reads the
+# Secret Service error itself, so it must resolve to the single version keyring also picks.
+secret-service   = "4"
+# The D-Bus error names the classification above reads. Already in the graph under secret-service;
+# named here so the match is on typed variants rather than on a rendered string.
+zbus             = "4"
 totp-rs          = "5"
 flate2           = "1"
 # Ed25519 verification for signed manifests (runner/component catalogs), checked against a
@@ -66,7 +75,7 @@ proptest         = "1"
 tempfile         = "3"
 serial_test      = "3"
 # Forward-declared for test types not yet wired up: wiremock backs an HTTP-mock transport,
-# assert_cmd + predicates a CLI end-to-end harness, trybuild the compile-fail invariant tests.
+# assert_cmd + predicates a CLI end-to-end harness.
 wiremock         = "0.6"
 assert_cmd       = "2"
 predicates       = "3"
