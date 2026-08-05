@@ -243,6 +243,10 @@ jobs:
       - name: A locked store probes as locked
         run: |
           export XDG_DATA_HOME="$(mktemp -d)"
+          # The opt-in the test refuses to run without. It is set here and nowhere else: the keyring
+          # below is a throwaway on a private bus, and the same test against a desktop session would
+          # lock the user's real login keyring with no way to unlock it again.
+          export APOGEE_KEYRING_LOCK_OK=1
           dbus-run-session -- bash -c '
             echo -n "apogee-ci" | gnome-keyring-daemon --unlock --components=secrets
             cargo test -p apogee-secrets --features testing --test secret_service_locked -- --test-threads=1

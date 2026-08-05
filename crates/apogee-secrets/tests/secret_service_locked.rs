@@ -19,8 +19,25 @@ use secret_service::EncryptionType;
 use secret_service::blocking::SecretService;
 use uuid::Uuid;
 
+/// The opt-in this test refuses to run without.
+///
+/// It locks whatever collection the bus hands it, and on a desktop session that is the user's real
+/// login keyring. Locking it there is not a test artifact that goes away: everything else on the
+/// machine that keeps a secret stops being able to read one, the unlock prompt starts appearing over
+/// whatever the user was doing, and anything holding a token in there begins reporting it as
+/// invalid rather than as locked. Feature-gating alone did not prevent that, because a single
+/// `--all-features` run turns the gate on.
+const LOCK_OPT_IN: &str = "APOGEE_KEYRING_LOCK_OK";
+
 #[test]
 fn a_locked_store_probes_locked_and_refuses_a_write_as_locked() {
+    assert!(
+        std::env::var_os(LOCK_OPT_IN).is_some(),
+        "refusing to run: this test locks the session's keyring and cannot unlock it again. \
+         Set {LOCK_OPT_IN}=1, and only against a throwaway keyring on a private bus \
+         (the CI step for this shows the shape: XDG_DATA_HOME to a temp dir under dbus-run-session)."
+    );
+
     SecretService::connect(EncryptionType::Dh)
         .expect("connect to the bus")
         .get_any_collection()
