@@ -9,6 +9,10 @@ license.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+# Only to read the plaintext password file another launcher writes when it is configured to keep one.
+# Nothing this crate owns is serialized: a secret that could be written into config is the leak the
+# crate exists to prevent.
+serde_json.workspace = true
 
 # The Secret Service backend speaks D-Bus through zbus rather than libdbus: the pure-Rust path needs
 # no C system library at build time, and its error type is the one that separates "nothing owns the
@@ -32,8 +36,14 @@ default = ["encrypted-session"]
 # features are not visible as a cfg, so this passthrough is what the build gate in lib.rs tests.
 encrypted-session = ["keyring/crypto-rust"]
 # Gates the tests that need a live session bus and a real Secret Service provider. Never enabled by
-# a shipping build.
+# a shipping build, and never by a dependency edge: these tests write to whatever keyring is on the
+# bus and one of them locks a collection, so on a developer's desktop they raise an unlock dialog and
+# wait on it. Nothing may depend on this feature, or `--workspace` unifies it on and every run starts
+# prompting. Test doubles go behind `mock` for exactly that reason.
 testing = []
+# The in-memory store, for other crates' tests. Deliberately separate from `testing`: a dev-dependency
+# that turned that one on would drag the live-bus tests into every workspace run.
+mock = []
 
 [dev-dependencies]
 # Compile-fail proof that Secret implements none of the leaking traits.
@@ -41,6 +51,7 @@ trybuild.workspace = true
 # Only so the derive-Serialize compile-fail case has the derive macro in scope; the crate itself
 # never serializes anything.
 serde.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "secret_service"
@@ -60,6 +71,14 @@ required-features = ["testing"]
 
 [[test]]
 name = "bus_encrypted"
+required-features = ["testing"]
+
+[[test]]
+name = "foreign_import"
+required-features = ["testing"]
+
+[[test]]
+name = "windows_credentials"
 required-features = ["testing"]
 
 [lints]

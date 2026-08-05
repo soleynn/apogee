@@ -58,10 +58,14 @@ pub struct Account {
     pub sqex_id: String,
     pub kind: AccountKind,
     pub use_otp: bool,
+    /// Keep nothing for this account in the secret store: ask for the password every time. Per
+    /// account rather than per launcher, because a shared machine may hold one login worth saving
+    /// and one that is not.
+    pub never_store: bool,
 }
 
 impl Account {
-    /// A new account with a freshly minted identity and no one-time password.
+    /// A new account with a freshly minted identity, no one-time password, and its secrets kept.
     #[must_use]
     pub fn new(sqex_id: impl Into<String>, kind: AccountKind) -> Self {
         Self {
@@ -69,6 +73,7 @@ impl Account {
             sqex_id: sqex_id.into(),
             kind,
             use_otp: false,
+            never_store: false,
         }
     }
 }

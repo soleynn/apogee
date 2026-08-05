@@ -37,6 +37,10 @@ pub enum BackendState {
     NoProvider,
     /// The sandbox's bus policy refused the name outright.
     SandboxDenied,
+    /// The store keeps nothing, by the user's choice. Reads answer nothing and writes are refused.
+    /// Nothing here is broken and there is nothing to fix: refusing is what this store is for, so a
+    /// caller answers it by asking for the secret every time instead.
+    NotStoring,
     /// The store failed in a way this crate does not classify.
     Unreachable,
 }
@@ -107,6 +111,7 @@ mod tests {
             (BackendState::NoSessionBus, false, false),
             (BackendState::NoProvider, false, false),
             (BackendState::SandboxDenied, false, false),
+            (BackendState::NotStoring, false, false),
             (BackendState::Unreachable, false, false),
         ];
         for (state, locked, usable) in expected {

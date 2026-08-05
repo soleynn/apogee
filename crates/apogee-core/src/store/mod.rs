@@ -136,9 +136,22 @@ impl Migrate for Profile {
 }
 
 impl Migrate for Account {
-    const CURRENT_VERSION: u32 = 1;
-    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
-        Err(format!("no migration from schema version {from}"))
+    const CURRENT_VERSION: u32 = 2;
+    fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| "account payload is not a json object".to_string())?;
+        match from {
+            // Gained the switch that keeps this account's secrets out of the store. Off for an
+            // account that predates it: it was saving its password already, and turning that off
+            // underneath a user would look like the launcher had forgotten it.
+            1 => {
+                obj.entry("never_store")
+                    .or_insert(serde_json::Value::Bool(false));
+            }
+            other => return Err(format!("no migration from schema version {other}")),
+        }
+        Ok(value)
     }
 }
 

@@ -63,6 +63,14 @@ pub enum SecretKind {
 }
 
 impl SecretKind {
+    /// Every kind an account can have stored.
+    ///
+    /// The enum is `#[non_exhaustive]`, so a caller outside the crate cannot write this list itself.
+    /// Anything that has to sweep an account reads it from here instead, and picks up a kind added
+    /// later without being revisited: a hand-written list would go on compiling while it quietly
+    /// stopped covering one.
+    pub const ALL: [Self; 2] = [Self::Password, Self::TotpSecret];
+
     /// The kind's component of the stored key.
     ///
     /// This is on-disk contract: changing a slug orphans every secret already stored under the old
@@ -99,6 +107,26 @@ mod tests {
         let secret = Secret::new(Vec::new());
         assert!(secret.is_empty());
         assert_eq!(secret.len(), 0);
+    }
+
+    /// `ALL` is what a sweep of an account iterates, so a kind missing from it is a secret left
+    /// behind on a store the user asked to be emptied. The wildcard-free match is the enforcement:
+    /// a new variant stops this compiling until it gains an arm, and the arm is next to the
+    /// assertion that the list also has room for it.
+    #[test]
+    fn every_kind_is_swept() {
+        #[allow(dead_code)]
+        fn every_variant_has_an_entry(kind: SecretKind) {
+            match kind {
+                SecretKind::Password => (),
+                SecretKind::TotpSecret => (),
+            }
+        }
+
+        assert_eq!(
+            SecretKind::ALL,
+            [SecretKind::Password, SecretKind::TotpSecret]
+        );
     }
 
     /// The slugs are half of the stored key, so they are frozen here rather than left to whatever
