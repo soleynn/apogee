@@ -122,7 +122,8 @@ enum SecretsCommand {
     Backend(BackendArgs),
     /// Change the passphrase the sealed file is kept under, and re-seal it under a fresh salt.
     Passphrase,
-    /// Delete the sealed file and every secret in it. The answer for a forgotten passphrase.
+    /// Delete the sealed file and every secret in it, once the launcher has been pointed somewhere
+    /// else. The answer for a forgotten passphrase.
     DestroyFile,
 }
 
@@ -541,7 +542,7 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             println!("backend  {:?}", report.backend);
             println!("state    {:?}", report.state);
             if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
-                let store = sealed_store(core)?;
+                let store = sealed_store(core);
                 println!("file     {}", store.path().display());
                 println!("at path  {:?}", store.inspect());
             }
@@ -590,7 +591,7 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             Ok(())
         }
         SecretsCommand::Passphrase => {
-            let store = sealed_store(core)?;
+            let store = sealed_store(core);
             if !matches!(store.inspect(), FileState::Sealed { .. }) {
                 println!(
                     "there is no sealed secret file at {}",
@@ -605,7 +606,7 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             Ok(())
         }
         SecretsCommand::DestroyFile => {
-            let store = sealed_store(core)?;
+            let store = sealed_store(core);
             if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
                 println!(
                     "the launcher is still set to use the secret file; run `secrets backend --to platform` \
@@ -653,11 +654,8 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
 /// Its own handle rather than the one the core is holding, because these verbs act on the file
 /// itself: creating it, re-sealing it, deleting it. None of that is reachable through the storage
 /// seam, which is what stops anything else in the launcher doing it by accident.
-fn sealed_store(core: &Core) -> Result<EncryptedFile, CliError> {
-    Ok(EncryptedFile::open(
-        core.secrets_path(),
-        std::sync::Arc::new(TerminalPassphrase),
-    ))
+fn sealed_store(core: &Core) -> EncryptedFile {
+    EncryptedFile::open(core.secrets_path(), std::sync::Arc::new(TerminalPassphrase))
 }
 
 /// Switch where secrets are kept from the next run onwards.
@@ -671,7 +669,7 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
     let chosen = SecretBackend::from(choice);
 
     if chosen == SecretBackend::EncryptedFile {
-        let store = sealed_store(core)?;
+        let store = sealed_store(core);
         match store.inspect() {
             FileState::Sealed { work } => {
                 println!(

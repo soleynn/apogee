@@ -391,6 +391,44 @@ fn the_passphrase_is_asked_for_once_however_many_calls_follow() {
     assert_eq!(source.asked(), 1);
 }
 
+/// The one case a cached key must not be trusted for: the file was re-sealed by something else while
+/// this handle held a key derived under the old salt.
+///
+/// Reported as a wrong passphrase it would tell a user their passphrase is wrong about a store that
+/// is perfectly fine, which is the misdiagnosis the salt travelling with the cached key exists to
+/// prevent. Nothing else in the suite reaches the mismatch: every other path that draws a new salt
+/// refreshes the same handle's cache in the same call.
+#[test]
+fn a_store_re_sealed_by_something_else_is_asked_about_again_rather_than_refused() {
+    let (_dir, path) = scratch().expect("scratch");
+    let mine = Scripted::new(b"first");
+    let store = created(&path, mine.clone()).expect("create");
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+    store.seal();
+    store.get(ACCOUNT, SecretKind::Password).expect("read");
+    assert_eq!(mine.asked(), 1);
+    assert!(store.is_open());
+
+    // A second handle, as another launcher process would have, rotates the passphrase underneath.
+    let elsewhere = EncryptedFile::open(&path, Scripted::new(b"first"));
+    elsewhere
+        .change_passphrase(&pw("first"), &pw("second"))
+        .expect("rotate");
+
+    mine.now_answers(b"second").expect("script");
+    assert_eq!(
+        store
+            .get(ACCOUNT, SecretKind::Password)
+            .expect("the stale key must be noticed rather than reported as a wrong passphrase")
+            .expect("present")
+            .expose(),
+        b"hunter2"
+    );
+    assert_eq!(mine.asked(), 2, "the handle has to ask again, not reuse");
+}
+
 #[test]
 fn sealing_a_store_makes_the_next_call_ask_again() {
     let (_dir, path) = scratch().expect("scratch");

@@ -303,45 +303,10 @@ mod tests {
         assert!(!dir.path().join("store.apsf.def.tmp").exists());
     }
 
-    /// A read redirected through a symlink would hand back whatever the link points at, and the file
-    /// it points at would then be replaced by the next write.
-    #[cfg(unix)]
-    #[test]
-    fn a_symlink_at_the_store_path_is_refused() {
-        let dir = temp_dir();
-        let target = dir.path().join("elsewhere");
-        std::fs::write(&target, vec![0u8; super::super::frame::MIN_FILE]).expect("write");
-        let path = dir.path().join("store.apsf");
-        std::os::unix::fs::symlink(&target, &path).expect("symlink");
-        assert!(matches!(
-            read(&path),
-            Err(SecretsError::Corrupt {
-                detail: "store path"
-            })
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_created_store_and_its_directory_are_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = temp_dir();
-        let path = dir.path().join("nested").join("store.apsf");
-        private_dir(&path).expect("directory");
-        publish(&path, &vec![0u8; super::super::frame::MIN_FILE]).expect("publish");
-
-        let file_mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-        assert_eq!(file_mode & 0o777, 0o600, "{file_mode:o}");
-        let dir_mode = std::fs::metadata(path.parent().expect("parent"))
-            .expect("stat")
-            .permissions()
-            .mode();
-        assert_eq!(dir_mode & 0o777, 0o700, "{dir_mode:o}");
-    }
-
-    /// A store made before this was owner-only, or restored by a tool that widened it, has to be put
-    /// back rather than left leaking quietly for the rest of its life.
+    /// The narrowing of an existing wide *directory*, which is the one permissions path the store's
+    /// own tests cannot reach: they always create their directory rather than finding one. A store
+    /// made before this was owner-only, or restored by a tool that widened it, has to be put back
+    /// rather than left leaking quietly for the rest of its life.
     #[cfg(unix)]
     #[test]
     fn a_directory_and_a_file_left_wider_are_narrowed() {

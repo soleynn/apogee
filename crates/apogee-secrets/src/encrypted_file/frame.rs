@@ -129,15 +129,14 @@ impl Header {
         if be16(head, OFF_VERSION) != VERSION {
             return Err(corrupt("format version"));
         }
-        // The two algorithm ids are written and read as one big-endian word, so the frame keeps the
-        // magic / version / flags shape the other containers in this workspace use.
-        let suite = be16(head, OFF_SUITE);
-        let kdf = u8::try_from(suite >> 8).unwrap_or(0);
-        let aead = u8::try_from(suite & 0xFF).unwrap_or(0);
-        if kdf != KDF_ARGON2ID {
+        // The two algorithm ids occupy one big-endian word, so the frame keeps the magic / version /
+        // flags shape the other containers in this workspace use. They are read as the two bytes they
+        // are rather than as the word split back apart, which is the same thing with no conversion
+        // that could be given a defensive default and then silently take it.
+        if head[OFF_SUITE] != KDF_ARGON2ID {
             return Err(corrupt("key derivation function"));
         }
-        if aead != AEAD_XCHACHA20POLY1305 {
+        if head[OFF_SUITE + 1] != AEAD_XCHACHA20POLY1305 {
             return Err(corrupt("cipher"));
         }
         let cost = KdfCost::new(

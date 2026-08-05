@@ -83,15 +83,15 @@ pub use memory::{Call, FailAt, MemoryStore};
 
 /// Parse arbitrary bytes as the fallback store's file header, for the fuzz workspace.
 ///
-/// Behind a feature that no shipping build enables: this is a decoder taking hostile input, and it is
-/// not part of the crate's API.
+/// Both of these take what a fuzzer produces, which is what the file's own parser takes off a disk.
+/// They are behind a feature no shipping build enables, so a decoder fed hostile input never becomes
+/// part of this crate's API.
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_frame(bytes: &[u8]) {
     encrypted_file::parse_frame(bytes);
 }
 
-/// Parse arbitrary bytes as the fallback store's record table, for the fuzz workspace. As
-/// [`fuzz_parse_frame`].
+/// Parse arbitrary bytes as the fallback store's record table. As [`fuzz_parse_frame`].
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_records(bytes: &[u8]) {
     encrypted_file::parse_records(bytes);

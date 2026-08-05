@@ -104,6 +104,11 @@ fn time(memory_kib: u32, passes: u32, reps: usize) -> Result<u128, Box<dyn std::
 
 /// High-water resident memory, which is the other half of the answer: a cell that swaps on a handheld
 /// costs seconds rather than the milliseconds it measured.
+///
+/// The kernel's figure is a process-wide mark that never falls, so a row's number includes every row
+/// before it. That is what is wanted here only because the grid is walked from smallest to largest,
+/// which makes each row's own allocation the largest so far. Reorder the grid and the column stops
+/// meaning what it says.
 #[cfg(target_os = "linux")]
 fn peak_rss_mib() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;

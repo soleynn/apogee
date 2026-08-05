@@ -91,7 +91,10 @@ pub(crate) fn encode(table: &Table) -> Result<Zeroizing<Vec<u8>>, SecretsError> 
         at += ACCOUNT_LEN;
         out[at] = *kind;
         at += KIND_LEN;
-        let len = u32::try_from(value.len()).unwrap_or(MAX_VALUE);
+        // Re-checked rather than carried over from the sizing pass above: a fallible conversion given
+        // a default would write a length that does not match the bytes that follow it, and the file
+        // would seal and then never decode.
+        let len = u32::try_from(value.len()).map_err(|_| SecretsError::Backend { step })?;
         out[at..at + VALUE_LEN_LEN].copy_from_slice(&len.to_be_bytes());
         at += VALUE_LEN_LEN;
         out[at..at + value.len()].copy_from_slice(value);
@@ -304,8 +307,8 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        /// Tables of up to sixteen records over four accounts, both known kinds and one this build
-        /// has no name for, values from empty to a few kilobytes.
+        /// Tables of up to sixteen records over arbitrary account ids, both known kinds and one this
+        /// build has no name for, values from empty to a few kilobytes.
         fn any_table() -> impl Strategy<Value = Table> {
             proptest::collection::btree_map(
                 (

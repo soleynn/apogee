@@ -21,9 +21,6 @@ pub use passphrase::{Passphrase, Unprompted};
 
 use crate::{Backend, BackendReport, BackendState, Secret, SecretKind, SecretStore, SecretsError};
 
-#[cfg(feature = "fuzzing")]
-pub(crate) use fuzzing::{parse_frame, parse_records};
-
 /// Proof that a front end asked the user for the encrypted fallback and got an answer.
 ///
 /// Holds nothing, and is neither `Clone`, `Copy`, `Default`, nor deserializable, with a private
@@ -62,9 +59,11 @@ pub enum FileState {
         /// whatever this build would choose today.
         work: KdfCost,
     },
-    /// Something is there and cannot be read: a permission, or a directory in the way.
+    /// The path could not be examined at all: a permission on it or on a directory above it. Says
+    /// nothing about what is there, because nothing was read.
     Unreadable,
-    /// Something is there and is not one of these: a symlink at the path, the wrong magic, a version
+    /// Something is there and it is not a store this build opens. Anything that is not a regular
+    /// file, a symlink at the path among them, and any regular file with the wrong magic, a version
     /// or an algorithm this build does not know, a length that cannot be right, or a work factor
     /// outside the band this build accepts.
     Foreign,
@@ -252,7 +251,9 @@ impl EncryptedFile {
     /// plaintext to begin with.
     ///
     /// # Errors
-    /// [`SecretsError::Io`] or [`SecretsError::Denied`] if the file is there and will not go.
+    /// [`SecretsError::Io`] or [`SecretsError::Denied`] if the file is there and will not go, and
+    /// [`SecretsError::Backend`] if the lock that serialises this against another process's write
+    /// could not be taken.
     pub fn remove(&self, consent: Consent) -> Result<bool, SecretsError> {
         let Consent(()) = consent;
         let mut cached = self.cache();
@@ -507,28 +508,27 @@ impl std::fmt::Debug for EncryptedFile {
     }
 }
 
-/// Entry points for the fuzz workspace, and for nothing else.
+/// Reach the header parser from the crate root, for the fuzz workspace and nothing else.
 ///
-/// Behind a feature so the two decoders below never become part of the shipping API. They take bytes
-/// straight off a fuzzer, which is what the file's own parser takes off a disk.
+/// The parser itself lives in a module private to this one, so an entry point has to be re-exported
+/// rather than named directly. The feature is what keeps it out of a shipping build.
 #[cfg(feature = "fuzzing")]
-mod fuzzing {
-    /// Parse arbitrary bytes as a sealed store's header. Stops before any key derivation, so a fuzzer
-    /// spends its budget on the parser rather than on Argon2.
-    pub(crate) fn parse_frame(bytes: &[u8]) {
-        let _ = super::Header::parse(bytes);
-    }
+pub(crate) fn parse_frame(bytes: &[u8]) {
+    let _ = Header::parse(bytes);
+}
 
-    /// Decode arbitrary bytes as a sealed store's record table. Authenticated before it is reached in
-    /// production, so this covers the decoder's own totality rather than an attacker's reach.
-    pub(crate) fn parse_records(bytes: &[u8]) {
-        let _ = super::items::decode(bytes);
-    }
+/// As [`parse_frame`], for the record table.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn parse_records(bytes: &[u8]) {
+    let _ = items::decode(bytes);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ACCOUNT: Uuid = Uuid::from_u128(0x0194_8f2c_7d3e_4a51_9b60_c2e8_1f45_a903);
+    const OTHER: Uuid = Uuid::from_u128(2);
 
     /// The handle is held behind a trait object inside the composition root and moved across task
     /// boundaries with it, so it has to stay `Send + Sync + 'static`. Nothing else pins that: a cache
@@ -537,6 +537,57 @@ mod tests {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
         assert_send_sync_static::<EncryptedFile>();
     };
+
+    /// The sweep's headline claim, which no public API can set up: a record filed under a tag this
+    /// build has no name for still goes when the account it belongs to is emptied. Leaving it behind
+    /// would be a secret surviving in a store the user asked to be emptied, and every other test can
+    /// only write the two kinds this build knows.
+    ///
+    /// Written straight through the sealing path rather than through `set`, which is the only way to
+    /// put a tag there that no `SecretKind` maps to.
+    #[test]
+    fn an_account_sweep_takes_a_kind_this_build_does_not_know() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(EncryptedFile::FILE_NAME);
+        let store = EncryptedFile::open(&path, Arc::new(Unprompted));
+        store
+            .create(
+                Consent::granted(),
+                &Secret::new(b"pp".to_vec()),
+                KdfCost::floor(),
+            )
+            .expect("create");
+
+        let unknown = 200;
+        assert!(!SecretKind::ALL.iter().any(|k| items::tag_of(*k) == unknown));
+        let mut table = Table::new();
+        table.insert(
+            (*ACCOUNT.as_bytes(), items::tag_of(SecretKind::Password)),
+            Zeroizing::new(b"hunter2".to_vec()),
+        );
+        table.insert(
+            (*ACCOUNT.as_bytes(), unknown),
+            Zeroizing::new(b"from a later build".to_vec()),
+        );
+        table.insert(
+            (*OTHER.as_bytes(), unknown),
+            Zeroizing::new(b"another account's".to_vec()),
+        );
+        let held = store
+            .cache()
+            .as_ref()
+            .map(|c| (c.salt, c.cost, c.key.clone()));
+        let (salt, cost, key) = held.expect("creating leaves the handle open");
+        store.publish(&table, &salt, cost, &key).expect("seal");
+
+        store.forget_account(ACCOUNT).expect("sweep");
+
+        let bytes = disk::read(&path).expect("read").expect("present");
+        let header = Header::parse(&bytes).expect("parse");
+        let left = unseal(&bytes, &header, &key).expect("open");
+        assert_eq!(left.len(), 1);
+        assert!(left.contains_key(&(*OTHER.as_bytes(), unknown)));
+    }
 
     /// The guard on the hand-written `Debug`. A derive would print the sealing key, and the whole
     /// point of the type it is held in is that it never reaches a log.
