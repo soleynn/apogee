@@ -41,8 +41,8 @@ impl KdfCost {
     ///
     /// Measured, not picked. From the `kdf_cost` example on an eight-core Zen 2 desktop, release
     /// build, median of three, one lane throughout, as millisecond and peak resident mebibyte pairs:
-    /// 19456 KiB over 2 passes is 16 and 21, 32768 over 3 is 43 and 53, 65536 over 3 is 92 and 85,
-    /// 98304 over 3 is 151 and 117, 131072 over 3 is 200 and 148, 262144 over 3 is 423 and 276.
+    /// 19456 KiB over 2 passes is 17 and 19, 32768 over 3 is 47 and 32, 65536 over 3 is 103 and 64,
+    /// 98304 over 3 is 157 and 96, 131072 over 3 is 213 and 128, 262144 over 3 is 424 and 256.
     ///
     /// Lanes stay at one because this build derives them sequentially: 65536 over 3 measured 95 ms at
     /// four lanes against 92 at one, so a second lane costs the same wall clock here while handing an
@@ -53,10 +53,17 @@ impl KdfCost {
     /// memory with a GPU, and the peak figures above are why: a cell that lands in swap on a handheld
     /// costs seconds rather than the milliseconds it measured.
     ///
+    /// Those peaks are the working set, not what the process happens to hold. The two numbers differ:
+    /// the same sweep against glibc reported 84 mebibytes at the shipped cell where the block vector
+    /// is 64, because that allocator keeps what it has taken. The figures above are from a statically
+    /// linked build, whose allocator returns memory promptly and whose derivation runs about eight
+    /// percent slower. Both differences point the same way, which is why the sweep is run that way:
+    /// a reading taken like this understates the hardware rather than flattering it.
+    ///
     /// Still owed: the same sweep on handheld hardware, idle and with a game resident, which is the
-    /// case that decides this rather than a desktop's. The cost travels in each file, so lowering
-    /// this later is one edit and every store already written keeps opening at what it was sealed
-    /// under.
+    /// case that decides this rather than a desktop's. Build it static, because that hardware carries
+    /// no toolchain. The cost travels in each file, so lowering this later is one edit and every store
+    /// already written keeps opening at what it was sealed under.
     pub const CURRENT: Self = Self {
         memory_kib: 65_536,
         passes: 3,

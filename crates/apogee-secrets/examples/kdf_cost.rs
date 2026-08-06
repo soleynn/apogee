@@ -14,6 +14,17 @@
 //! work factor far below what the hardware can carry, which is the one way to get this wrong in the
 //! direction that matters.
 //!
+//! To measure a machine that has no toolchain on it, build a static binary here and copy that over:
+//!
+//! ```text
+//! cargo build -p apogee-secrets --release --example kdf_cost --target x86_64-unknown-linux-musl
+//! ```
+//!
+//! Prefer that build even where a native one is possible. Its allocator returns memory promptly, so
+//! the peak column is the derivation's working set rather than whatever the allocator has kept, and
+//! it runs a few percent slower. Both differences understate the hardware, which is the direction to
+//! be wrong in.
+//!
 //! The number worth having is the *worst* one the target hardware produces, so on a handheld run it
 //! four ways: on a desktop session idle, in game mode idle, in game mode with a game resident, and on
 //! battery. The third is usually the one that decides it.
