@@ -17,7 +17,10 @@ pub(crate) const MAGIC: [u8; 4] = *b"APSF";
 /// The format this build writes and the only one it reads. An exact match: there is no read-older
 /// path, because a build that guessed at an older layout would decrypt the wrong bytes under a key
 /// that verified, which is worse than refusing.
-pub(crate) const VERSION: u16 = 1;
+///
+/// 2 narrowed what the body envelope is bound to. A version-1 file's body tag was computed over the
+/// whole header, so it does not verify here and such a store is refused rather than misread.
+pub(crate) const VERSION: u16 = 2;
 
 /// Argon2id, RFC 9106 version `0x13`.
 pub(crate) const KDF_ARGON2ID: u8 = 1;
@@ -81,6 +84,20 @@ const OFF_BODY_NONCE: usize = 76;
 /// of as a damaged file, which is exactly the distinction the second envelope exists to draw.
 pub(crate) const CHECK_AAD_LEN: usize = OFF_CHECK_NONCE;
 
+/// How much the body envelope is bound to: everything that decides the key, then the body's nonce.
+///
+/// Also deliberately short of the whole header, and for the reason the check envelope exists. The
+/// check envelope's own nonce and tag are the one region no other check covers, so while the body
+/// was bound to them too, damage to those twenty-four-plus-sixteen bytes failed both envelopes and
+/// was indistinguishable from a wrong passphrase: the user was told to retype a passphrase that was
+/// already right, forever. Left out of the body's associated data, they are separable, because a
+/// body that opens under this key proves the key is the file's own.
+///
+/// Nothing is weakened by the omission. An attacker who edits those bytes without the key can only
+/// make the check fail, which is a refusal they could get by deleting the file, and one they cannot
+/// turn into a wrong plaintext: the body still has to authenticate under its own tag.
+pub(crate) const BODY_AAD_LEN: usize = CHECK_AAD_LEN + NONCE_LEN;
+
 use super::kdf::KdfCost;
 
 /// A parsed header. Every field in it has been checked; nothing here is a value read straight out of
@@ -108,6 +125,19 @@ impl Header {
         out[OFF_CHECK_NONCE..OFF_CHECK_TAG].copy_from_slice(&self.check_nonce);
         out[OFF_CHECK_TAG..OFF_BODY_NONCE].copy_from_slice(&self.check_tag);
         out[OFF_BODY_NONCE..HEADER_LEN].copy_from_slice(&self.body_nonce);
+        out
+    }
+
+    /// The header bytes the body envelope is sealed under.
+    ///
+    /// Built from the parsed fields rather than sliced out of the file, so a caller cannot pass a
+    /// region that was never checked, and so the two halves cannot be assembled in the wrong order
+    /// at one of the two call sites.
+    pub(crate) fn body_aad(self) -> [u8; BODY_AAD_LEN] {
+        let head = self.to_bytes();
+        let mut out = [0u8; BODY_AAD_LEN];
+        out[..CHECK_AAD_LEN].copy_from_slice(&head[..CHECK_AAD_LEN]);
+        out[CHECK_AAD_LEN..].copy_from_slice(&head[OFF_BODY_NONCE..HEADER_LEN]);
         out
     }
 

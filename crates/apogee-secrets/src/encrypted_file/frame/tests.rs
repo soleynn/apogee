@@ -25,7 +25,7 @@ fn the_header_layout_is_frozen() {
 
     let bytes = header().to_bytes();
     assert_eq!(&bytes[0..4], b"APSF");
-    assert_eq!(&bytes[4..8], &[0x00, 0x01, 0x01, 0x01]);
+    assert_eq!(&bytes[4..8], &[0x00, 0x02, 0x01, 0x01]);
     assert_eq!(&bytes[20..36], &[0x11; 16]);
     assert_eq!(&bytes[36..60], &[0x22; 24]);
     assert_eq!(&bytes[60..76], &[0x33; 16]);
@@ -38,6 +38,23 @@ fn the_header_layout_is_frozen() {
 fn the_check_envelope_covers_exactly_what_decides_the_key() {
     assert_eq!(CHECK_AAD_LEN, 36);
     assert_eq!(CHECK_AAD_LEN, OFF_CHECK_NONCE);
+}
+
+/// The body skips the check envelope's own nonce and tag, which is what lets damage to them be told
+/// apart from a wrong passphrase. Widening this back to the whole header collapses the two again,
+/// and the only thing that would notice is the pair of cases in the tamper suite.
+#[test]
+fn the_body_envelope_leaves_out_the_check_envelope() {
+    assert_eq!(BODY_AAD_LEN, 60);
+    assert_eq!(BODY_AAD_LEN, CHECK_AAD_LEN + NONCE_LEN);
+    assert_eq!(HEADER_LEN - BODY_AAD_LEN, NONCE_LEN + TAG_LEN);
+
+    // What it is bound to, positionally: the key material, then the body's own nonce, and nothing
+    // from the twenty-four plus sixteen bytes in between.
+    let aad = header().body_aad();
+    assert_eq!(&aad[0..4], b"APSF");
+    assert_eq!(&aad[20..36], &[0x11; 16]);
+    assert_eq!(&aad[36..60], &[0x44; 24]);
 }
 
 #[test]
@@ -56,7 +73,7 @@ fn each_structural_rejection_names_a_different_part() {
     let mut seen = Vec::new();
     let cases: [(usize, u8, &str); 5] = [
         (0, b'X', "file magic"),
-        (5, 0x02, "format version"),
+        (5, 0x03, "format version"),
         (6, 0x02, "key derivation function"),
         (7, 0x02, "cipher"),
         // The second byte of the memory cost, which is the only one of its four that is nonzero
