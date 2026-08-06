@@ -9,6 +9,11 @@
 //! same way as there being nothing to import: silently, with an empty answer. So they are built by
 //! pure functions that need no store to test, and frozen by unit tests that run on every platform,
 //! including the ones where the store they name does not exist.
+//!
+//! Freezing a string catches an edit to it and says nothing about whether it was ever right, and no
+//! test here can: a case that seeds the store itself passes for any value it uses. So each string
+//! carries a citation to the line of the other launcher's source that produces it. That source is
+//! read as a specification and never copied; the launcher half of it is GPL-3.0.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,17 +23,38 @@ use zeroize::Zeroize;
 use crate::{Secret, SecretsError};
 
 /// The prefix the other launcher writes its credentials under today.
+///
+/// `CREDS_PREFIX_NEW`, goatcorp/FFXIVQuickLauncher@40ed6e9,
+/// `src/XIVLauncher/Accounts/XivAccount.cs:11`. The separator and the lowercased account name are
+/// the interpolation at `:49`.
 const TARGET_PREFIX: &str = "XIVLAUNCHER";
 
 /// The prefix it used before, which its own reader still probes first and migrates away from. An
 /// install that has not been opened since the change still has its password only under this one.
+///
+/// `CREDS_PREFIX_OLD`, same file, `:10`, read first at `:25`.
 const LEGACY_TARGET_PREFIX: &str = "FINAL FANTASY XIV";
+
+// The three Secret Service strings below, traced to the source that produces each. The other
+// launcher's native build calls `Keyring.GetPassword(PACKAGE, SERVICE, accountName)`
+// (goatcorp/XIVLauncher.Core@0b4ec78,
+// `src/XIVLauncher.Core/Accounts/Secrets/Providers/KeychainSecretProvider.cs:51`). That reaches
+// libsecret through goaaats/KeySharp (`KeySharp/Keyring.cs:47`, which fixes the argument order) and
+// its vendored native half, hrantzsch/keychain@c856836. `src/keychain_linux.cpp` is what turns the
+// three arguments into a bus item: `makeSchema` (`:41-49`) makes the package the schema name, and
+// `getPassword` (`:108-121`) files the other two under the attribute names declared at `:33-34`,
+// `service` and `username`.
 
 /// The value its native build files passwords under on the Secret Service. Not the account name:
 /// it is a fixed marker, the same for every account.
+///
+/// `SERVICE`, `KeychainSecretProvider.cs:10`, passed to every verb at `:51`, `:65` and `:71`.
 const SECRET_SERVICE_SERVICE: &str = "SEID";
 
 /// The schema its native build declares on the Secret Service.
+///
+/// `PACKAGE`, `KeychainSecretProvider.cs:9`, which reaches the bus as the schema name rather than as
+/// anything the launcher passes per call.
 ///
 /// Deliberately *not* part of the search below. Whether it reaches the bus as an attribute depends
 /// on the binding it goes through rather than on the launcher, and a query that named it would
@@ -78,10 +104,13 @@ impl ForeignKey {
 
     /// The Secret Service attributes its native build files this account's password under.
     ///
+    /// The two names are `keychain_linux.cpp:33-34`, not anything the launcher chooses.
+    ///
     /// Both are needed. The service half is a fixed marker rather than anything about the account,
     /// so on its own it matches every account that launcher has saved, plus the permanent dummy item
-    /// it writes at startup to make the keyring unlock. Pairing it with the name is what selects one
-    /// account, and what keeps that dummy out of the result without needing to know it exists.
+    /// it writes at startup to make the keyring unlock (`KeychainSecretProvider.cs:27-32`). Pairing
+    /// it with the name is what selects one account, and what keeps that dummy out of the result
+    /// without needing to know it exists.
     #[must_use]
     pub fn secret_service_attributes(&self) -> [(&'static str, &str); 2] {
         [
@@ -373,6 +402,10 @@ mod tests {
     /// no job here, so they are frozen against a fixed name rather than left to whatever the
     /// constants happen to say. A change to either prefix, its separator, or its spacing finds
     /// nothing and reports it as nothing to import.
+    ///
+    /// What this cannot do is establish that the literals below are the right ones. Nothing in a
+    /// test can: the live case seeds the store with the same strings it then searches for, so it
+    /// passes for any value. The citations on the constants are where that comes from.
     #[test]
     fn credential_targets_are_frozen() {
         let key = ForeignKey::from_stored_name("someaccount");

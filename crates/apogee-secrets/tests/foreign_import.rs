@@ -5,6 +5,11 @@
 //! reading it leaves it there, and that the startup item the other launcher writes is not mistaken
 //! for a password.
 //!
+//! What no case here proves is that the strings are the right ones. Every one of them seeds the bus
+//! from the copies below, so they all pass for any value: what is under test is the search, not the
+//! contract. The copies are deliberate, since seeding through the crate's own constants would make
+//! even that vacuous, and each is annotated with where the real value comes from.
+//!
 //! Run single-threaded: the cases share one collection.
 
 use std::collections::HashMap;
@@ -15,10 +20,15 @@ use secret_service::blocking::SecretService;
 
 /// What the other launcher's native build files a password under: a fixed marker in `service`, the
 /// lowercased account name in `username`.
+///
+/// `SERVICE`, goatcorp/XIVLauncher.Core@0b4ec78,
+/// `src/XIVLauncher.Core/Accounts/Secrets/Providers/KeychainSecretProvider.cs:10`.
 const FOREIGN_SERVICE: &str = "SEID";
 
 /// The permanent item it writes at every startup, only so the keyring unlocks. Not a password, and
 /// not an account.
+///
+/// `DUMMY_SVC` and `DUMMY_NAME`, same file, `:27-28`.
 const DUMMY_SERVICE: &str = "XIVLauncher Safe Storage Control";
 const DUMMY_NAME: &str = "XIVLauncher";
 
