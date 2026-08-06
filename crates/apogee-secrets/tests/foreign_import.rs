@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use apogee_secrets::{ForeignCredentialStore, ForeignKey, ImportSource};
+use apogee_secrets::{ForeignCredentialStore, ForeignKey, Import, ImportSource};
 use secret_service::EncryptionType;
 use secret_service::blocking::SecretService;
 
@@ -80,10 +80,12 @@ fn a_password_another_launcher_saved_is_found() {
     let name = unique_name("imported");
     seed(&service, FOREIGN_SERVICE, &name, b"their-password").expect("seed the item");
 
-    let found = ForeignCredentialStore::new()
+    let Import::Password(found) = ForeignCredentialStore::new()
         .password(&ForeignKey::from_stored_name(&name))
         .expect("read the other launcher's store")
-        .expect("the seeded password was not found");
+    else {
+        panic!("the seeded password was not found");
+    };
 
     assert_eq!(found.expose(), b"their-password");
 }
@@ -96,10 +98,13 @@ fn reading_leaves_the_other_launcher_s_copy_alone() {
     let name = unique_name("untouched");
     seed(&service, FOREIGN_SERVICE, &name, b"their-password").expect("seed the item");
 
-    ForeignCredentialStore::new()
+    let read = ForeignCredentialStore::new()
         .password(&ForeignKey::from_stored_name(&name))
-        .expect("read the other launcher's store")
-        .expect("the seeded password was not found");
+        .expect("read the other launcher's store");
+    assert!(
+        matches!(read, Import::Password(_)),
+        "the seeded password was not found"
+    );
 
     assert!(
         seeded_still_there(&service, FOREIGN_SERVICE, &name).expect("search the bus"),
@@ -126,7 +131,10 @@ fn the_startup_item_is_not_mistaken_for_a_password() {
         .password(&ForeignKey::from_stored_name(DUMMY_NAME))
         .expect("read the other launcher's store");
 
-    assert!(found.is_none(), "the startup item was read as a password");
+    assert!(
+        matches!(found, Import::Nothing),
+        "the startup item was read as a password"
+    );
 }
 
 /// A user who never saved a password there gets an answer, not a failure. Reported as an error it
@@ -137,5 +145,6 @@ fn an_account_with_nothing_saved_reads_as_nothing() {
         .password(&ForeignKey::from_stored_name(unique_name("absent")))
         .expect("read the other launcher's store");
 
-    assert!(found.is_none());
+    // `Nothing` and not `Unsupported`: this platform has a reader, and it looked.
+    assert!(matches!(found, Import::Nothing));
 }

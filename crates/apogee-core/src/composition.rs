@@ -20,8 +20,8 @@ use apogee_otp::Otp;
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::{
-    BackendReport, EncryptedFile, ForeignKey, ImportSource, Null, Passphrase, Secret, SecretKind,
-    Secrets, SecretsError, Unprompted,
+    BackendReport, EncryptedFile, ForeignKey, Import, ImportSource, Null, Passphrase, Secret,
+    SecretKind, Secrets, SecretsError, Unprompted,
 };
 use sqex_proto::{ComputerId, Transport};
 use tokio::sync::mpsc;
@@ -166,6 +166,23 @@ pub struct ProfileRemoval {
     /// for this account has outlived the record naming it, so a caller has to say so rather than
     /// report a clean removal.
     pub secrets_swept: bool,
+}
+
+/// What importing another launcher's password did.
+///
+/// [`Nothing`](Self::Nothing) and [`Unsupported`](Self::Unsupported) both store nothing, and they
+/// are still different answers: the first says the other launcher has no password for this account,
+/// which is a fact about the user's setup, and the second says this build has no way to look, which
+/// is a fact about the target and leaves the question open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImportOutcome {
+    /// A password was read from the source and stored under this launcher's key.
+    Imported,
+    /// The source was read and holds nothing for the account.
+    Nothing,
+    /// The source cannot be read on this target, so nothing was looked at.
+    Unsupported,
 }
 
 /// Whether a store that failed this way may still be holding the secret.
@@ -625,9 +642,11 @@ impl Core {
 
     /// Copy the password another launcher saved for `key` into this one's store for `account`.
     ///
-    /// Answers whether there was one to copy. Reads `source` and writes ours; the other launcher's
-    /// entry is left exactly as it was, because it is not this program's to remove and a user may
-    /// still be running it.
+    /// Answers what happened, which is three things and not two: a source with no reader on this
+    /// target held nothing to copy, but so did a source that was read and was empty, and only the
+    /// second of those is news about the user's other launcher. Reads `source` and writes ours; the
+    /// other launcher's entry is left exactly as it was, because it is not this program's to remove
+    /// and a user may still be running it.
     ///
     /// The refusal is decided before the source is touched. Reading one is not free of consequence:
     /// it connects to the platform credential store, which can raise the unlock prompt, or it opens
@@ -642,15 +661,22 @@ impl Core {
         account: Uuid,
         source: &dyn ImportSource,
         key: &ForeignKey,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<ImportOutcome, CoreError> {
         if self.account_or_missing(account)?.never_store {
             return Err(SecretsError::NotStoring.into());
         }
-        let Some(password) = source.password(key)? else {
-            return Ok(false);
-        };
-        self.store_secret(account, SecretKind::Password, password)?;
-        Ok(true)
+        match source.password(key)? {
+            Import::Password(password) => {
+                self.store_secret(account, SecretKind::Password, password)?;
+                Ok(ImportOutcome::Imported)
+            }
+            Import::Nothing => Ok(ImportOutcome::Nothing),
+            Import::Unsupported => Ok(ImportOutcome::Unsupported),
+            // `Import` belongs to another crate and is `#[non_exhaustive]`. Nothing was stored on
+            // any arm but the first, so a variant added later reads as nothing found, which is the
+            // answer that claims the least.
+            _ => Ok(ImportOutcome::Nothing),
+        }
     }
 
     /// Back up the game config in `profile`'s prefix, then prune to the retention setting.
@@ -814,16 +840,16 @@ mod tests {
     fn an_account_that_keeps_nothing_is_refused_before_its_password_is_read() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use apogee_secrets::{ForeignKey, ImportSource, Secret, SecretsError};
+        use apogee_secrets::{ForeignKey, Import, ImportSource, Secret, SecretsError};
 
         use crate::model::AccountKind;
 
         struct Counting(AtomicUsize);
 
         impl ImportSource for Counting {
-            fn password(&self, _key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
+            fn password(&self, _key: &ForeignKey) -> Result<Import, SecretsError> {
                 self.0.fetch_add(1, Ordering::Relaxed);
-                Ok(Some(Secret::new(b"hunter2".to_vec())))
+                Ok(Import::Password(Secret::new(b"hunter2".to_vec())))
             }
         }
 
@@ -973,6 +999,7 @@ mod tests {
         use uuid::Uuid;
 
         use super::*;
+        use crate::ImportOutcome;
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
         fn core_with(store: Arc<MemoryStore>) -> (TempDir, Core) {
@@ -1235,7 +1262,10 @@ mod tests {
             let source = ForeignSecretsFile::at(&path);
             let key = ForeignKey::from_stored_name(account.sqex_id.to_lowercase());
 
-            assert!(core.import_password(account.id, &source, &key).unwrap());
+            assert_eq!(
+                core.import_password(account.id, &source, &key).unwrap(),
+                ImportOutcome::Imported
+            );
 
             assert_eq!(
                 store.stored(account.id, SecretKind::Password),
@@ -1249,7 +1279,9 @@ mod tests {
         }
 
         /// Nothing to import is an answer, not a failure: it is what a user who never saved a
-        /// password there sees, and it must not look like a broken import.
+        /// password there sees, and it must not look like a broken import. `Nothing` specifically,
+        /// and not `Unsupported`: a source that was read and held nothing has to stay tellable from
+        /// one that was never read, since only the first is news about the other launcher.
         #[test]
         fn an_account_the_other_launcher_never_saved_imports_nothing() {
             let store = Arc::new(MemoryStore::new());
@@ -1267,7 +1299,38 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(!imported);
+            assert_eq!(imported, ImportOutcome::Nothing);
+            assert!(store.is_empty());
+        }
+
+        /// A source with no reader on this target is its own answer, and it must not be folded into
+        /// the one above: the two store the same nothing and mean opposite things to a user.
+        #[test]
+        fn a_source_that_cannot_be_read_here_is_not_reported_as_nothing_saved() {
+            use apogee_secrets::{Import, ImportSource, SecretsError};
+
+            struct NoReader;
+
+            impl ImportSource for NoReader {
+                fn password(&self, _key: &ForeignKey) -> Result<Import, SecretsError> {
+                    Ok(Import::Unsupported)
+                }
+            }
+
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            let outcome = core
+                .import_password(
+                    account.id,
+                    &NoReader,
+                    &ForeignKey::from_stored_name("me@example.invalid"),
+                )
+                .unwrap();
+
+            assert_eq!(outcome, ImportOutcome::Unsupported);
             assert!(store.is_empty());
         }
     }
