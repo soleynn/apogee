@@ -146,8 +146,17 @@ fn detect_sandbox() -> Option<Sandbox> {
     None
 }
 
+/// Read the sandbox's own description of itself, lossily.
+///
+/// Lossily because the alternative was worse than a mangled value. `read_to_string` fails on a
+/// single byte that is not UTF-8 anywhere in the file, a `filesystems=` entry naming a path in some
+/// other encoding for instance, and the failure erased the whole sandbox: `detect_sandbox` fell
+/// through to `None` and a confined process was reported as unconfined with no keyring installed.
+/// Every section that decides the answer here is ASCII, so a replacement character in an unrelated
+/// value costs nothing.
 fn read_flatpak_info() -> Option<String> {
-    std::fs::read_to_string("/.flatpak-info").ok()
+    let bytes = std::fs::read("/.flatpak-info").ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn flatpak_sandbox(info: &str) -> Sandbox {
@@ -158,8 +167,10 @@ fn flatpak_sandbox(info: &str) -> Sandbox {
 }
 
 fn flatpak_app_id(info: &str) -> Option<String> {
+    // Last rather than first, as GLib's `KeyFile` resolves a repeated key. See `policy_permits`.
     entries(info)
-        .find(|(section, key, _)| *section == APPLICATION && *key == "name")
+        .filter(|(section, key, _)| *section == APPLICATION && *key == "name")
+        .last()
         .map(|(_, _, value)| value.to_owned())
 }
 
@@ -170,11 +181,59 @@ fn flatpak_app_id(info: &str) -> Option<String> {
 /// not a grant: it makes the name visible without making it callable, which is precisely the
 /// configuration that produces a store that looks present and answers nothing.
 fn flatpak_can_talk_to_secrets(info: &str) -> bool {
-    entries(info).any(|(section, key, value)| match section {
-        CONTEXT => key == "sockets" && value.split(';').any(|s| s.trim() == "session-bus"),
-        SESSION_BUS_POLICY => key == SECRETS_NAME && matches!(value, "talk" | "own"),
-        _ => false,
-    })
+    holds_the_session_bus(info) || policy_permits(info)
+}
+
+/// Whether the sandbox was handed the session bus socket itself, so no proxy filters anything.
+///
+/// A negated entry (`!session-bus`, which is what `--nosocket=session-bus` writes) is not the name,
+/// so it is not a grant.
+fn holds_the_session_bus(info: &str) -> bool {
+    entries(info)
+        .filter(|(section, key, _)| *section == CONTEXT && *key == "sockets")
+        .last()
+        .is_some_and(|(_, _, value)| value.split(';').any(|s| s.trim() == "session-bus"))
+}
+
+/// Whether the bus policy permits method calls to the credential-store name.
+///
+/// Two things an exact-match test over every entry got wrong, both measured against a real sandbox.
+/// Flatpak writes a wildcard permission as a key of its own (`org.freedesktop.*=talk`), which the
+/// proxy resolves by prefix, so comparing against the full name alone reads a granted sandbox as
+/// denied and tells the user to grant a permission they already hold. And a repeated key is
+/// last-wins in GLib's `KeyFile`, which is the parser flatpak itself reads this file with, so
+/// stopping at the first match reads `talk` followed by `see` as a grant where flatpak sees none.
+///
+/// Between two keys that both match, the more specific one decides, which is what the proxy does: an
+/// exact name beats any wildcard, and a longer wildcard beats a shorter one.
+fn policy_permits(info: &str) -> bool {
+    let mut best: Option<(usize, &str)> = None;
+    for (section, key, value) in entries(info) {
+        if section != SESSION_BUS_POLICY {
+            continue;
+        }
+        let Some(specificity) = policy_reaches_secrets(key) else {
+            continue;
+        };
+        // Greater *or equal*: equality is the same key written twice, and the later one wins.
+        if best.is_none_or(|(held, _)| specificity >= held) {
+            best = Some((specificity, value));
+        }
+    }
+    matches!(best, Some((_, "talk" | "own")))
+}
+
+/// How specifically a policy key names the credential store, if it names it at all. Larger is more
+/// specific, and `None` is a key about some other name.
+///
+/// `a.b.*` covers every name under `a.b.` and not `a.b` itself, which is how the proxy resolves it:
+/// so `org.freedesktop.*` reaches the store and `org.freedesktop.secrets.*` does not.
+fn policy_reaches_secrets(key: &str) -> Option<usize> {
+    if key == SECRETS_NAME {
+        return Some(usize::MAX);
+    }
+    let prefix = key.strip_suffix('*')?;
+    SECRETS_NAME.starts_with(prefix).then_some(prefix.len())
 }
 
 /// Walk the file as `(section, key, value)`, ignoring blanks, comments, and anything before the
@@ -238,6 +297,80 @@ mod tests {
         assert!(!flatpak_can_talk_to_secrets(misplaced));
         let misplaced = "[Context]\norg.freedesktop.secrets=talk\n";
         assert!(!flatpak_can_talk_to_secrets(misplaced));
+    }
+
+    /// The form flatpak actually writes for a wildcard talk permission. Comparing against the full
+    /// name alone read this as a denial, so a sandbox that could reach the store was told to grant a
+    /// permission it already held, and one with no keyring installed was told the same thing.
+    #[test]
+    fn a_wildcard_policy_that_covers_the_service_is_a_grant() {
+        assert!(flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.freedesktop.*=talk\n"
+        ));
+        assert!(flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.*=own\n"
+        ));
+        assert!(flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\n*=talk\n"
+        ));
+    }
+
+    /// A wildcard covers the names under a prefix, not the prefix's own parent, and a key that
+    /// merely looks similar covers nothing.
+    #[test]
+    fn a_wildcard_that_does_not_reach_the_service_is_not_a_grant() {
+        for body in [
+            "[Session Bus Policy]\norg.freedesktop.secrets.*=talk\n",
+            "[Session Bus Policy]\norg.freedesktop.secretsX=talk\n",
+            "[Session Bus Policy]\nx.org.freedesktop.secrets=talk\n",
+            "[Session Bus Policy]\ncom.*=talk\n",
+        ] {
+            assert!(!flatpak_can_talk_to_secrets(body), "{body}");
+        }
+    }
+
+    /// Between two keys that both match, the more specific one decides, as the proxy resolves it.
+    #[test]
+    fn an_exact_policy_beats_a_wildcard_either_way_round() {
+        assert!(!flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.freedesktop.*=talk\norg.freedesktop.secrets=see\n"
+        ));
+        assert!(!flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.freedesktop.secrets=see\norg.freedesktop.*=talk\n"
+        ));
+        assert!(flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.freedesktop.*=see\norg.freedesktop.secrets=talk\n"
+        ));
+        assert!(flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.*=see\norg.freedesktop.*=talk\n"
+        ));
+    }
+
+    /// A repeated key is last-wins in GLib's `KeyFile`, which is what flatpak reads this file with.
+    /// Stopping at the first match made `talk` then `see` a grant here and a denial to flatpak.
+    #[test]
+    fn a_repeated_key_is_resolved_the_way_flatpak_resolves_it() {
+        assert!(!flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.freedesktop.secrets=talk\norg.freedesktop.secrets=see\n"
+        ));
+        assert!(flatpak_can_talk_to_secrets(
+            "[Session Bus Policy]\norg.freedesktop.secrets=see\norg.freedesktop.secrets=talk\n"
+        ));
+        assert!(!flatpak_can_talk_to_secrets(
+            "[Context]\nsockets=session-bus;\nsockets=x11;\n"
+        ));
+        assert_eq!(
+            flatpak_app_id("[Application]\nname=first\nname=second\n").as_deref(),
+            Some("second")
+        );
+    }
+
+    /// What `--nosocket=session-bus` writes. It is not the name, so it is not a grant.
+    #[test]
+    fn a_negated_socket_is_not_a_grant() {
+        assert!(!flatpak_can_talk_to_secrets(
+            "[Context]\nsockets=x11;!session-bus;\n"
+        ));
     }
 
     #[test]
