@@ -92,9 +92,17 @@ fn platform_failure(err: &keyring::Error, step: &'static str) -> SecretsError {
     }
 }
 
+/// The Keychain's lock arrives here, in the variant keyring boxes everything it does not map into.
+/// A locked store is answered by unlocking and retrying, so it must not be reported as a failure the
+/// user can do nothing about. The Credential Manager has no lock and produces no status of this
+/// shape, so nothing changes there.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
-fn platform_failure(_err: &keyring::Error, step: &'static str) -> SecretsError {
-    SecretsError::Backend { step }
+fn platform_failure(err: &keyring::Error, step: &'static str) -> SecretsError {
+    if crate::apple::locked(err) {
+        SecretsError::Locked
+    } else {
+        SecretsError::Backend { step }
+    }
 }
 
 /// Reach the Secret Service error keyring boxed inside its own.
@@ -235,6 +243,36 @@ mod tests {
                 map_error(&err, "store"),
                 SecretsError::Backend { step: "store" }
             ));
+        }
+    }
+
+    /// A platform failure this crate can read no status out of stays a backend failure rather than
+    /// being guessed at as a lock: the Credential Manager has no lock to report, and on a keychain
+    /// it would send a user off to unlock a store that is already open.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
+    #[test]
+    fn a_platform_failure_with_no_readable_status_stays_a_backend_failure() {
+        let err = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("something")));
+        assert!(matches!(
+            map_error(&err, "read"),
+            SecretsError::Backend { step: "read" }
+        ));
+    }
+
+    /// The store path's half of the lock classification: the same three codes, through the same
+    /// downcast, arriving as the condition a caller retries after an unlock instead of as an opaque
+    /// failure. Compiled by the Apple cross-check job and run by nothing here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shut_keychain_maps_to_locked() {
+        for code in [-25308, -25293, -128] {
+            let err = keyring::Error::PlatformFailure(Box::new(
+                security_framework::base::Error::from_code(code),
+            ));
+            assert!(
+                matches!(map_error(&err, "read"), SecretsError::Locked),
+                "{code}"
+            );
         }
     }
 

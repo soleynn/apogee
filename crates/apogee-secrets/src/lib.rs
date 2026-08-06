@@ -67,10 +67,20 @@ mod probe;
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
 mod probe_native;
 
+// The Keychain status table and the reader for it. Compiled wherever a build can reach a Keychain,
+// and additionally under `cfg(test)` everywhere else, so the table runs in the ordinary test job: no
+// job in this repository has Apple hardware, and a table only Apple could execute is a table nothing
+// holds.
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))
+))]
+mod apple;
+
 pub use encrypted_file::{Consent, EncryptedFile, FileState, KdfCost, Passphrase, Unprompted};
 pub use error::SecretsError;
 pub use import::{
-    FOREIGN_SCHEMA, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, ImportSource,
+    FOREIGN_SCHEMA, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, Import, ImportSource,
 };
 pub use keyring_store::OsKeyring;
 pub use null::Null;

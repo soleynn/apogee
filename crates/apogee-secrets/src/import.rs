@@ -120,16 +120,37 @@ impl ForeignKey {
     }
 }
 
+/// What a source had for one account.
+///
+/// Three answers rather than two. "There is no reader for this source on this target" is not the
+/// same fact as "this source was read and holds nothing", and a caller that cannot tell them apart
+/// tells the user their other launcher saved no password when nothing ever looked. The two need
+/// different things done about them, so they are different values.
+///
+/// Derives nothing, for the reason [`Secret`] derives nothing: a `Debug` on the wrapper prints the
+/// password inside it the moment anything above formats the value it arrived in.
+#[non_exhaustive]
+pub enum Import {
+    /// A password this source holds for the account.
+    Password(Secret),
+    /// The source was read and holds nothing under that key.
+    Nothing,
+    /// This source cannot be read on this target, so nothing was looked at. Not a failure: the
+    /// account is fine, the store is fine, and another source may still hold the password.
+    Unsupported,
+}
+
 /// A place another launcher put a password.
 ///
 /// Read-only by design, not by omission: see the module header.
 pub trait ImportSource {
-    /// The password stored for `key`, or `Ok(None)` if this source holds none.
+    /// What this source holds for `key`.
     ///
     /// # Errors
     /// As [`SecretStore::get`](crate::SecretStore::get): the source is a store like any other and
-    /// can be locked, absent, or refuse.
-    fn password(&self, key: &ForeignKey) -> Result<Option<Secret>, SecretsError>;
+    /// can be locked, absent, or refuse. A source with no reader on this target is
+    /// [`Import::Unsupported`] rather than an error, because nothing failed.
+    fn password(&self, key: &ForeignKey) -> Result<Import, SecretsError>;
 }
 
 /// The platform credential store, read at another launcher's keys instead of at ours.
@@ -146,7 +167,7 @@ impl ForeignCredentialStore {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 impl ImportSource for ForeignCredentialStore {
-    fn password(&self, key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
+    fn password(&self, key: &ForeignKey) -> Result<Import, SecretsError> {
         use secret_service::EncryptionType;
         use secret_service::blocking::SecretService;
 
@@ -167,7 +188,7 @@ impl ImportSource for ForeignCredentialStore {
                 // the unlock prompt and then blocks on it, so the caller is told to unlock and come
                 // back instead of being told there is nothing to import.
                 if found.locked.is_empty() {
-                    Ok(None)
+                    Ok(Import::Nothing)
                 } else {
                     Err(SecretsError::Locked)
                 }
@@ -200,7 +221,7 @@ impl ImportSource for ForeignCredentialStore {
     /// a path only one platform could ever run. Here the target is not ours to choose. It is fixed
     /// by the program being read, on the one platform that program stores it, and using anything
     /// else finds nothing.
-    fn password(&self, key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
+    fn password(&self, key: &ForeignKey) -> Result<Import, SecretsError> {
         let name = key.name();
         first_readable(
             [key.legacy_credential_target(), key.credential_target()]
@@ -224,19 +245,25 @@ impl ImportSource for ForeignCredentialStore {
 /// that launcher writes today, so its condition is the live one.
 #[cfg(any(target_os = "windows", test))]
 fn first_readable(
-    reads: impl IntoIterator<Item = Result<Option<Secret>, SecretsError>>,
-) -> Result<Option<Secret>, SecretsError> {
+    reads: impl IntoIterator<Item = Result<Import, SecretsError>>,
+) -> Result<Import, SecretsError> {
     let mut failure = None;
+    let mut looked = false;
     for read in reads {
         match read {
-            Ok(Some(secret)) => return Ok(Some(secret)),
-            Ok(None) => {}
+            Ok(Import::Password(secret)) => return Ok(Import::Password(secret)),
+            Ok(Import::Nothing) => looked = true,
+            // This platform's reader never answers it, and it is the only caller. Kept separate
+            // anyway: folding it into `Nothing` would undo the distinction the type exists to draw,
+            // which is between a source that held no password and one that was never able to look.
+            Ok(Import::Unsupported) => {}
             Err(err) => failure = Some(err),
         }
     }
-    match failure {
-        Some(err) => Err(err),
-        None => Ok(None),
+    match (failure, looked) {
+        (Some(err), _) => Err(err),
+        (None, true) => Ok(Import::Nothing),
+        (None, false) => Ok(Import::Unsupported),
     }
 }
 
@@ -263,7 +290,7 @@ fn classify_credential_read(err: &keyring::Error) -> SecretsError {
 /// reader is the one call whose error carries the raw bytes back out. The decode is done here
 /// instead, so a blob that is not text becomes a condition rather than an error holding a password.
 #[cfg(target_os = "windows")]
-fn read_credential(target: &str, name: &str) -> Result<Option<Secret>, SecretsError> {
+fn read_credential(target: &str, name: &str) -> Result<Import, SecretsError> {
     use keyring::Entry;
 
     // Service and user are recorded on the credential but are not what this store looks it up by,
@@ -283,7 +310,7 @@ fn read_credential(target: &str, name: &str) -> Result<Option<Secret>, SecretsEr
             blob.zeroize();
             Ok(non_empty(decoded?))
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(keyring::Error::NoEntry) => Ok(Import::Nothing),
         Err(err) => Err(classify_credential_read(&err)),
     }
 }
@@ -292,10 +319,14 @@ fn read_credential(target: &str, name: &str) -> Result<Option<Secret>, SecretsEr
 /// not been established here, and guessing at a key would report "nothing saved" for an account that
 /// has one. The impl exists so the type is usable on every target this crate builds for, and the
 /// plaintext-file source still works. Establishing the Keychain layout is what would replace it.
+///
+/// [`Import::Unsupported`] and not [`Import::Nothing`]: the two read identically to a caller that
+/// only has an absence to report, and it would say the other launcher saved no password for an
+/// account whose password nothing ever went looking for.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 impl ImportSource for ForeignCredentialStore {
-    fn password(&self, _key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
-        Ok(None)
+    fn password(&self, _key: &ForeignKey) -> Result<Import, SecretsError> {
+        Ok(Import::Unsupported)
     }
 }
 
@@ -340,7 +371,7 @@ pub struct ForeignSecretsFile {
 
 impl ForeignSecretsFile {
     /// Read passwords from the file at `path`. A file that is not there is not an error: the lookup
-    /// answers `None`, the same as a store that holds nothing.
+    /// answers [`Import::Nothing`], the same as a store that holds nothing.
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -354,10 +385,10 @@ impl ForeignSecretsFile {
 }
 
 impl ImportSource for ForeignSecretsFile {
-    fn password(&self, key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
+    fn password(&self, key: &ForeignKey) -> Result<Import, SecretsError> {
         let mut body = match std::fs::read_to_string(&self.path) {
             Ok(body) => body,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Import::Nothing),
             Err(err) => return Err(SecretsError::Io(err)),
         };
         let parsed = serde_json::from_str::<HashMap<String, String>>(&body);
@@ -374,11 +405,12 @@ impl ImportSource for ForeignSecretsFile {
         for (_, mut password) in entries {
             password.zeroize();
         }
-        Ok(found.and_then(|mut password| {
-            let bytes = password.as_bytes().to_vec();
-            password.zeroize();
-            non_empty(bytes)
-        }))
+        let Some(mut password) = found else {
+            return Ok(Import::Nothing);
+        };
+        let bytes = password.as_bytes().to_vec();
+        password.zeroize();
+        Ok(non_empty(bytes))
     }
 }
 
@@ -387,11 +419,11 @@ impl ImportSource for ForeignSecretsFile {
 /// The other launcher deletes the entry instead of writing a blank one, so a blank is never a
 /// password a user chose. Importing it would replace a prompt the user can answer with a saved
 /// value that fails every login.
-fn non_empty(bytes: Vec<u8>) -> Option<Secret> {
+fn non_empty(bytes: Vec<u8>) -> Import {
     if bytes.iter().all(u8::is_ascii_whitespace) {
-        return None;
+        return Import::Nothing;
     }
-    Some(Secret::new(bytes))
+    Import::Password(Secret::new(bytes))
 }
 
 #[cfg(test)]
@@ -433,17 +465,17 @@ mod tests {
         }
     }
 
+    /// The one answer this helper never gives is `Unsupported`: a source that got as far as reading
+    /// bytes has a reader, whatever the bytes turned out to be.
     #[test]
     fn a_blank_stored_password_is_read_as_nothing_stored() {
-        assert!(non_empty(Vec::new()).is_none());
-        assert!(non_empty(b"   ".to_vec()).is_none());
-        assert!(non_empty(b"\t\r\n".to_vec()).is_none());
-        assert_eq!(
-            non_empty(b" pw ".to_vec())
-                .expect("a password with spaces in it")
-                .expose(),
-            b" pw "
-        );
+        for blank in [Vec::new(), b"   ".to_vec(), b"\t\r\n".to_vec()] {
+            assert!(matches!(non_empty(blank), Import::Nothing));
+        }
+        let Import::Password(found) = non_empty(b" pw ".to_vec()) else {
+            panic!("a password with spaces in it is a password");
+        };
+        assert_eq!(found.expose(), b" pw ");
     }
 
     /// The target sweep, driven with the store's answers built directly. The store it reads has one
@@ -453,16 +485,21 @@ mod tests {
         use super::*;
 
         /// What a target that held something hands back, as the decoded text it becomes.
-        fn saved(text: &str) -> Result<Option<Secret>, SecretsError> {
-            Ok(Some(Secret::new(text.as_bytes().to_vec())))
+        fn saved(text: &str) -> Result<Import, SecretsError> {
+            Ok(Import::Password(Secret::new(text.as_bytes().to_vec())))
         }
 
-        fn nothing() -> Result<Option<Secret>, SecretsError> {
-            Ok(None)
+        fn nothing() -> Result<Import, SecretsError> {
+            Ok(Import::Nothing)
+        }
+
+        /// A source that could not be read at all, which is a different answer from an empty one.
+        fn unsupported() -> Result<Import, SecretsError> {
+            Ok(Import::Unsupported)
         }
 
         /// What an undecodable blob under a target comes back as.
-        fn undecodable() -> Result<Option<Secret>, SecretsError> {
+        fn undecodable() -> Result<Import, SecretsError> {
             Err(SecretsError::Backend {
                 step: "decode the other launcher's credential",
             })
@@ -473,9 +510,11 @@ mod tests {
         /// writes today. A user whose password is under the current one gets it.
         #[test]
         fn a_target_that_does_not_read_does_not_end_the_search() {
-            let found = first_readable([undecodable(), saved("their-password")])
-                .expect("the second target is still read")
-                .expect("the password under the second target");
+            let Ok(Import::Password(found)) =
+                first_readable([undecodable(), saved("their-password")])
+            else {
+                panic!("the second target is still read");
+            };
             assert_eq!(found.expose(), b"their-password");
         }
 
@@ -484,12 +523,14 @@ mod tests {
         #[test]
         fn nothing_is_read_after_a_hit() {
             let mut probed = Vec::new();
-            let found = first_readable(["legacy", "current"].into_iter().map(|target| {
-                probed.push(target);
-                saved(target)
-            }))
-            .expect("read")
-            .expect("the password under the first target");
+            let Ok(Import::Password(found)) =
+                first_readable(["legacy", "current"].into_iter().map(|target| {
+                    probed.push(target);
+                    saved(target)
+                }))
+            else {
+                panic!("the password under the first target");
+            };
 
             assert_eq!(found.expose(), b"legacy");
             assert_eq!(probed, ["legacy"]);
@@ -499,11 +540,25 @@ mod tests {
         /// rather than a failure.
         #[test]
         fn nothing_under_either_target_is_nothing_to_import() {
-            assert!(
-                first_readable([nothing(), nothing()])
-                    .expect("read")
-                    .is_none()
-            );
+            assert!(matches!(
+                first_readable([nothing(), nothing()]),
+                Ok(Import::Nothing)
+            ));
+        }
+
+        /// A target that was looked at outranks one that could not be: "nothing saved" is a fact
+        /// about the other launcher's store, and "could not look" is a fact about this build, so the
+        /// first is the more useful answer whenever anything actually managed to read.
+        #[test]
+        fn a_source_that_could_not_look_does_not_outrank_one_that_did() {
+            assert!(matches!(
+                first_readable([unsupported(), nothing()]),
+                Ok(Import::Nothing)
+            ));
+            assert!(matches!(
+                first_readable([unsupported(), unsupported()]),
+                Ok(Import::Unsupported)
+            ));
         }
 
         /// Held back, not dropped. With no password to return there is nothing else to say, and
@@ -555,31 +610,35 @@ mod tests {
         fn a_named_account_is_found_and_the_others_are_not_returned() {
             let (_dir, path) = write(r#"{"alice":"pw-alice","bob":"pw-bob"}"#);
             let source = ForeignSecretsFile::at(&path);
-            let found = source
+            let Import::Password(found) = source
                 .password(&ForeignKey::from_stored_name("alice"))
                 .expect("read")
-                .expect("alice is in the file");
+            else {
+                panic!("alice is in the file");
+            };
             assert_eq!(found.expose(), b"pw-alice");
-            assert!(
+            assert!(matches!(
                 source
                     .password(&ForeignKey::from_stored_name("carol"))
-                    .expect("read")
-                    .is_none()
-            );
+                    .expect("read"),
+                Import::Nothing
+            ));
         }
 
         /// A user who has never turned that mode on has no file, and that is the ordinary case
-        /// rather than a failure: the importer moves on to the next source.
+        /// rather than a failure: the importer moves on to the next source. `Nothing` and not
+        /// `Unsupported`, because this source is readable everywhere and the file simply is not
+        /// there, which is a fact about the machine rather than about the target.
         #[test]
         fn a_file_that_is_not_there_holds_nothing() {
             let dir = tempfile::tempdir().expect("temp dir");
             let source = ForeignSecretsFile::at(dir.path().join("absent.json"));
-            assert!(
+            assert!(matches!(
                 source
                     .password(&ForeignKey::from_stored_name("alice"))
-                    .expect("read")
-                    .is_none()
-            );
+                    .expect("read"),
+                Import::Nothing
+            ));
         }
 
         /// The parse failure must not reach the caller carrying what it was parsing. `expect_err`
@@ -600,10 +659,12 @@ mod tests {
         #[test]
         fn a_name_stored_with_other_characters_round_trips() {
             let (_dir, path) = write(r#"{"ırssi":"pw-é"}"#);
-            let found = ForeignSecretsFile::at(&path)
+            let Import::Password(found) = ForeignSecretsFile::at(&path)
                 .password(&ForeignKey::from_stored_name("\u{131}rssi"))
                 .expect("read")
-                .expect("the account is in the file");
+            else {
+                panic!("the account is in the file");
+            };
             assert_eq!(found.expose(), "pw-\u{e9}".as_bytes());
         }
     }
@@ -639,5 +700,18 @@ mod tests {
                 Vec::<u8>::new()
             );
         }
+    }
+
+    /// The Apple target has no reader, and it has to say so rather than report an absence. This is
+    /// the only reader in the crate whose whole body is that answer, so it is the one place a later
+    /// change could quietly turn "nobody looked" back into "there was nothing". Compiled by the
+    /// Apple cross-check job and run by nothing here.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn the_apple_credential_store_reports_that_it_cannot_look() {
+        let found = ForeignCredentialStore::new()
+            .password(&ForeignKey::from_stored_name("someaccount"))
+            .expect("a source with no reader is not a failure");
+        assert!(matches!(found, Import::Unsupported));
     }
 }

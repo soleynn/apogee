@@ -41,13 +41,13 @@ pub use apogee_runtime::{
 };
 pub use apogee_secrets::{
     Backend, BackendReport, BackendState, Consent, EncryptedFile, FileState,
-    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, ImportSource, KdfCost, Passphrase,
-    Sandbox, Secret, SecretKind, SecretStore, Secrets, SecretsError, Unprompted,
+    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, Import, ImportSource, KdfCost,
+    Passphrase, Sandbox, Secret, SecretKind, SecretStore, Secrets, SecretsError, Unprompted,
 };
 pub use command::{
     Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, PrefixAction, Progress,
 };
-pub use composition::{Core, CoreConfig, ProfileRemoval};
+pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval};
 pub use error::CoreError;
 pub use model::{
     Account, AccountKind, LaunchSettings, PrefixSelection, Profile, Region, RunnerSelection,
