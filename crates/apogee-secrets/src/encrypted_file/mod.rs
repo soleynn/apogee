@@ -1086,9 +1086,14 @@ mod tests {
     fn a_store_never_prints_its_key() {
         let store = EncryptedFile::open("/nonexistent/store.apsf", Arc::new(Unprompted));
         let key = [0xAB_u8; KEY_LEN];
-        store
-            .cache()
-            .store([0xCD; SALT_LEN], KdfCost::floor(), Zeroizing::new(key));
+        *store.cache() = Some(CachedKey {
+            salt: [0xCD; SALT_LEN],
+            cost: KdfCost::floor(),
+            key: Zeroizing::new(key),
+            // Put in place rather than stored, because what is under test is one `Debug` line: this
+            // way nothing is set waiting on a handle over a path that does not exist.
+            expires_at: u64::MAX,
+        });
         let rendered = format!("{store:?}");
         assert!(rendered.contains("open: true"), "{rendered}");
         assert!(!rendered.contains("ab"), "{rendered}");
