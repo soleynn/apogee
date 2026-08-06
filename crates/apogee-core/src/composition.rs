@@ -16,7 +16,7 @@ use apogee_addons::{AddonError, AddonPaths, Addons};
 use crate::addons::AddonBackend;
 use crate::addons::addons_backend::AddonsBackend;
 use apogee_fetch::Fetcher;
-use apogee_otp::Otp;
+use apogee_otp::{Deviation, Otp, TotpParams};
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::{
@@ -36,7 +36,7 @@ use crate::flow::{self, FlowContext};
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
-use crate::model::{Account, Profile, SecretBackend, Settings};
+use crate::model::{Account, OtpDelivery, Profile, SecretBackend, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
 use crate::steam::{NoSteam, SteamBackend};
@@ -582,15 +582,45 @@ impl Core {
     /// keyring must still be able to delete its accounts, but it is not a clean sweep either and a
     /// caller has to be able to say which happened.
     ///
+    /// The one-time password stays on, and goes back to being typed. A sweep takes the secret a code
+    /// was derived from, so an account left pointing at one would be gated on a code nothing can
+    /// produce: told a code is needed and never asked for one.
+    ///
     /// # Errors
     /// Returns [`CoreError::Secrets`] if the sweep failed in a way that could have left a secret
-    /// behind.
+    /// behind, or a [`CoreError::Store`] if the account record could not be rewritten.
     pub fn forget_secrets(&self, account: Uuid) -> Result<bool, CoreError> {
+        // Whatever the store answers, this process stops remembering which code the account last
+        // submitted: the secret those digits came from is on its way out, and a record kept past it
+        // would delay the first code a re-imported secret produces.
+        self.otp.forget(account);
+        // Ahead of the sweep, the mirror of the rule importing follows. An account asking for a code
+        // it could still derive is a wasted prompt; an account deriving one from a secret that was
+        // deleted cannot log in at all, so the flag moves first and the deletion follows it.
+        self.ask_for_typed_codes(account)?;
         match self.secrets.store().forget_account(account) {
             Ok(()) => Ok(true),
             Err(err) if could_hold_secrets(&err) => Err(err.into()),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Point `account` back at a typed code, if it was set to derive one.
+    ///
+    /// An account that was never there, or was already asking, is left alone: this runs on the way
+    /// out of an account being deleted as well as on a plain sweep.
+    fn ask_for_typed_codes(&self, account: Uuid) -> Result<(), CoreError> {
+        let mut record = match self.store.load_account(account) {
+            Ok(record) => record,
+            Err(StoreError::NotFound { .. }) => return Ok(()),
+            Err(other) => return Err(other.into()),
+        };
+        if record.otp_delivery == OtpDelivery::Ask {
+            return Ok(());
+        }
+        record.otp_delivery = OtpDelivery::Ask;
+        self.store.save_account(&record)?;
+        Ok(())
     }
 
     /// Where the sealed-file secret store keeps its file.
@@ -677,6 +707,47 @@ impl Core {
             // answer that claims the least.
             _ => Ok(ImportOutcome::Nothing),
         }
+    }
+
+    /// Save `offered` as the secret `account`'s one-time passwords are derived from, and switch the
+    /// account over to deriving them.
+    ///
+    /// Answers with every parameter of the offered secret the login server will not accept a code
+    /// from. An empty answer is the ordinary case; a non-empty one is stored exactly as it was given
+    /// rather than rewritten, so a user with a genuinely unusual secret gets an explanation instead
+    /// of silently wrong codes.
+    ///
+    /// Write-only like every other secret here: there is no matching read, and the code is derived
+    /// inside the login flow.
+    ///
+    /// Importing also turns the one-time password on for the account and points it at the stored
+    /// secret. Nothing else toggles either, so a secret imported without them would be one the login
+    /// gate never consults. The flags move only after the write succeeds: set over a failed store
+    /// they would gate every login on a code nothing can derive.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoAccount`] if there is no such account, [`CoreError::Secrets`] with
+    /// [`SecretsError::NotStoring`] if the account keeps nothing, [`CoreError::Otp`] if the text is
+    /// not a usable secret, or the store's own failure.
+    pub fn import_totp_secret(
+        &self,
+        account: Uuid,
+        offered: &str,
+    ) -> Result<Vec<Deviation>, CoreError> {
+        // Refused before anything is parsed, matching `import_password`: an account whose whole
+        // setting is that nothing is kept should not have a shared secret decoded into this process
+        // on its behalf.
+        if self.account_or_missing(account)?.never_store {
+            return Err(SecretsError::NotStoring.into());
+        }
+        let params = TotpParams::parse(offered)?;
+        let deviations = params.deviations();
+        self.store_secret(account, SecretKind::TotpSecret, params.into_secret())?;
+        let mut record = self.account_or_missing(account)?;
+        record.use_otp = true;
+        record.otp_delivery = OtpDelivery::Generate;
+        self.store.save_account(&record)?;
+        Ok(deviations)
     }
 
     /// Back up the game config in `profile`'s prefix, then prune to the retention setting.
@@ -807,6 +878,7 @@ impl Core {
             launch: self.launch.clone(),
             addons: self.addons.clone(),
             steam: self.steam.clone(),
+            otp: self.otp.clone(),
             store: self.store.clone(),
             clock: self.clock.clone(),
             computer_id: self.computer_id,
@@ -1000,6 +1072,7 @@ mod tests {
 
         use super::*;
         use crate::ImportOutcome;
+        use crate::model::OtpDelivery;
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
         fn core_with(store: Arc<MemoryStore>) -> (TempDir, Core) {
@@ -1332,6 +1405,251 @@ mod tests {
 
             assert_eq!(outcome, ImportOutcome::Unsupported);
             assert!(store.is_empty());
+        }
+
+        /// The example key from the format's own documentation, doubled to reach the length a key
+        /// has to be. Synthetic, and the only secret these tests use.
+        fn offered_secret() -> &'static str {
+            "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+        }
+
+        /// Refused before the text is parsed at all, matching the password import. An account whose
+        /// whole setting is that nothing is kept should not have a shared secret decoded into this
+        /// process on its behalf, and the refusal is a local record lookup.
+        #[test]
+        fn an_account_that_keeps_nothing_refuses_a_one_time_password_secret() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                never_store: true,
+                ..Account::new("keeps nothing", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+
+            let err = core
+                .import_totp_secret(account.id, offered_secret())
+                .unwrap_err();
+
+            assert!(
+                matches!(err, CoreError::Secrets(SecretsError::NotStoring)),
+                "{err:?}"
+            );
+            assert!(store.calls().is_empty(), "the refusal reached the store");
+            assert!(!core.account(account.id).unwrap().use_otp);
+        }
+
+        /// Text that is not a usable secret is refused where it is read, so nothing lands in the
+        /// store and no flag moves. An account left set to generate from a secret that failed to
+        /// store would be gated on a code nothing can derive.
+        #[test]
+        fn text_that_is_not_a_secret_leaves_the_account_alone() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            let err = core
+                .import_totp_secret(account.id, "https://example.invalid/not-a-secret")
+                .unwrap_err();
+
+            assert!(matches!(err, CoreError::Otp(_)), "{err:?}");
+            assert!(store.calls().is_empty(), "the refusal reached the store");
+            let saved = core.account(account.id).unwrap();
+            assert!(!saved.use_otp);
+            assert_eq!(saved.otp_delivery, OtpDelivery::Ask);
+        }
+
+        /// Importing is the verb that turns the one-time password on and points it at the stored
+        /// secret. Nothing else moves either flag, so a secret imported without them would be one
+        /// the login gate never consults.
+        #[test]
+        fn an_imported_secret_switches_the_account_to_generating() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            let deviations = core
+                .import_totp_secret(account.id, offered_secret())
+                .unwrap();
+
+            assert!(deviations.is_empty(), "{deviations:?}");
+            let saved = core.account(account.id).unwrap();
+            assert!(saved.use_otp);
+            assert_eq!(saved.otp_delivery, OtpDelivery::Generate);
+            let stored = store.stored(account.id, SecretKind::TotpSecret).unwrap();
+            let stored = String::from_utf8(stored).unwrap();
+            assert!(stored.contains(offered_secret()), "{stored}");
+            assert!(stored.contains("digits=6"), "{stored}");
+            assert_eq!(
+                store.calls(),
+                vec![Call::Set(account.id, SecretKind::TotpSecret)],
+                "nothing else in the store was touched"
+            );
+        }
+
+        /// A secret whose parameters the login server will not take is stored exactly as it was
+        /// given and reported, never quietly rewritten to the ones that would be accepted: rewriting
+        /// produces wrong codes with nothing said, and the answer a user needs is that this secret
+        /// is for somewhere else.
+        #[test]
+        fn a_secret_the_login_server_will_not_take_is_stored_as_given_and_reported() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            let offered = format!(
+                "otpauth://totp/Example:me?secret={}&algorithm=SHA512&digits=8&period=60",
+                offered_secret()
+            );
+            let deviations = core.import_totp_secret(account.id, &offered).unwrap();
+
+            assert_eq!(deviations.len(), 3, "{deviations:?}");
+            let stored =
+                String::from_utf8(store.stored(account.id, SecretKind::TotpSecret).unwrap())
+                    .unwrap();
+            assert!(stored.contains("algorithm=SHA512"), "{stored}");
+            assert!(stored.contains("digits=8"), "{stored}");
+            assert!(stored.contains("period=60"), "{stored}");
+            // The label the user's export carried does not travel into the store.
+            assert!(!stored.contains("Example"), "{stored}");
+        }
+
+        /// Every regular file under `root`, as bytes. A helper rather than a walk inlined in the
+        /// test, and it answers with what it managed to read rather than unwrapping its way there.
+        fn files_under(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+            let mut found = Vec::new();
+            let mut pending = vec![root.to_path_buf()];
+            while let Some(directory) = pending.pop() {
+                let Ok(entries) = std::fs::read_dir(&directory) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else if let Ok(bytes) = std::fs::read(&path) {
+                        found.push((path, bytes));
+                    }
+                }
+            }
+            found
+        }
+
+        /// Importing writes the secret to the store and to nowhere else. The account record is the
+        /// one thing importing also touches, and it is the one thing a front end may read back, so a
+        /// field that carried any of the secret would put it in a settings file that is not
+        /// encrypted, is not swept by forgetting an account, and is the file a bug report attaches.
+        ///
+        /// Asserted over the whole tree rather than over the account file, because the point is that
+        /// there is no second copy anywhere, and a cache written beside it would be a new file.
+        #[test]
+        fn an_imported_secret_reaches_the_store_and_no_file_on_disk() {
+            let store = Arc::new(MemoryStore::new());
+            let (dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            core.import_totp_secret(account.id, offered_secret())
+                .unwrap();
+
+            assert!(store.stored(account.id, SecretKind::TotpSecret).is_some());
+            let written = files_under(dir.path());
+            assert!(!written.is_empty(), "the account file was never written");
+            for (path, bytes) in written {
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    !text.contains(offered_secret()),
+                    "the secret reached {}",
+                    path.display()
+                );
+            }
+
+            // Nor does the one record a front end reads back carry it, in any rendering.
+            let saved = core.account(account.id).unwrap();
+            assert!(!format!("{saved:?}").contains(offered_secret()));
+            assert!(saved.use_otp);
+        }
+
+        /// A sweep takes the secret and the setting that pointed at it together.
+        ///
+        /// Left behind, the setting says a code is derived from something that is no longer there:
+        /// a shell reading it asks for nothing, the flow can mint nothing, and the login stops on
+        /// needing a code that nobody is ever asked for. The one-time password stays on, because the
+        /// account still has one; it goes back to being typed.
+        #[test]
+        fn forgetting_the_secrets_puts_the_account_back_to_typing_its_code() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            core.import_totp_secret(account.id, offered_secret())
+                .unwrap();
+
+            assert!(core.forget_secrets(account.id).unwrap());
+
+            let saved = core.account(account.id).unwrap();
+            assert!(
+                saved.use_otp,
+                "the account stopped using a one-time password"
+            );
+            assert_eq!(saved.otp_delivery, OtpDelivery::Ask);
+            assert!(store.stored(account.id, SecretKind::TotpSecret).is_none());
+
+            // And importing again is still the way back to generating them.
+            core.import_totp_secret(account.id, offered_secret())
+                .unwrap();
+            assert_eq!(
+                core.account(account.id).unwrap().otp_delivery,
+                OtpDelivery::Generate
+            );
+        }
+
+        /// A sweep for an account that was already typing its codes leaves the record alone, and one
+        /// for an account that is not there at all is still a sweep: forgetting runs on the way out
+        /// of deleting an account, after which there is no record to rewrite.
+        #[test]
+        fn forgetting_the_secrets_of_an_account_with_no_record_still_sweeps() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            assert!(core.forget_secrets(Uuid::from_u128(0x9e4e4)).unwrap());
+
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            assert!(core.forget_secrets(account.id).unwrap());
+            assert_eq!(
+                core.account(account.id).unwrap(),
+                account,
+                "an account already typing its codes was rewritten"
+            );
+        }
+
+        /// The flags move only after the secret is written. Set over a store that refused, they
+        /// would gate every login on a code nothing can derive, and the store the write failed
+        /// against is exactly the store that cannot answer the next mint either.
+        #[test]
+        fn a_secret_that_could_not_be_stored_moves_no_flag() {
+            let store = Arc::new(
+                MemoryStore::new().failing_with(FailAt::Set(Some(SecretKind::TotpSecret)), || {
+                    SecretsError::Locked
+                }),
+            );
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            let err = core
+                .import_totp_secret(account.id, offered_secret())
+                .unwrap_err();
+
+            assert!(
+                matches!(err, CoreError::Secrets(SecretsError::Locked)),
+                "{err:?}"
+            );
+            let saved = core.account(account.id).unwrap();
+            assert!(!saved.use_otp);
+            assert_eq!(saved.otp_delivery, OtpDelivery::Ask);
         }
     }
 }

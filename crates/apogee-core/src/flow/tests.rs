@@ -2,10 +2,10 @@
 //! backend, plus the session-cache fast path. No network, no real process.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use apogee_otp::OtpSource;
-use apogee_secrets::Secret;
+use apogee_otp::{ClockSkew, Otp, OtpSource, TotpParams};
+use apogee_secrets::{MemoryStore, Secret, SecretKind, SecretStore};
 use apogee_test_support::login_fixtures as fx;
 use apogee_test_support::sandbox::build_game_install;
 use apogee_test_support::transport::FixtureTransport;
@@ -156,12 +156,38 @@ fn context_with_steam(
     steam: Arc<dyn SteamBackend>,
     now: u64,
 ) -> FlowContext {
+    context_with_otp(
+        h,
+        transport,
+        patch,
+        launch,
+        addons,
+        steam,
+        Otp::new(Arc::new(MemoryStore::new())),
+        now,
+    )
+}
+
+/// Like [`context_with_steam`], but over a caller-built one-time-password handle, so a test can seed
+/// the store it reads from before the flow runs.
+#[allow(clippy::too_many_arguments)]
+fn context_with_otp(
+    h: &Harness,
+    transport: Arc<dyn Transport>,
+    patch: Arc<dyn PatchBackend>,
+    launch: Arc<dyn LaunchBackend>,
+    addons: Arc<dyn AddonBackend>,
+    steam: Arc<dyn SteamBackend>,
+    otp: Otp,
+    now: u64,
+) -> FlowContext {
     FlowContext {
         transport,
         patch,
         launch,
         addons,
         steam,
+        otp,
         store: h.store.clone(),
         clock: Arc::new(move || now),
         computer_id: host::computer_id(),
@@ -322,6 +348,251 @@ async fn use_otp_without_a_usable_code_asks_for_one_before_any_request() {
 
     assert_eq!(states(&events), [FlowState::NeedsOtp]);
     assert_eq!(transport.recorded().len(), 0, "no request before the OTP");
+}
+
+/// The base32 secret these tests derive codes from: the example key from the format's own
+/// documentation, doubled to reach the length a key has to be. Synthetic, and never a real one.
+fn totp_seed() -> &'static str {
+    "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+}
+
+/// A one-time-password handle over an in-memory store already holding `account`'s secret, so a login
+/// derives a code with no keyring anywhere near it.
+fn otp_with_secret(account: Uuid) -> Otp {
+    let store = MemoryStore::new();
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    store
+        .set(account, SecretKind::TotpSecret, params.into_secret())
+        .unwrap();
+    Otp::new(Arc::new(store))
+}
+
+/// A context over the usual fakes, with the caller's one-time-password handle.
+fn context_otp(h: &Harness, transport: Arc<dyn Transport>, otp: Otp, now: u64) -> FlowContext {
+    context_with_otp(
+        h,
+        transport,
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        Arc::new(FakeAddons::new()),
+        Arc::new(NoSteam),
+        otp,
+        now,
+    )
+}
+
+/// The one-time-password field of the recorded OAuth submit, which is the third request of a login.
+fn submitted_otp(transport: &FixtureTransport) -> Option<String> {
+    let recorded = transport.recorded();
+    let body = recorded.get(2)?.body.as_ref()?.as_bytes().to_vec();
+    String::from_utf8_lossy(&body)
+        .split('&')
+        .find_map(|field| field.strip_prefix("otppw=").map(str::to_owned))
+}
+
+/// The zero-interaction case: an account set to generate logs in from what is stored, with nothing
+/// asked for and nothing typed.
+#[tokio::test]
+async fn a_stored_secret_logs_in_without_asking_for_a_code() {
+    let h = harness(true);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_with_secret(h.account), NOW);
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Totp,
+        },
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert!(
+        !states(&events).contains(&FlowState::NeedsOtp),
+        "a stored secret was still asked about: {:?}",
+        states(&events)
+    );
+    let sent = submitted_otp(&transport).expect("a generated code was submitted");
+    assert_eq!(sent.len(), 6, "{sent}");
+    assert!(sent.bytes().all(|b| b.is_ascii_digit()), "{sent}");
+    assert_eq!(
+        h.store
+            .load_uid_cache(h.account)
+            .unwrap()
+            .unwrap()
+            .unique_id,
+        UNIQUE_ID
+    );
+}
+
+/// Hold until the current window has at least `least` seconds left in it.
+///
+/// The tests below seed or spend a code for one window and the login has to land in that same
+/// window, so a boundary crossed in between would decide the outcome instead of the guard.
+fn away_from_a_window_boundary(least: u64) {
+    loop {
+        let elapsed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let left = 30 - (elapsed % 30);
+        if left >= least {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(left));
+    }
+}
+
+/// How long a run said it was holding for, if it said so at all.
+fn otp_hold(events: &[Event]) -> Option<u64> {
+    states(events).into_iter().find_map(|state| match state {
+        FlowState::WaitingForOtpWindow { seconds } => Some(seconds),
+        _ => None,
+    })
+}
+
+/// A code the login server has already seen is not sent a second time. The flow says how long it is
+/// holding for, holds for exactly that long, and then sends the next window's code, which is what
+/// the guard exists to produce.
+///
+/// Virtual time, so the wait costs the suite nothing and the clock the assertion reads is the one
+/// the sleep ran on. The seeded record is what a login that had just happened would have left
+/// behind.
+#[tokio::test(start_paused = true)]
+async fn a_code_the_server_has_seen_is_not_sent_again() {
+    let h = harness(true);
+    away_from_a_window_boundary(5);
+
+    let otp = otp_with_secret(h.account);
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    let already = params.code(SystemTime::now(), ClockSkew::NONE).unwrap();
+    let repeat = already.expose().to_owned();
+    otp.submitted(h.account, &already);
+
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp, NOW);
+
+    let started = tokio::time::Instant::now();
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Totp,
+        },
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let waited = otp_hold(&events).expect("the flow should have said it was holding");
+    // The record was seeded for the current window and the guard steps over one window at a time,
+    // so the hold is what is left of this one: real, and exactly what was narrated.
+    assert!((1..=30).contains(&waited), "held for {waited} seconds");
+    assert_eq!(
+        elapsed.as_secs(),
+        waited,
+        "the run narrated a {waited}s hold and took {elapsed:?}"
+    );
+    let sent = submitted_otp(&transport).expect("a generated code was submitted");
+    assert_ne!(
+        sent, repeat,
+        "the code the server already saw was sent again"
+    );
+}
+
+/// A second login in the same window does not send the same code again.
+///
+/// The guard only works if the flow records what it put on the wire, and the record is written by
+/// the login rather than by the mint: a code that reached the server has been seen whether or not
+/// the login succeeded. Two runs through one handle, which is what the composition root hands every
+/// login of a session.
+#[tokio::test(start_paused = true)]
+async fn a_second_login_in_one_window_sends_a_different_code() {
+    let h = harness(true);
+    away_from_a_window_boundary(5);
+    let otp = otp_with_secret(h.account);
+
+    let first_transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let events = run(
+        context_otp(&h, first_transport.clone(), otp.clone(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Totp,
+        },
+    )
+    .await;
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert!(otp_hold(&events).is_none(), "the first login held");
+    let first = submitted_otp(&first_transport).expect("a generated code was submitted");
+
+    let second_transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let events = run(
+        context_otp(&h, second_transport.clone(), otp, NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Totp,
+        },
+    )
+    .await;
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let second = submitted_otp(&second_transport).expect("a generated code was submitted");
+
+    assert_ne!(
+        first, second,
+        "the code the first login sent was sent again, so nothing recorded it"
+    );
+    assert!(
+        otp_hold(&events).is_some(),
+        "the second login sent a different code without saying it had held"
+    );
+}
+
+/// A run stopped while it holds for the next window stops there.
+///
+/// The hold is the only wall-clock wait in a login and the one moment a shell tells a user to sit
+/// still, so it is the moment cancel gets pressed. Ignoring the token there would spend the whole
+/// hold, log in anyway, and cache a session for a run that was stopped.
+#[tokio::test(start_paused = true)]
+async fn a_run_stopped_while_it_holds_never_logs_in() {
+    let h = harness(true);
+    away_from_a_window_boundary(5);
+
+    let otp = otp_with_secret(h.account);
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    let already = params.code(SystemTime::now(), ClockSkew::NONE).unwrap();
+    otp.submitted(h.account, &already);
+
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp, NOW);
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let events = run_with_cancel(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Totp,
+        },
+        cancel,
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert!(
+        states(&events).contains(&FlowState::Cancelled),
+        "{:?}",
+        states(&events)
+    );
+    assert!(
+        transport.recorded().is_empty(),
+        "a stopped run still talked to the login server"
+    );
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_none());
 }
 
 #[tokio::test]

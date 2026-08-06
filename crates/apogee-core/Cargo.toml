@@ -37,6 +37,9 @@ apogee-test-support = { path = "../apogee-test-support" }
 # `testing`: that feature gates tests that drive whatever provider is on the session bus, and
 # depending on it here would unify it on for every workspace run and start raising unlock prompts.
 apogee-secrets = { path = "../apogee-secrets", features = ["mock"] }
+# test-util adds paused virtual time, so the flow's wait for the next one-time-password window costs
+# the suite nothing to drive.
+tokio = { workspace = true, features = ["test-util"] }
 insta.workspace = true
 rstest.workspace = true
 proptest.workspace = true
