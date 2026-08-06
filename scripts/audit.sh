@@ -200,6 +200,21 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios; do
   fi
 done
 
+# 10. Unsafe code has exactly one home. The workspace lint is `deny` rather than `forbid` so that the
+#    Windows arm of the fallback secret store can set an owner-only access list through advapi32,
+#    which the standard library has no API for. `deny` is overridable where `forbid` was not, and the
+#    relaxation reaches every test target in the workspace besides, so the shape it bought is checked
+#    here rather than left to the lint. Crate roots still carry their own attribute, which is the
+#    line the `unsafe_code` filter drops; a comment that merely says the word is dropped separately.
+unsafe_home='crates/apogee-secrets/src/encrypted_file/disk.rs'
+hits=$(grep -rnE '\bunsafe\b' crates/*/src apps/*/src --include='*.rs' \
+  | grep -v "^$unsafe_home:" | grep -v 'unsafe_code' \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)' || true)
+[ -z "$hits" ] || report "unsafe outside the secret store's Windows permission arm" "$hits"
+grep -qE '^mod win_acl \{$' "$unsafe_home" \
+  || report "the one module allowed to hold unsafe is gone; the workspace lint can go back to forbid" \
+     "$unsafe_home"
+
 # Informational: remaining stub markers (never fails).
 printf 'stub markers (todo!/unimplemented!): %s\n' \
   "$(grep -roE 'todo!|unimplemented!' crates/*/src --include='*.rs' | wc -l | tr -d ' ')"

@@ -309,21 +309,349 @@ fn private_file(options: &mut OpenOptions) {
     options.mode(0o600);
 }
 
-/// On this platform the file inherits the directory's access rules, and the launcher's own directory
-/// is already restricted to the user. There is no mode to set and nothing to narrow.
-#[cfg(not(unix))]
+/// Make sure the directory the store lives in exists and that nothing but its owner can reach it.
+///
+/// Windows has no mode bits. What decides access is the directory's DACL, and a directory created
+/// under a wide parent inherits that parent's inheritable entries verbatim: under a drive root that
+/// is `BUILTIN\Users:(I)(RX)` and `NT AUTHORITY\Authenticated Users:(I)(M)`, which lets every local
+/// account copy the sealed file and grind the passphrase offline, and lets any authenticated account
+/// overwrite it, turning a whole-file rollback into something another user can do. So the directory
+/// gets a *protected* DACL, protected being the flag that stops inheritance, holding one entry: full
+/// control for the directory's own owner, inheritable by everything created inside it. The owner
+/// rather than whoever is running, because that is what a mode names on the other arm.
+///
+/// Re-applied on every call rather than only to a directory this creates, for the reason the unix
+/// arm repairs a mode both ways: a store made by an earlier build, or restored by a tool that
+/// dropped the entries, would otherwise stay readable for the rest of its life with nothing to say
+/// so. It is a no-op when the entry is already the one wanted, so a healthy store is never written.
+#[cfg(windows)]
 pub(crate) fn private_dir(path: &Path) -> Result<(), SecretsError> {
     let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
         return Ok(());
     };
-    std::fs::create_dir_all(parent).map_err(map_io)
+    std::fs::create_dir_all(parent).map_err(map_io)?;
+    if is_root(parent) {
+        return Ok(());
+    }
+    win_acl::own_only(parent, win_acl::Inherit::Yes)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn narrow_file(_path: &Path) {}
+/// Whether `dir` is a volume root, which this arm creates under and never re-permissions.
+///
+/// Narrowing `C:\` is damage rather than repair, and it is not a directory this crate would have
+/// created: it is whatever the caller's path happened to sit on. So a drive root keeps what it had,
+/// and the store's own directory below it is the one that gets an owner-only list. Nothing a shipped
+/// launcher composes puts a store at a root; the only paths that do are a caller's own choosing.
+#[cfg(windows)]
+fn is_root(dir: &Path) -> bool {
+    dir.parent().is_none()
+}
 
-#[cfg(not(unix))]
+/// Narrow the store itself if something widened it, and take the read-only attribute back off.
+///
+/// Two repairs, because Windows has two ways to leave the store unwritable. The attribute is the one
+/// that bricks it: `publish` replaces the file by rename, and a rename over a file carrying
+/// `FILE_ATTRIBUTE_READONLY` fails with access denied every time, so a restore, read-only media or
+/// one `attrib +R` leaves every write answering `Denied` for good while reads go on working. The
+/// entry list is the other: a file restored with explicit entries of its own carries them into a
+/// directory whose inheritance never gets to override them.
+///
+/// Best effort, like the unix arm. The contents are sealed either way, so a file that will not
+/// narrow is not a reason to refuse the operation and strand the user.
+#[cfg(windows)]
+pub(crate) fn narrow_file(path: &Path) {
+    clear_readonly(path);
+    let _ = win_acl::own_only(path, win_acl::Inherit::No);
+}
+
+/// Nothing to set on the open, and nothing that needs to be.
+///
+/// The standard library cannot hand a `SECURITY_ATTRIBUTES` to `CreateFile`, so there is no mode to
+/// put on the open the way the unix arm does. It is not the mechanism here anyway: a file created in
+/// a directory whose DACL is protected and owner-only inherits that one entry and nothing else, and
+/// `private_dir` runs ahead of every path that creates one. What this arm used to assert, that the
+/// launcher's own directory is already restricted to the user, is now something the crate does
+/// rather than something it takes on faith about a path its caller chose.
+#[cfg(windows)]
 fn private_file(_options: &mut OpenOptions) {}
+
+/// Take `FILE_ATTRIBUTE_READONLY` back off, so a rename over the file can land.
+///
+/// The rename is the only case that needs it. An unlink does not, because the standard library
+/// clears the attribute itself before removing a file on this platform, which is measured rather
+/// than assumed: `a_read_only_store_deletes_without_help` is what holds that.
+///
+/// Refuses anything at the name that is not a regular file, for the reason the read path does: the
+/// permission set here follows a symlink, and the store path is the caller's.
+///
+/// The lint below is the unix hazard: clearing the flag there sets every write bit, world included.
+/// This arm is Windows-only, where the flag is one attribute and clearing it grants nobody anything.
+#[cfg(windows)]
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "one attribute on Windows; the world-writable outcome is the unix arm's, and this is \
+              not compiled there"
+)]
+fn clear_readonly(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if !meta.is_file() {
+        return;
+    }
+    let mut perms = meta.permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+/// The Win32 behind the Windows arm above.
+///
+/// The one place in this workspace that leaves safe Rust, and the reason this crate is
+/// `deny(unsafe_code)` where every other crate root is `forbid`: the standard library exposes no
+/// security-descriptor API, and on Windows the security descriptor is the whole of what a mode is on
+/// unix. `scripts/audit.sh` fails on an `unsafe` block anywhere else.
+///
+/// Every call is `advapi32` through Microsoft's own bindings, there is no pointer arithmetic, and
+/// the two blocks the conversions allocate are freed by [`LocalBlock`] rather than by hand.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "the security descriptor has no safe-Rust equivalent"
+)]
+mod win_acl {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree, WIN32_ERROR};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+        SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, OBJECT_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+    use windows_sys::core::PWSTR;
+
+    use super::map_io;
+    use crate::SecretsError;
+
+    /// Whether the entry also has to reach what is created inside the object.
+    pub(super) enum Inherit {
+        /// A directory: object- and container-inherit, so every file and directory made in it starts
+        /// with the same one entry.
+        Yes,
+        /// A file: nothing is created inside it, so the entry carries no inheritance flags.
+        No,
+    }
+
+    /// Give `path` a protected access list naming nobody but `path`'s own owner.
+    ///
+    /// Protected is what makes this a narrowing rather than an addition: it drops the parent's
+    /// inherited entries, so the one written here is the whole list. Reads the current list first
+    /// and returns without writing when it already matches, which is the common case on every call
+    /// after the first.
+    pub(super) fn own_only(path: &Path, inherit: Inherit) -> Result<(), SecretsError> {
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+
+        let current = read(
+            &name,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        )?;
+        let owner = sddl(&current, OWNER_SECURITY_INFORMATION)?;
+        let Some(sid) = owner.strip_prefix("O:") else {
+            return Err(unreadable());
+        };
+        // `FA` is full control. `OI` and `CI` are the two inheritance flags, which is what `icacls`
+        // prints as `(OI)(CI)(F)`.
+        let flags = match inherit {
+            Inherit::Yes => "OICI",
+            Inherit::No => "",
+        };
+        let wanted = format!("(A;{flags};FA;;;{sid})");
+        let rendered = sddl(&current, DACL_SECURITY_INFORMATION)?;
+        let (control, entries) = split_dacl(&rendered);
+        if control.contains('P') && entries == wanted {
+            return Ok(());
+        }
+        drop(current);
+
+        write(&name, &parse(&format!("D:P{wanted}"))?)
+    }
+
+    /// A rendered access list split into its control flags and its entries.
+    ///
+    /// The flags are the descriptor's own state, `P` for protected and `AI` for auto-inherited, and
+    /// Windows sets `AI` itself on the way in. Folding them into the comparison above would make the
+    /// already-narrow check never match and rewrite the list on every call for the rest of the
+    /// store's life.
+    fn split_dacl(rendered: &str) -> (&str, &str) {
+        let body = rendered.strip_prefix("D:").unwrap_or(rendered);
+        match body.find('(') {
+            Some(at) => body.split_at(at),
+            None => (body, ""),
+        }
+    }
+
+    /// A block one of these calls allocated with `LocalAlloc`, released once when it goes out of
+    /// scope. The pointers read out of a descriptor point *into* it, so the block has to outlive
+    /// them, which is what makes this worth a type rather than a call at each exit.
+    struct LocalBlock(*mut c_void);
+
+    impl Drop for LocalBlock {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: the pointer came from a call documented to return `LocalAlloc`ed memory,
+                // this is the only owner of it, and `Drop` runs once.
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+
+    /// The named object's security descriptor, holding whatever `what` asked for.
+    fn read(name: &[u16], what: OBJECT_SECURITY_INFORMATION) -> Result<LocalBlock, SecretsError> {
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `name` is a NUL-terminated UTF-16 path that outlives the call, `descriptor` is a
+        // live out-pointer, and the four out-parameters not asked for are optional and passed null.
+        // On success the descriptor is `LocalAlloc`ed and becomes `LocalBlock`'s to free.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                what,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &raw mut descriptor,
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(LocalBlock(descriptor))
+        } else {
+            Err(win32(status))
+        }
+    }
+
+    /// One component of `descriptor` in SDDL, the text form `icacls` and PowerShell also speak.
+    ///
+    /// Asked for one component at a time so the answer needs no parsing: `O:` alone is the owner and
+    /// `D:` alone is the access list, where a descriptor rendered whole would have to be split.
+    fn sddl(
+        descriptor: &LocalBlock,
+        what: OBJECT_SECURITY_INFORMATION,
+    ) -> Result<String, SecretsError> {
+        let mut text: PWSTR = ptr::null_mut();
+        let mut units = 0u32;
+        // SAFETY: the descriptor is alive for the call, and both out-pointers are live locals. On
+        // success `text` is a `LocalAlloc`ed UTF-16 string of `units` characters.
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.0,
+                SDDL_REVISION_1,
+                what,
+                &raw mut text,
+                &raw mut units,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        let text = LocalBlock(text.cast());
+        let len = units as usize;
+        // SAFETY: the call reported `units` characters at `text`, which is alive here and is not
+        // written through anywhere.
+        let rendered = unsafe { std::slice::from_raw_parts(text.0.cast::<u16>(), len) };
+        // The length is documented without the terminator. Trimmed rather than trusted either way,
+        // because a NUL riding along would sit inside every string `own_only` compares.
+        let rendered = rendered.strip_suffix(&[0]).unwrap_or(rendered);
+        String::from_utf16(rendered).map_err(|_| unreadable())
+    }
+
+    /// An SDDL access list back into a descriptor.
+    fn parse(text: &str) -> Result<LocalBlock, SecretsError> {
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `text` is a NUL-terminated UTF-16 buffer that outlives the call, the revision is
+        // the only one this API defines, `descriptor` is a live out-pointer, and the size
+        // out-parameter is optional and passed null.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        Ok(LocalBlock(descriptor))
+    }
+
+    /// Put `descriptor`'s access list onto the named object, protected against inheritance.
+    fn write(name: &[u16], descriptor: &LocalBlock) -> Result<(), SecretsError> {
+        let mut acl: *mut ACL = ptr::null_mut();
+        let mut present = 0;
+        let mut defaulted = 0;
+        // SAFETY: the descriptor is the one `parse` built and is alive here, and the three
+        // out-pointers are live locals. `acl` comes back pointing into the descriptor.
+        let ok = unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.0,
+                &raw mut present,
+                &raw mut acl,
+                &raw mut defaulted,
+            )
+        };
+        if ok == 0 || present == 0 {
+            return Err(unreadable());
+        }
+
+        // SAFETY: `name` is a NUL-terminated UTF-16 path, `acl` points into `descriptor`, which
+        // outlives the call, and the owner, group and audit parameters are null because only the
+        // access list is being set. The call copies what it is handed and keeps no pointer.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl,
+                ptr::null(),
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(win32(status))
+        }
+    }
+
+    /// A Win32 status through the same taxonomy the filesystem errors take, so access denied on the
+    /// access list reads as `Denied` exactly as access denied on an open does.
+    fn win32(status: WIN32_ERROR) -> SecretsError {
+        map_io(std::io::Error::from_raw_os_error(status as i32))
+    }
+
+    /// The thread's last error, for the calls that report failure with a bool.
+    fn last_error() -> SecretsError {
+        map_io(std::io::Error::last_os_error())
+    }
+
+    /// A descriptor that came back well-formed enough to succeed and not well-formed enough to use.
+    fn unreadable() -> SecretsError {
+        SecretsError::Backend {
+            step: "read the secret store's access list",
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -419,5 +747,192 @@ mod tests {
             std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    /// One SDDL component of what `path` carries, read back through the platform's own tool rather
+    /// than through the bindings under test: a permission this crate both writes and reads proves
+    /// only that it agrees with itself, and the access list is the whole claim here.
+    ///
+    /// `GetSecurityDescriptorSddlForm` rather than `.Sddl`, because it answers one component at a
+    /// time and so needs no splitting, and because SDDL is the one rendering `icacls` does not
+    /// localize.
+    #[cfg(windows)]
+    #[allow(clippy::expect_used)]
+    fn sddl(path: &Path, part: &str) -> String {
+        let script = format!(
+            "(Get-Acl -LiteralPath '{}').GetSecurityDescriptorSddlForm('{part}')",
+            path.display()
+        );
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("run powershell");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// The one entry the arm under test should have left, spelled the way the platform renders it.
+    ///
+    /// `AI` is the auto-inherited flag, which Windows sets itself on the way in and which the code
+    /// under test therefore does not compare on; it is pinned here because this is where what the
+    /// platform actually does belongs.
+    #[cfg(windows)]
+    fn only_owner(path: &Path, inherit: &str) -> String {
+        let owner = sddl(path, "Owner");
+        let sid = owner.strip_prefix("O:").unwrap_or(&owner);
+        format!("D:PAI(A;{inherit};FA;;;{sid})")
+    }
+
+    /// Hand a path an entry it should not keep, through `icacls` for the reason `sddl` reads through
+    /// PowerShell. `*S-1-1-0` is Everyone by SID, so the seeding does not depend on the machine's
+    /// language either.
+    #[cfg(windows)]
+    #[allow(clippy::expect_used)]
+    fn grant_everyone(path: &Path, spec: &str) {
+        let out = std::process::Command::new("icacls.exe")
+            .arg(path)
+            .args(["/grant", &format!("*S-1-1-0:{spec}")])
+            .output()
+            .expect("run icacls");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    /// Set or clear `FILE_ATTRIBUTE_READONLY`, which is what a restore, read-only media or one
+    /// `attrib +R` leaves behind.
+    #[cfg(windows)]
+    #[allow(clippy::expect_used)]
+    fn set_readonly(path: &Path, on: bool) {
+        let mut perms = std::fs::metadata(path).expect("stat").permissions();
+        perms.set_readonly(on);
+        std::fs::set_permissions(path, perms).expect("attribute");
+    }
+
+    /// Windows has no mode bits, so the directory's access list is the entire mechanism, and a
+    /// directory created under a wide parent inherits that parent's entries verbatim. That is what a
+    /// store under a drive root gets: `BUILTIN\Users:(I)(RX)` and `Authenticated Users:(I)(M)`, so
+    /// every local account could copy the sealed file and grind the passphrase offline. The store's
+    /// own tests cannot reach this, because they create their directory under a temp root that is
+    /// already user-only.
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_under_a_wide_parent_is_narrowed() {
+        let dir = temp_dir();
+        let wide = dir.path().join("wide");
+        std::fs::create_dir(&wide).expect("mkdir");
+        grant_everyone(&wide, "(OI)(CI)F");
+        let nested = wide.join("nested");
+        let path = nested.join("store.apsf");
+
+        private_dir(&path).expect("directory");
+
+        assert_eq!(sddl(&nested, "Access"), only_owner(&nested, "OICI"));
+    }
+
+    /// The entry has to reach what is created in the directory, or the file the launcher actually
+    /// writes its secrets into would be the one thing left wide.
+    #[cfg(windows)]
+    #[test]
+    fn the_store_inherits_the_directory_s_one_entry() {
+        let dir = temp_dir();
+        let wide = dir.path().join("wide");
+        std::fs::create_dir(&wide).expect("mkdir");
+        grant_everyone(&wide, "(OI)(CI)F");
+        let path = wide.join("nested").join("store.apsf");
+
+        private_dir(&path).expect("directory");
+        publish(&path, &vec![5u8; super::super::frame::MIN_FILE]).expect("publish");
+
+        let owner = sddl(&path, "Owner");
+        let sid = owner.strip_prefix("O:").unwrap_or(&owner);
+        // `ID` marks the entry inherited, which is the point: nothing set it on the file. The file
+        // itself is not protected, only auto-inherited, because protection is the directory's.
+        assert_eq!(sddl(&path, "Access"), format!("D:AI(A;ID;FA;;;{sid})"));
+    }
+
+    /// A store restored with explicit entries of its own carries them into a directory whose
+    /// inheritance never gets to override them, so the file is narrowed as well as the directory.
+    #[cfg(windows)]
+    #[test]
+    fn a_store_file_left_wider_is_narrowed() {
+        let dir = temp_dir();
+        let path = dir.path().join("store.apsf");
+        publish(&path, &vec![6u8; super::super::frame::MIN_FILE]).expect("publish");
+        grant_everyone(&path, "F");
+        assert!(
+            sddl(&path, "Access").contains(";WD)"),
+            "the seeding did not widen the store"
+        );
+
+        narrow_file(&path);
+
+        assert_eq!(sddl(&path, "Access"), only_owner(&path, ""));
+    }
+
+    /// `publish` replaces the store by rename, and a rename over a file carrying the read-only
+    /// attribute fails with access denied every time, so a restore, read-only media or one
+    /// `attrib +R` left every write answering `Denied` for good while reads went on working.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_store_can_be_written_again() {
+        let dir = temp_dir();
+        let path = dir.path().join("store.apsf");
+        let bytes = vec![7u8; super::super::frame::MIN_FILE];
+        publish(&path, &bytes).expect("publish");
+        set_readonly(&path, true);
+
+        narrow_file(&path);
+
+        publish(&path, &bytes).expect("publish over a store that was read-only");
+    }
+
+    /// The delete side of the same condition, which needs nothing from this crate: the standard
+    /// library clears the attribute itself before removing a file here. Pinned rather than assumed,
+    /// because the repair above would otherwise look like it owed this one too.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_store_deletes_without_help() {
+        let dir = temp_dir();
+        let path = dir.path().join("store.apsf");
+        publish(&path, &vec![8u8; super::super::frame::MIN_FILE]).expect("publish");
+        set_readonly(&path, true);
+
+        assert!(remove(&path).expect("remove a read-only store"));
+    }
+
+    /// Applying it twice is applying it once: the second call finds the entry it wants already
+    /// there and writes nothing, which is what every call after the first does on a healthy store.
+    #[cfg(windows)]
+    #[test]
+    fn narrowing_a_directory_twice_lands_on_the_same_list() {
+        let dir = temp_dir();
+        let path = dir.path().join("nested").join("store.apsf");
+
+        private_dir(&path).expect("directory");
+        let once = sddl(path.parent().expect("parent"), "Access");
+        private_dir(&path).expect("directory again");
+
+        assert_eq!(sddl(path.parent().expect("parent"), "Access"), once);
+    }
+
+    /// The guard that keeps this off a volume root, pinned on the decision rather than on a `C:\`
+    /// this must never actually write to. Re-permissioning a drive root is damage and not repair,
+    /// and nothing ships a store at one.
+    #[cfg(windows)]
+    #[test]
+    fn a_volume_root_is_not_a_directory_this_narrows() {
+        for root in [r"C:\", r"\\server\share", r"\\?\C:\"] {
+            assert!(is_root(Path::new(root)), "{root} should be left alone");
+        }
+        for inside in [r"C:\apogee", r"C:\apogee\secrets", "relative"] {
+            assert!(!is_root(Path::new(inside)), "{inside} should be narrowed");
+        }
     }
 }
