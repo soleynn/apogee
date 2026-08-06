@@ -589,6 +589,68 @@ mod tests {
         assert!(left.contains_key(&(*OTHER.as_bytes(), unknown)));
     }
 
+    /// The body is bound to the whole header, with the file on disk as the oracle for it.
+    ///
+    /// Every other test reaches the body through `unseal`, so the writer and the reader agree by
+    /// construction and the suite observes the agreement rather than the binding. Narrowing one side
+    /// alone is caught, by ten tests that then read nothing back; narrowing *both* to the check
+    /// envelope's prefix is green across the whole suite. Here the associated data is rebuilt from
+    /// the bytes that were written, so what is asserted is what `publish` committed to rather than
+    /// what the reader happens to agree with.
+    #[test]
+    fn the_body_is_sealed_under_the_whole_header() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(EncryptedFile::FILE_NAME);
+        let store = EncryptedFile::open(&path, Arc::new(Unprompted));
+        store
+            .create(
+                Consent::granted(),
+                &Secret::new(b"pp".to_vec()),
+                KdfCost::floor(),
+            )
+            .expect("create");
+        store
+            .set(
+                ACCOUNT,
+                SecretKind::Password,
+                Secret::new(b"hunter2".to_vec()),
+            )
+            .expect("write");
+
+        let key = store
+            .cache()
+            .as_ref()
+            .map(|c| c.key.clone())
+            .expect("writing leaves the handle open");
+        let bytes = disk::read(&path).expect("read").expect("present");
+        let header = Header::parse(&bytes).expect("parse");
+        let split = bytes.len() - TAG_LEN;
+        let head = header.to_bytes();
+        let tag: [u8; TAG_LEN] = bytes[split..].try_into().expect("tag");
+        assert_eq!(head[..], bytes[..HEADER_LEN], "the header round-trips");
+
+        let mut body = bytes[HEADER_LEN..split].to_vec();
+        seal::open_body(&key, &header.body_nonce, &head, &mut body, &tag)
+            .expect("the body opens under the header the file carries");
+
+        // The check tag is the region to edit: inside the header, outside what the check envelope
+        // binds, and not the body's nonce, so it moves the associated data and nothing else.
+        let mut edited = header;
+        edited.check_tag[0] ^= 1;
+        let mut body = bytes[HEADER_LEN..split].to_vec();
+        assert!(
+            seal::open_body(
+                &key,
+                &header.body_nonce,
+                &edited.to_bytes(),
+                &mut body,
+                &tag
+            )
+            .is_err(),
+            "the body opened under a header it was not sealed under"
+        );
+    }
+
     /// The guard on the hand-written `Debug`. A derive would print the sealing key, and the whole
     /// point of the type it is held in is that it never reaches a log.
     #[test]

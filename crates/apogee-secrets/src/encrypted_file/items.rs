@@ -296,6 +296,36 @@ mod tests {
         assert!(decode(&encoded).is_err());
     }
 
+    /// Both caps, on a table long enough that the cap is what refuses.
+    ///
+    /// The two cases above declare an outsized count or length inside a single 512-byte bucket,
+    /// where `bytes.get(..)` runs out first and refuses for a reason that has nothing to do with
+    /// either cap: delete one and they stay green. What each cap is for is bounding the work a
+    /// declared size can ask for, so each is checked here on a table where the declared size fits.
+    #[test]
+    fn the_caps_refuse_before_the_buffer_does() {
+        let mut buf = vec![0u8; 66_048];
+        buf[..COUNT_LEN].copy_from_slice(&1u32.to_be_bytes());
+        let len_at = COUNT_LEN + ACCOUNT_LEN + KIND_LEN;
+        buf[len_at..len_at + VALUE_LEN_LEN].copy_from_slice(&(MAX_VALUE + 1).to_be_bytes());
+        assert!(
+            decode(&buf).is_err(),
+            "a value one past the cap fits this table and was accepted"
+        );
+
+        let mut buf = vec![0u8; 86_528];
+        buf[..COUNT_LEN].copy_from_slice(&(MAX_ITEMS + 1).to_be_bytes());
+        for account in 0..=u128::from(MAX_ITEMS) {
+            let at = COUNT_LEN + (account as usize) * RECORD_HEAD;
+            buf[at..at + ACCOUNT_LEN].copy_from_slice(&account.to_be_bytes());
+            buf[at + ACCOUNT_LEN] = 1;
+        }
+        assert!(
+            decode(&buf).is_err(),
+            "a count one past the cap fits this table and was accepted"
+        );
+    }
+
     #[test]
     fn bytes_that_are_not_a_whole_number_of_buckets_are_refused() {
         assert!(decode(&[]).is_err());

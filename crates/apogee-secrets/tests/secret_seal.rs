@@ -14,6 +14,8 @@ fn secret_implements_none_of_the_forbidden_traits() {
     cases.compile_fail("tests/ui/secret_derive_debug.rs");
     cases.compile_fail("tests/ui/secret_derive_serialize.rs");
     cases.compile_fail("tests/ui/secret_derive_clone.rs");
+    cases.compile_fail("tests/ui/secret_derive_partial_eq.rs");
+    cases.compile_fail("tests/ui/secret_derive_default.rs");
     cases.compile_fail("tests/ui/secret_orphan_debug.rs");
 }
 
