@@ -10,7 +10,14 @@ const MIB: u64 = 1024 * 1024;
 const LEN: u64 = 12 * MIB;
 const BLOCK_SIZE: u32 = 2 * MIB as u32; // six blocks across two segments
 const BLOCKS: u32 = 6;
-/// The one byte a `bytes=0-0` range-capability probe serves before the transfer starts.
+/// The slack one `bytes=0-0` range-capability probe is worth in a byte count.
+///
+/// The probe reads the response headers and drops the body unread, so a range-ignoring `200` costs a
+/// socket buffer instead of the whole file. Dropping it tears the connection down, and the server
+/// counts a body chunk only once it has handed it over: when its body task has not been scheduled by
+/// the time the connection goes away, the probe's one byte is generated, never sent, and never
+/// counted. Sixteen cases per run made this the loudest instance of that race (about one run in five
+/// under load), so the probe byte is a tolerance here, never a fixed `+ 1`.
 const PROBE: u64 = 1;
 
 proptest! {
@@ -56,9 +63,19 @@ proptest! {
 
             let bytes = tokio::fs::read(verified.path()).await.unwrap();
             prop_assert_eq!(bytes, generated_vec(seed, 0, LEN as usize));
-            // The whole file once, one re-fetch per dirty block, and the probe byte: nothing else.
-            let expected = LEN + dirty.len() as u64 * u64::from(BLOCK_SIZE) + PROBE;
-            prop_assert_eq!(server.stats().bytes_served(), expected);
+            // The whole file once and one re-fetch per dirty block: nothing else. The request count is
+            // taken before any body, so it is exact under any load and carries the "nothing else was
+            // fetched" claim on its own: the probe, one per segment, one per dirty block.
+            prop_assert_eq!(server.stats().requests(), 3 + dirty.len() as u64);
+            let expected = LEN + dirty.len() as u64 * u64::from(BLOCK_SIZE);
+            let served = server.stats().bytes_served();
+            prop_assert!(
+                (expected..=expected + PROBE).contains(&served),
+                "served {} bytes, want {} plus at most the probe byte; ranges served: {:?}",
+                served,
+                expected,
+                server.stats().served_ranges(),
+            );
             Ok(())
         })?;
     }

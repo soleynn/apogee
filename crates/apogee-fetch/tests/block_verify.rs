@@ -13,13 +13,44 @@ use apogee_test_support::chaos::{ChaosServer, block_hashes, generated_vec};
 use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
-/// The one byte a `bytes=0-0` range-capability probe serves before the transfer starts.
+/// The slack one `bytes=0-0` range-capability probe is worth in a byte count.
+///
+/// The probe reads the response headers and drops the body unread, so a range-ignoring `200` costs a
+/// socket buffer instead of the whole file. Dropping it tears the connection down, and the server
+/// counts a body chunk only once it has handed it over: when its body task has not been scheduled by
+/// the time the connection goes away, the probe's one byte is generated, never sent, and never
+/// counted. Under load that race is lost often enough to matter (roughly 1 run in 100 for the
+/// segmented tests here, 1 in 5 for the sixteen-case property test in `block_repair`), so the probe
+/// byte is a tolerance, never a fixed `+ 1`.
 const PROBE: u64 = 1;
 
 fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// Assert `server` answered exactly `requests` requests and streamed exactly `expected` transfer
+/// bytes, give or take the [`PROBE`] byte.
+///
+/// The request count is taken on the request path, before any body, so it is exact under any load;
+/// it carries the "and nothing else was fetched" half of the claim that the byte count gives up when
+/// it admits the probe's tolerance. Together they are strictly tighter than a bare byte equality: an
+/// extra request that happened to serve zero bytes would pass one and fail the other.
+fn assert_transfer(server: &ChaosServer, requests: u64, expected: u64) {
+    let stats = server.stats();
+    assert_eq!(
+        stats.requests(),
+        requests,
+        "unexpected request count; ranges served: {:?}",
+        stats.served_ranges(),
+    );
+    let served = stats.bytes_served();
+    assert!(
+        (expected..=expected + PROBE).contains(&served),
+        "served {served} bytes, want {expected} plus at most the probe byte; ranges served: {:?}",
+        stats.served_ranges(),
+    );
 }
 
 /// A `BlockSha1` spec builder for `len` bytes from `seed`, verified at `block_size`, served by
@@ -66,8 +97,9 @@ async fn a_multi_block_multi_segment_download_verifies_and_publishes() {
         tokio::fs::read(&dest).await.unwrap(),
         generated_vec(21, 0, len as usize)
     );
-    // Nothing was corrupt, so the file is served exactly once (plus the capability probe byte).
-    assert_eq!(server.stats().bytes_served(), len + PROBE);
+    // Nothing was corrupt, so the file is served exactly once: the capability probe and one request
+    // per segment, and no byte of the file twice.
+    assert_transfer(&server, 5, len);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -98,13 +130,9 @@ async fn only_the_dirty_block_is_re_fetched_then_verifies() {
         tokio::fs::read(verified.path()).await.unwrap(),
         generated_vec(22, 0, len as usize)
     );
-    // Byte-accounted repair: the whole file once, plus exactly the one dirty block re-served (and the
-    // capability probe byte). No other range is re-fetched.
-    assert_eq!(
-        server.stats().bytes_served(),
-        len + u64::from(block_size) + PROBE,
-        "only the dirty block is re-fetched"
-    );
+    // Byte-accounted repair: the whole file once, plus exactly the one dirty block re-served. Six
+    // requests and no more: the capability probe, one per segment, and the single block re-fetch.
+    assert_transfer(&server, 6, len + u64::from(block_size));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
