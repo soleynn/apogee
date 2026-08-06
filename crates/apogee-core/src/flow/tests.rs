@@ -490,9 +490,17 @@ async fn a_code_the_server_has_seen_is_not_sent_again() {
 
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
     // The page's clock starts a window and the guard steps over one window at a time, so the hold is
-    // the whole of the window that clock opened: exact, and exactly what was narrated.
-    assert_eq!(otp_hold(&events), Some(30));
-    assert_eq!(elapsed.as_secs(), 30, "the run took {elapsed:?}");
+    // what is left of the window that clock opened. Not pinned to the whole thirty: the two clock
+    // readings the correction is made of cancel only to the second, and whatever real time passes
+    // between them comes off the hold. What has to be exact is that the run waited out the wait it
+    // announced, which is the property a shell's progress bar rests on.
+    let waited = otp_hold(&events).expect("the flow should have said it was holding");
+    assert!((1..=30).contains(&waited), "held for {waited} seconds");
+    assert_eq!(
+        elapsed.as_secs(),
+        waited,
+        "the run narrated a {waited}s hold and took {elapsed:?}"
+    );
     let sent = submitted_otp(&transport).expect("a generated code was submitted");
     assert_ne!(
         sent, repeat,
@@ -615,11 +623,19 @@ fn notices(events: &[Event]) -> Vec<Notice> {
 
 /// A clock a login server would have if this host's were badly wrong in the other direction.
 ///
-/// A constant rather than an offset from the wall clock, and on a window boundary, for the reason
-/// [`fx::SERVER_UNIX_SECS`] is: what a login derives for collapses onto whatever the page said, so a
-/// constant there makes the code a constant here. The pair covers both signs, since the scripted
-/// page's own clock is already behind any host running this.
-const SERVER_AHEAD_UNIX: u64 = 2_082_758_400;
+/// A constant rather than an offset from the wall clock, for the reason [`fx::SERVER_UNIX_SECS`] is
+/// one: what a login derives for collapses onto whatever the page said, so a constant there makes
+/// the code a constant here. The pair covers both signs, since the scripted page's own clock is
+/// already behind any host running this.
+///
+/// Mid-window rather than on a boundary, which the sibling can afford to be and this cannot. The
+/// offset is measured by truncation, so a server ahead of this host is read as a second less ahead
+/// than it is, and the instant derived for is the second before the one named. On a boundary that
+/// second belongs to the previous window, whose last second is inside the freshness floor, so the
+/// mint steps forward and lands back on the right window for the wrong reason: the test would pass
+/// while measuring nothing, and go red the day that floor changed. Fifteen seconds in, the second
+/// before is the same window and the equality holds on its own.
+const SERVER_AHEAD_UNIX: u64 = 2_082_758_415;
 
 /// The codes this host's own clock could produce for a run that began at `started`.
 ///

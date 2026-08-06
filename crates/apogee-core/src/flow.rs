@@ -376,7 +376,11 @@ async fn authenticate(
     let minted: Option<Code> = match prepared {
         Some(prepared) => {
             let skew = server_skew(&flow, arrived, tx);
-            match hold_for(prepared.mint(skew)?, tx, cancel).await {
+            let minted = prepared.mint(skew)?;
+            // The key has done its work, and what follows can sit on a wall-clock wait of most of two
+            // minutes. Erased here rather than at the end of the arm, so nothing holds it across one.
+            drop(prepared);
+            match hold_for(minted, tx, cancel).await {
                 // A run stopped while it held for the next window, which the hold has narrated.
                 None => return Ok(None),
                 code => code,
@@ -423,13 +427,29 @@ async fn authenticate(
 ///
 /// A drift worth mentioning is mentioned once, here, rather than where it is applied: the code that
 /// goes on the wire is right either way, and what the user can act on is the clock.
+///
+/// The reading is taken at face value, with no bound on how far it may move the window. That is a
+/// decision and not an oversight: the correction exists because this host's clock can be arbitrarily
+/// wrong, so any bound narrow enough to catch a bad reading also refuses the days-out drift the whole
+/// thing is for. It means whoever answers the top page chooses which window this login's code is
+/// derived for, which is only reachable by terminating the TLS to the login server, and anyone there
+/// is already reading the password out of the submit that follows. What it costs is that a code
+/// intercepted there stops being a thing usable for thirty seconds and becomes one usable at a moment
+/// that party picked.
 fn server_skew(
     flow: &sqex_proto::LoginFlow<'_>,
     arrived: SystemTime,
     tx: &UnboundedSender<Event>,
 ) -> ClockSkew {
-    let Some(server) = flow.server_time() else {
-        tracing::debug!("the login page carried no readable clock; using this host's");
+    // A stamp naming an instant before the epoch is a broken header rather than a clock: no code is
+    // defined for it, so correcting against it would fail a login that was about to work. It is
+    // discarded with the unreadable ones, which is the rule that keeps a bad stamp from costing more
+    // than the correction.
+    let Some(server) = flow
+        .server_time()
+        .filter(|at| *at >= SystemTime::UNIX_EPOCH)
+    else {
+        tracing::debug!("the login page carried no usable clock; using this host's");
         return ClockSkew::NONE;
     };
     let skew = ClockSkew::between(server, arrived);

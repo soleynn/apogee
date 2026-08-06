@@ -1804,7 +1804,7 @@ fn render_notice(notice: &Notice) -> String {
             seconds.unsigned_abs(),
             if *seconds > 0 { "behind" } else { "ahead of" },
         ),
-        _ => "warning: something is off".to_owned(),
+        _ => "warning: an unrecognized advisory".to_owned(),
     }
 }
 

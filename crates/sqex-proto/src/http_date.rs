@@ -152,8 +152,12 @@ fn two(hi: u8, lo: u8) -> Option<u32> {
 }
 
 /// One ASCII digit as its value.
+///
+/// The subtraction is checked and comes first. Testing `is_ascii_digit` and handing the difference to
+/// `then_some` reads as a guard and is not one: the argument is evaluated whatever the test says, so
+/// any byte below `0` underflows before the guard is consulted.
 fn digit(byte: u8) -> Option<u8> {
-    byte.is_ascii_digit().then_some(byte - b'0')
+    byte.checked_sub(b'0').filter(|value| *value <= 9)
 }
 
 /// How many days `month` has in `year`. Zero for a month number that is not one, which refuses every
@@ -283,6 +287,43 @@ mod tests {
         assert_eq!(parse_http_date("Sun, 06 nov 1994 08:49:37 GMT"), None);
         assert_eq!(parse_http_date("SUN, 06 Nov 1994 08:49:37 GMT"), None);
         assert_eq!(parse_http_date("Sun, 06 NOV 1994 08:49:37 gmt"), None);
+    }
+
+    /// A digit position holding something that is not one, on both sides of `0`.
+    ///
+    /// Both sides deliberately: reading the byte as a digit before checking that it is one underflows
+    /// only downward, so a test that reaches for a letter every time proves the half that cannot
+    /// fail. The punctuation, the zone and the day name are all correct here, so nothing refuses
+    /// these before the field itself is read.
+    #[test]
+    fn a_digit_position_holding_something_else_is_refused() {
+        for hostile in [
+            "Sun, !6 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 199. 08:49:37 GMT",
+            "Sun, 06 Nov 1994 /8:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:3\u{7f} GMT",
+            "Sun, 0X Nov 1994 08:49:37 GMT",
+            "Sun Nov  \u{1} 08:49:37 1994",
+            "Sun Nov  6 08:49:37 19-4",
+        ] {
+            assert_eq!(parse_http_date(hostile), None, "{hostile:?}");
+        }
+    }
+
+    /// Every byte, at every field position, in both grammars. The parser answers or refuses; it never
+    /// takes the process down, which is the property the fuzz target exists for and the one a
+    /// hand-written case list cannot cover.
+    #[test]
+    fn no_byte_at_any_position_takes_the_parser_down() {
+        for well_formed in ["Sun, 06 Nov 1994 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"] {
+            for position in 0..well_formed.len() {
+                for byte in 0..=u8::MAX {
+                    let mut text = well_formed.as_bytes().to_vec();
+                    text[position] = byte;
+                    let _ = parse_http_date(&String::from_utf8_lossy(&text));
+                }
+            }
+        }
     }
 
     /// A name in neither table, at the right width, so only the table lookup refuses it.

@@ -438,12 +438,9 @@ fn unix_seconds(at: SystemTime) -> u64 {
     at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// Seconds since the Unix epoch, for the skew comparison.
+/// This host's clock in seconds since the Unix epoch, for the skew comparison.
 fn utc_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    unix_seconds(SystemTime::now())
 }
 
 /// The current UTC broken down into launcher-time parts, via the civil-from-days algorithm (no date

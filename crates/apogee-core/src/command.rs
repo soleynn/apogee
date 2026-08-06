@@ -185,10 +185,11 @@ pub enum Notice {
     /// This host's clock and the login server's disagree by more than the launcher is willing to pass
     /// over. `seconds` is how far the server is ahead, negative when it is behind.
     ///
-    /// The login is unaffected: the one-time code that went with it was generated against the
-    /// server's own reading, which is the clock it gets checked against. Everything else on this
-    /// machine that cares what time it is has the problem this names, so it is said out loud rather
-    /// than silently corrected for.
+    /// Raised by a login that generates its own one-time code, which is the one that has both clocks
+    /// in hand and the one the drift would otherwise break. That login is unaffected: the code was
+    /// derived against the server's own reading, which is the clock it gets checked against. It is
+    /// said out loud anyway, because a clock this far out is a fact about the machine rather than
+    /// about the login, and silently working around it leaves the user with no idea it is wrong.
     ClockSkew { seconds: i64 },
 }
 

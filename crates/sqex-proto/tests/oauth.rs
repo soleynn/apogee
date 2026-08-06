@@ -25,6 +25,9 @@ const TOP_URL: &str = "https://ffxiv-login.square-enix.com/oauth/ffxivarr/login/
     ?lng=en&rgn=3&isft=0&cssmode=1&isnew=1&launchver=3";
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";
 /// [`SERVER_DATE`] as the instant a consumer reads back off the page.
+///
+/// Written out rather than derived from the header above, so what pins the reader is a value worked
+/// out somewhere other than the code being tested.
 const SERVER_UNIX_SECS: u64 = 1_752_062_400;
 
 /// [`SERVER_DATE`] as an instant.
