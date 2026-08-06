@@ -8,6 +8,7 @@ mod passphrase;
 mod seal;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use uuid::Uuid;
@@ -79,6 +80,76 @@ struct CachedKey {
     key: Zeroizing<[u8; KEY_LEN]>,
 }
 
+/// The derived key, and a lock-free answer to whether there is one.
+///
+/// Two views of one fact, kept in step by the guard rather than by every caller remembering to. The
+/// flag exists because a read of "is this handle open" must not queue: a write holds the mutex from
+/// before the file is read until after it is re-sealed, and the passphrase prompt and the Argon2
+/// derivation are both inside that window, so anything that reached for the same lock waited out a
+/// modal dialog first.
+struct KeyCache {
+    slot: Mutex<Option<CachedKey>>,
+    present: AtomicBool,
+}
+
+impl KeyCache {
+    fn new() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            present: AtomicBool::new(false),
+        }
+    }
+
+    /// Take the cache, taking a poisoned lock's contents back rather than turning another test's
+    /// panic into a second one. Panicking is denied in this workspace, and a poisoned cache is not a
+    /// condition this store models: the worst it holds is a key that will be re-derived.
+    fn lock(&self) -> KeyGuard<'_> {
+        KeyGuard {
+            slot: self.slot.lock().unwrap_or_else(PoisonError::into_inner),
+            present: &self.present,
+        }
+    }
+
+    /// Whether a key is held, without taking the lock.
+    ///
+    /// `Relaxed` because this is a report about a moment that has already passed by the time a
+    /// caller reads it: the file can be deleted, and the key dropped, between the load and the next
+    /// statement. What it must not do is block, and what it must not be is a second source of truth
+    /// that drifts, which is what the guard below is for.
+    fn present(&self) -> bool {
+        self.present.load(Ordering::Relaxed)
+    }
+}
+
+/// A held key cache, which publishes whether the slot is occupied as it is released.
+///
+/// The two can therefore disagree only while the lock is held, which is exactly the window in which
+/// a reader taking the lock would have been blocked anyway.
+struct KeyGuard<'a> {
+    slot: MutexGuard<'a, Option<CachedKey>>,
+    present: &'a AtomicBool,
+}
+
+impl Drop for KeyGuard<'_> {
+    fn drop(&mut self) {
+        self.present.store(self.slot.is_some(), Ordering::Relaxed);
+    }
+}
+
+impl std::ops::Deref for KeyGuard<'_> {
+    type Target = Option<CachedKey>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.slot
+    }
+}
+
+impl std::ops::DerefMut for KeyGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.slot
+    }
+}
+
 /// What to do when the store is not there.
 #[derive(Clone, Copy)]
 enum Missing {
@@ -112,7 +183,7 @@ enum Missing {
 pub struct EncryptedFile {
     path: PathBuf,
     passphrase: Arc<dyn Passphrase>,
-    key: Mutex<Option<CachedKey>>,
+    key: KeyCache,
 }
 
 impl EncryptedFile {
@@ -129,7 +200,7 @@ impl EncryptedFile {
         Self {
             path: path.into(),
             passphrase,
-            key: Mutex::new(None),
+            key: KeyCache::new(),
         }
     }
 
@@ -235,7 +306,7 @@ impl EncryptedFile {
     /// Whether this handle has already derived its key, so the next call will not ask for anything.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        self.cache().is_some()
+        self.key.present()
     }
 
     /// Forget the derived key and erase it. The next call that needs one asks again.
@@ -275,8 +346,8 @@ impl EncryptedFile {
     /// Take the key cache, taking a poisoned lock's contents back rather than turning another test's
     /// panic into a second one. Panicking is denied in this workspace, and a poisoned cache is not a
     /// condition this store models: the worst it holds is a key that will be re-derived.
-    fn cache(&self) -> MutexGuard<'_, Option<CachedKey>> {
-        self.key.lock().unwrap_or_else(PoisonError::into_inner)
+    fn cache(&self) -> KeyGuard<'_> {
+        self.key.lock()
     }
 
     /// The key for `header`, from the cache when it was derived from the same salt and cost, and
@@ -456,21 +527,27 @@ impl SecretStore for EncryptedFile {
         self.modify(Missing::Ignore, move |table| table.remove(&key).is_some())
     }
 
+    /// Answers from the path every time, and consults the cached key only to separate a store this
+    /// handle has already unlocked from one it has not.
+    ///
+    /// Answering from the key alone was worse than useless: whether a key is cached says nothing
+    /// about what is at the path, so a handle whose file had been deleted or overwritten behind it
+    /// went on reporting `Ready` with `is_usable()` true. That state is reachable inside one process,
+    /// because the CLI's own destroy-file verb opens a second handle over the path the long-lived one
+    /// is holding. Reading the path is still a report about a moment that has passed, which no probe
+    /// can avoid, but it is a report about the right thing.
     fn probe(&self) -> BackendReport {
-        let state = if self.is_open() {
-            BackendState::Ready
-        } else {
-            match self.inspect() {
-                // Usable once the passphrase arrives, and unusable when nothing can supply one:
-                // offering to save into a store that will refuse the write helps nobody.
-                FileState::Sealed { .. } if self.passphrase.can_prompt() => BackendState::Locked,
-                FileState::Sealed { .. } => BackendState::Unreachable,
-                // A store nobody has created is reachable and has nothing to store into, which is
-                // what this state says. It is also the only answer that keeps `is_usable` false, and
-                // a secret must not be routed at a store the user has not asked for.
-                FileState::Absent => BackendState::NoDefaultCollection,
-                FileState::Unreadable | FileState::Foreign => BackendState::Unreachable,
-            }
+        let state = match self.inspect() {
+            FileState::Sealed { .. } if self.is_open() => BackendState::Ready,
+            // Usable once the passphrase arrives, and unusable when nothing can supply one:
+            // offering to save into a store that will refuse the write helps nobody.
+            FileState::Sealed { .. } if self.passphrase.can_prompt() => BackendState::Locked,
+            FileState::Sealed { .. } => BackendState::Unreachable,
+            // A store nobody has created is reachable and has nothing to store into, which is
+            // what this state says. It is also the only answer that keeps `is_usable` false, and
+            // a secret must not be routed at a store the user has not asked for.
+            FileState::Absent => BackendState::NoDefaultCollection,
+            FileState::Unreadable | FileState::Foreign => BackendState::Unreachable,
         };
         BackendReport {
             backend: Backend::EncryptedFile,
