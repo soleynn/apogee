@@ -11,6 +11,7 @@ is tagged with its change type. Versioning aims to follow
 - Add a probe report example for sandbox runs (#105) _(testing)_
 - Keep nothing, forget everything, and import what another launcher saved (#106) _(added)_
 - Seal account secrets in a passphrase-protected file (#108) _(added)_
+- Pin the properties four one-line edits could ship past (#109) _(testing)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
