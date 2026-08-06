@@ -9,10 +9,12 @@ use crate::{Secret, SecretsError};
 /// This is the seam whichever front end does the asking plugs into.
 ///
 /// It is asked at the moment a secret is wanted rather than when the store is constructed, so a
-/// command that never touches a secret never makes the user type anything. It is asked at most once
-/// per handle per set of stored parameters: the derived key is kept, the passphrase is dropped inside
-/// the call that used it, and a failed attempt is not remembered, which is how a mistyped one is
-/// corrected by simply trying again.
+/// command that never touches a secret never makes the user type anything. It is asked once per
+/// stretch of use per set of stored parameters: the derived key is kept until it has gone unused for
+/// [`EncryptedFile::DEFAULT_IDLE`](crate::EncryptedFile::DEFAULT_IDLE), the passphrase is dropped
+/// inside the call that used it, and a failed attempt is not remembered, which is how a mistyped one
+/// is corrected by simply trying again. A source that prompts is asked again by a launcher that has
+/// been left alone, and should not treat the second prompt as a fault.
 ///
 /// An implementation must be callable from any thread and must not cache what it returns. It must
 /// also not call back into the store that asked it: the store holds its lock across the whole
