@@ -161,6 +161,26 @@ hits=$(grep -rnE 'XChaCha20Poly1305|Argon2|getrandom::' crates/apogee-secrets/sr
 hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^crates/apogee-secrets/src/' || true)
 [ -z "$hits" ] || report "a library mints its own fallback-store consent" "$hits"
 
+# 9. keyring names no backend by default: a target that selects none of its store features resolves
+#    `mock`, an in-process map that answers every call. Dropping `apple-native` from the Apple
+#    dependency line substitutes it there, and the result is a build whose secrets round-trip through
+#    this process's memory and whose probe reports a healthy store. The Linux side of that trap is
+#    caught by a job with a real provider on a real bus; the Apple side has no hardware anywhere in
+#    this repository's checks, so it is caught here, off the resolved graph.
+for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios; do
+  apple=$(cargo metadata --format-version 1 --filter-platform "$target")
+  keyring_id=$(jq -r '.packages[]|select(.name=="keyring")|.id' <<<"$apple")
+  keyring=$(jq -c --arg id "$keyring_id" '.resolve.nodes[]|select(.id==$id)' <<<"$apple")
+  # The feature and the edge it gates are both asserted: the feature is what the manifest line says,
+  # and the dependency is what the resolver did with it under this target's cfg.
+  jq -e '.features|index("apple-native")' <<<"$keyring" >/dev/null \
+    || report "keyring resolves its in-memory mock on $target" \
+      "the apple-native feature is not selected for this target"
+  jq -e '.deps[]|select(.name=="security_framework")' <<<"$keyring" >/dev/null \
+    || report "keyring has no Keychain backend on $target" \
+      "security-framework is not among its resolved dependencies"
+done
+
 # Informational: remaining stub markers (never fails).
 printf 'stub markers (todo!/unimplemented!): %s\n' \
   "$(grep -roE 'todo!|unimplemented!' crates/*/src --include='*.rs' | wc -l | tr -d ' ')"

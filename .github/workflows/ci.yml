@@ -381,6 +381,39 @@ jobs:
       - run: cargo test -p apogee-secrets --features mock --lib
       - run: cargo test -p apogee-secrets --features testing --test windows_credentials -- --test-threads=1
 
+  # The Apple targets the crate declares support for, type-checked. There is no hardware for them
+  # anywhere in this repository and no cross-compiler either: the Keychain backend links system
+  # frameworks, so `build-windows-cross`'s trick does not carry over. Checking does, and it is what
+  # catches the failure that matters, because the code under those cfgs is otherwise compiled by
+  # nothing and can rot silently. `-p apogee-secrets` rather than the workspace: it is the only crate
+  # with an Apple-specific line in it, and everything else here reaches a C dependency that needs an
+  # Apple SDK to build. Which store keyring actually resolves for these targets is a graph property
+  # rather than a compile one, so `scripts/audit.sh` asserts it and this job does not.
+  #
+  # Advisory, like the two credential-store jobs: the branch ruleset's required contexts are fixed,
+  # and adding one is a separate change.
+  check-apple-cross:
+    name: check-apple-cross
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: apple-cross
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `mock` and not `--all-features`: the `testing` targets are integration tests against a live
+      # session bus, and they name a crate that is not a dependency on these targets at all.
+      - run: cargo clippy -p apogee-secrets --features mock --all-targets --target aarch64-apple-darwin -- -D warnings
+      - run: cargo clippy -p apogee-secrets --features mock --all-targets --target x86_64-apple-darwin -- -D warnings
+
   deny:
     name: deny
     runs-on: ubuntu-latest
