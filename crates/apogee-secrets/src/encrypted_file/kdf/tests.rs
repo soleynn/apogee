@@ -27,6 +27,31 @@ fn only_costs_inside_the_band_are_accepted() {
     assert!(KdfCost::new(MIN_MEMORY_KIB, 2, 0).is_none());
     assert!(KdfCost::new(MIN_MEMORY_KIB, 2, u32::MAX).is_none());
     assert_eq!(KdfCost::new(MIN_MEMORY_KIB, 2, 1), Some(KdfCost::floor()));
+
+    // The edges again, by literal. Everything above is written in terms of the constants, so it
+    // moves with them: widening the ceiling leaves all of it true while a header can then ask for
+    // gibibytes of Argon2 memory, which is an allocation the parse is supposed to have refused.
+    assert!(KdfCost::new(19_456, 2, 1).is_some());
+    assert!(KdfCost::new(19_455, 2, 1).is_none());
+    assert!(KdfCost::new(1 << 20, 2, 1).is_some());
+    assert!(KdfCost::new((1 << 20) + 1, 2, 1).is_none());
+    assert!(KdfCost::new(65_536, 16, 4).is_some());
+    assert!(KdfCost::new(65_536, 17, 1).is_none());
+    assert!(KdfCost::new(65_536, 3, 5).is_none());
+}
+
+/// The shipped triple, by literal.
+///
+/// Everything else that looks at `CURRENT` is self-referential: the band check derives its arguments
+/// from `CURRENT`, `default()` is compared against `CURRENT`, and the store reports back whatever it
+/// was sealed under. So passes 3 to 2 is a third of the derivation gone, and lanes 1 to 4 is the
+/// change the constant's own comment argues against, and neither turns anything red. Because the
+/// cost travels in each file, a store written under a weakened value keeps opening at it forever.
+#[test]
+fn the_shipped_cost_is_the_measured_triple() {
+    assert_eq!(KdfCost::CURRENT.memory_kib(), 65_536);
+    assert_eq!(KdfCost::CURRENT.passes(), 3);
+    assert_eq!(KdfCost::CURRENT.lanes(), 1);
 }
 
 /// Lowering the shipped cost below the floor has to be one edit, not two that can be made apart.
