@@ -17,6 +17,7 @@ is tagged with its change type. Versioning aims to follow
 - Pin the properties four one-line edits could ship past (#109) _(testing)_
 - Make the probe answer about the thing it is reporting on (#110) _(fixed)_
 - Tell damage to the check envelope apart from a mistyped passphrase (#111) _(fixed)_
+- Make the in-memory double model a store that could exist (#113) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
