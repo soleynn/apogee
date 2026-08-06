@@ -110,6 +110,48 @@ fn a_written_secret_reads_back_and_a_missing_one_is_absent() {
     );
 }
 
+/// Both envelopes get a nonce of their own, drawn again for every write.
+///
+/// Only `create` and `change_passphrase` draw a new salt, so across ordinary writes the key is
+/// stable and the nonce is the only thing keeping two sealings of one store apart. Under a stable
+/// key a repeated nonce is a repeated keystream: XOR two snapshots of the file and the records fall
+/// out of it, with no passphrase involved. Nothing else in the suite looks at either field, so the
+/// property with the worst failure mode in the crate is observed here or nowhere.
+///
+/// The offsets are written out rather than imported. A test that read them from the code it guards
+/// would follow a layout change instead of catching it.
+#[test]
+fn every_write_draws_a_fresh_nonce_for_each_envelope() {
+    const CHECK_NONCE: std::ops::Range<usize> = 36..60;
+    const BODY_NONCE: std::ops::Range<usize> = 76..100;
+
+    let (_dir, path) = scratch().expect("scratch");
+    let store = created(&path, Scripted::new(b"correct horse")).expect("create");
+
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    for value in ["first", "second", "third"] {
+        store
+            .set(ACCOUNT, SecretKind::Password, pw(value))
+            .expect("write");
+        let bytes = std::fs::read(&path).expect("read the sealed file");
+        let check = bytes[CHECK_NONCE].to_vec();
+        let body = bytes[BODY_NONCE].to_vec();
+
+        assert_ne!(
+            check, body,
+            "one write sealed both envelopes under the same nonce"
+        );
+        for nonce in [&check, &body] {
+            assert!(
+                !seen.contains(nonce),
+                "a nonce was drawn twice across writes of one store"
+            );
+        }
+        seen.push(check);
+        seen.push(body);
+    }
+}
+
 /// The property the whole file exists for. A handle that only worked while it was the one that wrote
 /// the file would be a cache, not a store.
 #[test]
