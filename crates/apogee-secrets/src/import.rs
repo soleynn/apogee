@@ -452,8 +452,9 @@ mod tests {
     mod credential_targets {
         use super::*;
 
-        fn saved(password: &str) -> Result<Option<Secret>, SecretsError> {
-            Ok(Some(Secret::new(password.as_bytes().to_vec())))
+        /// What a target that held something hands back, as the decoded text it becomes.
+        fn saved(text: &str) -> Result<Option<Secret>, SecretsError> {
+            Ok(Some(Secret::new(text.as_bytes().to_vec())))
         }
 
         fn nothing() -> Result<Option<Secret>, SecretsError> {
