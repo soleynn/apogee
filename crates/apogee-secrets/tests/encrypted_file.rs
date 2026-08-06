@@ -182,6 +182,86 @@ fn a_write_replaces_the_file_rather_than_rewriting_it() {
     );
 }
 
+/// The report follows the path, not the key this handle happens to be holding.
+///
+/// Answering from the cached key alone meant a handle whose file had been deleted or clobbered
+/// behind it went on saying `Ready` with `is_usable()` true, while its own `inspect()` said the
+/// store was gone. One process is enough to reach that: a second handle over the same path is all
+/// the CLI's destroy-file verb is.
+#[test]
+fn a_report_follows_the_file_and_not_the_cached_key() {
+    let (_dir, path) = scratch().expect("scratch");
+    let store = created(&path, Scripted::new(b"correct horse")).expect("create");
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+    assert!(store.is_open());
+    assert_eq!(store.probe().state, BackendState::Ready);
+
+    std::fs::remove_file(&path).expect("delete the store behind the handle");
+    assert_eq!(store.inspect(), FileState::Absent);
+    assert_eq!(store.probe().state, BackendState::NoDefaultCollection);
+    assert!(!store.probe().is_usable());
+
+    std::fs::write(&path, vec![0u8; 640]).expect("clobber the store behind the handle");
+    assert_eq!(store.inspect(), FileState::Foreign);
+    assert_eq!(store.probe().state, BackendState::Unreachable);
+    assert!(!store.probe().is_usable());
+}
+
+/// A report must not queue behind a write that is waiting on the user.
+///
+/// A write holds the key cache from before the file is read until after it is re-sealed, and both
+/// the passphrase prompt and the derivation are inside that window. A probe that reached for the
+/// same lock waited out the whole prompt, so the call a front end makes to decide what to show
+/// blocked on the dialog it was deciding whether to show.
+#[test]
+fn a_report_does_not_wait_for_a_write_that_is_waiting_on_the_user() {
+    let (_dir, path) = scratch().expect("scratch");
+    let source = Scripted::new(b"correct horse");
+    let store = Arc::new(created(&path, source.clone()).expect("create"));
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+
+    // A fresh handle, so the write below has to ask, and a source that takes its time answering.
+    let slow = Arc::new(Slow {
+        answer: b"correct horse".to_vec(),
+        takes: std::time::Duration::from_secs(3),
+    });
+    let waiting = Arc::new(EncryptedFile::open(&path, slow));
+    let writer = {
+        let waiting = waiting.clone();
+        std::thread::spawn(move || waiting.set(OTHER, SecretKind::Password, pw("second")))
+    };
+
+    // Long enough that the write is inside the prompt, short enough to leave most of it left.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    let report = waiting.probe();
+    let waited = started.elapsed();
+
+    assert!(
+        waited < std::time::Duration::from_secs(1),
+        "the report waited {waited:?} for a prompt that had seconds left to run"
+    );
+    assert_eq!(report.state, BackendState::Locked);
+    writer.join().expect("writer thread").expect("write");
+}
+
+/// A passphrase source that takes its time, standing in for a modal dialog.
+struct Slow {
+    answer: Vec<u8>,
+    takes: std::time::Duration,
+}
+
+impl Passphrase for Slow {
+    fn unlock(&self) -> Result<Secret, SecretsError> {
+        std::thread::sleep(self.takes);
+        Ok(Secret::new(self.answer.clone()))
+    }
+}
+
 /// The property the whole file exists for. A handle that only worked while it was the one that wrote
 /// the file would be a cache, not a store.
 #[test]
