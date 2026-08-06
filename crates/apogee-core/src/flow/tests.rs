@@ -23,7 +23,7 @@ use crate::command::{Command, Event, FlowState, PrefixAction};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, Profile, STEAM_APP_ID, Settings};
+use crate::model::{Account, AccountKind, Profile, STEAM_APP_ID, SecretBackend, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::steam::fake::FakeSteam;
@@ -1016,6 +1016,7 @@ async fn close_after_launch_detaches_without_supervising() {
         .save_settings(&Settings {
             language: "en".to_string(),
             close_after_launch: true,
+            secret_backend: SecretBackend::Platform,
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
@@ -1268,6 +1269,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
         .save_settings(&Settings {
             language: "en".to_string(),
             close_after_launch: true,
+            secret_backend: SecretBackend::Platform,
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
@@ -1305,6 +1307,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
         .save_settings(&Settings {
             language: "en".to_string(),
             close_after_launch: true,
+            secret_backend: SecretBackend::Platform,
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,

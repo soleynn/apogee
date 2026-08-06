@@ -9,6 +9,11 @@ license.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+# The fallback store's seal. Nothing else in this crate does cryptography of its own: the platform
+# stores encrypt their own items, and this is the backend for the sessions that have none.
+argon2.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
 # Only to read the plaintext password file another launcher writes when it is configured to keep one.
 # Nothing this crate owns is serialized: a secret that could be written into config is the leak the
 # crate exists to prevent.
@@ -44,6 +49,9 @@ testing = []
 # The in-memory store, for other crates' tests. Deliberately separate from `testing`: a dev-dependency
 # that turned that one on would drag the live-bus tests into every workspace run.
 mock = []
+# The fallback store's two decoders, reachable from the fuzz workspace and from nothing else. Off in
+# every shipping build, so a parser entry point that takes hostile bytes is never public API.
+fuzzing = []
 
 [dev-dependencies]
 # Compile-fail proof that Secret implements none of the leaking traits.
@@ -52,6 +60,7 @@ trybuild.workspace = true
 # never serializes anything.
 serde.workspace = true
 tempfile.workspace = true
+proptest.workspace = true
 
 [[test]]
 name = "secret_service"

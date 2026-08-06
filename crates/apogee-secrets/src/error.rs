@@ -36,6 +36,27 @@ pub enum SecretsError {
     /// Reachable whenever another program has written a matching item.
     #[error("more than one stored secret matches this account and kind")]
     Ambiguous,
+    /// The passphrase did not open the encrypted store.
+    ///
+    /// Distinct from [`Locked`](Self::Locked), which is a store nobody has tried to unlock yet: this
+    /// is an attempt that was made and failed, and it is answered by typing it again rather than by
+    /// going off to unlock something. Also what a store reports when its salt or its work parameters
+    /// have been edited, because a key derived from edited parameters is a wrong key and no check can
+    /// tell the two apart.
+    #[error("the passphrase did not open the secret store")]
+    WrongPassphrase,
+    /// The stored secrets are damaged, or were written by a build this one cannot read.
+    ///
+    /// Separate from [`Backend`](Self::Backend) because it is neither transient nor retryable: the
+    /// file on disk will not start opening. A caller answers it by restoring a copy or by starting
+    /// over, and starting over destroys secrets, so it must never be offered for a store that merely
+    /// failed once.
+    #[error("the stored secrets are unreadable: {detail}")]
+    Corrupt {
+        /// Which part of the file did not hold up, for triage. One of a fixed set this crate owns,
+        /// never a value a caller passed in.
+        detail: &'static str,
+    },
     /// The store keeps nothing by the user's choice, so the write was refused. Distinct from
     /// [`Denied`](Self::Denied), which is a sandbox or platform rule the user did not set and would
     /// send them off to change a permission: this one is answered by asking for the secret again
@@ -78,6 +99,8 @@ mod tests {
                 SecretsError::Denied => (),
                 SecretsError::NoCollection => (),
                 SecretsError::Ambiguous => (),
+                SecretsError::WrongPassphrase => (),
+                SecretsError::Corrupt { .. } => (),
                 SecretsError::NotStoring => (),
                 SecretsError::Backend { .. } => (),
                 SecretsError::Io(_) => (),
@@ -95,6 +118,16 @@ mod tests {
             (
                 SecretsError::Ambiguous,
                 "more than one stored secret matches this account and kind",
+            ),
+            (
+                SecretsError::WrongPassphrase,
+                "the passphrase did not open the secret store",
+            ),
+            (
+                SecretsError::Corrupt {
+                    detail: "file magic",
+                },
+                "the stored secrets are unreadable: file magic",
             ),
             (SecretsError::NotStoring, "the secret store keeps nothing"),
             (

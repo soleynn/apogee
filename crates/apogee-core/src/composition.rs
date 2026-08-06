@@ -1,14 +1,12 @@
 //! The composition root: the one place every subsystem is constructed, tuned, and injected.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Restore is unix-only, and so is everything only it needs.
 #[cfg(unix)]
 use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::path::Path;
 
 use apogee_addons::backup::{ArchiveRecord, BackupError, BackupReport, PruneReport, Retain};
 #[cfg(unix)]
@@ -22,7 +20,8 @@ use apogee_otp::Otp;
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::{
-    BackendReport, ForeignKey, ImportSource, Secret, SecretKind, Secrets, SecretsError,
+    BackendReport, EncryptedFile, ForeignKey, ImportSource, Null, Passphrase, Secret, SecretKind,
+    Secrets, SecretsError, Unprompted,
 };
 use sqex_proto::{ComputerId, Transport};
 use tokio::sync::mpsc;
@@ -37,7 +36,7 @@ use crate::flow::{self, FlowContext};
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
-use crate::model::{Account, Profile, Settings};
+use crate::model::{Account, Profile, SecretBackend, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
 use crate::steam::{NoSteam, SteamBackend};
@@ -64,6 +63,16 @@ pub struct CoreConfig {
 }
 
 impl CoreConfig {
+    /// Where the encrypted fallback store's file goes, if that is the backend in use.
+    ///
+    /// Beside the accounts it is keyed to, in a directory the store already keeps owner-only. It is
+    /// not under the cache home for the obvious reason: a cache cleaner taking it would take every
+    /// saved password with it.
+    #[must_use]
+    pub fn secrets_path(&self) -> PathBuf {
+        self.store_dir.join(EncryptedFile::FILE_NAME)
+    }
+
     /// A config rooted at one base directory, with the standard subdirectories beneath it. Handy
     /// for a throwaway or test run pointed at a scratch directory.
     #[must_use]
@@ -102,6 +111,23 @@ impl CoreConfig {
             addons_dir: data.join("apogee/addons"),
         })
     }
+}
+
+/// The one concrete transport.
+///
+/// gzip/deflate are enabled so reqwest negotiates and decompresses the login pages automatically (the
+/// request path forwards no accept-encoding of its own). HTTP-version tuning is the reqwest default
+/// and is what we want: HTTP/1.1 over the plain-HTTP patch and boot-check CDN, HTTP/2 negotiated via
+/// ALPN over the TLS artifact and login hosts. Dual-stack Happy-Eyeballs connect applies throughout.
+fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
+    let client = reqwest::Client::builder()
+        .gzip(true)
+        .deflate(true)
+        .build()
+        .map_err(|e| CoreError::Init {
+            detail: e.to_string(),
+        })?;
+    Ok(Arc::new(HttpTransport::new(client)))
 }
 
 /// Resolve an XDG base directory from `var`, falling back to `$HOME/<fallback>`.
@@ -155,7 +181,9 @@ pub struct ProfileRemoval {
 /// assumed away (see [`ProfileRemoval::secrets_swept`]).
 ///
 /// The enum belongs to another crate and is `#[non_exhaustive]`, so an unrecognized condition is
-/// assumed to be the dangerous kind.
+/// assumed to be the dangerous kind. That default is what covers the sealed-file store's two
+/// conditions, and it is right for both: a passphrase that did not open the file and a file that will
+/// not open at all each leave every secret in it exactly where it was.
 fn could_hold_secrets(err: &SecretsError) -> bool {
     !matches!(
         err,
@@ -193,6 +221,8 @@ pub struct Core {
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
     backups_dir: PathBuf,
+    /// Where the sealed-file secret store's file goes, whether or not that is the backend in use.
+    secrets_path: PathBuf,
 }
 
 impl Core {
@@ -202,24 +232,30 @@ impl Core {
     /// Returns [`CoreError::Init`] if the network client cannot be built, or the wrapped subsystem
     /// error if a subsystem fails to construct.
     pub fn new(config: CoreConfig) -> Result<Self, CoreError> {
-        // The one concrete transport. gzip/deflate are enabled so reqwest negotiates and decompresses
-        // the login pages automatically (the request path forwards no accept-encoding of its own).
-        // HTTP-version tuning is the reqwest default and is what we want: HTTP/1.1 over the plain-HTTP
-        // patch/boot-check CDN, HTTP/2 negotiated via ALPN over the TLS artifact/login hosts. Dual-stack
-        // Happy-Eyeballs connect applies throughout.
-        let client = reqwest::Client::builder()
-            .gzip(true)
-            .deflate(true)
-            .build()
-            .map_err(|e| CoreError::Init {
-                detail: e.to_string(),
-            })?;
-        Self::with_transport(config, Arc::new(HttpTransport::new(client)))
+        Self::with_passphrase(config, Arc::new(Unprompted))
+    }
+
+    /// As [`Core::new`], with the source the sealed-file secret store asks when it has to unlock.
+    ///
+    /// What a front end that can prompt constructs. [`Core::new`] is the same call with a source
+    /// that has nothing to give, which is the honest answer for one that cannot.
+    ///
+    /// # Errors
+    /// As [`Core::new`].
+    pub fn with_passphrase(
+        config: CoreConfig,
+        passphrase: Arc<dyn Passphrase>,
+    ) -> Result<Self, CoreError> {
+        Self::with_transport_and_passphrase(config, http_transport()?, passphrase)
     }
 
     /// Construct and wire every subsystem from `config`, using the injected `transport` in place of
     /// the concrete network client. The composition-root seam that lets a headless test drive the
     /// flows against a scripted transport.
+    ///
+    /// Nothing here can ask for a passphrase, so an install whose settings select the sealed-file
+    /// store gets one that reports itself unusable and refuses. That is the honest answer for a
+    /// caller that has not wired a prompt; [`Core::with_passphrase`] is the one that has.
     ///
     /// # Errors
     /// Returns the wrapped subsystem error if a subsystem fails to construct.
@@ -227,7 +263,42 @@ impl Core {
         config: CoreConfig,
         transport: Arc<dyn Transport>,
     ) -> Result<Self, CoreError> {
-        Self::with_secrets(config, transport, Secrets::new())
+        Self::with_transport_and_passphrase(config, transport, Arc::new(Unprompted))
+    }
+
+    /// Construct and wire every subsystem from `config`, selecting the secret store the stored
+    /// settings name and handing the sealed-file backend `passphrase` to ask when it has to unlock.
+    ///
+    /// The selection lives here rather than in a front end because it is wiring, and the prompt is
+    /// injected rather than built here because prompting is presentation. A front end supplies the
+    /// one thing only it can.
+    ///
+    /// The choice is read once. Changing it takes effect on the next launch, and it moves nothing:
+    /// whatever the previous backend holds stays there until it is deleted on purpose.
+    ///
+    /// # Errors
+    /// Returns the wrapped subsystem error if a subsystem fails to construct.
+    pub fn with_transport_and_passphrase(
+        config: CoreConfig,
+        transport: Arc<dyn Transport>,
+        passphrase: Arc<dyn Passphrase>,
+    ) -> Result<Self, CoreError> {
+        // A corrupt settings file reads as the default here, the same as every other preference read
+        // at construction: the corruption surfaces when the shell reads settings, and defaulting to
+        // the platform store is the answer that neither prompts nor invents a file.
+        let chosen = Store::new(config.store_dir.clone())
+            .load_settings()
+            .map(|s| s.secret_backend)
+            .unwrap_or_default();
+        let secrets = match chosen {
+            SecretBackend::Platform => Secrets::new(),
+            SecretBackend::EncryptedFile => Secrets::with_backend(Box::new(EncryptedFile::open(
+                config.secrets_path(),
+                passphrase,
+            ))),
+            SecretBackend::Nothing => Secrets::with_backend(Box::new(Null::new())),
+        };
+        Self::with_secrets(config, transport, secrets)
     }
 
     /// Construct and wire every subsystem from `config`, using the injected `transport` and the
@@ -243,6 +314,9 @@ impl Core {
         transport: Arc<dyn Transport>,
         secrets: Secrets,
     ) -> Result<Self, CoreError> {
+        // Derived before `config` is consumed, and held so a front end can name the sealed store's
+        // file without resolving the base directories a second time.
+        let secrets_path = config.secrets_path();
         // `config` is consumed here, so move its owned paths into each subsystem rather than clone.
         let CoreConfig {
             store_dir,
@@ -314,6 +388,7 @@ impl Core {
             clock: host::system_clock(),
             prefixes_dir,
             backups_dir,
+            secrets_path,
         })
     }
 
@@ -499,6 +574,15 @@ impl Core {
             Err(err) if could_hold_secrets(&err) => Err(err.into()),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Where the sealed-file secret store keeps its file.
+    ///
+    /// Answered whatever backend is in use, because a front end offering to create one has to name
+    /// the path before there is a store at it.
+    #[must_use]
+    pub fn secrets_path(&self) -> &Path {
+        &self.secrets_path
     }
 
     /// What the credential store this launcher is using reports about itself.
@@ -721,6 +805,82 @@ mod tests {
         let transport = Arc::new(FixtureTransport::new([]));
         let core = Core::with_transport(CoreConfig::with_base(dir.path()), transport);
         assert!(core.is_ok());
+    }
+
+    /// The stored preference decides which store is wired, and a run that cannot prompt still has to
+    /// come up: a sealed-file store nobody can unlock reports itself unusable rather than failing
+    /// construction, which is what keeps the profile and launch verbs working on a machine whose
+    /// secrets are behind a passphrase nobody typed.
+    ///
+    /// Constructing does no I/O against the store, so a preference selecting a file that was never
+    /// created reports having nothing to store into rather than being broken.
+    #[test]
+    fn the_stored_preference_picks_the_backend() {
+        use std::sync::Arc;
+
+        use apogee_secrets::{Backend, BackendState};
+        use apogee_test_support::transport::FixtureTransport;
+
+        use crate::model::{SecretBackend, Settings};
+
+        let cases = [
+            (SecretBackend::Platform, None),
+            (
+                SecretBackend::EncryptedFile,
+                Some((Backend::EncryptedFile, BackendState::NoDefaultCollection)),
+            ),
+            (
+                SecretBackend::Nothing,
+                Some((Backend::Null, BackendState::NotStoring)),
+            ),
+        ];
+        for (chosen, expected) in cases {
+            let dir = TempDir::new().unwrap();
+            let config = CoreConfig::with_base(dir.path());
+            let core = Core::with_transport(config.clone(), Arc::new(FixtureTransport::new([])))
+                .expect("construct");
+            core.save_settings(&Settings {
+                secret_backend: chosen,
+                ..Settings::default()
+            })
+            .unwrap();
+
+            let core = Core::with_transport(config, Arc::new(FixtureTransport::new([])))
+                .expect("construct");
+            if let Some((backend, state)) = expected {
+                let report = core.secrets_report();
+                assert_eq!(report.backend, backend, "{chosen:?}");
+                assert_eq!(report.state, state, "{chosen:?}");
+            }
+            // The platform arm is deliberately not asserted on: what it reports is a fact about
+            // whatever keyring the machine running the tests has, not about this selection.
+        }
+    }
+
+    /// The path is on-disk contract. A change orphans every store already written under the old one,
+    /// with no error at the point of the change.
+    #[test]
+    fn the_sealed_store_lives_beside_the_accounts_it_is_keyed_to() {
+        let config = CoreConfig::with_base("/base");
+        assert_eq!(
+            config.secrets_path(),
+            std::path::Path::new("/base/store/secrets.apsf")
+        );
+    }
+
+    /// Deleting an account stops when a sweep might have left something. Both of the sealed store's
+    /// own conditions have to count as "might", because a file that would not open still holds every
+    /// secret that was in it, and an account deleted over one leaves them unreachable forever.
+    #[test]
+    fn a_store_that_would_not_open_blocks_an_account_deletion() {
+        use apogee_secrets::SecretsError;
+
+        assert!(super::could_hold_secrets(&SecretsError::WrongPassphrase));
+        assert!(super::could_hold_secrets(&SecretsError::Corrupt {
+            detail: "authentication tag"
+        }));
+        assert!(super::could_hold_secrets(&SecretsError::Locked));
+        assert!(!super::could_hold_secrets(&SecretsError::NoCollection));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use super::{Migrate, Store, StoreError, UidCacheEntry};
-use crate::model::{Account, AccountKind, Profile, Settings};
+use crate::model::{Account, AccountKind, Profile, SecretBackend, Settings};
 
 fn cache_entry(game_version: &str, expires_at: u64) -> UidCacheEntry {
     UidCacheEntry {
@@ -31,6 +31,7 @@ fn settings_round_trips_at_the_current_version() {
     let settings = Settings {
         language: "ja".to_string(),
         close_after_launch: true,
+        secret_backend: SecretBackend::EncryptedFile,
         keep_patches: true,
         backups_kept: 3,
         backup_before_patch: false,
@@ -49,14 +50,24 @@ fn missing_settings_loads_the_default() {
 #[case(1)]
 #[case(2)]
 #[case(3)]
+#[case(4)]
+#[case(5)]
 fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) {
     let (dir, store) = store();
     // Each historical shape carries only the fields that existed at that version.
     let data = match version {
         1 => serde_json::json!({ "language": "fr" }),
         2 => serde_json::json!({ "language": "fr", "close_after_launch": false }),
-        _ => serde_json::json!({
+        3 => serde_json::json!({
             "language": "fr", "close_after_launch": false, "keep_patches": false
+        }),
+        4 => serde_json::json!({
+            "language": "fr", "close_after_launch": false, "keep_patches": false,
+            "backups_kept": 5
+        }),
+        _ => serde_json::json!({
+            "language": "fr", "close_after_launch": false, "keep_patches": false,
+            "backups_kept": 5, "backup_before_patch": true
         }),
     };
     let envelope = serde_json::json!({ "schema_version": version, "data": data });
@@ -67,6 +78,9 @@ fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) 
     assert_eq!(loaded.language, "fr");
     assert!(!loaded.close_after_launch);
     assert!(!loaded.keep_patches);
+    // Every install that predates the choice was using the platform store, so that is the only
+    // answer a migration may reach: any other would move a user off the store their password is in.
+    assert_eq!(loaded.secret_backend, SecretBackend::Platform);
 
     // A re-save rewrites the envelope at the current schema version.
     store.save_settings(&loaded).unwrap();
@@ -272,6 +286,7 @@ proptest::proptest! {
         let settings = Settings {
             language,
             close_after_launch: close,
+            secret_backend: SecretBackend::Platform,
             keep_patches: keep,
             backups_kept: 5,
             backup_before_patch: true,

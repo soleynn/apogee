@@ -190,7 +190,7 @@ impl Migrate for UidCacheEntry {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 5;
+    const CURRENT_VERSION: u32 = 6;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -215,6 +215,13 @@ impl Migrate for Settings {
             4 => {
                 obj.entry("backup_before_patch")
                     .or_insert(serde_json::Value::Bool(true));
+            }
+            // Gained the choice of where secrets are kept. The platform store is what every existing
+            // install was already using, so migrating to anything else would move a user off the
+            // store their password is actually in.
+            5 => {
+                obj.entry("secret_backend")
+                    .or_insert(serde_json::Value::from("platform"));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }

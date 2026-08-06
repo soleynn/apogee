@@ -42,5 +42,9 @@ required-features = ["wine-integration"]
 name = "patch_e2e"
 required-features = ["fixtures"]
 
+[[test]]
+name = "secrets_file"
+required-features = ["fixtures"]
+
 [lints]
 workspace = true
