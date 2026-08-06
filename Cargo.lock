@@ -270,6 +270,7 @@ dependencies = [
  "thiserror",
  "trybuild",
  "uuid",
+ "windows-sys 0.61.2",
  "zbus",
  "zeroize",
 ]

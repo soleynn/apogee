@@ -67,6 +67,11 @@ flate2           = "1"
 ed25519-dalek    = "3"
 # safe syscall wrappers (monotonic clock now; /proc + signals later), keeping #![forbid(unsafe_code)]
 rustix           = "1"
+# The one Win32 surface with no standard-library equivalent: the security descriptor that decides who
+# can reach the fallback secret store's directory, which is what a mode is on the other platforms.
+# Microsoft's own bindings, already resolved here under several transitive edges. Gated to
+# apogee-secrets and to `cfg(windows)`, and the sole reason that crate is `deny(unsafe_code)`.
+windows-sys      = { version = "0.61", features = ["Win32_Security_Authorization"] }
 # config-backup container, gated to apogee-addons. Default features off on purpose: the `time`
 # feature makes the default write options stamp the wall clock, which would make archives
 # unreproducible.
@@ -100,7 +105,13 @@ predicates       = "3"
 trybuild         = "1"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` rather than `forbid` for exactly one carve-out: the Windows arm of the fallback secret
+# store's on-disk permissions calls advapi32 to put an owner-only access list on the store's
+# directory, and the standard library exposes no security-descriptor API to do it in safe Rust.
+# Every crate root still carries its own `#![forbid(unsafe_code)]` except that one, and
+# `scripts/audit.sh` fails on an `unsafe` block anywhere but there, so the carve-out cannot spread
+# quietly to the test targets this relaxation also covers.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
