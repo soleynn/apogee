@@ -426,7 +426,7 @@ impl EncryptedFile {
         let head = header.to_bytes();
 
         let mut body = items::encode(table)?;
-        let tag = seal::seal_body(key, &body_nonce, &head, &mut body)?;
+        let tag = seal::seal_body(key, &body_nonce, &header.body_aad(), &mut body)?;
 
         let mut file = Vec::with_capacity(head.len() + body.len() + TAG_LEN);
         file.extend_from_slice(&head);
@@ -476,13 +476,6 @@ impl EncryptedFile {
 /// Open both envelopes and decode what they were holding.
 fn unseal(bytes: &[u8], header: &Header, key: &[u8; KEY_LEN]) -> Result<Table, SecretsError> {
     let head = bytes.get(..HEADER_LEN).ok_or(corrupt("file length"))?;
-    seal::open_check(
-        key,
-        &header.check_nonce,
-        &head[..CHECK_AAD_LEN],
-        &header.check_tag,
-    )?;
-
     let split = bytes
         .len()
         .checked_sub(TAG_LEN)
@@ -492,9 +485,30 @@ fn unseal(bytes: &[u8], header: &Header, key: &[u8; KEY_LEN]) -> Result<Table, S
         .get(split..)
         .and_then(|t| t.try_into().ok())
         .ok_or(corrupt("file length"))?;
+    let body_aad = header.body_aad();
+
+    if let Err(wrong_key) = seal::open_check(
+        key,
+        &header.check_nonce,
+        &head[..CHECK_AAD_LEN],
+        &header.check_tag,
+    ) {
+        // The check envelope refused, which on its own means only that this key does not open it: a
+        // wrong passphrase and an edited check nonce or tag produce the same failure, and no tag can
+        // tell a wrong key from a wrong nonce. The body is the tiebreak, because it is not bound to
+        // either of those fields. If it opens, the key is the file's own and the damage is confined
+        // to the check envelope; if it does not, the key really is wrong.
+        let mut probe = Zeroizing::new(cipher.to_vec());
+        return Err(
+            match seal::open_body(key, &header.body_nonce, &body_aad, &mut probe, &tag) {
+                Ok(()) => corrupt("check envelope"),
+                Err(_) => wrong_key,
+            },
+        );
+    }
 
     let mut body = Zeroizing::new(cipher.to_vec());
-    seal::open_body(key, &header.body_nonce, head, &mut body, &tag)?;
+    seal::open_body(key, &header.body_nonce, &body_aad, &mut body, &tag)?;
     items::decode(&body)
 }
 
@@ -666,16 +680,19 @@ mod tests {
         assert!(left.contains_key(&(*OTHER.as_bytes(), unknown)));
     }
 
-    /// The body is bound to the whole header, with the file on disk as the oracle for it.
+    /// The body is bound to the key material and its own nonce, and to nothing else in the header.
     ///
     /// Every other test reaches the body through `unseal`, so the writer and the reader agree by
-    /// construction and the suite observes the agreement rather than the binding. Narrowing one side
-    /// alone is caught, by ten tests that then read nothing back; narrowing *both* to the check
-    /// envelope's prefix is green across the whole suite. Here the associated data is rebuilt from
-    /// the bytes that were written, so what is asserted is what `publish` committed to rather than
-    /// what the reader happens to agree with.
+    /// construction and the suite observes the agreement rather than the binding: moving both to the
+    /// same wrong region is green across the whole suite. The associated data here is rebuilt
+    /// positionally from the bytes that were written, so what is asserted is what `publish`
+    /// committed to rather than what the reader happens to agree with.
+    ///
+    /// Both halves of the classification rest on this shape. Widening it back over the check
+    /// envelope makes damage there indistinguishable from a wrong passphrase; narrowing it further
+    /// unbinds the body's own nonce.
     #[test]
-    fn the_body_is_sealed_under_the_whole_header() {
+    fn the_body_is_sealed_under_the_key_material_and_its_own_nonce() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join(EncryptedFile::FILE_NAME);
         let store = EncryptedFile::open(&path, Arc::new(Unprompted));
@@ -706,26 +723,52 @@ mod tests {
         let tag: [u8; TAG_LEN] = bytes[split..].try_into().expect("tag");
         assert_eq!(head[..], bytes[..HEADER_LEN], "the header round-trips");
 
-        let mut body = bytes[HEADER_LEN..split].to_vec();
-        seal::open_body(&key, &header.body_nonce, &head, &mut body, &tag)
-            .expect("the body opens under the header the file carries");
+        // Assembled by offset out of the file itself: the key material, then the last field of the
+        // header, which is the body's nonce. Nothing from this module decides what goes in.
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(&bytes[..CHECK_AAD_LEN]);
+        rebuilt.extend_from_slice(&bytes[HEADER_LEN - NONCE_LEN..HEADER_LEN]);
 
-        // The check tag is the region to edit: inside the header, outside what the check envelope
-        // binds, and not the body's nonce, so it moves the associated data and nothing else.
-        let mut edited = header;
-        edited.check_tag[0] ^= 1;
+        let mut body = bytes[HEADER_LEN..split].to_vec();
+        seal::open_body(&key, &header.body_nonce, &rebuilt, &mut body, &tag)
+            .expect("the body opens under the key material and its own nonce");
+
+        // Not the whole header. That is the shape this replaced, and under it the check envelope's
+        // own bytes are covered twice over and damage to them reads as a mistyped passphrase.
         let mut body = bytes[HEADER_LEN..split].to_vec();
         assert!(
-            seal::open_body(
-                &key,
-                &header.body_nonce,
-                &edited.to_bytes(),
-                &mut body,
-                &tag
-            )
-            .is_err(),
-            "the body opened under a header it was not sealed under"
+            seal::open_body(&key, &header.body_nonce, &head, &mut body, &tag).is_err(),
+            "the body is still bound to the whole header"
         );
+
+        // The property the damage-versus-typo classification rests on, in both directions. An edit
+        // inside the check envelope leaves the body openable, so a correct key is still provable;
+        // an edit to the key material or to the body's nonce does not.
+        let mut edited = header;
+        edited.check_tag[0] ^= 1;
+        edited.check_nonce[0] ^= 1;
+        let mut body = bytes[HEADER_LEN..split].to_vec();
+        seal::open_body(
+            &key,
+            &header.body_nonce,
+            &edited.body_aad(),
+            &mut body,
+            &tag,
+        )
+        .expect("an edited check envelope must leave the body openable");
+
+        let mut salted = header;
+        salted.salt[0] ^= 1;
+        let mut renonced = header;
+        renonced.body_nonce[0] ^= 1;
+        for (what, moved) in [("the salt", salted), ("the body nonce", renonced)] {
+            let mut body = bytes[HEADER_LEN..split].to_vec();
+            assert!(
+                seal::open_body(&key, &header.body_nonce, &moved.body_aad(), &mut body, &tag)
+                    .is_err(),
+                "the body opened with {what} edited out from under it"
+            );
+        }
     }
 
     /// The guard on the hand-written `Debug`. A derive would print the sealing key, and the whole

@@ -159,8 +159,16 @@ fn every_header_region_is_covered_by_a_tag_or_a_check() {
             Refusal::Damaged("cipher"),
         ),
         ("salt", SALT, Refusal::Passphrase),
-        ("check nonce", CHECK_NONCE, Refusal::Passphrase),
-        ("check tag", CHECK_TAG, Refusal::Passphrase),
+        // Damage, not a typo. These two fields fail the check envelope under a perfectly good key,
+        // so a tag alone cannot separate them from a wrong passphrase, and reporting one told the
+        // user to retype something that was already right, forever. They are the one region the
+        // body is not bound to, so the body settles it: it opens, therefore the key is the file's.
+        (
+            "check nonce",
+            CHECK_NONCE,
+            Refusal::Damaged("check envelope"),
+        ),
+        ("check tag", CHECK_TAG, Refusal::Damaged("check envelope")),
     ];
     for (name, region, expected) in regions {
         for at in [region.start, region.end - 1] {

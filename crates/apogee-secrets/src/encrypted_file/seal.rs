@@ -8,8 +8,13 @@
 //!
 //! What the split buys is the one distinction a front end cannot afford to get wrong: a mistyped
 //! passphrase and a damaged file look identical to a single tag, and offering "start over" for a typo
-//! destroys the secrets. Check fails means the key is wrong. Check passes and body fails means the
-//! key is right and the file is not.
+//! destroys the secrets.
+//!
+//! The reading is not "check fails means the key is wrong", which was too strong: an edited check
+//! nonce or check tag fails the check under a perfectly good key, and a tag cannot tell a wrong key
+//! from a wrong nonce. Those two fields are the one region the body is deliberately *not* bound to,
+//! so the body settles it. Check passes and body fails is a damaged file. Check fails and body opens
+//! is a damaged check envelope, also a damaged file. Only when both fail is the key wrong.
 
 use chacha20poly1305::aead::{AeadInOut, KeyInit, inout::InOutBuf};
 use chacha20poly1305::{Key, Tag, XChaCha20Poly1305, XNonce};
@@ -54,7 +59,9 @@ pub(crate) fn seal_check(
 /// # Errors
 /// [`SecretsError::WrongPassphrase`], which is also what an edited salt or an edited work parameter
 /// produces: a key derived from edited parameters is a wrong key, and no check can tell the two
-/// apart.
+/// apart. It is *not* the last word on the passphrase, though, because an edited nonce or tag
+/// produces it too. The caller resolves that against the body envelope, which those two fields are
+/// left out of.
 pub(crate) fn open_check(
     key: &[u8; KEY_LEN],
     nonce: &[u8; NONCE_LEN],
