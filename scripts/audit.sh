@@ -207,7 +207,10 @@ done
 #    here rather than left to the lint. Crate roots still carry their own attribute, which is the
 #    line the `unsafe_code` filter drops; a comment that merely says the word is dropped separately.
 unsafe_home='crates/apogee-secrets/src/encrypted_file/disk.rs'
-hits=$(grep -rnE '\bunsafe\b' crates/*/src apps/*/src --include='*.rs' \
+# `tests` as well as `src`. `deny` reaches every test target too, and an integration test is exactly
+# where an `unsafe` block would be waved through as scaffolding, so scanning only the sources left
+# the half of the relaxation this check was written to cover unguarded.
+hits=$(grep -rnE '\bunsafe\b' crates/*/src apps/*/src crates/*/tests apps/*/tests --include='*.rs' \
   | grep -v "^$unsafe_home:" | grep -v 'unsafe_code' \
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)' || true)
 [ -z "$hits" ] || report "unsafe outside the secret store's Windows permission arm" "$hits"
