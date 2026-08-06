@@ -12,6 +12,10 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 clap.workspace = true
 rpassword.workspace = true
+# The prompt readers here are where a password or a one-time code exists as plain text on its way
+# into a `Secret`, so the buffer typed into is an erased one. A `String` left to drop is a copy
+# nothing further down can reach.
+zeroize.workspace = true
 # Test-only: enabled by the `fixtures` feature to substitute a scripted transport. Never in a release
 # build (the feature is off by default).
 apogee-test-support = { path = "../../crates/apogee-test-support", optional = true }
@@ -22,10 +26,14 @@ fixtures = ["dep:apogee-test-support"]
 # The wine-present end-to-end test: a real launch through system wine. Implies `fixtures`.
 wine-integration = ["fixtures"]
 
+# Suppressing this process's core dumps (prctl + setrlimit), and signalling the game child in the
+# e2e test. Linux-only, so the windows-gnu cross-build never pulls rustix's process backend, which
+# does not exist there.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [dev-dependencies]
 serde_json.workspace = true
-# Sends SIGINT to the CLI child in the e2e test so it shuts the game down cleanly.
-rustix = { workspace = true, features = ["process"] }
 tempfile.workspace = true
 # The hermetic patch e2e: a chaos server serves a real patch chain the CLI downloads and applies.
 apogee-test-support = { path = "../../crates/apogee-test-support" }
@@ -44,6 +52,10 @@ required-features = ["fixtures"]
 
 [[test]]
 name = "secrets_file"
+required-features = ["fixtures"]
+
+[[test]]
+name = "otp"
 required-features = ["fixtures"]
 
 [lints]

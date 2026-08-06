@@ -20,6 +20,7 @@ use apogee_core::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 #[cfg(feature = "fixtures")]
 mod fixtures;
@@ -410,18 +411,50 @@ struct TargetArgs {
     profile: String,
 }
 
+/// The arguments of a flow that authenticates. Deliberately only the profile: the password and the
+/// one-time code are read from the terminal or stdin, never taken as an argument.
 #[derive(Args)]
 struct PlayArgs {
     /// Profile id or unique name.
     #[arg(long)]
     profile: String,
-    /// One-time password code (prompted if omitted and the account uses one).
-    #[arg(long)]
-    otp: Option<String>,
+}
+
+/// Stop this process being written to disk if it dies.
+///
+/// The sealed secret file derives its key once and holds it for the run, so a dump taken while the
+/// store is open carries the key, and the key plus the file beside it is every password in the store
+/// with no passphrase and no derivation work. A dump attached to a bug report or caught in a backup
+/// travels the same way a stolen file does.
+///
+/// Both calls are needed and neither is redundant. `PR_SET_DUMPABLE` is what actually stops it: when
+/// `core_pattern` is a pipe the kernel hands the handler an unlimited size, so `RLIMIT_CORE` alone
+/// would not. The limit covers a plain-file `core_pattern`, and unlike the dumpable flag it survives
+/// an `execve`, so it reaches the game and the runner this process starts too.
+///
+/// What it costs: crash diagnostics. A segfault anywhere in the launcher, or in what it spawns,
+/// leaves an exit status and nothing to open. What it does not cover: swap and hibernation, which
+/// write the same pages by a route no process-level flag reaches.
+#[cfg(target_os = "linux")]
+fn keep_this_process_off_disk() {
+    use rustix::process::{DumpableBehavior, Resource, Rlimit, set_dumpable_behavior, setrlimit};
+
+    if let Err(err) = set_dumpable_behavior(DumpableBehavior::NotDumpable) {
+        eprintln!("warning: this process can still be dumped to disk: {err}");
+    }
+    let none = Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    if let Err(err) = setrlimit(Resource::Core, none) {
+        eprintln!("warning: core dumps of this process are still allowed: {err}");
+    }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    keep_this_process_off_disk();
     match run(Cli::parse()).await {
         Ok(code) => code,
         Err(err) => {
@@ -1177,7 +1210,7 @@ fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), Cli
     let profile = resolve_profile(core, &args.profile)?;
     let account = core.account(profile.account)?;
     let password = read_password()?;
-    let otp = read_otp(args, &account)?;
+    let otp = read_otp(&account)?;
     Ok((profile.id, password, otp))
 }
 
@@ -1341,22 +1374,35 @@ fn read_passphrase(prompt: &str) -> Result<Secret, CliError> {
     if let Some(secret) = fixtures::passphrase() {
         return Ok(secret);
     }
-    Ok(Secret::new(typed(prompt)?.into_bytes()))
+    Ok(into_secret(typed(prompt)?))
 }
 
-/// Read one line with the echo off.
+/// Read one line with the echo off, into a buffer that is erased when it drops.
+///
+/// `rpassword` erases its own working buffers but hands back an ordinary `String`, and every caller
+/// here holds that answer for at least as long as it takes to check it against something.
 ///
 /// The failure worth naming is the only one that happens in practice: there is no terminal to ask on,
 /// because the launcher was run from a script or a service. The library's own error for that is an
 /// operating-system code with no bearing on what to do about it.
-fn typed(prompt: &str) -> Result<String, CliError> {
-    rpassword::prompt_password(prompt).map_err(|err| -> CliError {
-        if std::io::IsTerminal::is_terminal(&io::stdin()) {
-            Box::new(err)
-        } else {
-            "there is no terminal to type a passphrase on".into()
-        }
-    })
+fn typed(prompt: &str) -> Result<Zeroizing<String>, CliError> {
+    rpassword::prompt_password(prompt)
+        .map(Zeroizing::new)
+        .map_err(|err| -> CliError {
+            if std::io::IsTerminal::is_terminal(&io::stdin()) {
+                Box::new(err)
+            } else {
+                "there is no terminal to type a passphrase on".into()
+            }
+        })
+}
+
+/// Move an erased text buffer into a [`Secret`], leaving nothing behind.
+///
+/// `String::into_bytes` hands over the heap allocation rather than copying it, so the bytes are only
+/// ever in one place; taking the `String` out of its wrapper leaves an empty one to drop.
+fn into_secret(mut text: Zeroizing<String>) -> Secret {
+    Secret::from_string(std::mem::take(&mut *text))
 }
 
 /// Read a passphrase that is about to seal a file, so it is asked for twice and compared.
@@ -1376,7 +1422,7 @@ fn read_new_passphrase() -> Result<Secret, CliError> {
     if first != again {
         return Err("the two passphrases were not the same".into());
     }
-    Ok(Secret::new(first.into_bytes()))
+    Ok(into_secret(first))
 }
 
 /// Require the user to type `word` before something destructive or irreversible happens.
@@ -1388,15 +1434,35 @@ fn confirmed(word: &str) -> Result<bool, CliError> {
     Ok(prompt_line(&format!("Type `{word}` to continue: "))? == word)
 }
 
-/// The one-time-password source: the flag, else an interactive prompt when the account uses one.
-fn read_otp(args: &PlayArgs, account: &Account) -> Result<OtpSource, CliError> {
-    if let Some(code) = &args.otp {
-        Ok(OtpSource::Manual(code.clone()))
-    } else if account.use_otp {
-        Ok(OtpSource::Manual(prompt_line("One-time password: ")?))
+/// The one-time-password source: a code read off stdin when the account uses one, and nothing
+/// otherwise.
+///
+/// There is no flag for it, and there must not be one. `/proc/<pid>/cmdline` is world-readable with
+/// no `hidepid`, so an argument holding a live code is readable by every local user for as long as
+/// the run lasts; stdin is readable by nobody. A script that has to supply one pipes it in, the same
+/// line-per-answer shape as every other prompt here.
+fn read_otp(account: &Account) -> Result<OtpSource, CliError> {
+    if account.use_otp {
+        Ok(OtpSource::Manual(read_line_erased("One-time password: ")?))
     } else {
-        Ok(OtpSource::Manual(String::new()))
+        Ok(OtpSource::Manual(Secret::new(Vec::new())))
     }
+}
+
+/// Read one line of stdin into a buffer that is erased when it drops, trimming in place.
+///
+/// Trimming in place rather than with `trim().to_owned()`: the second `String` that would make is
+/// the copy nothing erases, which is the whole point of reading into an erased buffer at all.
+fn read_line_erased(prompt: &str) -> Result<Secret, CliError> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut line = Zeroizing::new(String::new());
+    io::stdin().read_line(&mut line)?;
+    let end = line.trim_end().len();
+    line.truncate(end);
+    let start = line.len() - line.trim_start().len();
+    line.drain(..start);
+    Ok(into_secret(line))
 }
 
 /// The game's settings: captured, listed, put back, and pruned.
@@ -1756,4 +1822,22 @@ fn render_patch(patch: &PatchProgress) -> String {
         }
         _ => "patch: progress".to_owned(),
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every reader that takes a typed answer hands back a buffer that erases itself.
+    ///
+    /// A tripwire, not a proof: it stops the return type quietly going back to `String`, which is the
+    /// shape this got wrong once already, but nothing here can see a caller that copies the answer
+    /// out again. What measures that is an allocator shim over the built binary, which needs
+    /// `unsafe` and so cannot live in this workspace.
+    const _: fn() = || {
+        fn erased_text(_: fn(&str) -> Result<Zeroizing<String>, CliError>) {}
+        fn erased_secret(_: fn(&str) -> Result<Secret, CliError>) {}
+        erased_text(typed);
+        erased_secret(read_line_erased);
+    };
 }

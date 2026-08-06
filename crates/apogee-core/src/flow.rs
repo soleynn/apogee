@@ -305,10 +305,14 @@ async fn authenticate(
     otp: OtpSource,
     tx: &UnboundedSender<Event>,
 ) -> Result<Option<Authenticated>, CoreError> {
-    // The one-time password: only a manually entered code is honored for now.
+    // The one-time password: only a manually entered code is honored for now. Borrowed out of the
+    // source rather than copied out of it, so the erased buffer the shell typed into is the only one
+    // this process holds.
     let otp_code = match (account.use_otp, &otp) {
         (false, _) => None,
-        (true, OtpSource::Manual(code)) if !code.is_empty() => Some(code.clone()),
+        (true, OtpSource::Manual(code)) if !code.is_empty() => {
+            Some(std::str::from_utf8(code.expose()).map_err(|_| CoreError::InvalidCredential)?)
+        }
         (true, _) => {
             emit(tx, FlowState::NeedsOtp);
             return Ok(None);
@@ -341,7 +345,7 @@ async fn authenticate(
         .submit(Credentials {
             sqexid: &account.sqex_id,
             password,
-            otp: otp_code.as_deref(),
+            otp: otp_code,
         })
         .await?;
     if !auth.terms_accepted {

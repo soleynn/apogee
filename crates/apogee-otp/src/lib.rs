@@ -4,8 +4,10 @@
 //! STUB: public shape only (error taxonomy, [`import`]/[`generate`], the [`Listener`], and the
 //! [`Otp`] handle the composition root holds); TOTP math and the local listener are not yet built.
 
+use std::fmt;
 use std::time::SystemTime;
 
+use apogee_secrets::Secret;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -26,11 +28,34 @@ pub enum OtpError {
 }
 
 /// Where a login's one-time password comes from.
-#[derive(Debug, Clone)]
+///
+/// A typed code is a [`Secret`], not a `String`: the buffer is erased when it drops, and the type
+/// carries no `Clone`, so a caller cannot leave a second copy behind on the heap. That is why the
+/// enum is neither `Clone` nor derived-`Debug` either.
 pub enum OtpSource {
     Totp,
-    Manual(String),
+    Manual(Secret),
     Listener(ListenerConfig),
+}
+
+/// The variant name, never the code. A rendered `OtpSource` is one of the few ways a live code could
+/// reach a log, so there is nothing else to render.
+impl fmt::Debug for OtpSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl OtpSource {
+    /// The variant's name, for a caller rendering a redacted view of something holding one.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Totp => "Totp",
+            Self::Manual(_) => "Manual",
+            Self::Listener(_) => "Listener",
+        }
+    }
 }
 
 /// Parsed TOTP parameters (secret + period + digits), from an otpauth URI or a base32 secret.
