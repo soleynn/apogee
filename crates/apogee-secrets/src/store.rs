@@ -55,6 +55,16 @@ pub trait SecretStore {
     /// an unlock prompt.
     fn probe(&self) -> BackendReport;
 
+    /// Erase whatever this store is holding so it does not have to ask again, at the cost of asking
+    /// again next time.
+    ///
+    /// The default does nothing, which is the honest answer for a store that keeps nothing between
+    /// calls: the platform stores hold no key of their own, and [`crate::Null`] has nothing to hold.
+    /// [`crate::EncryptedFile`] keeps the key its passphrase derives, and this is how a front end
+    /// that knows the key is not wanted again (the session ended, the screen locked) shortens how
+    /// long it is in this process's memory instead of waiting out that store's own idle window.
+    fn seal(&self) {}
+
     /// Delete every secret stored for `account`, whatever kinds it has.
     ///
     /// Every kind is attempted even after one of them fails, and the first failure is reported once

@@ -8,8 +8,9 @@ mod passphrase;
 mod seal;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -70,7 +71,7 @@ pub enum FileState {
     Foreign,
 }
 
-/// The key this handle derived, and what it was derived from.
+/// The key this handle derived, what it was derived from, and when it stops being one.
 ///
 /// The salt and the cost travel with it so a file that has been re-sealed since, which draws a fresh
 /// salt, is recognised as needing a fresh derivation rather than reported as a wrong passphrase.
@@ -78,61 +79,175 @@ struct CachedKey {
     salt: [u8; SALT_LEN],
     cost: KdfCost,
     key: Zeroizing<[u8; KEY_LEN]>,
+    /// When this key stops being handed out, on [`KeyCache::now`]'s scale. Pushed out by every call
+    /// that uses it, so what the window measures is idleness rather than age.
+    expires_at: u64,
 }
 
-/// The derived key, and a lock-free answer to whether there is one.
+/// The derived key, a lock-free answer to whether there is a usable one, and the window it lives in.
 ///
 /// Two views of one fact, kept in step by the guard rather than by every caller remembering to. The
-/// flag exists because a read of "is this handle open" must not queue: a write holds the mutex from
-/// before the file is read until after it is re-sealed, and the passphrase prompt and the Argon2
-/// derivation are both inside that window, so anything that reached for the same lock waited out a
-/// modal dialog first.
+/// published deadline exists because a read of "is this handle open" must not queue: a write holds
+/// the mutex from before the file is read until after it is re-sealed, and the passphrase prompt and
+/// the Argon2 derivation are both inside that window, so anything that reached for the same lock
+/// waited out a modal dialog first.
+///
+/// Two separate things act on the deadline, and only one of them is load-bearing. Whether a key may
+/// be handed out is settled on use, against the slot's own copy. Getting the bytes out of memory
+/// once nobody is asking is the waiting thread's job, and it is best effort: the window still
+/// expires on a host where no thread could be spawned, it is only erased later.
 struct KeyCache {
     slot: Mutex<Option<CachedKey>>,
-    present: AtomicBool,
+    /// The held key's deadline, published as the guard is released, and zero when there is none.
+    /// Zero needs no companion flag: no deadline is ever behind the base, so an empty slot reads as
+    /// expired by the same comparison that expires a real one.
+    expires_at: AtomicU64,
+    /// Woken when the slot is emptied, so the thread waiting out a window stops waiting on a key
+    /// that has already gone instead of holding the cache alive until its deadline.
+    empty: Condvar,
+    /// Whether a thread is already waiting out the held key's window.
+    reaping: AtomicBool,
+    /// How long a key outlives the call that last used it.
+    idle: Duration,
+    /// The zero of this cache's own scale. Monotonic, because the question is how long it has been
+    /// since the key was used, and a wall clock stepped backwards by the user or by NTP answers that
+    /// one wrongly. An `Instant` cannot be published in an atomic, so what is published is millis
+    /// since here.
+    base: Instant,
 }
 
 impl KeyCache {
-    fn new() -> Self {
+    fn new(idle: Duration) -> Self {
         Self {
             slot: Mutex::new(None),
-            present: AtomicBool::new(false),
+            expires_at: AtomicU64::new(0),
+            empty: Condvar::new(),
+            reaping: AtomicBool::new(false),
+            idle,
+            base: Instant::now(),
         }
+    }
+
+    /// Millis since this cache's base.
+    fn now(&self) -> u64 {
+        u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The deadline a key used at `now` gets. Saturating, so an absurd window parks the key rather
+    /// than wrapping it into the past and expiring it at once.
+    fn deadline(&self, now: u64) -> u64 {
+        now.saturating_add(u64::try_from(self.idle.as_millis()).unwrap_or(u64::MAX))
     }
 
     /// Take the cache, taking a poisoned lock's contents back rather than turning another test's
     /// panic into a second one. Panicking is denied in this workspace, and a poisoned cache is not a
     /// condition this store models: the worst it holds is a key that will be re-derived.
-    fn lock(&self) -> KeyGuard<'_> {
+    fn lock(self: &Arc<Self>) -> KeyGuard<'_> {
         KeyGuard {
             slot: self.slot.lock().unwrap_or_else(PoisonError::into_inner),
-            present: &self.present,
+            cache: self,
         }
     }
 
-    /// Whether a key is held, without taking the lock.
+    /// Whether a key is held and still inside its window, without taking the lock.
     ///
     /// `Relaxed` because this is a report about a moment that has already passed by the time a
     /// caller reads it: the file can be deleted, and the key dropped, between the load and the next
     /// statement. What it must not do is block, and what it must not be is a second source of truth
     /// that drifts, which is what the guard below is for.
     fn present(&self) -> bool {
-        self.present.load(Ordering::Relaxed)
+        self.now() < self.expires_at.load(Ordering::Relaxed)
+    }
+
+    /// Set a thread waiting to erase the held key when its window runs out, unless one already is.
+    ///
+    /// Called with the slot locked, which is what keeps it from racing a thread on its way out: that
+    /// one clears the flag before it releases the lock, so a key stored under the lock either finds
+    /// a waiter still running or arms a fresh one.
+    fn arm(self: &Arc<Self>) {
+        if self.idle.is_zero() {
+            // Nothing to wait out: a key is past its deadline the moment it is stored, and the first
+            // caller to look erases it. A thread would wake only to do that fractionally sooner.
+            return;
+        }
+        if self
+            .reaping
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let cache = Arc::clone(self);
+        if std::thread::Builder::new()
+            .name("apogee-secrets-idle".to_owned())
+            .spawn(move || cache.reap())
+            .is_err()
+        {
+            // A host that cannot spawn is not a reason to refuse the call that wanted the key. The
+            // window is still enforced on use; only the erasure waits for whoever looks next.
+            self.reaping.store(false, Ordering::Release);
+        }
+    }
+
+    /// Wait out the held key's window and erase it, returning once there is no key left to wait for.
+    fn reap(&self) {
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        while let Some(expires_at) = slot.as_ref().map(|held| held.expires_at) {
+            let now = self.now();
+            if now >= expires_at {
+                // Dropping it is what erases it: the key is `Zeroizing`.
+                *slot = None;
+                break;
+            }
+            // A key used again while this waits pushes its own deadline out, so what is waited on
+            // next is the new one rather than the one this woke for.
+            let (waited, _) = self
+                .empty
+                .wait_timeout(slot, Duration::from_millis(expires_at - now))
+                .unwrap_or_else(PoisonError::into_inner);
+            slot = waited;
+        }
+        self.expires_at.store(0, Ordering::Relaxed);
+        self.reaping.store(false, Ordering::Release);
     }
 }
 
-/// A held key cache, which publishes whether the slot is occupied as it is released.
+/// A held key cache, which publishes the held key's deadline as it is released.
 ///
 /// The two can therefore disagree only while the lock is held, which is exactly the window in which
 /// a reader taking the lock would have been blocked anyway.
 struct KeyGuard<'a> {
     slot: MutexGuard<'a, Option<CachedKey>>,
-    present: &'a AtomicBool,
+    cache: &'a Arc<KeyCache>,
+}
+
+impl KeyGuard<'_> {
+    /// Put a freshly derived key in the cache, start its window, and set something waiting to erase
+    /// it when that window runs out.
+    fn store(&mut self, salt: [u8; SALT_LEN], cost: KdfCost, key: Zeroizing<[u8; KEY_LEN]>) {
+        let expires_at = self.cache.deadline(self.cache.now());
+        *self.slot = Some(CachedKey {
+            salt,
+            cost,
+            key,
+            expires_at,
+        });
+        self.cache.arm();
+    }
 }
 
 impl Drop for KeyGuard<'_> {
     fn drop(&mut self) {
-        self.present.store(self.slot.is_some(), Ordering::Relaxed);
+        self.cache.expires_at.store(
+            self.slot.as_ref().map_or(0, |held| held.expires_at),
+            Ordering::Relaxed,
+        );
+        if self.slot.is_none() {
+            // Only when it has gone. A key whose deadline moved out is found by the waiting thread
+            // when it wakes for the old one, but a key that has gone would otherwise leave that
+            // thread holding the cache alive until a deadline nothing is going to reach.
+            self.cache.empty.notify_all();
+        }
     }
 }
 
@@ -162,13 +277,21 @@ enum Missing {
 /// Opt-in fallback backend: every account secret in one file, sealed under a passphrase.
 ///
 /// XChaCha20-Poly1305 over the whole record table, keyed by an Argon2id derivation of a passphrase
-/// the user types once per launcher session. One sealed blob rather than a file per secret, so a
-/// directory listing says neither which accounts have secrets nor which kinds are stored, and so
-/// emptying an account is a single atomic rewrite.
+/// the user types once per burst of use rather than once per call. One sealed blob rather than a
+/// file per secret, so a directory listing says neither which accounts have secrets nor which kinds
+/// are stored, and so emptying an account is a single atomic rewrite.
 ///
 /// The handle keeps the derived key and nothing else. No decrypted value is held between calls, so at
 /// most one call's worth of plaintext is alive at a time, and the passphrase is dropped inside the
 /// call that used it.
+///
+/// The kept key is erased once it has gone unused for [`EncryptedFile::DEFAULT_IDLE`], and the next
+/// call asks again. What that bounds is how long the one value that opens the store without a
+/// passphrase sits in this process's ordinary memory, because that memory reaches disk by routes the
+/// launcher does not choose: a core dump attached to a bug report, a page written to swap, a
+/// hibernation image. Anyone holding one of those and a copy of the file reads the whole store with
+/// no passphrase and none of the derivation work. A front end that knows the session is over can say
+/// so with [`EncryptedFile::seal`] rather than wait the window out.
 ///
 /// **This is weaker than a platform credential store, not stronger.** It defends a copy of the file
 /// taken off the machine, up to the strength of the passphrase, and it defends nothing at all against
@@ -183,12 +306,20 @@ enum Missing {
 pub struct EncryptedFile {
     path: PathBuf,
     passphrase: Arc<dyn Passphrase>,
-    key: KeyCache,
+    key: Arc<KeyCache>,
 }
 
 impl EncryptedFile {
     /// The file name this backend expects under the launcher's own directory. On-disk contract.
     pub const FILE_NAME: &'static str = "secrets.apsf";
+
+    /// How long a derived key outlives the call that last used it, unless a caller says otherwise.
+    ///
+    /// Long enough that one stretch of work (unlock, save a password, start a launch) costs one
+    /// prompt, and short enough that a launcher left open all afternoon is not still holding the key
+    /// that opens the store. Measured from the last use rather than from the derivation, so a burst
+    /// of calls is one window and not one each.
+    pub const DEFAULT_IDLE: Duration = Duration::from_secs(5 * 60);
 
     /// A handle over `path`, which asks `passphrase` the first time a call needs to unlock.
     ///
@@ -197,10 +328,25 @@ impl EncryptedFile {
     /// [`SecretsError::NoCollection`], never a new file under a passphrase nobody confirmed.
     #[must_use]
     pub fn open(path: impl Into<PathBuf>, passphrase: Arc<dyn Passphrase>) -> Self {
+        Self::with_idle_timeout(path, passphrase, Self::DEFAULT_IDLE)
+    }
+
+    /// As [`EncryptedFile::open`], keeping a derived key for `idle` after each use rather than for
+    /// [`EncryptedFile::DEFAULT_IDLE`].
+    ///
+    /// [`Duration::ZERO`] keeps no key at all, so every call that needs one asks: the least this
+    /// process can hold and the most it can prompt. There is deliberately no setting that keeps a key
+    /// for the life of the handle, because an unbounded residency is what the window exists to bound.
+    #[must_use]
+    pub fn with_idle_timeout(
+        path: impl Into<PathBuf>,
+        passphrase: Arc<dyn Passphrase>,
+        idle: Duration,
+    ) -> Self {
         Self {
             path: path.into(),
             passphrase,
-            key: KeyCache::new(),
+            key: Arc::new(KeyCache::new(idle)),
         }
     }
 
@@ -246,7 +392,7 @@ impl EncryptedFile {
         let salt: [u8; SALT_LEN] = seal::draw()?;
         let key = kdf::derive(passphrase.expose(), &salt, cost)?;
         self.publish(&Table::new(), &salt, cost, &key)?;
-        *cached = Some(CachedKey { salt, cost, key });
+        cached.store(salt, cost, key);
         Ok(())
     }
 
@@ -284,7 +430,7 @@ impl EncryptedFile {
         let cost = KdfCost::CURRENT;
         let key = kdf::derive(new.expose(), &salt, cost)?;
         self.publish(&table, &salt, cost, &key)?;
-        *cached = Some(CachedKey { salt, cost, key });
+        cached.store(salt, cost, key);
         Ok(())
     }
 
@@ -303,13 +449,22 @@ impl EncryptedFile {
         }
     }
 
-    /// Whether this handle has already derived its key, so the next call will not ask for anything.
+    /// Whether this handle holds a derived key that is still inside its window, so the next call
+    /// will not ask for anything.
+    ///
+    /// A key whose window has run out reads as closed here from the moment it expires, whether or not
+    /// anything has got round to erasing it yet, because what the answer is for is what the next call
+    /// will do.
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.key.present()
     }
 
     /// Forget the derived key and erase it. The next call that needs one asks again.
+    ///
+    /// What a front end calls when it knows the key is not wanted again soon: the session ended, the
+    /// screen locked, the user signed out. The window in [`EncryptedFile::DEFAULT_IDLE`] is the
+    /// backstop for everything that does not know.
     pub fn seal(&self) {
         *self.cache() = None;
     }
@@ -350,35 +505,40 @@ impl EncryptedFile {
         self.key.lock()
     }
 
-    /// The key for `header`, from the cache when it was derived from the same salt and cost, and
-    /// otherwise by asking for the passphrase and deriving.
+    /// The key for `header`, from the cache when it was derived from the same salt and cost and has
+    /// not been left alone past its window, and otherwise by asking for the passphrase and deriving.
     ///
     /// Matching on the salt is what makes a store another process re-sealed reprompt rather than
     /// report a wrong passphrase: a re-seal always draws a new salt, so a mismatch is a definite
     /// stale key rather than a possible typo.
+    ///
+    /// This is where the window is enforced, rather than in the thread that erases the key, because
+    /// a key that may still be used on a host where that thread could not be spawned would be a
+    /// window that quietly is not one.
     fn key_for(
         &self,
-        cached: &mut Option<CachedKey>,
+        cached: &mut KeyGuard<'_>,
         header: &Header,
     ) -> Result<Zeroizing<[u8; KEY_LEN]>, SecretsError> {
-        if let Some(current) = cached.as_ref()
+        let now = self.key.now();
+        if let Some(current) = cached.as_mut()
             && current.salt == header.salt
             && current.cost == header.cost
+            && now < current.expires_at
         {
+            // Using it restarts the window, so what expires a key is a gap between calls rather than
+            // the age of the derivation.
+            current.expires_at = self.key.deadline(now);
             return Ok(current.key.clone());
         }
-        *cached = None;
+        **cached = None;
         let passphrase = self.passphrase.unlock()?;
         if passphrase.is_empty() {
             return Err(SecretsError::Locked);
         }
         let key = kdf::derive(passphrase.expose(), &header.salt, header.cost)?;
         drop(passphrase);
-        *cached = Some(CachedKey {
-            salt: header.salt,
-            cost: header.cost,
-            key: key.clone(),
-        });
+        cached.store(header.salt, header.cost, key.clone());
         Ok(key)
     }
 
@@ -386,18 +546,14 @@ impl EncryptedFile {
     ///
     /// A key that turned out not to open the file is never left in the cache, however it was reached,
     /// so the next call asks again instead of failing the same way forever.
-    fn read_table(
-        &self,
-        cached: &mut Option<CachedKey>,
-        bytes: &[u8],
-    ) -> Result<Table, SecretsError> {
+    fn read_table(&self, cached: &mut KeyGuard<'_>, bytes: &[u8]) -> Result<Table, SecretsError> {
         let header = Header::parse(bytes)?;
         let key = self.key_for(cached, &header)?;
         match unseal(bytes, &header, &key) {
             Ok(table) => Ok(table),
             Err(err) => {
                 if matches!(err, SecretsError::WrongPassphrase) {
-                    *cached = None;
+                    **cached = None;
                 }
                 Err(err)
             }
@@ -557,6 +713,12 @@ impl SecretStore for EncryptedFile {
         self.modify(Missing::Ignore, move |table| table.remove(&key).is_some())
     }
 
+    /// Erase the derived key now rather than when its window runs out. The one backend in this crate
+    /// with something to erase.
+    fn seal(&self) {
+        EncryptedFile::seal(self);
+    }
+
     /// Answers from the path every time, and consults the cached key only to separate a store this
     /// handle has already unlocked from one it has not.
     ///
@@ -601,6 +763,17 @@ impl SecretStore for EncryptedFile {
             table.retain(|(stored, _), _| *stored != id);
             table.len() != before
         })
+    }
+}
+
+/// Erase the key with the handle rather than leaving it to the window.
+///
+/// The thread waiting out that window holds the cache alive, so without this a dropped handle's key
+/// would outlive it by as much as a full window. Emptying the slot erases the key here and wakes that
+/// thread, which finds nothing left to wait for and goes.
+impl Drop for EncryptedFile {
+    fn drop(&mut self) {
+        self.seal();
     }
 }
 
@@ -787,17 +960,135 @@ mod tests {
         }
     }
 
+    /// An empty store at `path`, opened with a window of the caller's choosing.
+    fn created(path: &Path, idle: Duration) -> EncryptedFile {
+        let store = EncryptedFile::with_idle_timeout(path, Arc::new(Unprompted), idle);
+        store
+            .create(
+                Consent::granted(),
+                &Secret::new(b"pp".to_vec()),
+                KdfCost::floor(),
+            )
+            .expect("create");
+        store
+    }
+
+    /// The window is enforced where the key is handed out, not only by the thread waiting to erase
+    /// it. A host that could not spawn that thread, and the moment before it has run on one that
+    /// could, must not be states in which an expired key is still good.
+    ///
+    /// The deadline is rewound by hand to one millisecond after this cache's own base, which any
+    /// derivation is already long past, under a window far too long for the waiting thread to be
+    /// what noticed. Every other route to an expired key erases it in the same breath, so this is
+    /// the only way to observe a key that is past its deadline and still in the slot.
+    #[test]
+    fn a_key_past_its_deadline_is_not_handed_out_while_it_is_still_in_the_slot() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(EncryptedFile::FILE_NAME);
+        let store = created(&path, Duration::from_secs(3600));
+
+        let mut cached = store.cache();
+        cached
+            .as_mut()
+            .expect("creating leaves the handle open")
+            .expires_at = 1;
+        drop(cached);
+
+        assert!(
+            !store.is_open(),
+            "a key past its deadline is not an open handle, whatever is still holding it"
+        );
+        assert!(
+            store.cache().is_some(),
+            "the key is still in the slot, so refusing to use it is the only thing that can refuse"
+        );
+        assert!(
+            matches!(
+                store.get(ACCOUNT, SecretKind::Password),
+                Err(SecretsError::Locked)
+            ),
+            "the expired key was used instead of the passphrase being asked for again"
+        );
+    }
+
+    /// What separates an idle window from a lifetime: using the key restarts it. Measured on the
+    /// deadline rather than by waiting one out, so the only thing the clock has to get right is that
+    /// a sleep does not return early, and a build that never refreshes leaves the two readings equal
+    /// rather than merely close.
+    ///
+    /// The source here cannot prompt, so the read in the middle proves its own precondition: had it
+    /// missed the cache it would have failed rather than quietly re-derived.
+    #[test]
+    fn using_a_key_pushes_its_window_out_rather_than_letting_it_age_out() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(EncryptedFile::FILE_NAME);
+        let store = created(&path, EncryptedFile::DEFAULT_IDLE);
+        let derived = store.key.expires_at.load(Ordering::Relaxed);
+
+        std::thread::sleep(Duration::from_millis(50));
+        store.get(ACCOUNT, SecretKind::Password).expect("read");
+
+        let used = store.key.expires_at.load(Ordering::Relaxed);
+        assert!(
+            used > derived,
+            "the window has to restart from the call that used the key, not from the derivation"
+        );
+    }
+
+    /// The window has to be enforced by something that runs, not only by the next call that looks at
+    /// the key. An idle launcher makes no calls, and idle is exactly the state a machine is in when
+    /// its memory is photographed, so a key erased only on the next call is a key that is still
+    /// there.
+    ///
+    /// Nothing in the loop touches the store: polling the slot is the observation, and waiting longer
+    /// than the window can only ever help.
+    #[test]
+    fn the_key_is_erased_when_its_window_runs_out_with_no_call_to_notice() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(EncryptedFile::FILE_NAME);
+        let store = created(&path, Duration::from_millis(50));
+        assert!(
+            store.cache().is_some(),
+            "creating the store leaves its key in the slot"
+        );
+
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < give_up && store.cache().is_some() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            store.cache().is_none(),
+            "the key outlived its window with nothing calling in to notice"
+        );
+    }
+
+    /// The thread waiting out a window holds the cache alive, so a handle that dropped without
+    /// clearing its own slot would leave the key behind for as much as a whole window after the
+    /// thing that owned it was gone. The window here is far longer than the test, so the drop is the
+    /// only thing that can have erased it.
+    #[test]
+    fn dropping_the_handle_erases_the_key_rather_than_leaving_it_to_the_window() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(EncryptedFile::FILE_NAME);
+        let store = created(&path, Duration::from_secs(3600));
+        let cache = Arc::clone(&store.key);
+        assert!(cache.lock().is_some());
+
+        drop(store);
+
+        assert!(cache.lock().is_none(), "the key outlived its handle");
+    }
+
     /// The guard on the hand-written `Debug`. A derive would print the sealing key, and the whole
     /// point of the type it is held in is that it never reaches a log.
     #[test]
     fn a_store_never_prints_its_key() {
         let store = EncryptedFile::open("/nonexistent/store.apsf", Arc::new(Unprompted));
         let key = [0xAB_u8; KEY_LEN];
-        *store.cache() = Some(CachedKey {
-            salt: [0xCD; SALT_LEN],
-            cost: KdfCost::floor(),
-            key: Zeroizing::new(key),
-        });
+        store
+            .cache()
+            .store([0xCD; SALT_LEN], KdfCost::floor(), Zeroizing::new(key));
         let rendered = format!("{store:?}");
         assert!(rendered.contains("open: true"), "{rendered}");
         assert!(!rendered.contains("ab"), "{rendered}");

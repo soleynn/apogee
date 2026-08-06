@@ -67,7 +67,16 @@ fn created(
     path: &std::path::Path,
     passphrase: Arc<Scripted>,
 ) -> Result<EncryptedFile, SecretsError> {
-    let store = EncryptedFile::open(path, passphrase.clone());
+    created_with_idle(path, passphrase, EncryptedFile::DEFAULT_IDLE)
+}
+
+/// As [`created`], with a window of the test's choosing in place of the shipped one.
+fn created_with_idle(
+    path: &std::path::Path,
+    passphrase: Arc<Scripted>,
+    idle: std::time::Duration,
+) -> Result<EncryptedFile, SecretsError> {
+    let store = EncryptedFile::with_idle_timeout(path, passphrase.clone(), idle);
     store.create(
         Consent::granted(),
         &Secret::new(
@@ -608,6 +617,102 @@ fn a_store_re_sealed_by_something_else_is_asked_about_again_rather_than_refused(
         b"hunter2"
     );
     assert_eq!(mine.asked(), 2, "the handle has to ask again, not reuse");
+}
+
+/// The window is what bounds how long the one value that opens this store without a passphrase is
+/// resident in ordinary process memory. Kept for the life of the launcher it reaches disk by routes
+/// nothing here chooses (a core dump attached to a bug report, a page written to swap, a hibernation
+/// image), and whoever holds one of those and a copy of the file reads every stored secret with no
+/// passphrase and none of the derivation work.
+///
+/// The sleep is three times the window, and the only way it could mislead is by returning early,
+/// which is the one thing sleeping does not do. A loaded machine overshoots, and overshooting is the
+/// direction that expires the key harder.
+#[test]
+fn a_key_left_alone_past_its_window_is_asked_for_again() {
+    let (_dir, path) = scratch().expect("scratch");
+    let source = Scripted::new(b"correct horse");
+    let store = created_with_idle(&path, source.clone(), std::time::Duration::from_millis(200))
+        .expect("create");
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+    assert_eq!(
+        source.asked(),
+        0,
+        "creating derived the key from the passphrase it was handed"
+    );
+    assert!(store.is_open());
+
+    std::thread::sleep(std::time::Duration::from_millis(600));
+
+    assert!(!store.is_open(), "the window ran out");
+    assert_eq!(
+        store.probe().state,
+        BackendState::Locked,
+        "a handle whose window ran out is locked, not ready: the next call prompts"
+    );
+    assert_eq!(
+        store
+            .get(ACCOUNT, SecretKind::Password)
+            .expect("read")
+            .expect("present")
+            .expose(),
+        b"hunter2",
+        "the store is untouched; only the key had to be derived again"
+    );
+    assert_eq!(
+        source.asked(),
+        1,
+        "the key was gone, so the passphrase had to be asked for again"
+    );
+}
+
+/// A zero window is the setting that keeps nothing, not the setting that keeps everything. Read the
+/// other way round it would be the one value that turns the window off, silently, in the direction
+/// nobody would want it turned off in.
+#[test]
+fn a_zero_window_keeps_no_key_between_calls() {
+    let (_dir, path) = scratch().expect("scratch");
+    let source = Scripted::new(b"pp");
+    let store =
+        created_with_idle(&path, source.clone(), std::time::Duration::ZERO).expect("create");
+    assert!(
+        !store.is_open(),
+        "not even the key that creating the store just derived"
+    );
+
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+    assert_eq!(source.asked(), 1);
+    store.get(ACCOUNT, SecretKind::Password).expect("read");
+    assert_eq!(source.asked(), 2, "every call pays for its own derivation");
+}
+
+/// Sealing early has to be reachable through the seam the composition root holds, or the only code
+/// that can shorten the key's residency is code holding this backend concretely, which the launcher
+/// deliberately does not.
+#[test]
+fn sealing_through_the_store_seam_makes_the_next_call_ask_again() {
+    let (_dir, path) = scratch().expect("scratch");
+    let source = Scripted::new(b"pp");
+    let store = created(&path, source.clone()).expect("create");
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+    assert!(store.is_open());
+
+    let seam: &dyn SecretStore = &store;
+    seam.seal();
+
+    assert!(
+        !store.is_open(),
+        "the seam's seal has to reach this backend's key"
+    );
+    assert_eq!(source.asked(), 0);
+    seam.get(ACCOUNT, SecretKind::Password).expect("read");
+    assert_eq!(source.asked(), 1);
 }
 
 #[test]
