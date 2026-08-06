@@ -152,6 +152,36 @@ fn every_write_draws_a_fresh_nonce_for_each_envelope() {
     }
 }
 
+/// A write replaces the file. It never rewrites the one that is already there.
+///
+/// Every test written for the publish path is satisfied by an in-place write: with no temp file
+/// there are trivially no strays to sweep, and the concurrent case still passes because the file
+/// lock, not the rename, is what serialises it. What in-place costs is the property the rename is
+/// there for, that a write which dies partway leaves the previous store whole rather than truncated,
+/// and the inode is the cheapest observation of that which does not need to kill a process mid-write.
+#[cfg(unix)]
+#[test]
+fn a_write_replaces_the_file_rather_than_rewriting_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (_dir, path) = scratch().expect("scratch");
+    let store = created(&path, Scripted::new(b"correct horse")).expect("create");
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("write");
+    let before = std::fs::metadata(&path).expect("stat").ino();
+
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter3"))
+        .expect("write");
+    let after = std::fs::metadata(&path).expect("stat").ino();
+
+    assert_ne!(
+        before, after,
+        "the store was rewritten in place instead of being replaced"
+    );
+}
+
 /// The property the whole file exists for. A handle that only worked while it was the one that wrote
 /// the file would be a cache, not a store.
 #[test]
