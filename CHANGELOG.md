@@ -19,6 +19,7 @@ is tagged with its change type. Versioning aims to follow
 - Tell damage to the check envelope apart from a mistyped passphrase (#111) _(fixed)_
 - Make the in-memory double model a store that could exist (#113) _(fixed)_
 - Guard the lock sidecar, and repair a store directory both ways (#114) _(fixed)_
+- Refuse a secret with no bytes in it (#115) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
