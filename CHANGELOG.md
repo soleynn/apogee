@@ -6,6 +6,9 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee-core
+- Keep the session id out of error text, and refuse before reading (#112) _(fixed)_
+
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
 - Add a probe report example for sandbox runs (#105) _(testing)_
@@ -13,6 +16,7 @@ is tagged with its change type. Versioning aims to follow
 - Seal account secrets in a passphrase-protected file (#108) _(added)_
 - Pin the properties four one-line edits could ship past (#109) _(testing)_
 - Make the probe answer about the thing it is reporting on (#110) _(fixed)_
+- Tell damage to the check envelope apart from a mistyped passphrase (#111) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
