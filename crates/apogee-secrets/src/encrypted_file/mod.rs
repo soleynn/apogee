@@ -542,6 +542,7 @@ impl SecretStore for EncryptedFile {
     }
 
     fn set(&self, account: Uuid, kind: SecretKind, value: Secret) -> Result<(), SecretsError> {
+        crate::store::refuse_empty(&value)?;
         let key = items::key_for(account, kind);
         let bytes = Zeroizing::new(value.expose().to_vec());
         drop(value);
