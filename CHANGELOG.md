@@ -12,6 +12,9 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-core
 - Keep the session id out of error text, and refuse before reading (#112) _(fixed)_
 
+### apogee-fetch
+- Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
+
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
 - Add a probe report example for sandbox runs (#105) _(testing)_
