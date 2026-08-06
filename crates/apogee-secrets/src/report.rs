@@ -17,6 +17,13 @@ pub enum Backend {
     EncryptedFile,
     /// The store that keeps nothing.
     Null,
+    /// The in-memory double, which nothing shipping constructs.
+    ///
+    /// It has a name of its own so that no real store's report can be confused with a test's. The
+    /// double used to answer [`Backend::Null`] while holding items and handing them back, which is a
+    /// combination the real [`crate::Null`] cannot produce, so a consumer's test could assert
+    /// behaviour no store has.
+    Memory,
 }
 
 /// What condition the store is in. Each variant is a distinct thing for a caller to do about it.
