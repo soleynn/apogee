@@ -262,6 +262,35 @@ impl Passphrase for Slow {
     }
 }
 
+/// A value with no bytes in it is refused, not stored.
+///
+/// An empty secret writes and reads back perfectly well, so nothing downstream notices: a front end
+/// renders the account as saved and stops asking, and the login submits an empty password and fails
+/// at the far end with an error that says nothing about the store. The crate already draws this line
+/// twice, in `Null::set` and in `create`'s empty-passphrase refusal.
+#[test]
+fn a_secret_with_no_bytes_in_it_is_refused_rather_than_saved() {
+    let (_dir, path) = scratch().expect("scratch");
+    let store = created(&path, Scripted::new(b"pp")).expect("create");
+
+    let err = store
+        .set(ACCOUNT, SecretKind::Password, Secret::new(Vec::new()))
+        .expect_err("an empty value must be refused");
+    assert!(matches!(err, SecretsError::Empty), "{err:?}");
+    assert!(
+        store
+            .get(ACCOUNT, SecretKind::Password)
+            .expect("read")
+            .is_none(),
+        "the refused write stored something anyway"
+    );
+
+    // One byte is a bad password and a real one. Which is not this crate's call to make.
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("x"))
+        .expect("a one-byte secret is a secret");
+}
+
 /// The property the whole file exists for. A handle that only worked while it was the one that wrote
 /// the file would be a cache, not a store.
 #[test]

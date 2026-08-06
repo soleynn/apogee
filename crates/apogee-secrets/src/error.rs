@@ -63,6 +63,14 @@ pub enum SecretsError {
     /// next time.
     #[error("the secret store keeps nothing")]
     NotStoring,
+    /// The value handed in held no bytes, so there was nothing to store.
+    ///
+    /// Refused rather than written, for the same reason [`NotStoring`](Self::NotStoring) is: a
+    /// caller that believed it had saved a password stops asking for one. An empty value stores and
+    /// reads back perfectly well, so nothing downstream notices until the login itself fails at the
+    /// far end with an error that says nothing about the store.
+    #[error("the value to store held no bytes")]
+    Empty,
     /// The store failed for a reason outside the classified set. `step` names what was being done.
     #[error("the secret backend failed to {step}")]
     Backend {
@@ -102,6 +110,7 @@ mod tests {
                 SecretsError::WrongPassphrase => (),
                 SecretsError::Corrupt { .. } => (),
                 SecretsError::NotStoring => (),
+                SecretsError::Empty => (),
                 SecretsError::Backend { .. } => (),
                 SecretsError::Io(_) => (),
             }
@@ -130,6 +139,7 @@ mod tests {
                 "the stored secrets are unreadable: file magic",
             ),
             (SecretsError::NotStoring, "the secret store keeps nothing"),
+            (SecretsError::Empty, "the value to store held no bytes"),
             (
                 SecretsError::Backend { step: "read" },
                 "the secret backend failed to read",

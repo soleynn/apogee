@@ -256,6 +256,9 @@ impl SecretStore for MemoryStore {
     }
 
     fn set(&self, account: Uuid, kind: SecretKind, value: Secret) -> Result<(), SecretsError> {
+        // Before the call is recorded: a value with no bytes never reached a real store either, so a
+        // double that logged the attempt would let a consumer assert a write that cannot happen.
+        crate::store::refuse_empty(&value)?;
         self.record(Call::Set(account, kind))?;
         self.locked(&self.items)
             .insert((account, kind.slug()), value.expose().to_vec());
@@ -344,6 +347,19 @@ mod tests {
         let store = MemoryStore::new().in_state(BackendState::Locked);
         assert!(store.probe().locked());
         assert_eq!(store.calls(), vec![Call::Probe]);
+    }
+
+    /// The double refuses an empty value the way every real backend does, and does not record the
+    /// attempt: a write that no store could have taken must not read back as one that happened.
+    #[test]
+    fn the_double_refuses_a_value_with_no_bytes_in_it() {
+        let store = MemoryStore::new();
+        assert!(matches!(
+            store.set(ACCOUNT, SecretKind::Password, Secret::new(Vec::new())),
+            Err(SecretsError::Empty)
+        ));
+        assert!(store.is_empty());
+        assert!(store.calls().is_empty());
     }
 
     /// The double must not print what it holds. A derive renders `items` as raw byte arrays, so one

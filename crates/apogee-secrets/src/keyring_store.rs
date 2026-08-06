@@ -143,6 +143,7 @@ impl SecretStore for OsKeyring {
     }
 
     fn set(&self, account: Uuid, kind: SecretKind, value: Secret) -> Result<(), SecretsError> {
+        crate::store::refuse_empty(&value)?;
         entry_for(account, kind)?
             .set_secret(value.expose())
             .map_err(|err| map_error(&err, "store"))

@@ -4,6 +4,28 @@ use uuid::Uuid;
 
 use crate::{BackendReport, OsKeyring, Secret, SecretKind, SecretsError};
 
+/// Refuse a value holding no bytes, before any store is asked to keep one.
+///
+/// Called from each backend's `set` rather than wrapped around the seam, because a caller holds a
+/// `&dyn SecretStore` and would walk straight past a wrapper. The rule is the one
+/// [`crate::EncryptedFile::create`] already applies to a passphrase, for the same reason
+/// [`crate::Null`] refuses every write: a store that takes nothing and hands nothing back is
+/// indistinguishable from one holding a real secret, so a front end renders the account as saved and
+/// stops asking, the login submits an empty password, and it fails at the far end with an error that
+/// says nothing about the store.
+///
+/// A one-byte secret is accepted, deliberately. How weak a password may be is not this crate's
+/// question; whether there is one at all is.
+///
+/// # Errors
+/// [`SecretsError::Empty`].
+pub(crate) fn refuse_empty(value: &Secret) -> Result<(), SecretsError> {
+    if value.is_empty() {
+        return Err(SecretsError::Empty);
+    }
+    Ok(())
+}
+
 /// Account-scoped secret storage.
 ///
 /// Every method blocks and may raise the platform's unlock prompt, so a caller on an async runtime

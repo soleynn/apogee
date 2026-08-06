@@ -66,10 +66,12 @@ fn store(padding: usize) -> Result<(tempfile::TempDir, std::path::PathBuf, Vec<u
         KdfCost::floor(),
     )?;
     store.set(ACCOUNT, SecretKind::Password, pw(SENTINEL))?;
+    // At least one byte: a store refuses a value with nothing in it, and what this second account
+    // is for is the record's *length*, not its emptiness.
     store.set(
         OTHER,
         SecretKind::TotpSecret,
-        Secret::new(vec![b'x'; padding]),
+        Secret::new(vec![b'x'; padding.max(1)]),
     )?;
     let bytes = std::fs::read(&path)?;
     Ok((dir, path, bytes))
