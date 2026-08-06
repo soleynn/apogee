@@ -1083,7 +1083,8 @@ mod tests {
         /// re-running the same command would report that there is no such profile.
         #[test]
         fn a_sweep_that_could_have_left_a_secret_stops_the_deletion() {
-            let store = Arc::new(MemoryStore::new().failing(FailAt::Delete(SecretKind::Password)));
+            let store =
+                Arc::new(MemoryStore::new().failing(FailAt::Delete(Some(SecretKind::Password))));
             let (_dir, core) = core_with(Arc::clone(&store));
             let (account, profile) = seeded(&core, &store);
 
@@ -1114,7 +1115,7 @@ mod tests {
         #[test]
         fn a_removal_that_failed_on_the_sweep_succeeds_when_it_is_retried() {
             let failing =
-                Arc::new(MemoryStore::new().failing(FailAt::Delete(SecretKind::Password)));
+                Arc::new(MemoryStore::new().failing(FailAt::Delete(Some(SecretKind::Password))));
             let (dir, core) = core_with(Arc::clone(&failing));
             let (account, profile) = seeded(&core, &failing);
             core.remove_profile(profile.id).unwrap_err();
