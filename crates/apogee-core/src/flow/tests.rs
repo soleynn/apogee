@@ -239,7 +239,7 @@ fn patch_cmd(profile: Uuid) -> Command {
     Command::Patch {
         profile,
         password: secret("pw"),
-        otp: OtpSource::Manual(String::new()),
+        otp: OtpSource::Manual(Secret::new(Vec::new())),
     }
 }
 
@@ -248,7 +248,7 @@ fn install_cmd(profile: Uuid) -> Command {
     Command::Install {
         profile,
         password: secret("pw"),
-        otp: OtpSource::Manual(String::new()),
+        otp: OtpSource::Manual(Secret::new(Vec::new())),
     }
 }
 
@@ -279,7 +279,7 @@ fn login_no_otp(profile: Uuid) -> Command {
     Command::Login {
         profile,
         password: secret("pw"),
-        otp: OtpSource::Manual(String::new()),
+        otp: OtpSource::Manual(Secret::new(Vec::new())),
     }
 }
 
@@ -288,7 +288,7 @@ fn play_no_otp(profile: Uuid) -> Command {
     Command::PatchAndPlay {
         profile,
         password: secret("pw"),
-        otp: OtpSource::Manual(String::new()),
+        otp: OtpSource::Manual(Secret::new(Vec::new())),
     }
 }
 
@@ -336,7 +336,7 @@ async fn a_manual_otp_is_sent_and_the_session_is_cached() {
         Command::Login {
             profile: h.profile,
             password: secret("hunter2"),
-            otp: OtpSource::Manual("123456".to_string()),
+            otp: OtpSource::Manual(Secret::from_string("123456".to_owned())),
         },
     )
     .await;
@@ -465,7 +465,7 @@ async fn a_current_game_launches_straight_through() {
         Command::PatchAndPlay {
             profile: h.profile,
             password: secret("hunter2"),
-            otp: OtpSource::Manual(String::new()),
+            otp: OtpSource::Manual(Secret::new(Vec::new())),
         },
     )
     .await;
@@ -511,7 +511,7 @@ async fn a_launch_inside_the_cache_window_skips_the_network() {
         Command::PatchAndPlay {
             profile: h.profile,
             password: secret("hunter2"),
-            otp: OtpSource::Manual(String::new()),
+            otp: OtpSource::Manual(Secret::new(Vec::new())),
         },
     )
     .await;

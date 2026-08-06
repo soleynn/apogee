@@ -87,7 +87,7 @@ impl fmt::Debug for Command {
                 .debug_struct("Login")
                 .field("profile", profile)
                 .field("password", &"<redacted>")
-                .field("otp", &otp_label(otp))
+                .field("otp", &otp.label())
                 .finish(),
             Command::Launch { profile } => {
                 f.debug_struct("Launch").field("profile", profile).finish()
@@ -96,19 +96,19 @@ impl fmt::Debug for Command {
                 .debug_struct("PatchAndPlay")
                 .field("profile", profile)
                 .field("password", &"<redacted>")
-                .field("otp", &otp_label(otp))
+                .field("otp", &otp.label())
                 .finish(),
             Command::Patch { profile, otp, .. } => f
                 .debug_struct("Patch")
                 .field("profile", profile)
                 .field("password", &"<redacted>")
-                .field("otp", &otp_label(otp))
+                .field("otp", &otp.label())
                 .finish(),
             Command::Install { profile, otp, .. } => f
                 .debug_struct("Install")
                 .field("profile", profile)
                 .field("password", &"<redacted>")
-                .field("otp", &otp_label(otp))
+                .field("otp", &otp.label())
                 .finish(),
             Command::Repair { profile } => {
                 f.debug_struct("Repair").field("profile", profile).finish()
@@ -125,15 +125,6 @@ impl fmt::Debug for Command {
             Command::Frontier(query) => f.debug_tuple("Frontier").field(query).finish(),
             Command::SupportBundle => f.write_str("SupportBundle"),
         }
-    }
-}
-
-/// The variant name of an [`OtpSource`], never its code, for a redacted `Debug`.
-fn otp_label(otp: &OtpSource) -> &'static str {
-    match otp {
-        OtpSource::Totp => "Totp",
-        OtpSource::Manual(_) => "Manual",
-        OtpSource::Listener(_) => "Listener",
     }
 }
 
