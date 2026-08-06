@@ -388,7 +388,7 @@ impl Core {
             fetcher.clone(),
             AddonPaths::new(addons_dir),
         );
-        let otp = Otp::new();
+        let otp = Otp::new(secrets.shared());
 
         Ok(Self {
             transport,

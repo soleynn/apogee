@@ -8,7 +8,32 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
+# RFC 6238 itself. `zeroize` is on so the key inside a constructed generator is erased when it drops;
+# `otpauth` stays off, which removes that crate's URI parser (and the aborts reachable through it)
+# from the build and keeps the constructor arity fixed.
+totp-rs = { workspace = true, features = ["zeroize"] }
+base32.workspace = true
+# Runs the blocking secret-store read off the runtime's workers, so an async caller never drives the
+# platform credential client from a worker thread.
+tokio.workspace = true
 apogee-secrets = { path = "../apogee-secrets" }
+
+[dev-dependencies]
+# The in-memory secret store, so no test reaches the machine's real keyring. `mock`, never `testing`:
+# that feature gates tests that drive whatever provider is on the session bus, and depending on it
+# here would unify it on for every workspace run and start raising unlock prompts.
+apogee-secrets = { path = "../apogee-secrets", features = ["mock"] }
+rstest.workspace = true
+proptest.workspace = true
+# Compile-fail proof that a live code cannot be copied or printed and that no stored secret is
+# readable back out. Both are absences, which nothing running can check.
+trybuild.workspace = true
+
+[features]
+# The import grammar, reachable from the fuzz workspace and from nothing else. Off in every shipping
+# build, so a parser that takes hostile text is never public API.
+fuzzing = []
 
 [lints]
 workspace = true
