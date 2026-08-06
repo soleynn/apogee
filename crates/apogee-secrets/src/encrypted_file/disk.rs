@@ -749,47 +749,78 @@ mod tests {
         );
     }
 
-    /// One SDDL component of what `path` carries, read back through the platform's own tool rather
-    /// than through the bindings under test: a permission this crate both writes and reads proves
-    /// only that it agrees with itself, and the access list is the whole claim here.
+    /// The access list `path` carries, read back through the platform's own tool rather than through
+    /// the bindings under test: a permission this crate both writes and reads proves only that it
+    /// agrees with itself, and the access list is the whole claim here.
     ///
-    /// `GetSecurityDescriptorSddlForm` rather than `.Sddl`, because it answers one component at a
-    /// time and so needs no splitting, and because SDDL is the one rendering `icacls` does not
-    /// localize.
+    /// `icacls /save` rather than PowerShell's `Get-Acl`, for two reasons. It writes SDDL, which is
+    /// the one rendering the plain output localizes and this does not. And it is a program in
+    /// `System32` rather than a cmdlet: `Get-Acl` lives in a module that does not autoload on every
+    /// Windows this suite runs on, and a test that needs a module loaded is a test that does not run.
+    /// What it writes is UTF-16, one object per name-then-list pair.
     #[cfg(windows)]
     #[allow(clippy::expect_used)]
-    fn sddl(path: &Path, part: &str) -> String {
-        let script = format!(
-            "(Get-Acl -LiteralPath '{}').GetSecurityDescriptorSddlForm('{part}')",
-            path.display()
-        );
-        let out = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    fn dacl(path: &Path) -> String {
+        let saved = tempfile::Builder::new()
+            .prefix("apogee-acl")
+            .tempfile()
+            .expect("temp file");
+        let out = std::process::Command::new("icacls.exe")
+            .arg(path)
+            .arg("/save")
+            .arg(saved.path())
             .output()
-            .expect("run powershell");
+            .expect("run icacls");
         assert!(
             out.status.success(),
             "{}",
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&out.stdout)
         );
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        let bytes = std::fs::read(saved.path()).expect("read what icacls saved");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("D:"))
+            .expect("an access list in what icacls saved")
+            .to_owned()
     }
 
-    /// The one entry the arm under test should have left, spelled the way the platform renders it.
+    /// The principal named by an access list that holds exactly one protected full-control entry,
+    /// which is what the arm under test should have left.
+    ///
+    /// The principal is checked rather than predicted. Naming it would mean looking the object's
+    /// owner up, and the object's owner is not a fixed answer: an elevated run makes it the
+    /// administrators group and an ordinary one makes it the account. What is fixed is that there is
+    /// one entry, that inheritance is cut, and that the entry does not name a principal standing for
+    /// more than one account. That it names *us* is what every test here that writes through it
+    /// shows, since a wrong principal locks this process out.
     ///
     /// `AI` is the auto-inherited flag, which Windows sets itself on the way in and which the code
-    /// under test therefore does not compare on; it is pinned here because this is where what the
-    /// platform actually does belongs.
+    /// under test therefore does not compare on. It is pinned here, where what the platform actually
+    /// does belongs.
     #[cfg(windows)]
-    fn only_owner(path: &Path, inherit: &str) -> String {
-        let owner = sddl(path, "Owner");
-        let sid = owner.strip_prefix("O:").unwrap_or(&owner);
-        format!("D:PAI(A;{inherit};FA;;;{sid})")
+    fn one_owner_entry(list: &str, inherit: &str) -> String {
+        let head = format!("D:PAI(A;{inherit};FA;;;");
+        assert!(
+            list.starts_with(&head) && list.ends_with(')'),
+            "not one protected full-control entry: {list}"
+        );
+        let principal = list[head.len()..list.len() - 1].to_owned();
+        assert!(!principal.contains('('), "more than one entry: {list}");
+        // Everyone, Users, Authenticated Users, Interactive, Network. Each stands for more than one
+        // account, which is the whole condition being repaired.
+        for group in ["WD", "BU", "AU", "IU", "NU"] {
+            assert_ne!(principal, group, "the entry names a group: {list}");
+        }
+        principal
     }
 
-    /// Hand a path an entry it should not keep, through `icacls` for the reason `sddl` reads through
-    /// PowerShell. `*S-1-1-0` is Everyone by SID, so the seeding does not depend on the machine's
-    /// language either.
+    /// Hand a path an entry it should not keep. `*S-1-1-0` is Everyone by SID, so the seeding does
+    /// not depend on the machine's language either.
     #[cfg(windows)]
     #[allow(clippy::expect_used)]
     fn grant_everyone(path: &Path, spec: &str) {
@@ -831,13 +862,20 @@ mod tests {
         let nested = wide.join("nested");
         let path = nested.join("store.apsf");
 
+        assert!(
+            dacl(&wide).contains(";WD)"),
+            "the seeding did not widen the parent"
+        );
+
         private_dir(&path).expect("directory");
 
-        assert_eq!(sddl(&nested, "Access"), only_owner(&nested, "OICI"));
+        one_owner_entry(&dacl(&nested), "OICI");
     }
 
     /// The entry has to reach what is created in the directory, or the file the launcher actually
-    /// writes its secrets into would be the one thing left wide.
+    /// writes its secrets into would be the one thing left wide. This is also what shows the
+    /// directory's entry names *this* account: a file cannot be published into a directory whose one
+    /// entry names somebody else.
     #[cfg(windows)]
     #[test]
     fn the_store_inherits_the_directory_s_one_entry() {
@@ -850,11 +888,10 @@ mod tests {
         private_dir(&path).expect("directory");
         publish(&path, &vec![5u8; super::super::frame::MIN_FILE]).expect("publish");
 
-        let owner = sddl(&path, "Owner");
-        let sid = owner.strip_prefix("O:").unwrap_or(&owner);
+        let owner = one_owner_entry(&dacl(path.parent().expect("parent")), "OICI");
         // `ID` marks the entry inherited, which is the point: nothing set it on the file. The file
         // itself is not protected, only auto-inherited, because protection is the directory's.
-        assert_eq!(sddl(&path, "Access"), format!("D:AI(A;ID;FA;;;{sid})"));
+        assert_eq!(dacl(&path), format!("D:AI(A;ID;FA;;;{owner})"));
     }
 
     /// A store restored with explicit entries of its own carries them into a directory whose
@@ -867,13 +904,13 @@ mod tests {
         publish(&path, &vec![6u8; super::super::frame::MIN_FILE]).expect("publish");
         grant_everyone(&path, "F");
         assert!(
-            sddl(&path, "Access").contains(";WD)"),
+            dacl(&path).contains(";WD)"),
             "the seeding did not widen the store"
         );
 
         narrow_file(&path);
 
-        assert_eq!(sddl(&path, "Access"), only_owner(&path, ""));
+        one_owner_entry(&dacl(&path), "");
     }
 
     /// `publish` replaces the store by rename, and a rename over a file carrying the read-only
@@ -916,10 +953,10 @@ mod tests {
         let path = dir.path().join("nested").join("store.apsf");
 
         private_dir(&path).expect("directory");
-        let once = sddl(path.parent().expect("parent"), "Access");
+        let once = dacl(path.parent().expect("parent"));
         private_dir(&path).expect("directory again");
 
-        assert_eq!(sddl(path.parent().expect("parent"), "Access"), once);
+        assert_eq!(dacl(path.parent().expect("parent")), once);
     }
 
     /// The guard that keeps this off a volume root, pinned on the decision rather than on a `C:\`
