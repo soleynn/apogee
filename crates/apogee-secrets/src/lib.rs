@@ -1,4 +1,8 @@
-#![forbid(unsafe_code)]
+// `deny` rather than the `forbid` every other crate root here carries, for one carve-out taken where
+// it is named: `encrypted_file::disk`'s Windows arm has to reach advapi32 to put an owner-only
+// access list on the fallback store's directory. The standard library exposes no security-descriptor
+// API, and on Windows that descriptor is the whole of what a mode is on the other platforms.
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! OS keyring-backed storage for account secrets.

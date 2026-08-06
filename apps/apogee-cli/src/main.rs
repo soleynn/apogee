@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! The headless launcher CLI: profile management and the login → launch flows, driving the one
 //! `apogee-core` command/event surface. It holds no launcher logic: it parses arguments, collects a
 //! password, issues a [`Command`], and renders the [`Event`] stream. The output format is a plain
