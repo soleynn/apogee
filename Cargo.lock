@@ -263,6 +263,7 @@ dependencies = [
  "keyring",
  "proptest",
  "secret-service",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "tempfile",

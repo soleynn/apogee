@@ -12,10 +12,10 @@ use std::process::ExitCode;
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
     EncryptedFile, Event, ExternalAddon, FileState, ForeignCredentialStore, ForeignKey,
-    ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportSource, KdfCost, OtpSource,
-    Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretsError,
-    SetupEvent, SyncChoice, Trigger, Uuid,
+    ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
+    KdfCost, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region,
+    RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend,
+    SecretKind, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -672,10 +672,27 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
                 Some(path) => Box::new(ForeignSecretsFile::at(path)),
                 None => Box::new(ForeignCredentialStore::new()),
             };
-            if core.import_password(account.id, source.as_ref(), &key)? {
-                println!("imported the password for {}", key.name());
-            } else {
-                println!("no saved password found for {}", key.name());
+            match core.import_password(account.id, source.as_ref(), &key)? {
+                ImportOutcome::Imported => {
+                    println!("imported the password for {}", key.name());
+                }
+                ImportOutcome::Nothing => {
+                    println!("no saved password found for {}", key.name());
+                }
+                // Not "nothing found": nothing was looked at. Saying otherwise would tell a user
+                // their other launcher has no password saved, and send them off to retype one they
+                // may already have. The other source is named because it is the one that works here.
+                ImportOutcome::Unsupported => {
+                    println!(
+                        "cannot read the credential store on this platform, so nothing was checked \
+                         for {}; pass --file with the other launcher's exported password file to \
+                         import from that instead",
+                        key.name()
+                    );
+                }
+                // `ImportOutcome` is `#[non_exhaustive]`, and every arm but the first stored
+                // nothing, so a condition added later is reported as one.
+                _ => println!("nothing was imported for {}", key.name()),
             }
             Ok(())
         }

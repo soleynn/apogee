@@ -5,7 +5,8 @@
 //! here. Nothing is ever written, so the probe cannot create the entry it is looking for.
 //!
 //! No CI job runs this: both stores need their own operating system, and the workspace's hermetic
-//! jobs have neither. It is exercised by the manual pre-release pass.
+//! jobs have neither. It is exercised by the manual pre-release pass. A cross-target check job does
+//! compile it, and the status table the classification below reads is tested on every host.
 
 use keyring::Entry;
 
@@ -25,7 +26,15 @@ pub(crate) fn probe() -> BackendReport {
 }
 
 fn probe_state() -> BackendState {
-    match Entry::new(SERVICE, PROBE_KEY).and_then(|entry| entry.get_secret()) {
+    classify(Entry::new(SERVICE, PROBE_KEY).and_then(|entry| entry.get_secret()))
+}
+
+/// What the store's answer to that read says about its condition.
+///
+/// Split from the read so the truth table is a value rather than a machine: the read needs one of
+/// two operating systems, and the table needs none.
+fn classify(answer: Result<Vec<u8>, keyring::Error>) -> BackendState {
+    match answer {
         // The key is never written, so a miss is the expected healthy answer; a hit would mean
         // something else wrote it, and the store still answered.
         Ok(_) | Err(keyring::Error::NoEntry) => BackendState::Ready,
@@ -33,6 +42,57 @@ fn probe_state() -> BackendState {
         // covers an unavailable, missing, invalid, or read-only keychain; keyring drops the code, so
         // the read-only case cannot be separated out here.
         Err(keyring::Error::NoStorageAccess(_)) => BackendState::NoProvider,
+        // A keychain that is shut rather than broken. It is worth writing to: the write raises the
+        // unlock prompt and then succeeds, so reporting it as unreachable makes `is_usable()` false
+        // and sends a front end to the fallback, or to keeping nothing, over a store that works
+        // after one unlock. The Credential Manager has no lock and produces no such status.
+        Err(err) if crate::apple::locked(&err) => BackendState::Locked,
         Err(_) => BackendState::Unreachable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_store_that_answers_at_all_is_ready() {
+        assert_eq!(classify(Ok(Vec::new())), BackendState::Ready);
+        assert_eq!(classify(Err(keyring::Error::NoEntry)), BackendState::Ready);
+    }
+
+    #[test]
+    fn no_storage_access_is_no_provider() {
+        let err = keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("no session")));
+        assert_eq!(classify(Err(err)), BackendState::NoProvider);
+    }
+
+    /// A failure with no status this crate can read stays unclassified rather than being guessed at
+    /// as a lock, which would tell a user to unlock a store that is not shut.
+    #[test]
+    fn a_failure_with_no_readable_status_is_unreachable() {
+        let err = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("something")));
+        assert_eq!(classify(Err(err)), BackendState::Unreachable);
+    }
+
+    /// The whole path a shut keychain takes, through the downcast rather than through the status
+    /// table alone. Compiled by the Apple cross-check job and run by nothing in this repository:
+    /// there is no Apple host here, and this is the one case that needs the framework's own error
+    /// type to exist.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shut_keychain_is_locked_and_therefore_still_usable() {
+        for code in [-25308, -25293, -128] {
+            let err = keyring::Error::PlatformFailure(Box::new(
+                security_framework::base::Error::from_code(code),
+            ));
+            assert_eq!(classify(Err(err)), BackendState::Locked, "{code}");
+        }
+        let report = BackendReport {
+            backend: BACKEND,
+            state: BackendState::Locked,
+            sandbox: None,
+        };
+        assert!(report.is_usable());
     }
 }

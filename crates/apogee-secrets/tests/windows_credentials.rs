@@ -10,7 +10,7 @@
 
 #![cfg(target_os = "windows")]
 
-use apogee_secrets::{ForeignCredentialStore, ForeignKey, ImportSource};
+use apogee_secrets::{ForeignCredentialStore, ForeignKey, Import, ImportSource};
 
 /// Seeded by the job as `XIVLAUNCHER-ci-current`.
 const CURRENT: &str = "ci-current";
@@ -20,10 +20,12 @@ const LEGACY: &str = "ci-legacy";
 
 #[test]
 fn a_credential_under_the_current_target_is_found() {
-    let found = ForeignCredentialStore::new()
+    let Import::Password(found) = ForeignCredentialStore::new()
         .password(&ForeignKey::from_stored_name(CURRENT))
         .expect("read the credential store")
-        .expect("the seeded credential was not found");
+    else {
+        panic!("the seeded credential was not found");
+    };
 
     assert_eq!(found.expose(), b"current-password");
 }
@@ -32,10 +34,12 @@ fn a_credential_under_the_current_target_is_found() {
 /// only under the old target, and its own reader still probes there first.
 #[test]
 fn a_credential_under_the_legacy_target_is_found() {
-    let found = ForeignCredentialStore::new()
+    let Import::Password(found) = ForeignCredentialStore::new()
         .password(&ForeignKey::from_stored_name(LEGACY))
         .expect("read the credential store")
-        .expect("the seeded legacy credential was not found");
+    else {
+        panic!("the seeded legacy credential was not found");
+    };
 
     assert_eq!(found.expose(), b"legacy-password");
 }
@@ -47,5 +51,6 @@ fn an_account_with_nothing_saved_reads_as_nothing() {
         .password(&ForeignKey::from_stored_name("ci-never-saved-anything"))
         .expect("read the credential store");
 
-    assert!(found.is_none());
+    // `Nothing` and not `Unsupported`: this platform has a reader, and it looked.
+    assert!(matches!(found, Import::Nothing));
 }

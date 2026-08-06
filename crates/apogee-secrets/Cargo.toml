@@ -35,6 +35,13 @@ keyring = { workspace = true, features = ["windows-native"] }
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }
 
+# Classification happens below keyring here too: it maps five `OSStatus` values and boxes every other
+# one opaquely, and a locked keychain arrives among the others. macOS only, because keyring resolves
+# this crate's major 3 there and its major 2 on iOS, and carrying both majors to classify a target
+# nothing here builds for is dead weight. iOS keeps the unclassified answer.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
+
 [features]
 default = ["encrypted-session"]
 # Forces the Secret Service session onto the Diffie-Hellman-agreed AES transport. A dependency's
