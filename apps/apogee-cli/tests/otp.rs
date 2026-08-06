@@ -12,6 +12,10 @@ use std::process::{Command, Output, Stdio};
 use apogee_test_support::sandbox::build_game_install;
 use tempfile::TempDir;
 
+/// What the fixture build answers every passphrase prompt with, so the sealed store the secret goes
+/// into needs no terminal.
+const PASSPHRASE: &str = "correct horse battery staple";
+
 /// Run the binary against `config` as its XDG root, feeding `typed` to stdin and closing it after.
 fn run(config: &Path, typed: &str, args: &[&str]) -> std::io::Result<Output> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_apogee-cli"))
@@ -22,6 +26,7 @@ fn run(config: &Path, typed: &str, args: &[&str]) -> std::io::Result<Output> {
         .env("XDG_CACHE_HOME", config.join("cache"))
         // The canned password, so no prompt needs a terminal, and the scripted login behind it.
         .env("APOGEE_FIXTURE_LOGIN", "current")
+        .env("APOGEE_FIXTURE_PASSPHRASE", PASSPHRASE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -140,5 +145,158 @@ fn no_flow_that_logs_in_accepts_a_code_as_an_argument() -> std::io::Result<()> {
             stderr(&out)
         );
     }
+    Ok(())
+}
+
+/// The example key from the format's own documentation, doubled to reach the length a key has to be.
+/// Synthetic, and the only secret these tests offer.
+const SEED: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+
+/// A home whose secrets go into the sealed file rather than into whatever keyring the machine
+/// running this has. Nothing here may touch a developer's login keyring or raise its unlock dialog.
+fn on_the_sealed_store(config: &Path) -> std::io::Result<()> {
+    let out = run(config, "encrypt\n", &["secrets", "backend", "--to", "file"])?;
+    assert!(out.status.success(), "backend: {}", stderr(&out));
+    Ok(())
+}
+
+/// The shared secret is worse to leak than a code, which expires in half a minute, so it takes the
+/// same route: stdin, never an argument that sits in a world-readable `cmdline` for the whole run.
+#[test]
+fn a_shared_secret_is_read_from_stdin_and_never_taken_as_an_argument() -> std::io::Result<()> {
+    let (config, _install) = with_otp_profile()?;
+    on_the_sealed_store(config.path())?;
+
+    let out = run(
+        config.path(),
+        "",
+        &["secrets", "totp", "--profile", "otp", "--secret", SEED],
+    )?;
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("unexpected argument '--secret'"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = run(
+        config.path(),
+        &format!("{SEED}\n"),
+        &["secrets", "totp", "--profile", "otp"],
+    )?;
+    assert!(out.status.success(), "totp: {}", stderr(&out));
+    assert!(
+        !stdout(&out).contains("JBSWY3DP"),
+        "the secret was echoed back: {}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("saved the one-time-password secret"),
+        "{}",
+        stdout(&out)
+    );
+    Ok(())
+}
+
+/// The zero-interaction login: once a secret is stored the account is never asked for a code, and
+/// nothing on stdin is what proves it.
+#[test]
+fn an_account_that_generates_its_own_code_is_never_prompted() -> std::io::Result<()> {
+    let (config, _install) = with_otp_profile()?;
+    on_the_sealed_store(config.path())?;
+    let out = run(
+        config.path(),
+        &format!("{SEED}\n"),
+        &["secrets", "totp", "--profile", "otp"],
+    )?;
+    assert!(out.status.success(), "totp: {}", stderr(&out));
+
+    let out = run(config.path(), "", &["patch", "--profile", "otp"])?;
+    assert!(out.status.success(), "patch: {}", stdout(&out));
+    assert!(
+        !stdout(&out).contains("NeedsOtp"),
+        "the stored secret was not used: {}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("One-time password:"),
+        "a generating account was still prompted: {}",
+        stdout(&out)
+    );
+    assert!(
+        session_cached(config.path()),
+        "the login did not complete: {}",
+        stdout(&out)
+    );
+    Ok(())
+}
+
+/// A secret whose parameters the login server will not take is stored anyway and said out loud. The
+/// alternative, rewriting it to what would be accepted, is wrong codes with nothing said.
+#[test]
+fn a_secret_the_login_server_will_not_take_is_reported() -> std::io::Result<()> {
+    let (config, _install) = with_otp_profile()?;
+    on_the_sealed_store(config.path())?;
+
+    let offered = format!("otpauth://totp/Example:me?secret={SEED}&digits=8&period=60");
+    let out = run(
+        config.path(),
+        &format!("{offered}\n"),
+        &["secrets", "totp", "--profile", "otp"],
+    )?;
+
+    assert!(out.status.success(), "totp: {}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(printed.contains("8-digit codes"), "{printed}");
+    assert!(printed.contains("every 60 seconds"), "{printed}");
+    // Both halves of each comparison come from the core, so what counts as accepted is never a
+    // literal this side has to keep in step.
+    assert!(printed.contains("only takes 6"), "{printed}");
+    assert!(printed.contains("expects 30"), "{printed}");
+    assert!(!printed.contains("JBSWY3DP"), "{printed}");
+    Ok(())
+}
+
+/// Forgetting the stored secret puts the account back to being asked for a code.
+///
+/// The setting that says a code is derived is written when a secret is imported, so an account left
+/// on it with nothing stored is one this side never prompts and the flow can never satisfy: told a
+/// code is needed, never asked for one, and a code piped in ignored. The sweep is the verb that has
+/// to undo it, because it is the verb that takes the secret away.
+#[test]
+fn forgetting_the_secret_asks_for_a_code_again() -> std::io::Result<()> {
+    let (config, _install) = with_otp_profile()?;
+    on_the_sealed_store(config.path())?;
+    let out = run(
+        config.path(),
+        &format!("{SEED}\n"),
+        &["secrets", "totp", "--profile", "otp"],
+    )?;
+    assert!(out.status.success(), "totp: {}", stderr(&out));
+
+    let out = run(
+        config.path(),
+        "",
+        &["secrets", "forget", "--profile", "otp"],
+    )?;
+    assert!(out.status.success(), "forget: {}", stderr(&out));
+
+    let out = run(config.path(), "123456\n", &["patch", "--profile", "otp"])?;
+    assert!(out.status.success(), "patch: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("One-time password:"),
+        "the account was never asked for a code: {}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("NeedsOtp"),
+        "the code on stdin was ignored: {}",
+        stdout(&out)
+    );
+    assert!(
+        session_cached(config.path()),
+        "the login did not complete: {}",
+        stdout(&out)
+    );
     Ok(())
 }

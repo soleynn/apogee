@@ -44,7 +44,7 @@ jobs:
           # The crates behind the fuzz targets, plus the fuzz workspace itself. Every name has to be a
           # real directory: `crates/sqex-cryptography` matched nothing, and a crate left off this list
           # means a change to it skips the target that covers it.
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons|apogee-secrets)/)'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons|apogee-secrets|apogee-otp)/)'; then
             echo "fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "fuzz=false" >> "$GITHUB_OUTPUT"
@@ -488,6 +488,11 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz build secrets_records --target x86_64-unknown-linux-gnu
       # Same bound, same reason: every record's length comes out of the buffer being decoded.
       - run: cargo +nightly-2026-07-23 fuzz run secrets_records --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build otp_import --target x86_64-unknown-linux-gnu
+      # A malloc bound too: the pasted text is capped and the key it decodes to is capped, both before
+      # anything is allocated for them, and an over-large reservation is the failure that would mean
+      # one of those caps stopped being checked first.
+      - run: cargo +nightly-2026-07-23 fuzz run otp_import --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build launch_args --target x86_64-unknown-linux-gnu
       # No malloc bound here, unlike the two above: this target's allocations are bounded by the input
       # length rather than by a number read out of it, so a limit could only fire on a bug the builder's

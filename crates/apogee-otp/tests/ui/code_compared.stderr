@@ -1,0 +1,13 @@
+error[E0369]: binary operation `==` cannot be applied to type `&Code`
+ --> tests/ui/code_compared.rs:7:10
+  |
+7 |     sent == next
+  |     ---- ^^ ---- &Code
+  |     |
+  |     &Code
+  |
+note: `Code` does not implement `PartialEq`
+ --> src/code.rs
+  |
+  | pub struct Code(Zeroizing<String>);
+  | ^^^^^^^^^^^^^^^ `Code` is defined in another crate
