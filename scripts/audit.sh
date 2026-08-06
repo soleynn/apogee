@@ -179,6 +179,25 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios; do
   jq -e '.deps[]|select(.name=="security_framework")' <<<"$keyring" >/dev/null \
     || report "keyring has no Keychain backend on $target" \
       "security-framework is not among its resolved dependencies"
+
+  # macOS reads the Keychain's status code out of the error keyring boxes, by downcasting to a type
+  # both crates have to have got from the same package. A resolver split hands them two, and the
+  # downcast then fails silently: every locked keychain goes back to being reported as broken, with
+  # nothing anywhere saying so. iOS is exempt because it reads no status (keyring resolves the other
+  # major there, and nothing here builds for it).
+  if [ "$target" != aarch64-apple-ios ]; then
+    security_framework_under() {
+      jq -r --arg p "$1" \
+        '(.packages[]|select(.name==$p)|.id) as $id
+         | .resolve.nodes[]|select(.id==$id)|.deps[]
+         | select(.name=="security_framework")|.pkg' <<<"$apple"
+    }
+    ours=$(security_framework_under apogee-secrets)
+    theirs=$(security_framework_under keyring)
+    [ -n "$ours" ] && [ "$ours" = "$theirs" ] \
+      || report "apogee-secrets and keyring read different security-framework packages on $target" \
+        "$(printf 'apogee-secrets: %s\nkeyring: %s' "${ours:-none}" "${theirs:-none}")"
+  fi
 done
 
 # Informational: remaining stub markers (never fails).
