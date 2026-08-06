@@ -242,10 +242,12 @@ jobs:
             cargo test -p apogee-secrets --features testing --test foreign_import -- --test-threads=1
           '
       # Locking is one-way here: unlocking again needs a prompt a headless session cannot answer, so
-      # this gets a keyring of its own and leaves it locked behind it. Only the probe is asserted;
-      # a store operation against a locked collection blocks on that same prompt for an unpredictable
-      # time, so those classifications are pinned by unit tests instead.
-      - name: A locked store probes as locked
+      # this gets a keyring of its own and leaves it locked behind it. The probe and a write are both
+      # asserted: the write is refused outright, and that refusal is the only live check anywhere that
+      # the store still reports a locked collection as locked. Reads past the lock are the ones left
+      # out, because resolving a stored item raises that prompt and then waits on it for an
+      # unpredictable time; their classifications are pinned by unit tests instead.
+      - name: A locked store probes as locked and refuses a write
         run: |
           export XDG_DATA_HOME="$(mktemp -d)"
           # The opt-in the test refuses to run without. It is set here and nowhere else: the keyring
