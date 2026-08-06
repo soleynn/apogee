@@ -21,6 +21,9 @@ const LOCK_SUFFIX: &str = "lock";
 /// Suffix every in-flight write carries until it is renamed into place.
 const TEMP_SUFFIX: &str = "tmp";
 
+/// How many times a lock will re-take a sidecar that was replaced under it before giving up.
+const LOCK_ATTEMPTS: u32 = 8;
+
 /// Read the sealed file, or answer `None` if there is nothing at the path.
 ///
 /// The size is checked against the cap from the directory entry, before any of the file is read, so a
@@ -137,17 +140,80 @@ impl Lock {
     /// long to retry for, and the holder is another process doing a write that takes milliseconds.
     pub(crate) fn take(path: &Path) -> Result<Self, SecretsError> {
         let sidecar = sibling(path, LOCK_SUFFIX);
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        private_file(&mut options);
-        let file = options.open(&sidecar).map_err(map_io)?;
-        // The sidecar is never deleted. Removing it would race the next process to acquire, which
-        // would then lock a file nobody else can see and serialise against nothing.
-        file.lock().map_err(|_| SecretsError::Backend {
+        let failed = || SecretsError::Backend {
             step: "take the secret store lock",
-        })?;
-        Ok(Self { _file: file })
+        };
+        // Bounded rather than endless. Each turn means the sidecar was replaced between this open
+        // and this lock, which two launchers can genuinely lose once; a process losing it over and
+        // over is racing something doing it deliberately, and waiting forever is the worse answer.
+        for _ in 0..LOCK_ATTEMPTS {
+            let file = open_sidecar(&sidecar)?;
+            // The sidecar is never deleted. Removing it would race the next process to acquire,
+            // which would then lock a file nobody else can see and serialise against nothing.
+            file.lock().map_err(|_| failed())?;
+            if still_at(&sidecar, &file) {
+                return Ok(Self { _file: file });
+            }
+            // Somebody unlinked the sidecar while this waited, so the lock now held is on an inode
+            // no other process will open: it excludes nobody. Two writers each holding one of these
+            // both returned `Ok` and one account's secret went missing. Take the one that is there.
+        }
+        Err(failed())
     }
+}
+
+/// Open the lock sidecar, refusing anything at that name that is not a regular file.
+///
+/// This was the one path in this file opened with no guard on what it found. The temp file uses
+/// `create_new` precisely so a planted symlink is refused, and the store itself is refused when it
+/// is not a regular file, but the sidecar took whatever was there. A FIFO left at the name parked
+/// every write inside `open(2)` indefinitely while holding the process-wide key lock, so the store
+/// could not even be deleted to recover; a symlink moved the lock to a file the other writer would
+/// never open, leaving the mutual exclusion protecting nothing.
+///
+/// Creating it exclusively first is what makes the common case safe without a check at all. The
+/// fallback check is not a guarantee, for the same reason it is not one on the read path: without a
+/// platform crate there is no way to open a path and refuse a symlink in one syscall, so a swap
+/// between the check and the open is uncovered. Stated rather than implied.
+fn open_sidecar(sidecar: &Path) -> Result<File, SecretsError> {
+    let mut fresh = OpenOptions::new();
+    fresh.write(true).create_new(true);
+    private_file(&mut fresh);
+    match fresh.open(sidecar) {
+        Ok(file) => return Ok(file),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(map_io(err)),
+    }
+
+    let meta = std::fs::symlink_metadata(sidecar).map_err(map_io)?;
+    if !meta.is_file() {
+        return Err(corrupt("store lock"));
+    }
+    let mut existing = OpenOptions::new();
+    existing.write(true).truncate(false);
+    private_file(&mut existing);
+    existing.open(sidecar).map_err(map_io)
+}
+
+/// Whether `file` is still what the name resolves to.
+///
+/// The flock is on an inode, not on a name, so a sidecar that was unlinked while this process waited
+/// leaves it holding a lock that excludes nobody.
+#[cfg(unix)]
+fn still_at(sidecar: &Path, file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(held), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(sidecar)) else {
+        return false;
+    };
+    held.dev() == named.dev() && held.ino() == named.ino()
+}
+
+/// Windows keeps the handle and the name together: an open file cannot be unlinked out from under
+/// its holder, so the race this answers is a unix one.
+#[cfg(not(unix))]
+fn still_at(_sidecar: &Path, _file: &File) -> bool {
+    true
 }
 
 /// A path beside `path` with one more dotted suffix.
@@ -191,12 +257,30 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), SecretsError> {
         Ok(()) => {}
         Err(err) => return Err(map_io(err)),
     }
-    // `recursive` leaves an existing directory's mode alone, which is the case this narrows.
-    if let Ok(meta) = std::fs::metadata(parent) {
-        let mode = meta.permissions().mode();
-        if mode & 0o077 != 0 {
-            let _ = std::fs::set_permissions(parent, PermissionsExt::from_mode(mode & 0o700));
-        }
+
+    // `recursive` leaves an existing directory's mode alone, which is the case this repairs. Both
+    // ways, deliberately: clearing the group and other bits is what keeps the store private, and
+    // restoring the owner's own bits is what keeps it reachable. A repair that could only clear
+    // them left a directory that had lost its owner write or search bit answering `Denied` on every
+    // call forever, with no way back from inside the launcher, and this is the directory the
+    // settings and the account records live in too. An exotic umask at first create reaches it, and
+    // so does a restore tool.
+    //
+    // On the handle rather than on the path: the mode that gets set then belongs to the directory
+    // that was just examined, instead of to whatever the name resolves to a moment later. Opening
+    // still follows a symlink at the name, which is a smaller gap than the one it closes and is the
+    // same one the read path documents.
+    let Ok(dir) = File::open(parent) else {
+        return Ok(());
+    };
+    let Ok(meta) = dir.metadata() else {
+        return Ok(());
+    };
+    let mode = meta.permissions().mode();
+    if mode & 0o777 != 0o700 {
+        // setuid, setgid and sticky are carried over rather than cleared: none of them is this
+        // function's business, and dropping one a user set would be a change nobody asked for.
+        let _ = dir.set_permissions(PermissionsExt::from_mode((mode & 0o7000) | 0o700));
     }
     Ok(())
 }

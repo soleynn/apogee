@@ -859,6 +859,142 @@ mod permissions {
         Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
     }
 
+    /// The lock sidecar is opened with a guard on what it finds, like every other path in the file.
+    ///
+    /// A FIFO at that name parked every write inside `open(2)` for as long as nobody opened the
+    /// other end, holding the process-wide key lock with it, so the store could not even be removed
+    /// to recover. A symlink took the lock on some other file, leaving two writers excluding
+    /// nobody. Both run under a deadline, because the failure being guarded against is a hang: a
+    /// regression here would otherwise stall the suite rather than fail it.
+    #[test]
+    fn a_lock_sidecar_that_is_not_a_regular_file_is_refused_rather_than_waited_on() {
+        for planted in ["fifo", "symlink"] {
+            let (dir, path) = scratch().expect("scratch");
+            let store = created(&path, Scripted::new(b"pp")).expect("create");
+            store
+                .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+                .expect("write");
+
+            let sidecar = path.with_extension("apsf.lock");
+            std::fs::remove_file(&sidecar).expect("the created store left one");
+            if planted == "fifo" {
+                let made = std::process::Command::new("mkfifo")
+                    .arg(&sidecar)
+                    .status()
+                    .expect("mkfifo");
+                assert!(made.success());
+            } else {
+                std::os::unix::fs::symlink(dir.path().join("elsewhere"), &sidecar)
+                    .expect("symlink");
+            }
+
+            let (done, waiting) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(store.set(OTHER, SecretKind::Password, pw("second")));
+            });
+            let answered = waiting
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("{planted}: the write is still parked on the sidecar"));
+            assert!(
+                answered.is_err(),
+                "{planted}: the write took a lock that excludes nobody"
+            );
+        }
+    }
+
+    /// A lock that was waiting is re-checked against the name when it finally gets it.
+    ///
+    /// The flock is on an inode, not on a name. A writer that blocked on the sidecar and woke to
+    /// find it had been unlinked meanwhile was holding a lock no other process would ever open: it
+    /// excluded nobody, and two writers each holding one of those both returned success with one
+    /// account's secret silently gone.
+    ///
+    /// What makes that observable is replacing the sidecar with something the open must refuse.
+    /// A writer that re-consults the name reports it; one that trusts the lock it already holds
+    /// goes on to write, which is exactly the case that loses the update.
+    #[test]
+    fn a_lock_that_waited_is_re_checked_against_the_name_it_waited_on() {
+        let (_dir, path) = scratch().expect("scratch");
+        let holder = created(&path, Scripted::new(b"pp")).expect("create");
+        holder
+            .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+            .expect("write");
+
+        // A second handle whose prompt takes long enough to hold the lock across the swap below.
+        let slow = std::sync::Arc::new(EncryptedFile::open(
+            &path,
+            std::sync::Arc::new(Slow {
+                answer: b"pp".to_vec(),
+                takes: std::time::Duration::from_secs(3),
+            }),
+        ));
+        let held = {
+            let slow = slow.clone();
+            std::thread::spawn(move || slow.set(OTHER, SecretKind::Password, pw("first")))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // A third writer, which now blocks on the sidecar the holder is sitting on.
+        let waiting = std::sync::Arc::new(EncryptedFile::open(&path, Scripted::new(b"pp")));
+        let (done, answer) = std::sync::mpsc::channel();
+        {
+            let waiting = waiting.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(waiting.set(ACCOUNT, SecretKind::TotpSecret, pw("third")));
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // Swap the sidecar for something no open may take, so the difference is visible.
+        let sidecar = path.with_extension("apsf.lock");
+        std::fs::remove_file(&sidecar).expect("unlink the sidecar being waited on");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&sidecar)
+                .status()
+                .expect("mkfifo")
+                .success()
+        );
+
+        held.join()
+            .expect("holder thread")
+            .expect("the holder's own write");
+        let answered = answer
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("the waiting writer never answered");
+        assert!(
+            answered.is_err(),
+            "the writer kept a lock on a sidecar that had been unlinked out from under it"
+        );
+    }
+
+    /// The repair puts a directory back, not just narrows it.
+    ///
+    /// A repair that could only clear bits left one that had lost its owner write or search bit
+    /// answering `Denied` on every call forever, with nothing inside the launcher able to undo it.
+    /// This is the directory the settings and the account records share, so it is not only the
+    /// secrets that stop working.
+    #[test]
+    fn a_store_directory_missing_an_owner_bit_is_repaired_rather_than_left() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("apogee").join(EncryptedFile::FILE_NAME);
+        let store = created(&path, Scripted::new(b"pp")).expect("create");
+        store
+            .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+            .expect("write");
+
+        let parent = path.parent().expect("parent");
+        for wrong in [0o500, 0o400, 0o750, 0o777] {
+            std::fs::set_permissions(parent, PermissionsExt::from_mode(wrong)).expect("chmod");
+            store
+                .set(ACCOUNT, SecretKind::Password, pw("again"))
+                .unwrap_or_else(|e| {
+                    panic!("a store directory left at {wrong:o} stayed broken: {e}")
+                });
+            assert_eq!(mode(parent).expect("stat"), 0o700, "from {wrong:o}");
+        }
+    }
+
     #[test]
     fn a_created_store_and_its_directory_are_owner_only() {
         let dir = tempfile::tempdir().expect("temp dir");
