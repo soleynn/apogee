@@ -48,6 +48,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "http_date"
+path = "fuzz_targets/http_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "sqex_base64"
 path = "fuzz_targets/sqex_base64.rs"
 test = false

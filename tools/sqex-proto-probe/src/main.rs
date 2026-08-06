@@ -152,11 +152,14 @@ async fn run_login(
         }
         OtpPlan::Totp(secret) => {
             let local = utc_unix();
-            let base = match flow.server_date().and_then(parse_http_date) {
+            // The launcher's own reader, so the probe measures what a login would measure rather
+            // than what a second copy of the grammar happens to agree with.
+            let base = match flow.server_time().map(unix_seconds) {
                 Some(server) => {
                     println!(
                         "[{scenario}] clock skew vs server: {}s (generating at server time)",
-                        server as i64 - local as i64
+                        i64::try_from(server).unwrap_or(i64::MAX)
+                            - i64::try_from(local).unwrap_or(i64::MAX)
                     );
                     server
                 }
@@ -429,58 +432,18 @@ fn env_opt(key: &str) -> Option<String> {
     }
 }
 
+/// An instant as seconds since the Unix epoch, clamped at the epoch: a server claiming a date before
+/// it has a clock this cannot generate against, and the local-time path is the honest answer.
+fn unix_seconds(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
 /// Seconds since the Unix epoch, for the skew comparison.
 fn utc_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-/// Parse an HTTP-date (`Wed, 09 Jul 2025 12:00:00 GMT`, RFC 7231 IMF-fixdate) to Unix seconds. Returns
-/// `None` on anything that does not match that fixed shape.
-fn parse_http_date(s: &str) -> Option<u64> {
-    let (_weekday, rest) = s.trim().split_once(", ")?;
-    let mut fields = rest.split(' ');
-    let day: i64 = fields.next()?.parse().ok()?;
-    let month = month_num(fields.next()?)?;
-    let year: i64 = fields.next()?.parse().ok()?;
-    let mut time = fields.next()?.split(':');
-    let hour: u64 = time.next()?.parse().ok()?;
-    let minute: u64 = time.next()?.parse().ok()?;
-    let second: u64 = time.next()?.parse().ok()?;
-    let days = days_from_civil(year, month, day);
-    Some(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-fn month_num(name: &str) -> Option<i64> {
-    Some(match name {
-        "Jan" => 1,
-        "Feb" => 2,
-        "Mar" => 3,
-        "Apr" => 4,
-        "May" => 5,
-        "Jun" => 6,
-        "Jul" => 7,
-        "Aug" => 8,
-        "Sep" => 9,
-        "Oct" => 10,
-        "Nov" => 11,
-        "Dec" => 12,
-        _ => return None,
-    })
-}
-
-/// Days since the Unix epoch for a civil date (Howard Hinnant's `days_from_civil`, the inverse of the
-/// `civil_from_days` in [`utc_now`]).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 /// The current UTC broken down into launcher-time parts, via the civil-from-days algorithm (no date

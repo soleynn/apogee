@@ -22,6 +22,7 @@ jobs:
           - patchlist
           - oauth_stored
           - oauth_launch_params
+          - http_date
           - sqex_base64
           - steam_ticket
           - launch_args
@@ -41,6 +42,7 @@ jobs:
           - component_manifest
           - secrets_frame
           - secrets_records
+          - otp_import
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
