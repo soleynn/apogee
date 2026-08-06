@@ -161,7 +161,8 @@ impl ImportSource for ForeignCredentialStore {
     /// Probes the legacy target first and the current one second, the same order and for the same
     /// reason the other launcher's own reader does: an install that has not been opened since it
     /// changed prefixes still has the password only under the old one, and the new one may exist as
-    /// an empty shell.
+    /// an empty shell. Neither an empty target nor an unreadable one ends the search: see
+    /// [`first_readable`].
     ///
     /// The target is passed through verbatim as the credential's lookup key, which is what this
     /// store keys on. That is the one place in this crate that addresses a credential by target
@@ -171,12 +172,59 @@ impl ImportSource for ForeignCredentialStore {
     /// by the program being read, on the one platform that program stores it, and using anything
     /// else finds nothing.
     fn password(&self, key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
-        for target in [key.legacy_credential_target(), key.credential_target()] {
-            if let Some(secret) = read_credential(&target, key.name())? {
-                return Ok(Some(secret));
-            }
+        let name = key.name();
+        first_readable(
+            [key.legacy_credential_target(), key.credential_target()]
+                .into_iter()
+                .map(|target| read_credential(&target, name)),
+        )
+    }
+}
+
+/// The first password any of `reads` held, in the order they are given.
+///
+/// Split out from the store call so the choice is testable on a host that has no credential store,
+/// which is every host this repository's checks run on. `reads` is walked lazily and abandoned on
+/// the first hit, so a password found under one target is the only one this process ever holds.
+///
+/// A target that fails is not a target that ends the search. Each one is a name in a namespace any
+/// program on the machine can write, and the two are written by different versions of the other
+/// launcher, so a blob under one that is not a password says nothing about the other. The failure is
+/// kept rather than dropped and reported only if no target answered, which keeps the diagnosis for
+/// the case where there is nothing else to report. The last one wins: the current target is the one
+/// that launcher writes today, so its condition is the live one.
+#[cfg(any(target_os = "windows", test))]
+fn first_readable(
+    reads: impl IntoIterator<Item = Result<Option<Secret>, SecretsError>>,
+) -> Result<Option<Secret>, SecretsError> {
+    let mut failure = None;
+    for read in reads {
+        match read {
+            Ok(Some(secret)) => return Ok(Some(secret)),
+            Ok(None) => {}
+            Err(err) => failure = Some(err),
         }
-        Ok(None)
+    }
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(None),
+    }
+}
+
+/// Fold a failure to read one target into the taxonomy.
+///
+/// `NoStorageAccess` is named here the way the store and the probe name it, because it means the
+/// same thing on the one platform that reaches this code: `ERROR_NO_SUCH_LOGON_SESSION`, which a
+/// service, a scheduled run or a network logon produces, and which says there is no credential store
+/// session at all rather than that this one credential could not be read. Reported as a backend
+/// failure it would send a caller looking for a fault in the other launcher's storage.
+#[cfg(any(target_os = "windows", test))]
+fn classify_credential_read(err: &keyring::Error) -> SecretsError {
+    match err {
+        keyring::Error::NoStorageAccess(_) => SecretsError::NoBackend,
+        _ => SecretsError::Backend {
+            step: "read the other launcher's credential",
+        },
     }
 }
 
@@ -207,9 +255,7 @@ fn read_credential(target: &str, name: &str) -> Result<Option<Secret>, SecretsEr
             Ok(non_empty(decoded?))
         }
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Err(SecretsError::Backend {
-            step: "read the other launcher's credential",
-        }),
+        Err(err) => Err(classify_credential_read(&err)),
     }
 }
 
@@ -365,6 +411,100 @@ mod tests {
                 .expose(),
             b" pw "
         );
+    }
+
+    /// The target sweep, driven with the store's answers built directly. The store it reads has one
+    /// platform and that platform has no job here, so the decision is exercised on every host and the
+    /// call it wraps on one.
+    mod credential_targets {
+        use super::*;
+
+        fn saved(password: &str) -> Result<Option<Secret>, SecretsError> {
+            Ok(Some(Secret::new(password.as_bytes().to_vec())))
+        }
+
+        fn nothing() -> Result<Option<Secret>, SecretsError> {
+            Ok(None)
+        }
+
+        /// What an undecodable blob under a target comes back as.
+        fn undecodable() -> Result<Option<Secret>, SecretsError> {
+            Err(SecretsError::Backend {
+                step: "decode the other launcher's credential",
+            })
+        }
+
+        /// The legacy target is a name any program on the machine can claim, and something else
+        /// having left junk under it is not a reason to never look at the target the other launcher
+        /// writes today. A user whose password is under the current one gets it.
+        #[test]
+        fn a_target_that_does_not_read_does_not_end_the_search() {
+            let found = first_readable([undecodable(), saved("their-password")])
+                .expect("the second target is still read")
+                .expect("the password under the second target");
+            assert_eq!(found.expose(), b"their-password");
+        }
+
+        /// The targets hold two different accounts' worth of plaintext between them. Reading past a
+        /// hit would pull a password this was not asked for into the process for no purpose.
+        #[test]
+        fn nothing_is_read_after_a_hit() {
+            let mut probed = Vec::new();
+            let found = first_readable(["legacy", "current"].into_iter().map(|target| {
+                probed.push(target);
+                saved(target)
+            }))
+            .expect("read")
+            .expect("the password under the first target");
+
+            assert_eq!(found.expose(), b"legacy");
+            assert_eq!(probed, ["legacy"]);
+        }
+
+        /// A user who never saved a password there has both targets empty, and that is an answer
+        /// rather than a failure.
+        #[test]
+        fn nothing_under_either_target_is_nothing_to_import() {
+            assert!(
+                first_readable([nothing(), nothing()])
+                    .expect("read")
+                    .is_none()
+            );
+        }
+
+        /// Held back, not dropped. With no password to return there is nothing else to say, and
+        /// answering "nothing saved" would hide a store that is failing. `expect_err` cannot be used
+        /// to get at it: that needs `Debug` on the success type, and the type inside it has none.
+        #[test]
+        fn a_failure_is_reported_when_no_target_answered() {
+            let Err(err) = first_readable([undecodable(), nothing()]) else {
+                panic!("a failure with no password behind it is dropped");
+            };
+            assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+        }
+
+        /// The one condition that is not about this credential at all. It is what a service, a
+        /// scheduled run or a network logon gets, and the store and the probe both name it, so the
+        /// import naming it something else would be the only place that disagrees.
+        #[test]
+        fn no_credential_store_session_is_not_a_credential_that_failed() {
+            let err = keyring::Error::NoStorageAccess(Box::new(std::io::Error::other(
+                "ERROR_NO_SUCH_LOGON_SESSION",
+            )));
+            assert!(matches!(
+                classify_credential_read(&err),
+                SecretsError::NoBackend
+            ));
+        }
+
+        #[test]
+        fn any_other_store_failure_is_a_backend_failure() {
+            let err = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("broken")));
+            assert!(matches!(
+                classify_credential_read(&err),
+                SecretsError::Backend { .. }
+            ));
+        }
     }
 
     mod secrets_file {
