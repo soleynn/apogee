@@ -78,6 +78,14 @@ impl Stats {
 
     /// How many body bytes the server has written across all responses. The waste-budget assertion:
     /// a resumed download must not re-fetch more than the interrupted tail.
+    ///
+    /// A chunk counts once the body task has handed it over, so bytes a client never took are never
+    /// counted. That makes the tally exact for any response a client reads to the end, and racy for
+    /// one it abandons: if the connection goes away before the body task is scheduled, the bytes are
+    /// generated, never sent, and never counted. A client that abandons a response on purpose (a
+    /// `bytes=0-0` range-capability probe, say) must therefore treat that body as a tolerance in an
+    /// exact byte count, and lean on [`requests`](Self::requests) - taken on the request path, before
+    /// any body - for the exact half of the claim.
     #[must_use]
     pub fn bytes_served(&self) -> u64 {
         self.bytes_served.load(Ordering::SeqCst)
