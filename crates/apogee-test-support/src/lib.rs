@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Test-only harness: byte-diff goldens, redaction, sandboxes, and a fixture transport.
 //!
 //! Dev-dependency only: consumers pull this in under `[dev-dependencies]`, so it never enters a
