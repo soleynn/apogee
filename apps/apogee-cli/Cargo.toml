@@ -12,6 +12,10 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 clap.workspace = true
 rpassword.workspace = true
+# The prompt readers here are where a password or a one-time code exists as plain text on its way
+# into a `Secret`, so the buffer typed into is an erased one. A `String` left to drop is a copy
+# nothing further down can reach.
+zeroize.workspace = true
 # Test-only: enabled by the `fixtures` feature to substitute a scripted transport. Never in a release
 # build (the feature is off by default).
 apogee-test-support = { path = "../../crates/apogee-test-support", optional = true }
@@ -44,6 +48,10 @@ required-features = ["fixtures"]
 
 [[test]]
 name = "secrets_file"
+required-features = ["fixtures"]
+
+[[test]]
+name = "otp"
 required-features = ["fixtures"]
 
 [lints]

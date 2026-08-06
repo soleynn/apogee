@@ -20,6 +20,7 @@ use apogee_core::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 #[cfg(feature = "fixtures")]
 mod fixtures;
@@ -410,14 +411,13 @@ struct TargetArgs {
     profile: String,
 }
 
+/// The arguments of a flow that authenticates. Deliberately only the profile: the password and the
+/// one-time code are read from the terminal or stdin, never taken as an argument.
 #[derive(Args)]
 struct PlayArgs {
     /// Profile id or unique name.
     #[arg(long)]
     profile: String,
-    /// One-time password code (prompted if omitted and the account uses one).
-    #[arg(long)]
-    otp: Option<String>,
 }
 
 #[tokio::main]
@@ -1177,7 +1177,7 @@ fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), Cli
     let profile = resolve_profile(core, &args.profile)?;
     let account = core.account(profile.account)?;
     let password = read_password()?;
-    let otp = read_otp(args, &account)?;
+    let otp = read_otp(&account)?;
     Ok((profile.id, password, otp))
 }
 
@@ -1388,15 +1388,35 @@ fn confirmed(word: &str) -> Result<bool, CliError> {
     Ok(prompt_line(&format!("Type `{word}` to continue: "))? == word)
 }
 
-/// The one-time-password source: the flag, else an interactive prompt when the account uses one.
-fn read_otp(args: &PlayArgs, account: &Account) -> Result<OtpSource, CliError> {
-    if let Some(code) = &args.otp {
-        Ok(OtpSource::Manual(code.clone()))
-    } else if account.use_otp {
-        Ok(OtpSource::Manual(prompt_line("One-time password: ")?))
+/// The one-time-password source: a code read off stdin when the account uses one, and nothing
+/// otherwise.
+///
+/// There is no flag for it, and there must not be one. `/proc/<pid>/cmdline` is world-readable with
+/// no `hidepid`, so an argument holding a live code is readable by every local user for as long as
+/// the run lasts; stdin is readable by nobody. A script that has to supply one pipes it in, the same
+/// line-per-answer shape as every other prompt here.
+fn read_otp(account: &Account) -> Result<OtpSource, CliError> {
+    if account.use_otp {
+        Ok(OtpSource::Manual(read_line_erased("One-time password: ")?))
     } else {
-        Ok(OtpSource::Manual(String::new()))
+        Ok(OtpSource::Manual(Secret::new(Vec::new())))
     }
+}
+
+/// Read one line of stdin into a buffer that is erased when it drops, trimming in place.
+///
+/// Trimming in place rather than with `trim().to_owned()`: the second `String` that would make is
+/// the copy nothing erases, which is the whole point of reading into an erased buffer at all.
+fn read_line_erased(prompt: &str) -> Result<Secret, CliError> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut line = Zeroizing::new(String::new());
+    io::stdin().read_line(&mut line)?;
+    let end = line.trim_end().len();
+    line.truncate(end);
+    let start = line.len() - line.trim_start().len();
+    line.drain(..start);
+    Ok(Secret::from_string(std::mem::take(&mut *line)))
 }
 
 /// The game's settings: captured, listed, put back, and pruned.
