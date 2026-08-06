@@ -21,6 +21,9 @@ apogee-zipatch = { path = "../crates/apogee-zipatch" }
 apogee-fetch = { path = "../crates/apogee-fetch", features = ["fuzzing"] }
 apogee-patcher = { path = "../crates/apogee-patcher" }
 apogee-addons = { path = "../crates/apogee-addons" }
+# `fuzzing` only, never `testing`: that one gates tests which drive whatever credential store is
+# really on the machine, and a dependency edge is how it would get switched on everywhere.
+apogee-secrets = { path = "../crates/apogee-secrets", features = ["fuzzing"] }
 
 [[bin]]
 name = "patchlist"
@@ -158,6 +161,20 @@ bench = false
 [[bin]]
 name = "launch_args"
 path = "fuzz_targets/launch_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secrets_frame"
+path = "fuzz_targets/secrets_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secrets_records"
+path = "fuzz_targets/secrets_records.rs"
 test = false
 doc = false
 bench = false

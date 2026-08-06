@@ -4,7 +4,10 @@ members  = ["crates/*", "apps/apogee-cli", "apps/apogee-elevated"]
 
 [workspace.package]
 edition      = "2024"
-rust-version = "1.88"
+# What the source actually needs, not a floor anyone supports: the pinned toolchain is the one this
+# builds with. Raised to 1.89 for `std::fs::File::lock`, which is how the fallback secret store keeps
+# two launcher processes from writing over each other without taking a C locking crate.
+rust-version = "1.89"
 license      = "GPL-3.0-or-later"
 
 [workspace.dependencies]
@@ -43,6 +46,16 @@ secret-service   = "4"
 # named here so the match is on typed variants rather than on a rendered string.
 zbus             = "4"
 totp-rs          = "5"
+# The fallback secret store's key derivation and its seal, gated to apogee-secrets. Foundation
+# cryptography used like a standard library, same RustCrypto generation as sha1/sha2/md-5 above.
+# Default features are off on both: the AEAD's random-nonce adapter is unused, and argon2's `alloc`
+# pulls a password-string encoder this never writes and hands the algorithm its working memory in a
+# buffer that is dropped un-erased.
+argon2           = { version = "0.5", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+# Salts and nonces come from the operating system generator directly: no seeded generator, so there
+# is no seed to get wrong and no state to fork across a process.
+getrandom        = "0.4"
 flate2           = "1"
 # Ed25519 verification for signed manifests (runner/component catalogs), checked against a
 # compiled-in key before any sha256 pin is trusted.

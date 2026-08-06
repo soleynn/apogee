@@ -155,11 +155,33 @@ pub enum Region {
     China,
 }
 
+/// Where the launcher keeps account secrets on this machine.
+///
+/// A stored choice rather than something detected at startup. The alternative to the platform store
+/// is a file sealed under a passphrase the user has to type, and nothing may put a secret into one
+/// the user did not ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SecretBackend {
+    /// The credential store this platform provides.
+    #[default]
+    Platform,
+    /// A file sealed under a passphrase, for a session with no credential store to talk to.
+    EncryptedFile,
+    /// Nothing is written down at all, and a password is asked for every time.
+    Nothing,
+}
+
 /// Launcher-wide preferences, independent of any profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     pub language: String,
     pub close_after_launch: bool,
+    /// Which store account secrets go into. Read once at construction, so a change takes effect on
+    /// the next launch, and switching moves nothing: whatever the old backend holds stays there until
+    /// it is deleted on purpose.
+    pub secret_backend: SecretBackend,
     /// Keep downloaded patches after a clean apply instead of removing them. Costs disk, but lets a
     /// later repair re-fetch broken ranges from the local patch files first (and a re-apply skip the
     /// download). Read once at construction, so a change takes effect on the next launch.
@@ -176,6 +198,7 @@ impl Default for Settings {
         Self {
             language: "en".to_string(),
             close_after_launch: false,
+            secret_backend: SecretBackend::Platform,
             // On, because a repair re-fetches broken ranges from the patch files first when they are
             // there and from the network when they are not, and the second is hours where the first
             // is minutes. It costs disk, which is why it is a setting and why it is stated.

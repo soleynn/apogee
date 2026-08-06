@@ -59,3 +59,12 @@ pub(crate) fn transport() -> Option<Arc<dyn Transport>> {
 pub(crate) fn password() -> Option<Secret> {
     std::env::var_os("APOGEE_FIXTURE_LOGIN").map(|_| Secret::new(b"fixture".to_vec()))
 }
+
+/// A canned passphrase for the sealed secret file, so the end-to-end test drives it without a
+/// terminal. `None` unless the variable is set, so an ordinary run always prompts.
+pub(crate) fn passphrase() -> Option<Secret> {
+    std::env::var("APOGEE_FIXTURE_PASSPHRASE")
+        .ok()
+        .filter(|text| !text.is_empty())
+        .map(|text| Secret::new(text.into_bytes()))
+}

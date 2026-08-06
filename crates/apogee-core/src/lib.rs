@@ -40,8 +40,9 @@ pub use apogee_runtime::{
     remove_compat_tool, steam_installs,
 };
 pub use apogee_secrets::{
-    Backend, BackendReport, BackendState, ForeignCredentialStore, ForeignKey, ForeignSecretsFile,
-    ImportSource, Sandbox, Secret, SecretKind,
+    Backend, BackendReport, BackendState, Consent, EncryptedFile, FileState,
+    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, ImportSource, KdfCost, Passphrase,
+    Sandbox, Secret, SecretKind, SecretStore, Secrets, SecretsError, Unprompted,
 };
 pub use command::{
     Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, PrefixAction, Progress,
@@ -50,7 +51,7 @@ pub use composition::{Core, CoreConfig, ProfileRemoval};
 pub use error::CoreError;
 pub use model::{
     Account, AccountKind, LaunchSettings, PrefixSelection, Profile, Region, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Settings,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, SecretBackend, Settings,
 };
 pub use sqex_proto::Transport;
 pub use store::StoreError;
