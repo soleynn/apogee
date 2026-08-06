@@ -26,6 +26,7 @@ is tagged with its change type. Versioning aims to follow
 - Bound how long the sealed file's key stays in memory (#118) _(fixed)_
 - Keep reading credential targets past a failure, and anchor the foreign key strings (#117) _(fixed)_
 - Classify, compile and gate the Apple credential-store path (#119) _(fixed)_
+- Give the Windows secret store an owner-only access list (#120) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
