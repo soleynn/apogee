@@ -446,10 +446,25 @@ impl EncryptedFile {
         change: impl FnOnce(&mut Table) -> bool,
     ) -> Result<(), SecretsError> {
         let mut cached = self.cache();
+        // Whether there is a store at all is settled before anything is created. Taking the lock
+        // first meant a write against a path with no store left the directory and a zero-byte
+        // sidecar behind and then answered that there was nothing to write into. Only a definite
+        // "not there" short-circuits: anything else, a permission on the path among them, falls
+        // through to the authoritative read below so it keeps its own answer.
+        if let Err(err) = std::fs::symlink_metadata(&self.path)
+            && err.kind() == std::io::ErrorKind::NotFound
+        {
+            return match missing {
+                Missing::Refuse => Err(SecretsError::NoCollection),
+                Missing::Ignore => Ok(()),
+            };
+        }
         disk::private_dir(&self.path)?;
         let _lock = disk::Lock::take(&self.path)?;
         disk::sweep_temps(&self.path);
 
+        // Re-read under the lock, because the check above is a fact about the moment before it: a
+        // store can be removed between the two, and that answer is the one that counts.
         let Some(bytes) = disk::read(&self.path)? else {
             return match missing {
                 Missing::Refuse => Err(SecretsError::NoCollection),
