@@ -1374,22 +1374,35 @@ fn read_passphrase(prompt: &str) -> Result<Secret, CliError> {
     if let Some(secret) = fixtures::passphrase() {
         return Ok(secret);
     }
-    Ok(Secret::new(typed(prompt)?.into_bytes()))
+    Ok(into_secret(typed(prompt)?))
 }
 
-/// Read one line with the echo off.
+/// Read one line with the echo off, into a buffer that is erased when it drops.
+///
+/// `rpassword` erases its own working buffers but hands back an ordinary `String`, and every caller
+/// here holds that answer for at least as long as it takes to check it against something.
 ///
 /// The failure worth naming is the only one that happens in practice: there is no terminal to ask on,
 /// because the launcher was run from a script or a service. The library's own error for that is an
 /// operating-system code with no bearing on what to do about it.
-fn typed(prompt: &str) -> Result<String, CliError> {
-    rpassword::prompt_password(prompt).map_err(|err| -> CliError {
-        if std::io::IsTerminal::is_terminal(&io::stdin()) {
-            Box::new(err)
-        } else {
-            "there is no terminal to type a passphrase on".into()
-        }
-    })
+fn typed(prompt: &str) -> Result<Zeroizing<String>, CliError> {
+    rpassword::prompt_password(prompt)
+        .map(Zeroizing::new)
+        .map_err(|err| -> CliError {
+            if std::io::IsTerminal::is_terminal(&io::stdin()) {
+                Box::new(err)
+            } else {
+                "there is no terminal to type a passphrase on".into()
+            }
+        })
+}
+
+/// Move an erased text buffer into a [`Secret`], leaving nothing behind.
+///
+/// `String::into_bytes` hands over the heap allocation rather than copying it, so the bytes are only
+/// ever in one place; taking the `String` out of its wrapper leaves an empty one to drop.
+fn into_secret(mut text: Zeroizing<String>) -> Secret {
+    Secret::from_string(std::mem::take(&mut *text))
 }
 
 /// Read a passphrase that is about to seal a file, so it is asked for twice and compared.
@@ -1409,7 +1422,7 @@ fn read_new_passphrase() -> Result<Secret, CliError> {
     if first != again {
         return Err("the two passphrases were not the same".into());
     }
-    Ok(Secret::new(first.into_bytes()))
+    Ok(into_secret(first))
 }
 
 /// Require the user to type `word` before something destructive or irreversible happens.
@@ -1449,7 +1462,7 @@ fn read_line_erased(prompt: &str) -> Result<Secret, CliError> {
     line.truncate(end);
     let start = line.len() - line.trim_start().len();
     line.drain(..start);
-    Ok(Secret::from_string(std::mem::take(&mut *line)))
+    Ok(into_secret(line))
 }
 
 /// The game's settings: captured, listed, put back, and pruned.
@@ -1809,4 +1822,22 @@ fn render_patch(patch: &PatchProgress) -> String {
         }
         _ => "patch: progress".to_owned(),
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every reader that takes a typed answer hands back a buffer that erases itself.
+    ///
+    /// A tripwire, not a proof: it stops the return type quietly going back to `String`, which is the
+    /// shape this got wrong once already, but nothing here can see a caller that copies the answer
+    /// out again. What measures that is an allocator shim over the built binary, which needs
+    /// `unsafe` and so cannot live in this workspace.
+    const _: fn() = || {
+        fn erased_text(_: fn(&str) -> Result<Zeroizing<String>, CliError>) {}
+        fn erased_secret(_: fn(&str) -> Result<Secret, CliError>) {}
+        erased_text(typed);
+        erased_secret(read_line_erased);
+    };
 }
