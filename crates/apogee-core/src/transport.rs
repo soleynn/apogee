@@ -8,6 +8,7 @@
 
 use reqwest::header::{DATE, HeaderName};
 use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError};
+use url::Url;
 
 /// A reqwest-backed [`Transport`]: a pooled client with dual-stack dialing. Internal wiring: the
 /// composition root is the only place a concrete transport is assembled, so this type is not exported.
@@ -41,10 +42,9 @@ impl Transport for HttpTransport {
             builder = builder.body(body.as_bytes().to_vec());
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|err| TransportError::new(format!("request failed: {err}")))?;
+        let response = builder.send().await.map_err(|err| {
+            TransportError::new(format!("request failed: {}", why(&req.url, &err)))
+        })?;
         let status = response.status().as_u16();
 
         // sqex-proto reads only two response headers: the top page's `Date` (for TOTP clock-skew
@@ -58,7 +58,12 @@ impl Transport for HttpTransport {
         let body = response
             .bytes()
             .await
-            .map_err(|err| TransportError::new(format!("reading response body failed: {err}")))?
+            .map_err(|err| {
+                TransportError::new(format!(
+                    "reading response body failed: {}",
+                    why(&req.url, &err)
+                ))
+            })?
             .to_vec();
 
         let mut out = ProtoResponse::new(status, body);
@@ -68,5 +73,71 @@ impl Transport for HttpTransport {
             }
         }
         Ok(out)
+    }
+}
+
+/// Say what went wrong with a request, without quoting the library's own message.
+///
+/// reqwest renders a failed send as `error sending request for url (<the whole url>)`, and at one
+/// step of the login flow that URL's last path segment *is* a credential: the registration POST
+/// carries the OAuth session id there. The message does not stay local either. It travels
+/// `TransportError` into `ProtoError::Transport` into `CoreError::Proto` and out of the CLI on
+/// stderr, so a user on a flaky connection is shown a live session token and pastes it into a bug
+/// report.
+///
+/// The seam this backs already forbade that in writing, and `SessionId` carries a hand-written
+/// redacting `Debug` written to make it impossible; routing the id through a URL walked around both.
+/// So the host is named and the path is not, which loses nothing a user could act on: which of the
+/// endpoints was unreachable is the actionable part, and the path is fixed by the protocol.
+fn why(url: &Url, err: &reqwest::Error) -> String {
+    let what = if err.is_timeout() {
+        "timed out"
+    } else if err.is_connect() {
+        "could not be reached"
+    } else if err.is_redirect() {
+        "redirected too many times"
+    } else if err.is_decode() {
+        "sent a response that could not be decoded"
+    } else if err.is_body() {
+        "broke off mid-response"
+    } else {
+        "failed"
+    };
+    // Scheme and host, never the path or the query. `host_str` is `None` only for a URL with no
+    // authority, which none of the protocol's endpoints is.
+    match url.host_str() {
+        Some(host) => format!("{} {what}", host),
+        None => format!("the request {what}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::Method;
+
+    /// The registration step puts the session id in the path, so the whole URL must never reach the
+    /// message. Driven against a port nothing listens on, which is the failure a user actually hits.
+    #[tokio::test]
+    async fn a_failed_request_names_the_host_and_not_the_path() {
+        let sentinel = "SESSIONIDSECRET";
+        let url =
+            Url::parse(&format!("http://127.0.0.1:1/oauth/register/{sentinel}")).expect("a url");
+        let transport = HttpTransport::new(reqwest::Client::new());
+
+        let err = transport
+            .execute(ProtoRequest::new(Method::POST, url))
+            .await
+            .expect_err("nothing listens on port 1");
+
+        let rendered = format!("{err} {err:?}");
+        assert!(
+            !rendered.contains(sentinel),
+            "the error carried the credential in the path: {rendered}"
+        );
+        assert!(
+            rendered.contains("127.0.0.1"),
+            "the error should still name the host: {rendered}"
+        );
     }
 }

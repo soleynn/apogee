@@ -629,6 +629,12 @@ impl Core {
     /// entry is left exactly as it was, because it is not this program's to remove and a user may
     /// still be running it.
     ///
+    /// The refusal is decided before the source is touched. Reading one is not free of consequence:
+    /// it connects to the platform credential store, which can raise the unlock prompt, or it opens
+    /// the other launcher's plaintext file, and either way it materialises a password in this
+    /// process. Doing that and then refusing to keep it is work and exposure spent on an account
+    /// whose whole setting is that nothing is kept, and the refusal is a local record lookup.
+    ///
     /// # Errors
     /// As [`Core::store_secret`], plus the source's own failure to read.
     pub fn import_password(
@@ -637,6 +643,9 @@ impl Core {
         source: &dyn ImportSource,
         key: &ForeignKey,
     ) -> Result<bool, CoreError> {
+        if self.account_or_missing(account)?.never_store {
+            return Err(SecretsError::NotStoring.into());
+        }
         let Some(password) = source.password(key)? else {
             return Ok(false);
         };
@@ -793,6 +802,50 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let core = Core::new(CoreConfig::with_base(dir.path())).unwrap();
         (dir, core)
+    }
+
+    /// An account that keeps nothing must not have the other launcher's password read at all.
+    ///
+    /// Reading the source is not free: it connects to the platform store, which can raise the
+    /// unlock prompt, or opens the other launcher's plaintext file, and either way the password
+    /// exists in this process before the refusal arrives. The refusal is a local record lookup, so
+    /// the safe order costs nothing.
+    #[test]
+    fn an_account_that_keeps_nothing_is_refused_before_its_password_is_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use apogee_secrets::{ForeignKey, ImportSource, Secret, SecretsError};
+
+        use crate::model::AccountKind;
+
+        struct Counting(AtomicUsize);
+
+        impl ImportSource for Counting {
+            fn password(&self, _key: &ForeignKey) -> Result<Option<Secret>, SecretsError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(Secret::new(b"hunter2".to_vec())))
+            }
+        }
+
+        let (_dir, core) = core();
+        let account = Account {
+            never_store: true,
+            ..Account::new("keeps nothing", AccountKind::Standard)
+        };
+        let id = account.id;
+        core.save_account(&account).unwrap();
+
+        let source = Counting(AtomicUsize::new(0));
+        let err = core
+            .import_password(id, &source, &ForeignKey::from_stored_name("someone"))
+            .expect_err("an account that keeps nothing must refuse");
+
+        assert!(matches!(err, CoreError::Secrets(SecretsError::NotStoring)));
+        assert_eq!(
+            source.0.load(Ordering::Relaxed),
+            0,
+            "the source was read for an account that keeps nothing"
+        );
     }
 
     #[test]
