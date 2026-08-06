@@ -19,7 +19,7 @@ use apogee_patcher::{PatchProgress, Repo};
 use super::{FlowContext, drive, language_id, launch_arguments, read_repo_ver};
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
-use crate::command::{Command, Event, FlowState, PrefixAction};
+use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
@@ -417,6 +417,10 @@ async fn a_stored_secret_logs_in_without_asking_for_a_code() {
     let sent = submitted_otp(&transport).expect("a generated code was submitted");
     assert_eq!(sent.len(), 6, "{sent}");
     assert!(sent.bytes().all(|b| b.is_ascii_digit()), "{sent}");
+    // The digits themselves, not just their shape. The scripted page's clock is a constant this host
+    // does not share, so a login that derived against its own clock, or against the offset with its
+    // sign inverted, sends six perfectly well-formed digits that are not these.
+    assert_eq!(sent, code_for_the_scripted_clock());
     assert_eq!(
         h.store
             .load_uid_cache(h.account)
@@ -427,21 +431,21 @@ async fn a_stored_secret_logs_in_without_asking_for_a_code() {
     );
 }
 
-/// Hold until the current window has at least `least` seconds left in it.
+/// The code a login through the scripted top page will derive, for the window that page's clock
+/// falls in.
 ///
-/// The tests below seed or spend a code for one window and the login has to land in that same
-/// window, so a boundary crossed in between would decide the outcome instead of the guard.
-fn away_from_a_window_boundary(least: u64) {
-    loop {
-        let elapsed = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let left = 30 - (elapsed % 30);
-        if left >= least {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(left));
-    }
+/// The tests below can name it exactly because the correction is an offset rather than a pinned
+/// instant: the flow measures the page's clock against this host's, then the mint reads this host's
+/// clock again, so the two readings cancel and what is left is the page's own. The page's clock is
+/// [`fx::SERVER_UNIX_SECS`], which starts a window, so the whole of one has to elapse inside the run
+/// before the counter moves.
+fn code_for_the_scripted_clock() -> String {
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    params
+        .code(fx::server_time(), ClockSkew::NONE)
+        .unwrap()
+        .expose()
+        .to_owned()
 }
 
 /// How long a run said it was holding for, if it said so at all.
@@ -458,15 +462,14 @@ fn otp_hold(events: &[Event]) -> Option<u64> {
 ///
 /// Virtual time, so the wait costs the suite nothing and the clock the assertion reads is the one
 /// the sleep ran on. The seeded record is what a login that had just happened would have left
-/// behind.
+/// behind, and it is seeded for the window the scripted page's clock falls in, because that is the
+/// clock the flow derives against.
 #[tokio::test(start_paused = true)]
 async fn a_code_the_server_has_seen_is_not_sent_again() {
     let h = harness(true);
-    away_from_a_window_boundary(5);
-
     let otp = otp_with_secret(h.account);
     let params = TotpParams::parse(totp_seed()).unwrap();
-    let already = params.code(SystemTime::now(), ClockSkew::NONE).unwrap();
+    let already = params.code(fx::server_time(), ClockSkew::NONE).unwrap();
     let repeat = already.expose().to_owned();
     otp.submitted(h.account, &already);
 
@@ -486,19 +489,22 @@ async fn a_code_the_server_has_seen_is_not_sent_again() {
     let elapsed = started.elapsed();
 
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
-    let waited = otp_hold(&events).expect("the flow should have said it was holding");
-    // The record was seeded for the current window and the guard steps over one window at a time,
-    // so the hold is what is left of this one: real, and exactly what was narrated.
-    assert!((1..=30).contains(&waited), "held for {waited} seconds");
-    assert_eq!(
-        elapsed.as_secs(),
-        waited,
-        "the run narrated a {waited}s hold and took {elapsed:?}"
-    );
+    // The page's clock starts a window and the guard steps over one window at a time, so the hold is
+    // the whole of the window that clock opened: exact, and exactly what was narrated.
+    assert_eq!(otp_hold(&events), Some(30));
+    assert_eq!(elapsed.as_secs(), 30, "the run took {elapsed:?}");
     let sent = submitted_otp(&transport).expect("a generated code was submitted");
     assert_ne!(
         sent, repeat,
         "the code the server already saw was sent again"
+    );
+    let next = params
+        .code(fx::server_time() + Duration::from_secs(30), ClockSkew::NONE)
+        .unwrap();
+    assert_eq!(
+        sent,
+        next.expose(),
+        "the hold ended on something other than the next window's code"
     );
 }
 
@@ -511,7 +517,6 @@ async fn a_code_the_server_has_seen_is_not_sent_again() {
 #[tokio::test(start_paused = true)]
 async fn a_second_login_in_one_window_sends_a_different_code() {
     let h = harness(true);
-    away_from_a_window_boundary(5);
     let otp = otp_with_secret(h.account);
 
     let first_transport = Arc::new(FixtureTransport::new(login_then_current()));
@@ -559,11 +564,9 @@ async fn a_second_login_in_one_window_sends_a_different_code() {
 #[tokio::test(start_paused = true)]
 async fn a_run_stopped_while_it_holds_never_logs_in() {
     let h = harness(true);
-    away_from_a_window_boundary(5);
-
     let otp = otp_with_secret(h.account);
     let params = TotpParams::parse(totp_seed()).unwrap();
-    let already = params.code(SystemTime::now(), ClockSkew::NONE).unwrap();
+    let already = params.code(fx::server_time(), ClockSkew::NONE).unwrap();
     otp.submitted(h.account, &already);
 
     let transport = Arc::new(FixtureTransport::new(login_then_current()));
@@ -588,11 +591,210 @@ async fn a_run_stopped_while_it_holds_never_logs_in() {
         "{:?}",
         states(&events)
     );
-    assert!(
-        transport.recorded().is_empty(),
-        "a stopped run still talked to the login server"
+    // The login server's own clock decides which window to hold for, so a login has asked for the
+    // top page by the time it knows it is holding at all. What it must not have done is submit: the
+    // two recorded requests are the service check and that page, and nothing followed them.
+    assert_eq!(
+        transport.recorded().len(),
+        2,
+        "a stopped run submitted credentials"
     );
     assert!(h.store.load_uid_cache(h.account).unwrap().is_none());
+}
+
+/// The advisories a run raised, in order.
+fn notices(events: &[Event]) -> Vec<Notice> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Notice(notice) => Some(*notice),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A clock a login server would have if this host's were badly wrong in the other direction.
+///
+/// A constant rather than an offset from the wall clock, and on a window boundary, for the reason
+/// [`fx::SERVER_UNIX_SECS`] is: what a login derives for collapses onto whatever the page said, so a
+/// constant there makes the code a constant here. The pair covers both signs, since the scripted
+/// page's own clock is already behind any host running this.
+const SERVER_AHEAD_UNIX: u64 = 2_082_758_400;
+
+/// The codes this host's own clock could produce for a run that began at `started`.
+///
+/// Two of them because a window may have turned over inside the run. Both are this host's rather than
+/// the login server's, which is the whole of what an uncorrected login is being checked for, and the
+/// scripted clock's code is neither.
+fn local_codes(started: SystemTime) -> Vec<String> {
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    [started, SystemTime::now()]
+        .into_iter()
+        .map(|at| {
+            params
+                .code(at, ClockSkew::NONE)
+                .unwrap()
+                .expose()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// A login through a page whose clock is scripted, and the code it derived.
+async fn login_against(h: &Harness, top: ProtoResponse) -> (Vec<Event>, Option<String>) {
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        top,
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_current(UNIQUE_ID),
+    ]));
+    let ctx = context_otp(h, transport.clone(), otp_with_secret(h.account), NOW);
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Totp,
+        },
+    )
+    .await;
+    let sent = submitted_otp(&transport);
+    (events, sent)
+}
+
+/// The acceptance case: a host whose clock is far enough out that its own codes would be refused
+/// still logs in, because the code went out for the window the login server is in, and the user is
+/// told which of the two clocks is wrong.
+///
+/// The offset is named from the server's side (it is ahead), so an implementation that measured
+/// `local - server` sends the code for an instant the same distance the other way and fails the
+/// equality below. That inversion is the sharpest trap here: both directions produce six well-formed
+/// digits and nothing else in the workspace would catch it.
+#[tokio::test]
+async fn a_host_whose_clock_is_wrong_logs_in_against_the_servers_and_is_told() {
+    let h = harness(true);
+    let ahead = SystemTime::UNIX_EPOCH + Duration::from_secs(SERVER_AHEAD_UNIX);
+    let (events, sent) = login_against(&h, fx::oauth_top_at("STOREDBLOB", ahead)).await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    assert_eq!(
+        sent.as_deref(),
+        Some(params.code(ahead, ClockSkew::NONE).unwrap().expose()),
+        "the code was not derived against the login server's clock"
+    );
+    match notices(&events).as_slice() {
+        [Notice::ClockSkew { seconds }] => assert!(
+            *seconds > ClockSkew::ADVISORY_SECONDS,
+            "the notice named {seconds}s, which is not a drift worth raising"
+        ),
+        other => panic!("expected one clock notice, got {other:?}"),
+    }
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_some());
+}
+
+/// The other direction. Separate from the case above rather than folded into it, because a sign
+/// dropped somewhere between the header and the counter still passes a test that only ever measures
+/// one way.
+#[tokio::test]
+async fn a_server_clock_behind_this_host_reads_as_a_negative_offset() {
+    let h = harness(true);
+    let behind = fx::server_time();
+    let (events, sent) = login_against(&h, fx::oauth_top_at("STOREDBLOB", behind)).await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let params = TotpParams::parse(totp_seed()).unwrap();
+    assert_eq!(
+        sent.as_deref(),
+        Some(params.code(behind, ClockSkew::NONE).unwrap().expose())
+    );
+    match notices(&events).as_slice() {
+        [Notice::ClockSkew { seconds }] => assert!(
+            *seconds < -ClockSkew::ADVISORY_SECONDS,
+            "a server behind this host was reported as {seconds}s"
+        ),
+        other => panic!("expected one clock notice, got {other:?}"),
+    }
+}
+
+/// A clock that agrees is not worth a sentence. Without this the notice is indistinguishable from
+/// one raised on every login, which is the version a user learns to ignore.
+#[tokio::test]
+async fn a_clock_that_agrees_with_the_login_server_is_not_mentioned() {
+    let h = harness(true);
+    let started = SystemTime::now();
+    let (events, sent) = login_against(&h, fx::oauth_top_at("STOREDBLOB", started)).await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(notices(&events), Vec::new());
+    let sent = sent.expect("a generated code was submitted");
+    assert!(
+        local_codes(started).contains(&sent),
+        "a login against an agreeing clock sent a code for another window"
+    );
+}
+
+/// A page that carries no clock at all costs the correction and not the login: the code goes out for
+/// this host's own window, which is what every login did before there was anything to correct
+/// against, and nothing is said because nothing was measured.
+#[tokio::test]
+async fn a_login_page_with_no_clock_still_logs_in_against_this_host() {
+    let h = harness(true);
+    let started = SystemTime::now();
+    let (events, sent) = login_against(&h, fx::oauth_top_undated("STOREDBLOB")).await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(notices(&events), Vec::new());
+    let sent = sent.expect("a generated code was submitted");
+    assert!(local_codes(started).contains(&sent));
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_some());
+}
+
+/// A stamp in a shape the reader does not take answers the same way an absent one does. The reader
+/// refuses the two obsolete forms, so this is the shape a real server would have to send to reach
+/// that path, and the login has to survive it.
+#[tokio::test]
+async fn a_clock_stamped_in_a_form_that_cannot_be_read_is_not_a_correction() {
+    let h = harness(true);
+    let started = SystemTime::now();
+    let (events, sent) = login_against(
+        &h,
+        fx::oauth_top_stamped("STOREDBLOB", "Wednesday, 09-Jul-25 12:00:00 GMT"),
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(notices(&events), Vec::new());
+    let sent = sent.expect("a generated code was submitted");
+    assert!(local_codes(started).contains(&sent));
+}
+
+/// A typed code came off a device with a clock of its own, so this host's disagreement with the
+/// login server says nothing about it and is not raised. The login is otherwise a skewed one.
+#[tokio::test]
+async fn a_typed_code_is_sent_untouched_and_raises_nothing() {
+    let h = harness(true);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top_at("STOREDBLOB", fx::server_time() + Duration::from_secs(3_600)),
+        fx::submit_success(SESSION_ID, REGION, MAX_EXPANSION),
+        fx::register_current(UNIQUE_ID),
+    ]));
+    let ctx = context_otp(&h, transport.clone(), otp_with_secret(h.account), NOW);
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Manual(Secret::new(b"424242".to_vec())),
+        },
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(notices(&events), Vec::new());
+    assert_eq!(submitted_otp(&transport).as_deref(), Some("424242"));
 }
 
 #[tokio::test]

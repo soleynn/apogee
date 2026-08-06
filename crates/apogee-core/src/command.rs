@@ -168,7 +168,28 @@ pub enum Event {
     /// A report rather than a stream of findings: the whole point is the list a user decides about,
     /// and a list arriving one item at a time is one a shell has to reassemble before it can ask.
     PrefixHealth(apogee_runtime::PrefixHealth),
+    /// Something true and worth saying that the run has already worked around.
+    ///
+    /// Its own variant rather than a [`FlowState`] because a flow is never *in* one of these: nothing
+    /// waits on it, the next step follows regardless, and a shell binding a status line to the last
+    /// state would sit on a notice the run moved past a moment later.
+    Notice(Notice),
     Error(CoreError),
+}
+
+/// An advisory a run raises in passing: true, actionable by the user later, and not something the run
+/// is waiting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Notice {
+    /// This host's clock and the login server's disagree by more than the launcher is willing to pass
+    /// over. `seconds` is how far the server is ahead, negative when it is behind.
+    ///
+    /// The login is unaffected: the one-time code that went with it was generated against the
+    /// server's own reading, which is the clock it gets checked against. Everything else on this
+    /// machine that cares what time it is has the problem this names, so it is said out loud rather
+    /// than silently corrected for.
+    ClockSkew { seconds: i64 },
 }
 
 /// Where a login-to-play flow currently stands. The shell narrates these; none is a failure.
