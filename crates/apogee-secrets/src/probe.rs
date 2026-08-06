@@ -34,13 +34,44 @@ pub(crate) enum BusFailure {
     Locked,
 }
 
+/// How long the bus gets to answer before the probe gives up on it.
+///
+/// A provider that is there answers in milliseconds. What this bounds is a socket that accepts the
+/// connection and then never speaks: the handshake underneath has no deadline of its own, so without
+/// this the one call whose whole job is to say what the store is doing is the one call that can
+/// never return. A wedged bus proxy and a hung `dbus-daemon` both produce it.
+const BUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) fn probe() -> BackendReport {
     let sandbox = detect_sandbox();
+    let asked = sandbox.clone();
+    let state = within(BUS_DEADLINE, BackendState::Unreachable, move || {
+        probe_state(asked.as_ref())
+    });
     BackendReport {
         backend: BACKEND,
-        state: probe_state(sandbox.as_ref()),
+        state,
         sandbox,
     }
+}
+
+/// Run `work` on a worker thread and answer `on_timeout` if it has not finished within `deadline`.
+///
+/// The worker is abandoned rather than cancelled, because a blocking D-Bus handshake has no
+/// cancellation point and the alternative is a call that cannot return. What is abandoned holds no
+/// lock of this crate's and owns nothing a later call needs, so the cost is the thread, and it ends
+/// when the connection attempt underneath it does.
+fn within<T: Send + 'static>(
+    deadline: std::time::Duration,
+    on_timeout: T,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (answer, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // A send that fails is a probe that already gave up and stopped listening.
+        let _ = answer.send(work());
+    });
+    wait.recv_timeout(deadline).unwrap_or(on_timeout)
 }
 
 fn probe_state(sandbox: Option<&Sandbox>) -> BackendState {
@@ -83,6 +114,23 @@ fn classify(err: &secret_service::Error, sandbox: Option<&Sandbox>) -> BackendSt
         Some(BusFailure::Locked) => BackendState::Locked,
         None => match err {
             secret_service::Error::Unavailable => BackendState::NoSessionBus,
+            // The library folds only a *missing* socket into `Unavailable`
+            // (`secret-service-5.1.0/src/util.rs:149` takes `ErrorKind::NotFound` alone), so a
+            // socket that exists and will not take a connection arrives here unnamed and used to
+            // report as an unclassified store failure. From a caller's point of view it is the same
+            // condition: the address names something that is not a working bus. A `dbus-daemon`
+            // that died leaving its socket, and a stale address inherited through tmux, ssh or
+            // `sudo -E`, are the ordinary ways to arrive here.
+            secret_service::Error::Zbus(zbus::Error::InputOutput(io))
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                BackendState::NoSessionBus
+            }
             secret_service::Error::Locked | secret_service::Error::Prompt => BackendState::Locked,
             secret_service::Error::NoResult => BackendState::NoDefaultCollection,
             _ => BackendState::Unreachable,
@@ -427,6 +475,51 @@ mod tests {
             classify(&no_name(), Some(&Sandbox::Container)),
             BackendState::NoProvider
         );
+    }
+
+    /// A socket that is there and refuses, or that the process may not open, is not a working bus.
+    /// The library names only a missing one, so these arrived unclassified and a user with a dead
+    /// `dbus-daemon` was told the store had simply broken.
+    #[test]
+    fn a_socket_that_will_not_take_a_connection_is_a_missing_bus() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let err = secret_service::Error::Zbus(zbus::Error::InputOutput(std::sync::Arc::new(
+                std::io::Error::new(kind, "socket"),
+            )));
+            assert_eq!(classify(&err, None), BackendState::NoSessionBus, "{kind:?}");
+        }
+
+        // Anything else on that socket is still an unclassified failure rather than a guess.
+        let err = secret_service::Error::Zbus(zbus::Error::InputOutput(std::sync::Arc::new(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "socket"),
+        )));
+        assert_eq!(classify(&err, None), BackendState::Unreachable);
+    }
+
+    /// The probe's own deadline. Without it a socket that accepts and never speaks blocks the call
+    /// forever, and that call is the one a front end makes to decide what to say about storage.
+    #[test]
+    fn work_that_outruns_the_deadline_answers_the_fallback() {
+        let slow = within(
+            std::time::Duration::from_millis(50),
+            BackendState::Unreachable,
+            || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                BackendState::Ready
+            },
+        );
+        assert_eq!(slow, BackendState::Unreachable);
+
+        let prompt = within(
+            std::time::Duration::from_secs(30),
+            BackendState::Unreachable,
+            || BackendState::Ready,
+        );
+        assert_eq!(prompt, BackendState::Ready);
     }
 
     #[test]
