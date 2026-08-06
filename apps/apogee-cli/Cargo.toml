@@ -26,10 +26,14 @@ fixtures = ["dep:apogee-test-support"]
 # The wine-present end-to-end test: a real launch through system wine. Implies `fixtures`.
 wine-integration = ["fixtures"]
 
+# Suppressing this process's core dumps (prctl + setrlimit), and signalling the game child in the
+# e2e test. Linux-only, so the windows-gnu cross-build never pulls rustix's process backend, which
+# does not exist there.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [dev-dependencies]
 serde_json.workspace = true
-# Sends SIGINT to the CLI child in the e2e test so it shuts the game down cleanly.
-rustix = { workspace = true, features = ["process"] }
 tempfile.workspace = true
 # The hermetic patch e2e: a chaos server serves a real patch chain the CLI downloads and applies.
 apogee-test-support = { path = "../../crates/apogee-test-support" }

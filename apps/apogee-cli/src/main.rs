@@ -420,8 +420,41 @@ struct PlayArgs {
     profile: String,
 }
 
+/// Stop this process being written to disk if it dies.
+///
+/// The sealed secret file derives its key once and holds it for the run, so a dump taken while the
+/// store is open carries the key, and the key plus the file beside it is every password in the store
+/// with no passphrase and no derivation work. A dump attached to a bug report or caught in a backup
+/// travels the same way a stolen file does.
+///
+/// Both calls are needed and neither is redundant. `PR_SET_DUMPABLE` is what actually stops it: when
+/// `core_pattern` is a pipe the kernel hands the handler an unlimited size, so `RLIMIT_CORE` alone
+/// would not. The limit covers a plain-file `core_pattern`, and unlike the dumpable flag it survives
+/// an `execve`, so it reaches the game and the runner this process starts too.
+///
+/// What it costs: crash diagnostics. A segfault anywhere in the launcher, or in what it spawns,
+/// leaves an exit status and nothing to open. What it does not cover: swap and hibernation, which
+/// write the same pages by a route no process-level flag reaches.
+#[cfg(target_os = "linux")]
+fn keep_this_process_off_disk() {
+    use rustix::process::{DumpableBehavior, Resource, Rlimit, set_dumpable_behavior, setrlimit};
+
+    if let Err(err) = set_dumpable_behavior(DumpableBehavior::NotDumpable) {
+        eprintln!("warning: this process can still be dumped to disk: {err}");
+    }
+    let none = Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    if let Err(err) = setrlimit(Resource::Core, none) {
+        eprintln!("warning: core dumps of this process are still allowed: {err}");
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    keep_this_process_off_disk();
     match run(Cli::parse()).await {
         Ok(code) => code,
         Err(err) => {
