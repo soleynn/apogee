@@ -1,0 +1,22 @@
+error[E0599]: no method named `key` found for reference `&TotpParams` in the current scope
+ --> tests/ui/params_key_read_back.rs:8:20
+  |
+8 |     let _ = params.key();
+  |                    ^^^ private field, not a method
+
+error[E0599]: no method named `secret` found for reference `&TotpParams` in the current scope
+ --> tests/ui/params_key_read_back.rs:9:20
+  |
+9 |     let _ = params.secret();
+  |                    ^^^^^^
+  |
+help: there is a method `into_secret` with a similar name
+  |
+9 |     let _ = params.into_secret();
+  |                    +++++
+
+error[E0616]: field `key` of struct `TotpParams` is private
+  --> tests/ui/params_key_read_back.rs:10:20
+   |
+10 |     let _ = params.key;
+   |                    ^^^ private field

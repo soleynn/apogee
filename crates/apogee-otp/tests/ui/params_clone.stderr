@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/params_clone.rs:7:5
+  |
+6 | fn duplicate(params: &TotpParams) -> TotpParams {
+  |                                      ---------- expected `TotpParams` because of return type
+7 |     params.clone()
+  |     ^^^^^^^^^^^^^^ expected `TotpParams`, found `&TotpParams`
+  |
+note: `TotpParams` does not implement `Clone`, so `&TotpParams` was cloned instead
+ --> tests/ui/params_clone.rs:7:5
+  |
+7 |     params.clone()
+  |     ^^^^^^
