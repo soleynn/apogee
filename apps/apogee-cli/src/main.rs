@@ -6,17 +6,19 @@
 
 use std::error::Error;
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig, Deviation,
-    EncryptedFile, Event, ExternalAddon, FileState, ForeignCredentialStore, ForeignKey,
+    EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore, ForeignKey,
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
-    KdfCost, Notice, OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixHealth,
-    Profile, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
-    SecretBackend, SecretKind, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    KdfCost, ListenerConsent, ListenerSettings, ListenerSources, Notice, OtpDelivery, OtpSource,
+    Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn, RunnerSelection,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretsError,
+    SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -74,6 +76,14 @@ enum Commands {
     Dalamud {
         #[command(subcommand)]
         action: DalamudAction,
+    },
+    /// Choose where an account's one-time code comes from, and tune the local listener.
+    ///
+    /// Its own group rather than a member of `secrets`: every verb there writes or deletes something
+    /// in the credential store, and the listener stores nothing at all.
+    Otp {
+        #[command(subcommand)]
+        action: OtpAction,
     },
     /// Read and change the launcher's own preferences.
     Settings {
@@ -270,6 +280,39 @@ enum DalamudAction {
     Enable(TargetArgs),
     /// Stop loading it. Nothing is deleted, and nothing contacts its distribution while it is off.
     Disable(TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum OtpAction {
+    /// Say where this profile's account gets its one-time code, and where the listener would sit.
+    Status(TargetArgs),
+    /// Take the code from a companion app pushing it to this machine, and stop asking for one.
+    ///
+    /// Opens a port on this machine's network while a login waits, so it asks first.
+    Listen(TargetArgs),
+    /// Go back to typing the code. Deletes nothing and closes nothing that is not already closed.
+    Ask(TargetArgs),
+    /// Change where the listener sits and who may reach it. Only the settings named are touched.
+    Listener(ListenerArgs),
+}
+
+#[derive(Args)]
+struct ListenerArgs {
+    /// The interface to take. `0.0.0.0` is every interface this machine answers on.
+    #[arg(long)]
+    bind: Option<IpAddr>,
+    /// The port to take. The companion apps dial 4646.
+    #[arg(long)]
+    port: Option<u16>,
+    /// Admit only this address. Repeat for more than one; replaces whatever was pinned before.
+    #[arg(long = "allow")]
+    allow: Vec<IpAddr>,
+    /// Admit anything that can reach the bound interface, clearing any pinned addresses.
+    #[arg(long)]
+    any: bool,
+    /// How many seconds a login waits for a code before giving up.
+    #[arg(long)]
+    wait: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -556,6 +599,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Commands::Dalamud { action } => {
             dalamud(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Otp { action } => {
+            otp(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Secrets { action } => {
@@ -1179,6 +1226,147 @@ fn dalamud(core: &Core, action: DalamudAction) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Where an account's one-time code comes from, and where the listener that can receive one sits.
+fn otp(core: &Core, action: OtpAction) -> Result<(), CliError> {
+    match action {
+        OtpAction::Status(args) => otp_status(core, &args.profile),
+        OtpAction::Listen(args) => otp_listen(core, &args.profile),
+        OtpAction::Ask(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            core.ask_for_pushed_codes_no_longer(profile.account)?;
+            println!("{} will be asked for a code again", profile.name);
+            Ok(())
+        }
+        OtpAction::Listener(args) => otp_listener(core, args),
+    }
+}
+
+/// Print where this account's code comes from and how the listener is configured.
+fn otp_status(core: &Core, target: &str) -> Result<(), CliError> {
+    let profile = resolve_profile(core, target)?;
+    let account = core.account(profile.account)?;
+    let where_from = match (account.use_otp, account.otp_delivery) {
+        (false, _) => "not used by this account",
+        (true, OtpDelivery::Generate) => "generated here from a stored secret",
+        (true, OtpDelivery::Listen) => "pushed to this machine by a companion app",
+        (true, _) => "typed in",
+    };
+    println!("one-time code: {where_from}");
+    print_listener_settings(&core.settings()?.otp_listener);
+    Ok(())
+}
+
+/// Print the machine's listener settings, in the shape `settings show` uses.
+fn print_listener_settings(listener: &ListenerSettings) {
+    println!("  listener bind: {}", listener.bind);
+    println!("  listener port: {}", listener.port);
+    println!("  listener wait: {} seconds", listener.wait_seconds);
+    match &listener.sources {
+        ListenerSources::Only { addresses } if !addresses.is_empty() => {
+            let pinned: Vec<String> = addresses.iter().map(ToString::to_string).collect();
+            println!("  listener admits: {}", pinned.join(", "));
+        }
+        // An empty pin admits nobody, which is the one configuration that refuses to bind rather than
+        // opening a port no one can reach. Only a hand-edited file produces it, and saying so is
+        // better than printing an empty list that reads like "everything".
+        ListenerSources::Only { .. } => {
+            println!("  listener admits: nothing, so no port will be opened");
+        }
+        _ => println!("  listener admits: anything that can reach the bound interface"),
+    }
+}
+
+/// Point an account at the listener, after saying plainly what that opens.
+///
+/// The one-time acknowledgment. It is a typed word rather than a yes/no because the thing being
+/// agreed to is visible to other people on the network and cannot be taken back by closing a dialog.
+fn otp_listen(core: &Core, target: &str) -> Result<(), CliError> {
+    let profile = resolve_profile(core, target)?;
+    let account = core.account(profile.account)?;
+    let listener = core.settings()?.otp_listener;
+
+    if account.otp_delivery == OtpDelivery::Listen {
+        println!("{} already takes its code from the listener", profile.name);
+        print_listener_settings(&listener);
+        return Ok(());
+    }
+
+    println!(
+        "while a login is waiting, this machine opens port {} and takes a code from whoever
+sends one first:",
+        listener.port
+    );
+    if listener.bind.is_unspecified() {
+        println!("  it listens on every interface, which can include a VPN, a container bridge,");
+        println!("  and the internet itself if this machine has a public address");
+    } else {
+        println!("  it listens on {}", listener.bind);
+    }
+    println!("  any device that can route a packet here can submit a code");
+    println!("  so can a web page you visit, from the browser on this machine");
+    println!("  a wrong code submitted first fails the login, and you start over");
+    println!("  the code travels in plain text, which is what the phone apps speak");
+    println!("pin your phone with `apogee-cli otp listener --allow <address>` to narrow that,");
+    println!("which also bounds what the listener has to keep track of");
+    if !confirmed("listen")? {
+        println!("left alone");
+        return Ok(());
+    }
+    core.use_pushed_codes(profile.account, ListenerConsent::granted())?;
+    println!("{} will take its code from the listener", profile.name);
+    Ok(())
+}
+
+/// Change where the listener sits and who may reach it. Only the settings named are touched.
+///
+/// Cannot turn anything on. Pointing an account at the listener is a separate verb, because that is
+/// the one that opens a port and so the one that has to ask.
+fn otp_listener(core: &Core, args: ListenerArgs) -> Result<(), CliError> {
+    if args.any && !args.allow.is_empty() {
+        return Err("--any and --allow say opposite things; pick one".into());
+    }
+    let mut listener = core.settings()?.otp_listener;
+    if let Some(bind) = args.bind {
+        listener.bind = bind;
+    }
+    if let Some(port) = args.port {
+        listener.port = port;
+    }
+    if let Some(wait) = args.wait {
+        listener.wait_seconds = wait;
+    }
+    if args.any {
+        listener.sources = ListenerSources::Any;
+    } else if !args.allow.is_empty() {
+        // Refused here as well as in the library, because this is the one place a sentence can be
+        // attached to the refusal. A link-local address means nothing without the interface it is on,
+        // the comparison downstream cannot carry that, and so a pin on one would be satisfied by the
+        // same address arriving over some other interface.
+        if let Some(bad) = args.allow.iter().find(|addr| is_link_local(**addr)) {
+            return Err(format!(
+                "{bad} is a link-local address, which does not name a device on its own: the same \
+                 address on another interface would match it. Pin the address your phone gets from \
+                 the router instead."
+            )
+            .into());
+        }
+        listener.sources = ListenerSources::Only {
+            addresses: args.allow,
+        };
+    }
+    core.set_listener_settings(listener.clone())?;
+    print_listener_settings(&listener);
+    Ok(())
+}
+
+/// Whether this is an IPv6 link-local unicast address.
+fn is_link_local(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(_) => false,
+        IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
+    }
+}
+
 /// Frame-consistency analysis over MangoHud frametime logs. Offline: reads CSVs and prints a table;
 /// the metrics themselves live in the library.
 fn bench(action: BenchAction) -> Result<ExitCode, CliError> {
@@ -1515,6 +1703,10 @@ fn read_otp(account: &Account) -> Result<OtpSource, CliError> {
     match (account.use_otp, account.otp_delivery) {
         (false, _) => Ok(OtpSource::Manual(Secret::new(Vec::new()))),
         (true, OtpDelivery::Generate) => Ok(OtpSource::Totp),
+        // Above the catch-all, and it has to stay there: without an explicit arm an account set to
+        // receive pushed codes would be prompted for a typed one, which is the opposite of the
+        // feature. This is the only login shape where no code passes through this process at all.
+        (true, OtpDelivery::Listen) => Ok(OtpSource::Listener),
         (true, _) => Ok(OtpSource::Manual(read_line_erased("One-time password: ")?)),
     }
 }
@@ -1779,7 +1971,7 @@ fn prompt_line(prompt: &str) -> io::Result<String> {
 /// Render one core event as a line of terminal text. Presentation lives in the shell.
 fn render(event: &Event) -> String {
     match event {
-        Event::State(state) => format!("state: {state:?}"),
+        Event::State(state) => render_state(state),
         Event::Progress(progress) => format!("progress: {}/{}", progress.completed, progress.total),
         Event::Patch(patch) => render_patch(patch),
         Event::Addon(addon) => render_addon(addon),
@@ -1789,6 +1981,27 @@ fn render(event: &Event) -> String {
         Event::Notice(notice) => render_notice(notice),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+/// Render where the flow stands.
+///
+/// Two arms and a fallback, rather than a table: every other disposition is a word a user reads and
+/// acts on without help, and the debug rendering has been that word all along. These two are not. One
+/// is an instruction (a port is open, go and tap your phone) and the other names an address the user
+/// has to recognize, and neither reads as either in debug soup.
+fn render_state(state: &FlowState) -> String {
+    match state {
+        FlowState::WaitingForPushedCode { port, seconds } => format!(
+            "state: waiting up to {seconds} seconds for a one-time code pushed to this machine on \
+             port {port}"
+        ),
+        // The address, never the digits. Worth printing because the first well-formed code wins
+        // whoever sent it: an address that is not the user's phone is the only sign of that.
+        FlowState::PushedCodeReceived { from } => {
+            format!("state: a one-time code arrived from {from}")
+        }
+        other => format!("state: {other:?}"),
     }
 }
 
@@ -1803,6 +2016,13 @@ fn render_notice(notice: &Notice) -> String {
              generated against the server's time, but everything else here has the wrong time",
             seconds.unsigned_abs(),
             if *seconds > 0 { "behind" } else { "ahead of" },
+        ),
+        // Deliberate rather than left to the catch-all: a flood is the one thing the listener can see
+        // that the user cannot, and "an unrecognized advisory" would throw it away. The login was not
+        // affected, which is why this is a warning and not a failure.
+        Notice::OtpListenerFlood { from, refused } => format!(
+            "warning: {from} spent the one-time-code listener's attempt budget while this login \
+             waited; {refused} connections were turned away and the login was unaffected"
         ),
         _ => "warning: an unrecognized advisory".to_owned(),
     }
