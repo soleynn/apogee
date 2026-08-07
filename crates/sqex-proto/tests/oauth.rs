@@ -474,6 +474,33 @@ fn a_reflected_top_url_does_not_leak_the_steam_ticket() {
 }
 
 #[test]
+fn a_bare_reflected_ticket_is_scrubbed_by_value() {
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    // The ticket echoed on its own, with no parameter name to redact by shape: the flow holds the
+    // ticket at this arm, so the excerpt scrubs it by value as well.
+    let body = format!("upstream rejected ticket {text}");
+    let transport = FixtureTransport::once(ProtoResponse::new(400, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert_eq!(excerpt, "upstream rejected ticket [redacted]");
+}
+
+#[test]
 fn a_top_page_that_reflects_the_ticket_does_not_leak_it_when_stored_is_missing() {
     let id = computer_id();
     let ticket = long_ticket().unwrap();

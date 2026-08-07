@@ -80,11 +80,15 @@ pub enum ProtoError {
 impl ProtoError {
     /// Build an [`InvalidResponse`](ProtoError::InvalidResponse) for `step` from a response, capturing
     /// the status and a redacted, length-capped body excerpt at this single construction site.
-    pub(crate) fn invalid_response(step: Step, response: &ProtoResponse) -> Self {
+    ///
+    /// `secrets` are the values this step put on the wire that the response can reflect back: the
+    /// session id registration writes into its URL path, the bearer ticket a Steam login writes into
+    /// its query. A step that sent none passes an empty slice.
+    pub(crate) fn invalid_response(step: Step, response: &ProtoResponse, secrets: &[&str]) -> Self {
         Self::InvalidResponse {
             step,
             status: response.status,
-            excerpt: excerpt(&response.body),
+            excerpt: scrubbed_excerpt(&response.body, secrets),
         }
     }
 }

@@ -101,7 +101,14 @@ pub async fn register_session(
                     pending_patches,
                 })
             }
-            None => Err(ProtoError::invalid_response(Step::Register, &response)),
+            // The request URL carries the live session id as its last path segment, so a response
+            // that reflects it back (a 404 page naming what it could not find) would carry the id
+            // into the excerpt.
+            None => Err(ProtoError::invalid_response(
+                Step::Register,
+                &response,
+                &[auth.session_id().expose()],
+            )),
         },
     }
 }

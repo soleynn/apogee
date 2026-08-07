@@ -37,7 +37,13 @@ pub async fn check_boot_version(
     }
 
     if !response.is_ok() {
-        return Err(ProtoError::invalid_response(Step::BootVersion, &response));
+        // No secrets to scrub: the boot-version check runs before login, carrying only the installed
+        // boot version.
+        return Err(ProtoError::invalid_response(
+            Step::BootVersion,
+            &response,
+            &[],
+        ));
     }
 
     let body = String::from_utf8_lossy(&response.body);

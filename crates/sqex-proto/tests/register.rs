@@ -319,6 +319,28 @@ fn a_whitespace_body_with_uid_is_not_treated_as_current() {
 }
 
 #[test]
+fn a_reflected_registration_url_does_not_leak_the_session_id() {
+    // The registration URL carries the live session id as its last path segment, so a 404 page that
+    // names the path it could not find reflects it back into the excerpt.
+    let body = format!(
+        "<html><head><title>404 Not Found</title></head><body>The requested URL \
+         /http/win32/ffxivneo_release_game/{GAME_VER}/{SESSION_ID} was not found on this server.\
+         </body></html>"
+    );
+    let (_transport, outcome) = login_then_register(ProtoResponse::new(404, body.into_bytes()));
+    let err = outcome.expect_err("404");
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert!(
+        !excerpt.contains(SESSION_ID),
+        "session id leaked: {excerpt}"
+    );
+    assert!(excerpt.contains("[redacted]"), "excerpt: {excerpt}");
+}
+
+#[test]
 fn non_ascii_uid_header_is_invalid_response() {
     // A UID header present but not visible ASCII is treated as absent (its `to_str` fails), so the
     // response is an invalid one, never a lossily-decoded credential.
