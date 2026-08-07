@@ -158,6 +158,41 @@ fn launch_params_falls_back_to_position_when_keys_are_unknown() {
 }
 
 #[test]
+fn launch_params_reads_the_documented_position_when_the_key_confirms_it() {
+    // Only the key text at index 6 is renamed; the real playable pair (8/9) is untouched, so a
+    // positional read still says playable. A search that took the first pair named `playable` would
+    // read index 7 instead and call an entitled account unplayable.
+    let params = parse_launch_params(
+        "sid,SESSIONABC,terms,1,region,3,playable,0,playable,1,ps3pkg,0,maxex,4,product,xyz",
+    )
+    .unwrap();
+    assert!(params.playable);
+}
+
+#[test]
+fn launch_params_finds_a_key_that_moved_off_its_position() {
+    // A leading pair shifts every documented index by one, so nothing is where XL would read it and
+    // the key search resolves the whole list.
+    let params = parse_launch_params(
+        "pad,0,sid,SHIFTED,terms,1,region,3,etmadd,0,playable,1,ps3pkg,0,maxex,4",
+    )
+    .unwrap();
+    assert_eq!(params.session_id.as_str(), "SHIFTED");
+    assert_eq!(params.region, 3);
+    assert!(params.playable);
+    assert_eq!(params.max_expansion, 4);
+}
+
+#[test]
+fn launch_params_rejects_a_key_duplicated_off_its_position() {
+    // The same shifted list, with a second `sid` pair. Two pairs claim the name and neither sits at
+    // the documented position, so there is no value to attribute to it: first-match-wins would hand
+    // back `FIRST`, an attacker-or-error-chosen session id, with no signal.
+    let params = "pad,0,sid,FIRST,sid,SECOND,terms,1,region,3,etmadd,0,playable,1,ps3pkg,0,maxex,4";
+    assert!(parse_launch_params(params).is_err());
+}
+
+#[test]
 fn launch_params_reads_zero_as_no_terms_and_no_service() {
     let params =
         parse_launch_params("sid,X,terms,0,region,3,etmadd,0,playable,0,ps3pkg,0,maxex,4").unwrap();

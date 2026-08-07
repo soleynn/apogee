@@ -147,28 +147,69 @@ pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackR
     })
 }
 
+/// What a key names when the list is searched by key rather than read at its documented position.
+enum KeyLookup<'a> {
+    /// Exactly one pair carries the key, and it has a value.
+    Found(&'a str),
+    /// No pair carries the key (or the one that does is a dangling final field): the documented
+    /// position decides instead.
+    Absent,
+    /// Two or more pairs carry the key, so no value can be attributed to it.
+    Ambiguous,
+}
+
+/// The value paired with `key`, searching the whole list.
+fn by_key<'a>(fields: &[&'a str], key: &str) -> KeyLookup<'a> {
+    let mut pairs = fields
+        .iter()
+        .step_by(2)
+        .enumerate()
+        .filter(|(_, name)| **name == key);
+    let Some((pair, _)) = pairs.next() else {
+        return KeyLookup::Absent;
+    };
+    if pairs.next().is_some() {
+        return KeyLookup::Ambiguous;
+    }
+    fields
+        .get(pair * 2 + 1)
+        .map_or(KeyLookup::Absent, |value| KeyLookup::Found(value))
+}
+
 /// Parse the comma-separated `launchParams` list.
 ///
 /// The list is `key,value,key,value,...`; XL reads the values positionally (idx 1 `sid`, 3 `terms`,
-/// 5 `region`, 9 `playable`, 13 `maxex`). This reads by key with a positional fallback, so a trailing
-/// field trim or a reorder that keeps the keys still parses. A list too short to yield the required
-/// fields is rejected. `Err` is the number of comma-separated fields found (never their contents,
-/// which include the session id).
+/// 5 `region`, 9 `playable`, 13 `maxex`), never looking at the key names. This reads each field in a
+/// fixed precedence:
+///
+/// 1. the documented position, when the key sits beside it (the canonical shape, and the same bytes XL
+///    reads);
+/// 2. otherwise the pair carrying that key, wherever it moved to, so a reorder or a trimmed field
+///    still parses;
+/// 3. otherwise, with the key nowhere in the list, the documented position anyway, so a renamed key
+///    still parses.
+///
+/// A key appearing more than once away from its documented position resolves to no value at all: two
+/// pairs claim the name, reading either would be a guess, and a first-match-wins search would let the
+/// earlier one silently override the value XL would read. A list too short to yield the required
+/// fields is rejected the same way. `Err` is the number of comma-separated fields found (never their
+/// contents, which include the session id).
 pub fn parse_launch_params(params: &str) -> Result<LaunchParams, usize> {
     let fields: Vec<&str> = params.split(',').collect();
     let got = fields.len();
 
-    // Even indices are keys, the following odd index the value. Fall back to the documented positional
-    // index only when the key is absent.
-    let by_key = |key: &str| -> Option<&str> {
-        fields
-            .iter()
-            .step_by(2)
-            .position(|k| *k == key)
-            .and_then(|pair| fields.get(pair * 2 + 1))
-            .copied()
+    // Even indices are keys, the following odd index the value, so a value at `idx` is keyed at
+    // `idx - 1`; every documented index below is odd.
+    let at = |key: &str, idx: usize| -> Option<&str> {
+        if fields.get(idx - 1).is_some_and(|name| *name == key) {
+            return fields.get(idx).copied();
+        }
+        match by_key(&fields, key) {
+            KeyLookup::Found(value) => Some(value),
+            KeyLookup::Absent => fields.get(idx).copied(),
+            KeyLookup::Ambiguous => None,
+        }
     };
-    let at = |key: &str, idx: usize| by_key(key).or_else(|| fields.get(idx).copied());
 
     let session_id = at("sid", 1).filter(|s| !s.is_empty()).ok_or(got)?;
     let terms = at("terms", 3).ok_or(got)?;
