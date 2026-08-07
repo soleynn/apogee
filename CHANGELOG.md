@@ -15,6 +15,9 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
 
+### apogee-otp
+- Generate one-time codes from a stored shared secret (#122) _(added)_
+
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
 - Add a probe report example for sandbox runs (#105) _(testing)_
