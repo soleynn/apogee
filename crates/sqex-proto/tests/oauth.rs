@@ -635,6 +635,36 @@ fn a_top_page_that_reflects_the_ticket_does_not_leak_it_when_stored_is_missing()
 }
 
 #[test]
+fn a_bare_reflected_ticket_does_not_leak_when_stored_is_missing() {
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    // The ticket echoed with no `session_ticket=` prefix to redact by shape, on a 200 page that
+    // carries a linked id but no `_STORED_`: only a caller-supplied scrub list catches this one.
+    let body = format!(
+        "Error: upstream rejected ticket {text}\n\
+         <input name=\"sqexid\" type=\"hidden\" value=\"{LINKED_ID}\"/>"
+    );
+    let transport = FixtureTransport::once(ProtoResponse::new(200, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::StoredNotFound { excerpt } = &err else {
+        panic!("expected StoredNotFound, got {err:?}");
+    };
+    assert!(!excerpt.contains(&text[..16]), "ticket leaked: {excerpt}");
+}
+
+#[test]
 fn a_top_page_without_stored_is_stored_not_found() {
     let id = computer_id();
     let transport = FixtureTransport::once(ProtoResponse::new(

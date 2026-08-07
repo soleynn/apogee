@@ -16,14 +16,14 @@ const FULL_PARAMS: &str =
 #[test]
 fn scrape_stored_lifts_the_value_past_other_attributes() {
     let html = r#"<input type="hidden" name="_STORED_" value="blob-12345">"#;
-    assert_eq!(scrape_stored(html).unwrap(), "blob-12345");
+    assert_eq!(scrape_stored(html, &[]).unwrap(), "blob-12345");
 }
 
 #[test]
 fn scrape_stored_without_the_anchor_is_stored_not_found() {
     let html = r#"<form><input name="user" value="x"></form>"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -32,7 +32,7 @@ fn scrape_stored_without_the_anchor_is_stored_not_found() {
 fn scrape_stored_with_an_unterminated_value_is_stored_not_found() {
     let html = r#"<input name="_STORED_" value="never-closed"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -41,7 +41,7 @@ fn scrape_stored_with_an_unterminated_value_is_stored_not_found() {
 fn scrape_stored_rejects_a_value_beyond_the_attribute_window() {
     let html = format!(r#"<input name="_STORED_" {}value="late">"#, " ".repeat(100));
     assert!(matches!(
-        scrape_stored(&html),
+        scrape_stored(&html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -51,7 +51,7 @@ fn scrape_stored_caps_a_runaway_value() {
     // A closing quote past the length cap is treated as absent, so the capture cannot run away.
     let html = format!(r#"<input name="_STORED_" value="{}">"#, "x".repeat(5000));
     assert!(matches!(
-        scrape_stored(&html),
+        scrape_stored(&html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -63,7 +63,7 @@ fn scrape_stored_rejects_an_empty_value() {
     // request later.
     let html = r#"<input type="hidden" name="_STORED_" value="">"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -76,16 +76,30 @@ fn scrape_stored_does_not_read_a_neighbouring_element() {
     let html =
         r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="someone">"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
     // The reported shape: on a real top page that neighbour is the empty visible sqexid input.
     let empty_neighbour =
         r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="">"#;
     assert!(matches!(
-        scrape_stored(empty_neighbour),
+        scrape_stored(empty_neighbour, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
+}
+
+#[test]
+fn scrape_stored_scrubs_a_secret_reflected_with_no_labelling_prefix() {
+    // No `_STORED_` anchor, so this is the caller's error path; the page reflects a bare secret
+    // (a Steam ticket echoed with no `session_ticket=` prefix a shape-based redaction could key on),
+    // so only a caller-supplied scrub list catches it.
+    let html = r#"<html>debug: rejected ticket SECRETTICKET123</html>"#;
+    let Err(ProtoError::StoredNotFound { excerpt }) = scrape_stored(html, &["SECRETTICKET123"])
+    else {
+        panic!("expected StoredNotFound");
+    };
+    assert!(!excerpt.contains("SECRETTICKET123"), "leaked: {excerpt}");
+    assert!(excerpt.contains("[redacted]"), "{excerpt}");
 }
 
 /// The visible login form's own username input, present on every top page including a Steam one.
@@ -307,7 +321,7 @@ fn full_parse_is_pinned() {
 proptest! {
     #[test]
     fn scrape_stored_never_panics(s in ".{0,300}") {
-        let _ = scrape_stored(&s);
+        let _ = scrape_stored(&s, &[]);
     }
 
     #[test]

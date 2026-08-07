@@ -371,10 +371,10 @@ pub async fn begin_login<'t>(
     let response = transport.execute(request).await?;
 
     // The ticket is a bearer credential and rides in the top-page query unescaped, so any page that
-    // echoes the request URL back reflects it. Scrubbing it by value here covers a page that reflects
-    // the ticket text alone; `excerpt` redacts the query parameter by shape for the re-encoded case
-    // and for `scrape_stored`, which is handed the page and never the ticket. Empty for a standard
-    // login, which the scrub skips.
+    // echoes the request URL back reflects it. Scrubbing it by value here, and passing the same list
+    // into `scrape_stored` below, covers a page that reflects the ticket text alone; `excerpt` redacts
+    // the query parameter by shape for the re-encoded case. Empty for a standard login, which the scrub
+    // skips.
     let ticket_text = kind.ticket().map_or("", ObfuscatedTicket::text);
     let secrets = [ticket_text];
 
@@ -413,7 +413,7 @@ pub async fn begin_login<'t>(
         None
     };
 
-    let stored = scrape_stored(&text)?.to_owned();
+    let stored = scrape_stored(&text, &secrets)?.to_owned();
     let server_date = read_date(&response);
 
     Ok(LoginFlow {
