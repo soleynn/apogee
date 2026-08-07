@@ -56,6 +56,7 @@ is tagged with its change type. Versioning aims to follow
 - Harden the patchlist parser (#132) _(fixed)_
 - Close three error-path credential leaks (#131) _(fixed)_
 - Make the transport seam's header-fidelity contract real (#133) _(fixed)_
+- Correct identity.rs doc comments on computer-id derivation (#134) _(documentation)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
