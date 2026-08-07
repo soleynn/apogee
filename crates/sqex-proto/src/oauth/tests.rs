@@ -169,6 +169,39 @@ fn account_ids_fold_no_further_than_the_launcher_does() {
 }
 
 #[test]
+fn the_turkish_dotless_i_and_long_s_do_not_fold_to_their_lookalike() {
+    // Unicode's simple uppercase mapping sends U+0131 to 'I' and U+017F to 'S', but a real .NET
+    // OrdinalIgnoreCase run refuses both: folding them the general way would let an id typed with the
+    // wrong letter pass as a match for one typed with the right one, weakening the check this
+    // comparison exists to enforce. Verified against a real `dotnet` run.
+    assert!(!eq_ordinal_ignore_case("\u{0131}", "I"));
+    assert!(!eq_ordinal_ignore_case("\u{0131}", "i"));
+    assert!(!eq_ordinal_ignore_case("\u{017F}", "S"));
+    assert!(!eq_ordinal_ignore_case("\u{017F}", "s"));
+}
+
+#[test]
+fn the_greek_iota_subscript_pairs_fold_together() {
+    // Each pair's full Unicode uppercase mapping expands to two characters (a base letter plus
+    // capital iota), so the general single-char fold leaves every pair distinct; a real .NET
+    // OrdinalIgnoreCase run folds them together anyway. One pair from each of the three eight-wide
+    // blocks, plus all three bare-iota-subscript singles: the whole reachable block, not just the
+    // finding's headline example.
+    assert!(eq_ordinal_ignore_case("\u{1F80}", "\u{1F88}"));
+    assert!(eq_ordinal_ignore_case("\u{1F87}", "\u{1F8F}"));
+    assert!(eq_ordinal_ignore_case("\u{1F90}", "\u{1F98}"));
+    assert!(eq_ordinal_ignore_case("\u{1F97}", "\u{1F9F}"));
+    assert!(eq_ordinal_ignore_case("\u{1FA0}", "\u{1FA8}"));
+    assert!(eq_ordinal_ignore_case("\u{1FA7}", "\u{1FAF}"));
+    assert!(eq_ordinal_ignore_case("\u{1FB3}", "\u{1FBC}"));
+    assert!(eq_ordinal_ignore_case("\u{1FC3}", "\u{1FCC}"));
+    assert!(eq_ordinal_ignore_case("\u{1FF3}", "\u{1FFC}"));
+    // A pair from two different blocks must still not fold together.
+    assert!(!eq_ordinal_ignore_case("\u{1F80}", "\u{1F90}"));
+    assert!(!eq_ordinal_ignore_case("\u{1FB3}", "\u{1FC3}"));
+}
+
+#[test]
 fn a_masked_id_splits_on_characters_not_bytes() {
     // A byte-indexed mask would panic here, and a byte count would call this id four long.
     assert_eq!(mask_id("héllo"), "h***o");

@@ -499,16 +499,83 @@ fn build_top_request(
 /// ready-made folds is that rule. `str::eq_ignore_ascii_case` folds only `A-Z`, so it refuses a
 /// non-ASCII id the launcher accepts; `str::to_uppercase` folds further, expanding `ß` to `SS` where
 /// .NET leaves `ß`, so it accepts a pair the launcher refuses. Taking a `char`'s uppercase form only
-/// when that form is one `char` is the same rule, over the code points a Rust `str` can hold.
+/// when that form is one `char` is the same rule, over the code points a Rust `str` can hold, save two
+/// known corrections [`fold`] applies on top of it.
 fn eq_ordinal_ignore_case(left: &str, right: &str) -> bool {
-    let fold = |c: char| {
-        let mut upper = c.to_uppercase();
-        match (upper.next(), upper.next()) {
-            (Some(single), None) => single,
-            _ => c,
-        }
-    };
     left.chars().map(fold).eq(right.chars().map(fold))
+}
+
+/// The fold [`eq_ordinal_ignore_case`] compares by: `char::to_uppercase` when that yields exactly one
+/// `char`, corrected against a real .NET run for two known ways that rule alone diverges from
+/// `OrdinalIgnoreCase`.
+///
+/// - **Over-matching**: Unicode's simple uppercase mapping sends the Turkish dotless i (`ı`, U+0131)
+///   to `I` and the long s (`ſ`, U+017F) to `S`, but .NET's ordinal fold does not apply either
+///   mapping; it leaves both letters distinct from their look-alike. Folding them the general way
+///   would accept an id typed with the wrong letter as a match for one typed with the right one, the
+///   opposite direction from every other correction here: it *weakens* the check
+///   [`ProtoError::SteamWrongAccount`] exists to enforce.
+/// - **Under-matching**: the Greek "prosgegrammeni"/"ypogegrammeni" case pairs ([`iota_subscript_fold`])
+///   have no single-`char` uppercase form at all: Rust's full case mapping expands each to two
+///   characters (a base letter plus capital iota), so the general rule falls through to identity and
+///   leaves every pair distinct. .NET folds them through a simple one-to-one table instead.
+fn fold(c: char) -> char {
+    if let Some(mapped) = iota_subscript_fold(c) {
+        return mapped;
+    }
+    if matches!(c, '\u{0131}' | '\u{017F}') {
+        return c;
+    }
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => single,
+        _ => c,
+    }
+}
+
+/// The Greek iota-subscript case pairs [`fold`] cannot resolve through `char::to_uppercase`, mapped to
+/// their `ypogegrammeni` (lowercase, iota-subscript) member so both sides of a pair land on the same
+/// value. Covers exactly the block reachable through a Steam-linked SE account id: the eight-wide
+/// psili/dasia combinations for alpha, eta, and omega, and the three bare-iota-subscript singles.
+/// Verified pair-by-pair against a real .NET 10 `OrdinalIgnoreCase` comparison; not a general
+/// re-derivation of Unicode's own case-folding tables.
+fn iota_subscript_fold(c: char) -> Option<char> {
+    match c {
+        '\u{1F88}' => Some('\u{1F80}'),
+        '\u{1F89}' => Some('\u{1F81}'),
+        '\u{1F8A}' => Some('\u{1F82}'),
+        '\u{1F8B}' => Some('\u{1F83}'),
+        '\u{1F8C}' => Some('\u{1F84}'),
+        '\u{1F8D}' => Some('\u{1F85}'),
+        '\u{1F8E}' => Some('\u{1F86}'),
+        '\u{1F8F}' => Some('\u{1F87}'),
+        '\u{1F98}' => Some('\u{1F90}'),
+        '\u{1F99}' => Some('\u{1F91}'),
+        '\u{1F9A}' => Some('\u{1F92}'),
+        '\u{1F9B}' => Some('\u{1F93}'),
+        '\u{1F9C}' => Some('\u{1F94}'),
+        '\u{1F9D}' => Some('\u{1F95}'),
+        '\u{1F9E}' => Some('\u{1F96}'),
+        '\u{1F9F}' => Some('\u{1F97}'),
+        '\u{1FA8}' => Some('\u{1FA0}'),
+        '\u{1FA9}' => Some('\u{1FA1}'),
+        '\u{1FAA}' => Some('\u{1FA2}'),
+        '\u{1FAB}' => Some('\u{1FA3}'),
+        '\u{1FAC}' => Some('\u{1FA4}'),
+        '\u{1FAD}' => Some('\u{1FA5}'),
+        '\u{1FAE}' => Some('\u{1FA6}'),
+        '\u{1FAF}' => Some('\u{1FA7}'),
+        '\u{1FBC}' => Some('\u{1FB3}'),
+        '\u{1FCC}' => Some('\u{1FC3}'),
+        '\u{1FFC}' => Some('\u{1FF3}'),
+        '\u{1F80}'..='\u{1F87}'
+        | '\u{1F90}'..='\u{1F97}'
+        | '\u{1FA0}'..='\u{1FA7}'
+        | '\u{1FB3}'
+        | '\u{1FC3}'
+        | '\u{1FF3}' => Some(c),
+        _ => None,
+    }
 }
 
 /// A recognizable but non-disclosing form of an account id: its first and last characters around a
