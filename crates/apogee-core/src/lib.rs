@@ -29,10 +29,11 @@ pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
 // Under its own name: the addon layer already has a public `AddonOutcome`, and re-exporting a second,
 // different type under that name gives a shell two things it cannot tell apart from the import alone.
 pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, Trigger};
-// `Deviation` and `OtpSource` only: a shell chooses where a code comes from and renders what an
-// imported secret will not be accepted for, and has business with nothing else in that crate. The
-// handle, the profile, the code and the clock offset all stay behind the core.
-pub use apogee_otp::{Deviation, OtpSource};
+// Three names only: a shell chooses where a code comes from, renders what an imported secret will not
+// be accepted for, and says that the user asked for a port on their network to be opened. The handle,
+// the profile, the code, the clock offset, the listener and its configuration all stay behind the
+// core, which is why the pushed-code source carries no payload.
+pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{
     BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
@@ -55,8 +56,9 @@ pub use command::{
 pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval};
 pub use error::CoreError;
 pub use model::{
-    Account, AccountKind, LaunchSettings, OtpDelivery, PrefixSelection, Profile, Region,
-    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, SecretBackend, Settings,
+    Account, AccountKind, LaunchSettings, ListenerSettings, ListenerSources, OtpDelivery,
+    PrefixSelection, Profile, Region, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
+    SecretBackend, Settings,
 };
 pub use sqex_proto::Transport;
 pub use store::StoreError;

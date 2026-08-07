@@ -7,9 +7,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use apogee_otp::{ClockSkew, Code, Minted, Otp, OtpError, OtpSource};
+use apogee_otp::{
+    ClockSkew, Code, Listener, ListenerConfig, Minted, Otp, OtpError, OtpSource, Prepared,
+    SourceFilter,
+};
 use apogee_patcher::{InstallRequest, Repo, SePatch};
 use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
 use apogee_secrets::Secret;
@@ -29,7 +32,10 @@ use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
-use crate::model::{Account, AccountKind, Profile, Region, STEAM_FREE_TRIAL_APP_ID, Settings};
+use crate::model::{
+    Account, AccountKind, ListenerSettings, ListenerSources, Profile, Region,
+    STEAM_FREE_TRIAL_APP_ID, Settings,
+};
 use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo_ver_path};
 use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
@@ -311,39 +317,51 @@ async fn authenticate(
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<Option<Authenticated>, CoreError> {
-    // The secret is read before any request, because that read is the one that raises the platform's
-    // unlock prompt and a prompt lasts as long as the user takes to notice it. The code itself cannot
-    // be derived yet: which thirty-second window to sign for is decided by the login server's clock,
-    // and that arrives with the top page below. So the read happens here and the derivation happens
-    // there, with nothing in between that can sit on a human.
-    let prepared = if account.use_otp && matches!(otp, OtpSource::Totp) {
-        match ctx.otp.prepare(account.id).await {
-            Ok(prepared) => Some(prepared),
-            // Nothing stored to derive from. The answer is to type a code or to import a secret,
-            // neither of which the login server has anything to do with, so it is not asked.
-            Err(OtpError::NoSecret) => {
+    // Where this login's code comes from, decided once. The three places that used to ask separately
+    // could disagree, and the precedence between a stored secret and the listener was an emergent
+    // property of two guards rather than something written down.
+    //
+    // The secret is read here, before any request, because that read is the one that raises the
+    // platform's unlock prompt and a prompt lasts as long as the user takes to notice it. The code
+    // itself cannot be derived yet: which thirty-second window to sign for is decided by the login
+    // server's clock, and that arrives with the top page below. So the read happens here and the
+    // derivation happens there, with nothing in between that can sit on a human.
+    let sourcing = if !account.use_otp {
+        Sourcing::None
+    } else {
+        match &otp {
+            OtpSource::Totp => match ctx.otp.prepare(account.id).await {
+                Ok(prepared) => Sourcing::Generate(prepared),
+                // Nothing stored to derive from. The answer is to type a code or to import a secret,
+                // neither of which the login server has anything to do with, so it is not asked.
+                Err(OtpError::NoSecret) => {
+                    emit(tx, FlowState::NeedsOtp);
+                    return Ok(None);
+                }
+                Err(err) => return Err(err.into()),
+            },
+            OtpSource::Listener => Sourcing::Push,
+            // Borrowed out of what holds it rather than copied out, so the erased buffer stays the
+            // only one this process holds.
+            OtpSource::Manual(code) if !code.is_empty() => Sourcing::Typed(
+                std::str::from_utf8(code.expose()).map_err(|_| CoreError::InvalidCredential)?,
+            ),
+            // An account that owes a code and has no way to produce one is answered before anything
+            // is sent. The wildcard also covers a variant this crate has not been rebuilt against,
+            // since the source enum is non-exhaustive from here.
+            _ => {
                 emit(tx, FlowState::NeedsOtp);
                 return Ok(None);
             }
-            Err(err) => return Err(err.into()),
         }
-    } else {
-        None
+    };
+    let (prepared, typed, wants_push) = match sourcing {
+        Sourcing::None => (None, None, false),
+        Sourcing::Generate(prepared) => (Some(prepared), None, false),
+        Sourcing::Push => (None, None, true),
+        Sourcing::Typed(code) => (None, Some(code), false),
     };
 
-    // The typed code, when that is where this login's comes from. Borrowed out of what holds it
-    // rather than copied out, so the erased buffer is the only one this process holds.
-    let typed = match &otp {
-        OtpSource::Manual(code) if account.use_otp && !code.is_empty() => {
-            Some(std::str::from_utf8(code.expose()).map_err(|_| CoreError::InvalidCredential)?)
-        }
-        _ => None,
-    };
-    // An account that owes a code and has no way to produce one is answered before anything is sent.
-    if account.use_otp && prepared.is_none() && typed.is_none() {
-        emit(tx, FlowState::NeedsOtp);
-        return Ok(None);
-    }
     let password =
         std::str::from_utf8(password.expose()).map_err(|_| CoreError::InvalidCredential)?;
 
@@ -357,6 +375,32 @@ async fn authenticate(
         emit(tx, FlowState::NoService);
         return Ok(None);
     }
+
+    // The listener's wait sits here, between the gate that can say the servers are closed and the
+    // request that starts a login it would otherwise sit on top of.
+    //
+    // This inverts the rule the generated code follows, and the inversion is the point. A pushed code
+    // needs no clock at all: it is derived on the phone, against the phone's clock, and arrives whole.
+    // So the force that pulls the derivation *after* the top page does not act on it, while the force
+    // that pushes an unbounded human wait *earlier* acts at full strength, and harder than on anything
+    // else in this function. This is the longest wait in the launcher (fetch the phone, unlock it,
+    // open the app, tap), and held after the page it would sit on a server-issued form nonce whose
+    // lifetime is not ours to measure and on a keep-alive connection the server may reap.
+    //
+    // Not before the maintenance gate either. That gate is one small request and the only thing here
+    // that can say the servers are down before credentials move; making someone walk to their phone
+    // and only then hear that the login server is closed is the worst ordering available. And a login
+    // stopped at that gate is not a login awaiting a code, so binding ahead of it would open a port on
+    // the network for a login that is about to be abandoned.
+    let pushed: Option<Code> = if wants_push {
+        let settings = ctx.store.load_settings().unwrap_or_default();
+        match wait_for_push(&settings.otp_listener, tx, cancel).await? {
+            Some(code) => Some(code),
+            None => return Ok(None),
+        }
+    } else {
+        None
+    };
 
     // OAuth.
     let oauth = oauth_context(ctx, oauth_region(profile.launch.region));
@@ -388,9 +432,12 @@ async fn authenticate(
         }
         None => None,
     };
-    let otp_code = match &minted {
-        Some(code) => Some(code.expose()),
-        None => typed,
+    // Mutually exclusive by construction: one comes from the listener arm and the other from the
+    // stored-secret arm, and the classification above picks exactly one. The ordering here is
+    // documentation of that, not a policy anything can reach.
+    let otp_code = match (&pushed, &minted) {
+        (Some(code), _) | (_, Some(code)) => Some(code.expose()),
+        _ => typed,
     };
 
     let submitted = flow
@@ -402,6 +449,11 @@ async fn authenticate(
         .await;
     // Recorded whichever way the submit went. The login server has seen the code either way, and it
     // is the server's replay rule this guards against, not our own success.
+    //
+    // A pushed code is deliberately not recorded, and the omission looks like a bug without this
+    // sentence. What the guard is read by is the mint, and an account whose codes arrive from a phone
+    // never mints: recording would cost an entry per login that nothing would ever consult, and the
+    // phone's own generator is what avoids the repeat.
     if let Some(code) = &minted {
         ctx.otp.submitted(account.id, code);
     }
@@ -501,6 +553,122 @@ async fn hold_for(
         }
     }
     Some(minted.into_code())
+}
+
+/// Where this login's one-time code comes from, decided once.
+///
+/// The arms are in precedence order, and that is where the arbitration lives: when an account has both
+/// a stored secret and the listener configured, the secret wins. A shell already picks exactly one
+/// source, so this is re-checking rather than choosing, but re-checking costs nothing and closes the
+/// gap for a shell that gets it wrong.
+enum Sourcing<'a> {
+    /// The account owes no code.
+    None,
+    /// The stored secret, read and waiting for the login server's clock.
+    Generate(Prepared),
+    /// A companion will push one to the local listener.
+    Push,
+    /// A code the user typed, borrowed out of what holds it.
+    Typed(&'a str),
+}
+
+/// Take the port, narrate the wait, and hand back the code a companion pushed.
+///
+/// `Ok(None)` when a disposition was already narrated and the flow should stop, matching
+/// [`hold_for`]. The listener is consumed by its own wait, so the port is gone on every path out of
+/// here including the error paths and including a cancel: there is no drop to remember and no early
+/// return to audit.
+async fn wait_for_push(
+    settings: &ListenerSettings,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<Option<Code>, CoreError> {
+    let Some(cfg) = listener_config(settings) else {
+        // A machine configured to admit nobody cannot receive a code, which is the same disposition
+        // as an account with no way to produce one. Answered rather than bound: opening a port that
+        // will refuse every connection is worse than not opening one.
+        emit(tx, FlowState::NeedsOtp);
+        return Ok(None);
+    };
+    let listener = Listener::bind(cfg).await?;
+    let port = listener.local_addr().port();
+    let wait = Duration::from_secs(settings.wait_seconds);
+    emit(
+        tx,
+        FlowState::WaitingForPushedCode {
+            port,
+            seconds: wait.as_secs(),
+        },
+    );
+
+    // The longest wall-clock wait in a login, so it is the one most likely to be cancelled. There is
+    // no token parameter on the wait itself: everything it starts, it owns, so losing this select
+    // drops the future, which closes the socket and aborts every connection in flight.
+    let received = tokio::select! {
+        received = listener.wait_for_code(wait) => received,
+        () = cancel.cancelled() => {
+            emit(tx, FlowState::Cancelled);
+            return Ok(None);
+        }
+    };
+
+    match received {
+        Ok(received) => {
+            // The address and never the digits. This crate has the logger; the one that held the
+            // bytes has none at all, which is what makes that rule structural rather than a habit.
+            tracing::info!(
+                from = %received.from(),
+                "a one-time code arrived at the local listener"
+            );
+            if let Some(from) = received.limited() {
+                let _ = tx.send(Event::Notice(Notice::OtpListenerFlood {
+                    from,
+                    refused: received.refused(),
+                }));
+            }
+            emit(
+                tx,
+                FlowState::PushedCodeReceived {
+                    from: received.from(),
+                },
+            );
+            Ok(Some(received.into_code()))
+        }
+        // Nobody pushed one in time. The account still owes a code and the next action is the same as
+        // every other way of owing one, so a shell that handles that handles this for free.
+        Err(OtpError::Timeout) => {
+            emit(tx, FlowState::NeedsOtp);
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Turn this machine's listener settings into a config, or nothing when it cannot receive a code.
+///
+/// `None` only for an allowlist that admits nobody, which a hand-edited file is the only way to reach:
+/// an empty list, or one holding an address that means nothing without the interface it is on. Both
+/// are fail-closed, and both say so without naming the addresses, which are the user's own network.
+fn listener_config(settings: &ListenerSettings) -> Option<ListenerConfig> {
+    let allow = match &settings.sources {
+        ListenerSources::Any => SourceFilter::Any,
+        ListenerSources::Only { addresses } => {
+            let Some((first, rest)) = addresses.split_first() else {
+                tracing::warn!("the one-time-code listener is pinned to no addresses at all");
+                return None;
+            };
+            let Some(filter) = SourceFilter::only(*first, rest) else {
+                tracing::warn!("the one-time-code listener is pinned to an unusable address");
+                return None;
+            };
+            filter
+        }
+    };
+    Some(ListenerConfig {
+        bind: settings.bind,
+        port: settings.port,
+        allow,
+    })
 }
 
 /// Which login variant an account logs in with, minting a Steam ticket when it needs one.

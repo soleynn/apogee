@@ -7,7 +7,7 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use super::{Migrate, Store, StoreError, UidCacheEntry};
-use crate::model::{Account, AccountKind, Profile, SecretBackend, Settings};
+use crate::model::{Account, AccountKind, ListenerSettings, Profile, SecretBackend, Settings};
 
 fn cache_entry(game_version: &str, expires_at: u64) -> UidCacheEntry {
     UidCacheEntry {
@@ -35,6 +35,7 @@ fn settings_round_trips_at_the_current_version() {
         keep_patches: true,
         backups_kept: 3,
         backup_before_patch: false,
+        otp_listener: ListenerSettings::default(),
     };
     store.save_settings(&settings).unwrap();
     assert_eq!(store.load_settings().unwrap(), settings);
@@ -290,6 +291,7 @@ proptest::proptest! {
             keep_patches: keep,
             backups_kept: 5,
             backup_before_patch: true,
+            otp_listener: ListenerSettings::default(),
         };
         store.save_settings(&settings).unwrap();
         proptest::prop_assert_eq!(store.load_settings().unwrap(), settings);
