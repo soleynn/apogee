@@ -124,7 +124,7 @@ impl CoreConfig {
 /// which is placed here because this is the only client that carries an account credential. The patch
 /// fetcher builds its own and is left alone: it addresses its hosts over plain HTTP, so it has no
 /// handshake to constrain, and what it downloads is checked against block digests rather than TLS.
-fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
+pub(crate) fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
     let client = crate::trust::anchor(reqwest::Client::builder().gzip(true).deflate(true))?
         .build()
         .map_err(|e| CoreError::Init {
