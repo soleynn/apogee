@@ -63,6 +63,7 @@ is tagged with its change type. Versioning aims to follow
 - Close the header-fidelity contract's remaining gaps (#137) _(fixed)_
 - Close the remaining OAuth-top scrub gap and account-fold divergence (#138) _(fixed)_
 - Close the 0.5 hardening/freeze gate's remaining items (#140) _(fixed)_
+- Close the OAuth failure message's truncate-before-redact gap (#143) _(fixed)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
