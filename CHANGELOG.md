@@ -55,6 +55,7 @@ is tagged with its change type. Versioning aims to follow
 - Validate input reaching the version report and frontier referer (#130) _(fixed)_
 - Harden the patchlist parser (#132) _(fixed)_
 - Close three error-path credential leaks (#131) _(fixed)_
+- Make the transport seam's header-fidelity contract real (#133) _(fixed)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
