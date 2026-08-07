@@ -16,14 +16,14 @@ const FULL_PARAMS: &str =
 #[test]
 fn scrape_stored_lifts_the_value_past_other_attributes() {
     let html = r#"<input type="hidden" name="_STORED_" value="blob-12345">"#;
-    assert_eq!(scrape_stored(html).unwrap(), "blob-12345");
+    assert_eq!(scrape_stored(html, &[]).unwrap(), "blob-12345");
 }
 
 #[test]
 fn scrape_stored_without_the_anchor_is_stored_not_found() {
     let html = r#"<form><input name="user" value="x"></form>"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -32,7 +32,7 @@ fn scrape_stored_without_the_anchor_is_stored_not_found() {
 fn scrape_stored_with_an_unterminated_value_is_stored_not_found() {
     let html = r#"<input name="_STORED_" value="never-closed"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -41,7 +41,7 @@ fn scrape_stored_with_an_unterminated_value_is_stored_not_found() {
 fn scrape_stored_rejects_a_value_beyond_the_attribute_window() {
     let html = format!(r#"<input name="_STORED_" {}value="late">"#, " ".repeat(100));
     assert!(matches!(
-        scrape_stored(&html),
+        scrape_stored(&html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -51,7 +51,7 @@ fn scrape_stored_caps_a_runaway_value() {
     // A closing quote past the length cap is treated as absent, so the capture cannot run away.
     let html = format!(r#"<input name="_STORED_" value="{}">"#, "x".repeat(5000));
     assert!(matches!(
-        scrape_stored(&html),
+        scrape_stored(&html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -63,7 +63,7 @@ fn scrape_stored_rejects_an_empty_value() {
     // request later.
     let html = r#"<input type="hidden" name="_STORED_" value="">"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
 }
@@ -76,16 +76,30 @@ fn scrape_stored_does_not_read_a_neighbouring_element() {
     let html =
         r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="someone">"#;
     assert!(matches!(
-        scrape_stored(html),
+        scrape_stored(html, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
     // The reported shape: on a real top page that neighbour is the empty visible sqexid input.
     let empty_neighbour =
         r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="">"#;
     assert!(matches!(
-        scrape_stored(empty_neighbour),
+        scrape_stored(empty_neighbour, &[]),
         Err(ProtoError::StoredNotFound { .. })
     ));
+}
+
+#[test]
+fn scrape_stored_scrubs_a_secret_reflected_with_no_labelling_prefix() {
+    // No `_STORED_` anchor, so this is the caller's error path; the page reflects a bare secret
+    // (a Steam ticket echoed with no `session_ticket=` prefix a shape-based redaction could key on),
+    // so only a caller-supplied scrub list catches it.
+    let html = r#"<html>debug: rejected ticket SECRETTICKET123</html>"#;
+    let Err(ProtoError::StoredNotFound { excerpt }) = scrape_stored(html, &["SECRETTICKET123"])
+    else {
+        panic!("expected StoredNotFound");
+    };
+    assert!(!excerpt.contains("SECRETTICKET123"), "leaked: {excerpt}");
+    assert!(excerpt.contains("[redacted]"), "{excerpt}");
 }
 
 /// The visible login form's own username input, present on every top page including a Steam one.
@@ -152,6 +166,39 @@ fn account_ids_fold_no_further_than_the_launcher_does() {
     // Different letters, not different cases of one.
     assert!(!eq_ordinal_ignore_case("é", "e"));
     assert!(!eq_ordinal_ignore_case("linked-account", "someone-else"));
+}
+
+#[test]
+fn the_turkish_dotless_i_and_long_s_do_not_fold_to_their_lookalike() {
+    // Unicode's simple uppercase mapping sends U+0131 to 'I' and U+017F to 'S', but a real .NET
+    // OrdinalIgnoreCase run refuses both: folding them the general way would let an id typed with the
+    // wrong letter pass as a match for one typed with the right one, weakening the check this
+    // comparison exists to enforce. Verified against a real `dotnet` run.
+    assert!(!eq_ordinal_ignore_case("\u{0131}", "I"));
+    assert!(!eq_ordinal_ignore_case("\u{0131}", "i"));
+    assert!(!eq_ordinal_ignore_case("\u{017F}", "S"));
+    assert!(!eq_ordinal_ignore_case("\u{017F}", "s"));
+}
+
+#[test]
+fn the_greek_iota_subscript_pairs_fold_together() {
+    // Each pair's full Unicode uppercase mapping expands to two characters (a base letter plus
+    // capital iota), so the general single-char fold leaves every pair distinct; a real .NET
+    // OrdinalIgnoreCase run folds them together anyway. One pair from each of the three eight-wide
+    // blocks, plus all three bare-iota-subscript singles: the whole reachable block, not just the
+    // finding's headline example.
+    assert!(eq_ordinal_ignore_case("\u{1F80}", "\u{1F88}"));
+    assert!(eq_ordinal_ignore_case("\u{1F87}", "\u{1F8F}"));
+    assert!(eq_ordinal_ignore_case("\u{1F90}", "\u{1F98}"));
+    assert!(eq_ordinal_ignore_case("\u{1F97}", "\u{1F9F}"));
+    assert!(eq_ordinal_ignore_case("\u{1FA0}", "\u{1FA8}"));
+    assert!(eq_ordinal_ignore_case("\u{1FA7}", "\u{1FAF}"));
+    assert!(eq_ordinal_ignore_case("\u{1FB3}", "\u{1FBC}"));
+    assert!(eq_ordinal_ignore_case("\u{1FC3}", "\u{1FCC}"));
+    assert!(eq_ordinal_ignore_case("\u{1FF3}", "\u{1FFC}"));
+    // A pair from two different blocks must still not fold together.
+    assert!(!eq_ordinal_ignore_case("\u{1F80}", "\u{1F90}"));
+    assert!(!eq_ordinal_ignore_case("\u{1FB3}", "\u{1FC3}"));
 }
 
 #[test]
@@ -307,7 +354,7 @@ fn full_parse_is_pinned() {
 proptest! {
     #[test]
     fn scrape_stored_never_panics(s in ".{0,300}") {
-        let _ = scrape_stored(&s);
+        let _ = scrape_stored(&s, &[]);
     }
 
     #[test]

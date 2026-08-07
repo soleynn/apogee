@@ -180,9 +180,9 @@ const REDACTED: &str = "[redacted]";
 /// Query parameters whose value is a credential, redacted wherever an excerpt carries the shape.
 ///
 /// The Steam ticket rides in the top-page query, so any page that echoes the request URL back (an
-/// error page, a WAF block) reflects it. Redacting by shape rather than by value covers the sites that
-/// never see the ticket ([`crate::oauth::scrape_stored`] takes only the page) and the reflections that
-/// re-encode it, which a verbatim scrub of the ticket text misses.
+/// error page, a WAF block) reflects it. Redacting by shape rather than only by value covers the
+/// reflections that re-encode it, which a verbatim scrub of the ticket text misses, and stands in for
+/// any call site that omits the ticket from its own scrub list.
 const SECRET_QUERY_PARAMS: [&str; 1] = ["session_ticket="];
 
 /// What ends a query parameter's value in reflected text: the query and fragment separators, plus the
@@ -190,9 +190,11 @@ const SECRET_QUERY_PARAMS: [&str; 1] = ["session_ticket="];
 /// value, so an unfamiliar reflection over-redacts rather than under-redacts.
 const VALUE_END: [char; 10] = ['&', '#', '"', '\'', '<', '>', ' ', '\t', '\r', '\n'];
 
-/// A short, safe excerpt of a response body for an error message: lossy UTF-8, capped in length so a
-/// large or binary body cannot bloat the error, with any [`SECRET_QUERY_PARAMS`] value redacted.
-pub(crate) fn excerpt(body: &[u8]) -> String {
+/// [`scrubbed_excerpt`] with no secrets to scrub verbatim, kept for tests that only exercise the
+/// [`SECRET_QUERY_PARAMS`] shape-based redaction. Every production call site now has a scrub list of
+/// its own, even if empty, so this has no caller outside `#[cfg(test)]`.
+#[cfg(test)]
+fn excerpt(body: &[u8]) -> String {
     scrubbed_excerpt(body, &[])
 }
 

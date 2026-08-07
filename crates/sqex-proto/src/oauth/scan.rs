@@ -10,7 +10,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::error::{ProtoError, excerpt};
+use crate::error::{ProtoError, scrubbed_excerpt};
 
 /// The attribute that anchors the `_STORED_` input on the top page (XL: `PatchListParser`-style
 /// anchored scan of `name="_STORED_" value="(...)"`).
@@ -70,13 +70,15 @@ pub(crate) enum CallbackReject {
 /// capturing up to the closing quote under a hard length cap. An empty capture is a miss, as it is for
 /// [`scrape_steam_id`]: a blank blob is not a session, and carrying one into the submit would defer the
 /// real diagnosis (a page that no longer has the shape this scanner reads) to a later, vaguer failure.
-/// Any miss is a [`ProtoError::StoredNotFound`] carrying a length-capped page excerpt (the top page
-/// carries no submitted credentials). The returned slice borrows `html`.
-pub fn scrape_stored(html: &str) -> Result<&str, ProtoError> {
+/// Any miss is a [`ProtoError::StoredNotFound`] carrying a length-capped page excerpt, scrubbed of
+/// `secrets`: the top page carries no submitted credentials, but a Steam login's request query carries
+/// a bearer ticket the page can reflect back. Callers pass the same list they scrub their own OAuth-top
+/// excerpts with. The returned slice borrows `html`.
+pub fn scrape_stored<'h>(html: &'h str, secrets: &[&str]) -> Result<&'h str, ProtoError> {
     attribute_value(html, STORED_ANCHOR, MAX_STORED)
         .filter(|stored| !stored.is_empty())
         .ok_or_else(|| ProtoError::StoredNotFound {
-            excerpt: excerpt(html.as_bytes()),
+            excerpt: scrubbed_excerpt(html.as_bytes(), secrets),
         })
 }
 
