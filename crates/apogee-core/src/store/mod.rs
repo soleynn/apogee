@@ -3,7 +3,9 @@
 //! Each entity is a JSON file wrapping a schema version around its data. Loading advances the data
 //! through a migration chain to the current version before returning it. A file that will not parse
 //! or migrate is copied aside and reported as [`StoreError::Corrupt`]; it is never deleted or
-//! overwritten, so a bad file can always be inspected or restored. Writes are atomic
+//! overwritten, so a bad file can always be inspected or restored. The single exception is
+//! [`Store::install_id`], which replaces its own unreadable file after the copy aside, because what
+//! it holds is opaque randomness rather than anything a user could want back. Writes are atomic
 //! (write-temp-then-rename), so an interrupted save never leaves a half-file the next load misreads.
 
 use std::fs;
@@ -195,6 +197,15 @@ impl Migrate for UidCacheEntry {
     }
 }
 
+/// The install id (see [`Store::install_id`]) is a bare identifier with no fields, but it goes
+/// through the same versioned envelope as every other entity so a later format has somewhere to go.
+impl Migrate for Uuid {
+    const CURRENT_VERSION: u32 = 1;
+    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err(format!("no migration from schema version {from}"))
+    }
+}
+
 impl Migrate for Settings {
     const CURRENT_VERSION: u32 = 7;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -277,6 +288,10 @@ impl Store {
 
     fn settings_file(&self) -> PathBuf {
         self.base.join("settings.json")
+    }
+
+    fn install_id_file(&self) -> PathBuf {
+        self.base.join("install-id.json")
     }
 
     fn profile_path(&self, id: Uuid) -> PathBuf {
@@ -380,6 +395,23 @@ impl Store {
             Err(StoreError::NotFound { .. }) => Ok(Settings::default()),
             Err(other) => Err(other),
         }
+    }
+
+    /// This install's own identifier: a random value minted on the first read and kept from then
+    /// on. It is derived from nothing about the machine, which is what makes it safe to present
+    /// off-host, and it is not a preference, so it lives here rather than in [`Settings`].
+    ///
+    /// A stored value that will not parse is replaced rather than reported. Its content is opaque
+    /// randomness with nothing in it to recover, the load has already copied the offending bytes
+    /// aside, and refusing to start over an unreadable one buys nobody anything.
+    pub fn install_id(&self) -> Result<Uuid, StoreError> {
+        let path = self.install_id_file();
+        if let Ok(id) = self.load::<Uuid>(&path) {
+            return Ok(id);
+        }
+        let id = Uuid::new_v4();
+        self.save(&path, &id)?;
+        Ok(id)
     }
 
     /// Serialize `value` under the current schema version and write it atomically.

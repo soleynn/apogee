@@ -150,6 +150,44 @@ fn a_corrupt_file_is_preserved_and_never_deleted() {
 }
 
 #[test]
+fn an_install_id_is_minted_once_and_kept() {
+    let (dir, store) = store();
+    let minted = store.install_id().unwrap();
+
+    assert!(dir.path().join("install-id.json").exists());
+    assert_eq!(store.install_id().unwrap(), minted);
+    // A second run over the same directory reads it rather than minting again.
+    assert_eq!(
+        Store::new(dir.path().to_path_buf()).install_id().unwrap(),
+        minted
+    );
+}
+
+/// The one entity a damaged file replaces instead of reporting: it holds opaque randomness, so
+/// there is nothing in it to recover and nothing gained by refusing to start. The bytes are still
+/// copied aside on the way past.
+#[test]
+fn a_damaged_install_id_is_replaced_rather_than_reported() {
+    let (dir, store) = store();
+    let path = dir.path().join("install-id.json");
+    let minted = store.install_id().unwrap();
+    let damaged = b"{ this is not valid json".to_vec();
+    fs::write(&path, &damaged).unwrap();
+
+    let replacement = store.install_id().unwrap();
+    assert_ne!(replacement, minted);
+    assert_eq!(store.install_id().unwrap(), replacement);
+
+    let preserved: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| p.to_string_lossy().ends_with(".corrupt"))
+        .collect();
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(fs::read(&preserved[0]).unwrap(), damaged);
+}
+
+#[test]
 fn a_profile_round_trips_through_the_store() {
     let (_dir, store) = store();
     let account = Account::new("me@example.invalid", AccountKind::Standard);
