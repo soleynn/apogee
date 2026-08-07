@@ -21,6 +21,7 @@ mod patch;
 mod steam;
 mod store;
 mod transport;
+mod trust;
 
 pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
 #[cfg(unix)]

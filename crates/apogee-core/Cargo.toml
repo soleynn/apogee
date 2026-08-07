@@ -41,6 +41,9 @@ insta.workspace = true
 rstest.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+# Digests the embedded trust anchors, so a swapped root file fails a test rather than quietly
+# becoming an authority this launcher obeys.
+sha2.workspace = true
 
 [lints]
 workspace = true

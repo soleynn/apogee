@@ -119,10 +119,13 @@ impl CoreConfig {
 /// request path forwards no accept-encoding of its own). HTTP-version tuning is the reqwest default
 /// and is what we want: HTTP/1.1 over the plain-HTTP patch and boot-check CDN, HTTP/2 negotiated via
 /// ALPN over the TLS artifact and login hosts. Dual-stack Happy-Eyeballs connect applies throughout.
+///
+/// Its trust anchors are constrained to the authorities Square Enix issues from (see [`crate::trust`]),
+/// which is placed here because this is the only client that carries an account credential. The patch
+/// fetcher builds its own and is left alone: it addresses its hosts over plain HTTP, so it has no
+/// handshake to constrain, and what it downloads is checked against block digests rather than TLS.
 fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
-    let client = reqwest::Client::builder()
-        .gzip(true)
-        .deflate(true)
+    let client = crate::trust::anchor(reqwest::Client::builder().gzip(true).deflate(true))?
         .build()
         .map_err(|e| CoreError::Init {
             detail: e.to_string(),
