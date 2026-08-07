@@ -22,9 +22,8 @@ const REUSE_SCAN_LIMIT: u64 = 3;
 
 /// The least life a returned code may have left, in seconds.
 ///
-/// A caller submits over the network: two requests separate the mint from the wire, each a round
-/// trip to Square Enix. A code minted in the last moments of its window is dead by the time it
-/// arrives, so a mint that lands there takes the next window's code and says how long that is
+/// A caller submits over the network: a code minted in the last moments of its window is dead by the
+/// time it arrives, so a mint that lands there takes the next window's code and says how long that is
 /// instead, which costs at most this many seconds and buys a whole period of validity. A profile
 /// whose whole period is this short is exempt, because no window of it would satisfy the floor.
 const MIN_LIFE_SECS: u64 = 3;
@@ -54,123 +53,45 @@ impl Otp {
         }
     }
 
-    /// Read the stored secret and produce the code to submit for `account`, for the clock as it
-    /// reads once the key is in hand.
+    /// Read `account`'s stored secret into something that can derive its codes.
     ///
-    /// The instant is taken after the store has answered, not before. The read is what raises the
-    /// platform's unlock prompt or derives an encrypted store's key, and it is bounded only by how
-    /// long the user takes: a counter derived from the instant the call started would name a window
-    /// that closed while the prompt was on screen. A caller pinning its own instant uses
-    /// [`Otp::mint_blocking_at`].
-    ///
-    /// The decoded key never crosses an await point, because it never leaves this one synchronous
-    /// call.
+    /// The read is separate from the derive because they answer to different clocks. This is the call
+    /// that raises the platform's unlock prompt, and it is bounded only by how long the user takes to
+    /// notice it; the derive names a thirty-second window and has to happen once the caller knows
+    /// which window the server is in. A fused call would put an unbounded wait between those two
+    /// facts.
     ///
     /// # Blocking
     /// Reads the secret store, which blocks and may raise the platform's unlock prompt. A caller on
-    /// an async runtime uses [`Otp::mint`] instead.
+    /// an async runtime uses [`Otp::prepare`] instead.
     ///
     /// # Errors
     /// [`OtpError::NoSecret`] if nothing is stored, [`OtpError::Stored`] if what is stored does not
-    /// parse, [`OtpError::Secrets`] if the store failed or is locked, [`OtpError::Clock`] if the
-    /// clock plus `skew` is not an instant a counter is defined for.
-    pub fn mint_blocking(&self, account: Uuid, skew: ClockSkew) -> Result<Minted, OtpError> {
-        let params = self.read_params(account)?;
-        self.derive(account, &params, SystemTime::now(), skew)
-    }
-
-    /// [`Otp::mint_blocking`] for a named instant rather than for the clock.
-    ///
-    /// For a caller that has an instant of its own: a test pinning one, or a login correcting
-    /// against a server clock. The store read still happens first, so an instant named before a
-    /// prompt is answered is a stale instant and this is the call that lets one be passed anyway.
-    ///
-    /// # Blocking
-    /// As [`Otp::mint_blocking`].
-    ///
-    /// # Errors
-    /// As [`Otp::mint_blocking`], reading `at` for the clock.
-    pub fn mint_blocking_at(
-        &self,
-        account: Uuid,
-        at: SystemTime,
-        skew: ClockSkew,
-    ) -> Result<Minted, OtpError> {
-        let params = self.read_params(account)?;
-        self.derive(account, &params, at, skew)
-    }
-
-    /// [`Otp::mint_blocking`], run off the runtime's workers.
-    ///
-    /// # Errors
-    /// As [`Otp::mint_blocking`], plus [`OtpError::Interrupted`] if the task was dropped before it
-    /// answered.
-    pub async fn mint(&self, account: Uuid, skew: ClockSkew) -> Result<Minted, OtpError> {
-        let handle = self.clone();
-        tokio::task::spawn_blocking(move || handle.mint_blocking(account, skew))
-            .await
-            .map_err(|_| OtpError::Interrupted)?
-    }
-
-    /// Read this account's stored secret back into a profile.
-    fn read_params(&self, account: Uuid) -> Result<TotpParams, OtpError> {
+    /// parse, [`OtpError::Secrets`] if the store failed or is locked.
+    pub fn prepare_blocking(&self, account: Uuid) -> Result<Prepared, OtpError> {
         let stored = self
             .store
             .get(account, SecretKind::TotpSecret)?
             .ok_or(OtpError::NoSecret)?;
         let params = TotpParams::from_secret(&stored)?;
         drop(stored);
-        Ok(params)
+        Ok(Prepared {
+            account,
+            params,
+            guard: Arc::clone(&self.guard),
+        })
     }
 
-    /// Pick the window to submit for and derive its code. Pure arithmetic, so nothing waits on
-    /// anything: what the caller gets back is the code for the window it lands in, how long until
-    /// that window opens, and how long it lasts once it does.
-    fn derive(
-        &self,
-        account: Uuid,
-        params: &TotpParams,
-        at: SystemTime,
-        skew: ClockSkew,
-    ) -> Result<Minted, OtpError> {
-        let period = params.period();
-        let seconds = window::shifted_seconds(at, skew)?;
-        let current = window::counter(seconds, period)?;
-        let left = window::remaining(seconds, period)?;
-
-        // A code with almost none of its window left does not survive the requests between here and
-        // the submit, so the mint steps past it exactly as it steps past one the server has seen.
-        // A profile whose whole period is inside the floor is exempt: every code it makes is that
-        // short-lived, so holding would delay each login and hand back the same short life anyway.
-        let floor = if u64::from(period) > MIN_LIFE_SECS {
-            MIN_LIFE_SECS
-        } else {
-            0
-        };
-        let mut counter = if left < floor {
-            current.checked_add(1).ok_or(OtpError::Clock)?
-        } else {
-            current
-        };
-
-        // Walk forward a window at a time until a code the server has not already seen turns up.
-        let mut code = params.code_for_counter(counter)?;
-        let mut scanned = 0;
-        while scanned < REUSE_SCAN_LIMIT && self.guard.repeats(account, &code) {
-            counter = counter.checked_add(1).ok_or(OtpError::Clock)?;
-            code = params.code_for_counter(counter)?;
-            scanned += 1;
-        }
-
-        let now = u64::try_from(seconds).map_err(|_| OtpError::Clock)?;
-        let opens_at = window::window_start(counter, period)?;
-        let wait = Duration::from_secs(opens_at.saturating_sub(now));
-        let valid_for = if counter == current {
-            Duration::from_secs(left)
-        } else {
-            Duration::from_secs(u64::from(period))
-        };
-        Ok(Minted::new(code, wait, valid_for))
+    /// [`Otp::prepare_blocking`], run off the runtime's workers.
+    ///
+    /// # Errors
+    /// As [`Otp::prepare_blocking`], plus [`OtpError::Interrupted`] if the task was dropped before it
+    /// answered.
+    pub async fn prepare(&self, account: Uuid) -> Result<Prepared, OtpError> {
+        let handle = self.clone();
+        tokio::task::spawn_blocking(move || handle.prepare_blocking(account))
+            .await
+            .map_err(|_| OtpError::Interrupted)?
     }
 
     /// Record that `code` went to the login server for `account`. In memory only, never persisted.
@@ -194,6 +115,86 @@ impl fmt::Debug for Otp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Otp")
             .field("tracked", &self.guard.tracked())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One account's secret, read back and ready to derive codes from.
+///
+/// Held by a caller between the store read and the moment it knows what the login server's clock
+/// reads, which is the one stretch where the correction can still be applied. It is not `Clone` (a
+/// clone is a second copy of the key with its own lifetime) and there is no way to read the key back
+/// out; the key is erased when this drops, so a caller drops it as soon as the code exists.
+pub struct Prepared {
+    account: Uuid,
+    params: TotpParams,
+    guard: Arc<Guard>,
+}
+
+impl Prepared {
+    /// The code to submit, for this host's clock as `skew` corrects it.
+    ///
+    /// Pure arithmetic against the clock read here: nothing waits, nothing reads the store again, and
+    /// what comes back says both which code to send and how long to hold before sending it.
+    ///
+    /// # Errors
+    /// [`OtpError::Clock`] if the clock plus `skew` is not an instant a counter is defined for.
+    pub fn mint(&self, skew: ClockSkew) -> Result<Minted, OtpError> {
+        self.mint_at(SystemTime::now(), skew)
+    }
+
+    /// [`Prepared::mint`] for a named instant rather than for the clock, for a caller that has one of
+    /// its own: a test pinning it, or a caller correcting against a clock it already read.
+    ///
+    /// # Errors
+    /// As [`Prepared::mint`], reading `at` for the clock.
+    pub fn mint_at(&self, at: SystemTime, skew: ClockSkew) -> Result<Minted, OtpError> {
+        let period = self.params.period();
+        let seconds = window::shifted_seconds(at, skew)?;
+        let current = window::counter(seconds, period)?;
+        let left = window::remaining(seconds, period)?;
+
+        // A code with almost none of its window left does not survive the requests between here and
+        // the submit, so the mint steps past it exactly as it steps past one the server has seen.
+        // A profile whose whole period is inside the floor is exempt: every code it makes is that
+        // short-lived, so holding would delay each login and hand back the same short life anyway.
+        let floor = if u64::from(period) > MIN_LIFE_SECS {
+            MIN_LIFE_SECS
+        } else {
+            0
+        };
+        let mut counter = if left < floor {
+            current.checked_add(1).ok_or(OtpError::Clock)?
+        } else {
+            current
+        };
+
+        // Walk forward a window at a time until a code the server has not already seen turns up.
+        let mut code = self.params.code_for_counter(counter)?;
+        let mut scanned = 0;
+        while scanned < REUSE_SCAN_LIMIT && self.guard.repeats(self.account, &code) {
+            counter = counter.checked_add(1).ok_or(OtpError::Clock)?;
+            code = self.params.code_for_counter(counter)?;
+            scanned += 1;
+        }
+
+        let now = u64::try_from(seconds).map_err(|_| OtpError::Clock)?;
+        let opens_at = window::window_start(counter, period)?;
+        let wait = Duration::from_secs(opens_at.saturating_sub(now));
+        let valid_for = if counter == current {
+            Duration::from_secs(left)
+        } else {
+            Duration::from_secs(u64::from(period))
+        };
+        Ok(Minted::new(code, wait, valid_for))
+    }
+}
+
+/// The account, never the key and never a code derived from it.
+impl fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Prepared")
+            .field("account", &self.account)
             .finish_non_exhaustive()
     }
 }

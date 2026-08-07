@@ -12,6 +12,7 @@
 //! on [`Authenticated`], not errors.
 
 use std::fmt;
+use std::time::SystemTime;
 
 use http::{HeaderName, HeaderValue, Method};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -20,6 +21,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::error::{ProtoError, Step, scrubbed_excerpt};
+use crate::http_date::parse_http_date;
 use crate::identity::ClientContext;
 use crate::time::LauncherTime;
 use crate::transport::{
@@ -163,11 +165,23 @@ impl fmt::Debug for LoginFlow<'_> {
 }
 
 impl LoginFlow<'_> {
-    /// The top page's `Date` response header, if the transport surfaced it. An upstream consumer uses
-    /// it to generate an OTP with clock-skew correction before [`LoginFlow::submit`].
+    /// The top page's `Date` response header verbatim, if the transport surfaced it. Diagnostic: a
+    /// consumer reads the instant through [`LoginFlow::server_time`] instead.
     #[must_use]
     pub fn server_date(&self) -> Option<&str> {
         self.server_date.as_deref()
+    }
+
+    /// The login server's own reading of now, from the top page it just answered with.
+    ///
+    /// The instant an upstream consumer measures its clock against to generate a one-time code the
+    /// server will accept, without spending a request on asking. `None` covers every way that reading
+    /// can be missing — no header, a transport that did not surface it, or a stamp in a form
+    /// [`parse_http_date`] does not read — because a consumer answers all three the same way: fall
+    /// back to its own clock, which is what it had before there was anything to correct against.
+    #[must_use]
+    pub fn server_time(&self) -> Option<SystemTime> {
+        parse_http_date(self.server_date.as_deref()?)
     }
 
     /// The Steam-linked SE id scraped from the top page, if any. Always `None` for a standard login.

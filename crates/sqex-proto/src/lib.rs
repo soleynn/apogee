@@ -10,6 +10,7 @@
 mod bootver;
 mod error;
 mod frontier;
+mod http_date;
 mod identity;
 mod oauth;
 mod patchlist;
@@ -21,6 +22,7 @@ mod version;
 pub use bootver::check_boot_version;
 pub use error::{ProtoError, Step};
 pub use frontier::{FrontierContext, GateStatus, check_gate_status, check_login_status};
+pub use http_date::parse_http_date;
 pub use identity::{
     ClientContext, ComputerId, PATCHER_USER_AGENT, frontier_referer, launcher_user_agent,
 };

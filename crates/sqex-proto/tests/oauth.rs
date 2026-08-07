@@ -24,6 +24,16 @@ const UA: &str = "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)";
 const TOP_URL: &str = "https://ffxiv-login.square-enix.com/oauth/ffxivarr/login/top\
     ?lng=en&rgn=3&isft=0&cssmode=1&isnew=1&launchver=3";
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";
+/// [`SERVER_DATE`] as the instant a consumer reads back off the page.
+///
+/// Written out rather than derived from the header above, so what pins the reader is a value worked
+/// out somewhere other than the code being tested.
+const SERVER_UNIX_SECS: u64 = 1_752_062_400;
+
+/// [`SERVER_DATE`] as an instant.
+fn server_instant() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(SERVER_UNIX_SECS)
+}
 
 fn fixed_time() -> LauncherTime {
     LauncherTime::from_parts(2024, 1, 2, 3, 47, 1_704_164_820_000)
@@ -102,6 +112,7 @@ fn a_standard_login_builds_both_fingerprinted_requests() {
         .await
         .unwrap();
         assert_eq!(flow.server_date(), Some(SERVER_DATE));
+        assert_eq!(flow.server_time(), Some(server_instant()));
         assert_eq!(flow.steam_linked_id(), None);
         flow.submit(Credentials {
             sqexid: "testuser",
@@ -469,6 +480,7 @@ fn a_real_captured_login_parses_to_authenticated() {
         .await
         .unwrap();
         assert_eq!(flow.server_date(), Some(SERVER_DATE));
+        assert_eq!(flow.server_time(), Some(server_instant()));
         flow.submit(Credentials {
             sqexid: "user",
             password: "pw",
@@ -556,6 +568,7 @@ fn a_real_captured_login_carries_an_otp_in_the_submit_body() {
         .await
         .unwrap();
         assert_eq!(flow.server_date(), Some(SERVER_DATE));
+        assert_eq!(flow.server_time(), Some(server_instant()));
         flow.submit(Credentials {
             sqexid: "user",
             password: "pw",

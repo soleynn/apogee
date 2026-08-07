@@ -14,7 +14,7 @@ use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig, Deviation,
     EncryptedFile, Event, ExternalAddon, FileState, ForeignCredentialStore, ForeignKey,
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
-    KdfCost, OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixHealth,
+    KdfCost, Notice, OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixHealth,
     Profile, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
     SecretBackend, SecretKind, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
@@ -1786,8 +1786,25 @@ fn render(event: &Event) -> String {
         Event::Setup(setup) => render_setup(setup),
         Event::Frontier(_) => "frontier data received".to_owned(),
         Event::PrefixHealth(health) => render_health(health),
+        Event::Notice(notice) => render_notice(notice),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+/// Render an advisory the run raised in passing.
+fn render_notice(notice: &Notice) -> String {
+    match notice {
+        // Said from the host's point of view, which is the one the user can do something about: the
+        // server being ahead is this machine being slow. `unsigned_abs` because the offset is a
+        // measurement and an absurd one saturates at `i64::MIN`, which has no negation.
+        Notice::ClockSkew { seconds } => format!(
+            "warning: this machine's clock is {} seconds {} the login server's; the code sent was \
+             generated against the server's time, but everything else here has the wrong time",
+            seconds.unsigned_abs(),
+            if *seconds > 0 { "behind" } else { "ahead of" },
+        ),
+        _ => "warning: an unrecognized advisory".to_owned(),
     }
 }
 

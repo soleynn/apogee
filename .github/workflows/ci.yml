@@ -473,6 +473,8 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build http_date --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run http_date --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build steam_ticket --target x86_64-unknown-linux-gnu

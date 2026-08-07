@@ -115,6 +115,64 @@ fn why(url: &Url, err: &reqwest::Error) -> String {
 mod tests {
     use super::*;
     use reqwest::Method;
+    use tokio::io::AsyncWriteExt;
+
+    /// Answer one request with a fixed response carrying `headers`, and hand back the address to send
+    /// it to. The request is drained rather than parsed: what is under test is the response side.
+    async fn one_shot(headers: &'static str) -> std::io::Result<Url> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = Url::parse(&format!("http://{}/", listener.local_addr()?))
+            .map_err(|_| std::io::Error::other("the listener's address is not a url"))?;
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let body = "ok";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n{headers}\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        Ok(url)
+    }
+
+    /// The `Date` header comes back off a real socket.
+    ///
+    /// The one test that fails if the surfaced-header list above stops naming it. Every fixture in
+    /// the workspace attaches that header itself, so deleting it from the list switches one-time-code
+    /// clock correction off in shipping builds with every other test in the repo still green.
+    #[tokio::test]
+    async fn the_response_headers_a_surface_reads_come_back_off_the_wire() -> std::io::Result<()> {
+        let url = one_shot(
+            "date: Wed, 09 Jul 2025 12:00:00 GMT\r\n\
+             x-patch-unique-id: UID-TOKEN\r\n\
+             set-cookie: session=secret\r\n",
+        )
+        .await?;
+        let transport = HttpTransport::new(reqwest::Client::new());
+
+        let response = transport
+            .execute(ProtoRequest::new(Method::GET, url))
+            .await
+            .map_err(|err| std::io::Error::other(err.message))?;
+
+        assert_eq!(
+            response
+                .header(&reqwest::header::DATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Wed, 09 Jul 2025 12:00:00 GMT")
+        );
+        assert!(
+            response
+                .header(&HeaderName::from_static("x-patch-unique-id"))
+                .is_some()
+        );
+        // Nothing beyond the two a surface asks for. A response carries credentials in headers a
+        // parser has no business seeing, and the seam's contract is that they do not travel.
+        assert_eq!(response.headers.len(), 2, "{:?}", response.headers);
+        Ok(())
+    }
 
     /// The registration step puts the session id in the path, so the whole URL must never reach the
     /// message. Driven against a port nothing listens on, which is the failure a user actually hits.

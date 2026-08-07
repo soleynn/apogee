@@ -48,7 +48,8 @@ pub use apogee_secrets::{
     Passphrase, Sandbox, Secret, SecretKind, SecretStore, Secrets, SecretsError, Unprompted,
 };
 pub use command::{
-    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, PrefixAction, Progress,
+    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Notice, PrefixAction,
+    Progress,
 };
 pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval};
 pub use error::CoreError;
