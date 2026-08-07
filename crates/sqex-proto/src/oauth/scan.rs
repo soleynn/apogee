@@ -37,8 +37,6 @@ const MAX_STEAM_ID: usize = 128;
 const CALLBACK_OPEN: &str = "window.external.user(\"login=auth,";
 /// The Steam relink callback (`restartup`). A standard login never triggers it.
 const RESTARTUP_MARKER: &str = "window.external.user(\"restartup\")";
-/// The most characters kept from a failure message, bounding the capture on hostile input.
-const MAX_MESSAGE: usize = 512;
 
 /// The launch parameters SE returns on a successful login. `session_id` authorizes the next stage, so
 /// this type deliberately implements no `Debug`/`Display`/`Serialize`: it is a transient parse result,
@@ -52,13 +50,17 @@ pub struct LaunchParams {
     pub max_expansion: u8,
 }
 
-/// Why a `login.send` body was not a usable success callback. Any `message` is SE's own failure text;
-/// the flow scrubs the submitted credentials out of it before surfacing, so this cannot leak them.
+/// Why a `login.send` body was not a usable success callback. Any `message` is SE's own failure text,
+/// borrowed straight out of the response body: the flow scrubs the submitted credentials out of it
+/// before surfacing, so this cannot leak them, and it must reach that scrub whole. A caller that copied
+/// or length-capped `message` before scrubbing would hand the redactor text it never saw the true tail
+/// of, which is exactly the shape of bug this borrow is meant to make impossible: there is no owned,
+/// pre-truncated copy for a caller to reach for by mistake.
 #[derive(Debug)]
-pub(crate) enum CallbackReject {
+pub(crate) enum CallbackReject<'a> {
     /// Not the `login=auth,ok,...` success callback. `message` is the `login=auth,ng,{type},{message}`
     /// failure text when one was found, or `None` when no login callback was present at all.
-    NotAuthOk { message: Option<String> },
+    NotAuthOk { message: Option<&'a str> },
     /// The success callback was present but its `launchParams` list was too short or malformed.
     /// `got_fields` is a count only.
     Unparseable { got_fields: usize },
@@ -122,9 +124,11 @@ pub(crate) fn is_restartup(html: &str) -> bool {
 }
 
 /// Peel the `login=auth,{status},...` callback out of a `login.send` body. A `login=auth,ok,` payload
-/// is parsed as launch params; a `login=auth,ng,{type},{message}` payload yields the failure message;
-/// no callback at all yields [`CallbackReject::NotAuthOk`] with no message.
-pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackReject> {
+/// is parsed as launch params; a `login=auth,ng,{type},{message}` payload yields the failure message,
+/// borrowed verbatim and uncapped (see [`CallbackReject`]: the caller's own excerpt builder owns
+/// bounding it, and does so cheaply regardless of length); no callback at all yields
+/// [`CallbackReject::NotAuthOk`] with no message.
+pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackReject<'_>> {
     let start = body
         .find(CALLBACK_OPEN)
         .ok_or(CallbackReject::NotAuthOk { message: None })?;
@@ -145,7 +149,7 @@ pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackR
         .split_once(',')
         .map_or(after_status, |(_type, message)| message);
     Err(CallbackReject::NotAuthOk {
-        message: Some(detail.chars().take(MAX_MESSAGE).collect()),
+        message: Some(detail),
     })
 }
 

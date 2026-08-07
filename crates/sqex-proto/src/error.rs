@@ -203,6 +203,16 @@ fn excerpt(body: &[u8]) -> String {
 /// secret the page re-encodes (HTML-escaped, percent-encoded) is not caught, so callers surface
 /// attacker-influenced text sparingly rather than relying on this alone. Scrubbing happens before the
 /// length cap, so a secret near the boundary cannot survive by being split.
+///
+/// `body` must be the full, untruncated text a step read off the wire: this function does its own
+/// bounded-window decode (see below) and length cap, cheaply, regardless of how large `body` is, so a
+/// caller has no performance reason to pre-truncate before calling this. It also has no correctness
+/// license to: the ambiguity guard below decides whether a secret could be waiting past what it saw by
+/// checking whether *this function's own* window filled, so a body a caller already cut down elsewhere
+/// looks identical to one that legitimately ended there, and the guard silently never engages. This bug
+/// shipped once already (a `MAX_MESSAGE`-capped OAuth failure message handed here pre-truncated, which
+/// hid a straddling secret from the guard) — see `oauth::scan::parse_login_callback`, which now borrows
+/// the message uncapped for exactly this reason.
 pub(crate) fn scrubbed_excerpt(body: &[u8], secrets: &[&str]) -> String {
     // Scrub a bounded window, not the whole body: keep EXCERPT_MAX_CHARS plus the longest secret
     // (minus one) so any secret with a char in the final excerpt is fully present here and is redacted
