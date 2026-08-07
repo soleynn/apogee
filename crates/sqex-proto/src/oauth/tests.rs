@@ -3,11 +3,11 @@
 
 use proptest::prelude::*;
 
-use super::mask_id;
 use super::scan::{
     CallbackReject, is_restartup, parse_launch_params, parse_login_callback, scrape_steam_id,
     scrape_stored,
 };
+use super::{eq_ordinal_ignore_case, mask_id};
 use crate::error::ProtoError;
 
 const FULL_PARAMS: &str =
@@ -56,6 +56,38 @@ fn scrape_stored_caps_a_runaway_value() {
     ));
 }
 
+#[test]
+fn scrape_stored_rejects_an_empty_value() {
+    // An empty blob is not a session. Accepting one submits a blank `_STORED_` and turns the real
+    // diagnosis, a top page that no longer has the shape this scanner reads, into a vaguer failure one
+    // request later.
+    let html = r#"<input type="hidden" name="_STORED_" value="">"#;
+    assert!(matches!(
+        scrape_stored(html),
+        Err(ProtoError::StoredNotFound { .. })
+    ));
+}
+
+#[test]
+fn scrape_stored_does_not_read_a_neighbouring_element() {
+    // Nothing in HTML fixes attribute order, so a page emitting `value=` before `name=` walks the
+    // window out of the `_STORED_` tag and into the next element, whose value belongs to a different
+    // input. Here that neighbour holds a value, so only the tag-boundary check refuses it.
+    let html =
+        r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="someone">"#;
+    assert!(matches!(
+        scrape_stored(html),
+        Err(ProtoError::StoredNotFound { .. })
+    ));
+    // The reported shape: on a real top page that neighbour is the empty visible sqexid input.
+    let empty_neighbour =
+        r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="">"#;
+    assert!(matches!(
+        scrape_stored(empty_neighbour),
+        Err(ProtoError::StoredNotFound { .. })
+    ));
+}
+
 /// The visible login form's own username input, present on every top page including a Steam one.
 const VISIBLE_INPUT: &str =
     r#"<input class="item-input" name="sqexid" id="sqexid" type="text" value="" tabindex="1">"#;
@@ -100,6 +132,29 @@ fn a_masked_id_keeps_the_ends_and_reports_no_length() {
 }
 
 #[test]
+fn account_ids_fold_case_past_ascii() {
+    // The launcher's `OrdinalIgnoreCase` reads these as one account; an ASCII-only fold refuses them
+    // and the login never reaches the server that would have accepted it.
+    assert!(eq_ordinal_ignore_case("café-account", "CAFÉ-ACCOUNT"));
+    assert!(eq_ordinal_ignore_case("ÅÄÖ", "åäö"));
+    assert!(eq_ordinal_ignore_case("linked-account", "LINKED-ACCOUNT"));
+}
+
+#[test]
+fn account_ids_fold_no_further_than_the_launcher_does() {
+    // .NET's ordinal casing is one code point to one code point: `ß` has no single-char uppercase, so
+    // it stays itself and does not match `SS`. Rust's `to_uppercase` would expand it and call these
+    // the same account, accepting a pair the launcher refuses.
+    assert!(!eq_ordinal_ignore_case("straße", "STRASSE"));
+    // Nor does it keep the first character of an expansion it cannot use: that would fold `ß` to `S`
+    // and equate two letters .NET holds apart.
+    assert!(!eq_ordinal_ignore_case("ß", "S"));
+    // Different letters, not different cases of one.
+    assert!(!eq_ordinal_ignore_case("é", "e"));
+    assert!(!eq_ordinal_ignore_case("linked-account", "someone-else"));
+}
+
+#[test]
 fn a_masked_id_splits_on_characters_not_bytes() {
     // A byte-indexed mask would panic here, and a byte count would call this id four long.
     assert_eq!(mask_id("héllo"), "h***o");
@@ -123,6 +178,41 @@ fn launch_params_falls_back_to_position_when_keys_are_unknown() {
     assert_eq!(params.session_id.as_str(), "SID");
     assert_eq!(params.region, 3);
     assert_eq!(params.max_expansion, 4);
+}
+
+#[test]
+fn launch_params_reads_the_documented_position_when_the_key_confirms_it() {
+    // Only the key text at index 6 is renamed; the real playable pair (8/9) is untouched, so a
+    // positional read still says playable. A search that took the first pair named `playable` would
+    // read index 7 instead and call an entitled account unplayable.
+    let params = parse_launch_params(
+        "sid,SESSIONABC,terms,1,region,3,playable,0,playable,1,ps3pkg,0,maxex,4,product,xyz",
+    )
+    .unwrap();
+    assert!(params.playable);
+}
+
+#[test]
+fn launch_params_finds_a_key_that_moved_off_its_position() {
+    // A leading pair shifts every documented index by one, so nothing is where XL would read it and
+    // the key search resolves the whole list.
+    let params = parse_launch_params(
+        "pad,0,sid,SHIFTED,terms,1,region,3,etmadd,0,playable,1,ps3pkg,0,maxex,4",
+    )
+    .unwrap();
+    assert_eq!(params.session_id.as_str(), "SHIFTED");
+    assert_eq!(params.region, 3);
+    assert!(params.playable);
+    assert_eq!(params.max_expansion, 4);
+}
+
+#[test]
+fn launch_params_rejects_a_key_duplicated_off_its_position() {
+    // The same shifted list, with a second `sid` pair. Two pairs claim the name and neither sits at
+    // the documented position, so there is no value to attribute to it: first-match-wins would hand
+    // back `FIRST`, an attacker-or-error-chosen session id, with no signal.
+    let params = "pad,0,sid,FIRST,sid,SECOND,terms,1,region,3,etmadd,0,playable,1,ps3pkg,0,maxex,4";
+    assert!(parse_launch_params(params).is_err());
 }
 
 #[test]

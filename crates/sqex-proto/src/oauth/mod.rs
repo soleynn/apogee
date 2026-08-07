@@ -279,7 +279,8 @@ impl LoginFlow<'_> {
     /// ticket is linked to, having first checked the caller meant that account: the ticket already
     /// decides which SE account the login lands on, so submitting a different username would either
     /// fail confusingly or sign the user into an account they did not pick. The comparison is
-    /// case-insensitive, matching the launcher (`Launcher.cs:572`), because SE ids are.
+    /// case-insensitive, matching the launcher (`Launcher.cs:572`) fold for fold
+    /// ([`eq_ordinal_ignore_case`]), because SE ids are.
     ///
     /// # Errors
     ///
@@ -290,7 +291,7 @@ impl LoginFlow<'_> {
         let Some(linked) = self.steam_linked_id.as_deref() else {
             return Ok(offered);
         };
-        if linked.eq_ignore_ascii_case(offered) {
+        if eq_ordinal_ignore_case(linked, offered) {
             Ok(linked)
         } else {
             Err(ProtoError::SteamWrongAccount {
@@ -457,6 +458,26 @@ fn build_top_request(
             HeaderValue::from_static(RSID_COOKIE),
         )
         .header(HeaderName::from_static("referer"), dynamic_header(referer)?))
+}
+
+/// Whether two account ids name the same account, under the launcher's own comparison.
+///
+/// The launcher compares with .NET's `OrdinalIgnoreCase` (`Launcher.cs:572`), which folds case per
+/// code point using simple, one-to-one uppercase mapping: it reads `é` and `É` as one letter, and
+/// leaves alone anything whose uppercase form is longer than the letter itself. Neither of Rust's
+/// ready-made folds is that rule. `str::eq_ignore_ascii_case` folds only `A-Z`, so it refuses a
+/// non-ASCII id the launcher accepts; `str::to_uppercase` folds further, expanding `ß` to `SS` where
+/// .NET leaves `ß`, so it accepts a pair the launcher refuses. Taking a `char`'s uppercase form only
+/// when that form is one `char` is the same rule, over the code points a Rust `str` can hold.
+fn eq_ordinal_ignore_case(left: &str, right: &str) -> bool {
+    let fold = |c: char| {
+        let mut upper = c.to_uppercase();
+        match (upper.next(), upper.next()) {
+            (Some(single), None) => single,
+            _ => c,
+        }
+    };
+    left.chars().map(fold).eq(right.chars().map(fold))
 }
 
 /// A recognizable but non-disclosing form of an account id: its first and last characters around a
