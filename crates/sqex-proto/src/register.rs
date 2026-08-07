@@ -89,12 +89,16 @@ pub async fn register_session(
             Some(unique_id) => {
                 // An empty body means the game is current; anything else is a game patchlist. This is
                 // exact-empty (not whitespace-trimmed), so a stray non-empty body fails loudly in the
-                // parser rather than being read as "current".
-                let pending_patches = if response.body.is_empty() {
+                // parser rather than being read as "current" - except for a leading byte-order mark,
+                // stripped first the same way `check_boot_version` strips one (`bootver.rs`), so a
+                // BOM-only body reads as empty instead of reaching the parser and failing with
+                // "patchlist too short".
+                let decoded = String::from_utf8_lossy(&response.body);
+                let body = decoded.strip_prefix('\u{feff}').unwrap_or(&decoded);
+                let pending_patches = if body.is_empty() {
                     Vec::new()
                 } else {
-                    let body = String::from_utf8_lossy(&response.body);
-                    parse_patch_list(&body)?
+                    parse_patch_list(body)?
                 };
                 Ok(Registration::Registered {
                     unique_id,

@@ -333,6 +333,29 @@ fn rejects_a_url_field_that_is_not_a_url() {
 }
 
 #[test]
+fn the_stored_url_is_the_normalized_form_not_the_raw_field() {
+    // `Url::parse` both validates and normalizes: it trims surrounding whitespace and fills in a
+    // missing `//` authority separator for a special scheme like `http`. The stored `url` must be
+    // what was actually validated, or a consumer deriving a cache key or filename from it would
+    // inherit un-normalized bytes that never went through the check above.
+    let cases = [
+        (
+            "  http://patch-dl.example.invalid/boot/y/z.patch  ",
+            "http://patch-dl.example.invalid/boot/y/z.patch",
+        ),
+        (
+            "http:patch-dl.example.invalid/boot/y/z.patch",
+            "http://patch-dl.example.invalid/boot/y/z.patch",
+        ),
+    ];
+    for (field, normalized) in cases {
+        let line = boot_entry(100, "D2024", field);
+        let entries = parse_patch_list(&envelope(&[line.as_str()])).unwrap();
+        assert_eq!(entries[0].url, normalized, "raw field was {field:?}");
+    }
+}
+
+#[test]
 fn repo_resolution_is_deliberately_left_to_the_consumer() {
     // Pins the scope decision documented on `parse_url`: a URL with no `/(game|boot)/{repoId}/`
     // segment, and one naming a repo beyond the range this workspace enumerates, are both accepted
