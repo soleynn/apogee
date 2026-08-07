@@ -530,9 +530,10 @@ fn eq_ordinal_ignore_case(left: &str, right: &str) -> bool {
 ///   [`ProtoError::SteamWrongAccount`] exists to enforce. Two are individual letters: the Turkish
 ///   dotless i (`ı`, U+0131) folds to `I` and the long s (`ſ`, U+017F) folds to `S` under Unicode's
 ///   mapping, but .NET treats each as its own letter. The rest are a single contiguous block,
-///   U+16EBB..=U+16ED3, which Unicode gives a simple uppercase mapping down to U+16EA0..=U+16EB8, a
-///   mapping .NET's ordinal fold does not apply; the pattern matches a script old enough for Rust's
-///   Unicode tables to case-fold but too new for .NET's ordinal table to have picked up.
+///   U+16EBB..=U+16ED3, which Unicode gives a simple uppercase mapping down to U+16EA0..=U+16EB8 (a
+///   script Rust's Unicode tables already case-fold; Python's `unicodedata` at Unicode 16.0 still has
+///   it unassigned, which points to .NET's ordinal table simply predating the mapping rather than
+///   deliberately excluding it, but the exclusion holds either way).
 /// - **Under-matching**: the Greek "prosgegrammeni"/"ypogegrammeni" case pairs ([`iota_subscript_fold`])
 ///   have no single-`char` uppercase form at all: Rust's full case mapping expands each to two
 ///   characters (a base letter plus capital iota), so the general rule falls through to identity and
