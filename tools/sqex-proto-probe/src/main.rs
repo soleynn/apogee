@@ -36,9 +36,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{HeaderName, HeaderValue};
 use sqex_proto::{
-    begin_login, register_session, Authenticated, ClientContext, ComputerId, Credentials,
-    InstallPaths, LauncherTime, LoginKind, OauthContext, ProtoError, ProtoRequest, ProtoResponse,
-    Registration, Transport, TransportError, VersionReport,
+    begin_login, check_header_fidelity, register_session, Authenticated, ClientContext, ComputerId,
+    Credentials, InstallPaths, LauncherTime, LoginKind, OauthContext, ProtoError, ProtoRequest,
+    ProtoResponse, Registration, Transport, TransportError, VersionReport, NEGOTIATED_HEADERS,
 };
 use totp_rs::{Algorithm, Secret, TOTP};
 
@@ -322,8 +322,10 @@ impl Transport for RecordingTransport {
         let mut builder = self.client.request(method, req.url.clone());
         for (name, value) in &req.headers {
             // reqwest manages content negotiation itself (client `.gzip`/`.deflate`); forwarding our
-            // declared accept-encoding would disable its automatic decompression.
-            if name.as_str() == "accept-encoding" {
+            // declared accept-encoding would disable its automatic decompression. It is the one header
+            // the seam's contract lets a client answer for itself, and the check below is narrowed to
+            // match.
+            if NEGOTIATED_HEADERS.contains(name) {
                 continue;
             }
             builder = builder.header(name.as_str(), value.as_bytes());
@@ -332,8 +334,21 @@ impl Transport for RecordingTransport {
             builder = builder.body(body.as_bytes().to_vec());
         }
 
-        let response = builder
-            .send()
+        // The captures this tool writes are what the fixtures are recorded from, so the request has to
+        // be checked back against its declaration before it is sent, not after it has been believed.
+        let request = builder
+            .build()
+            .map_err(|err| TransportError::new(format!("building the request failed: {err}")))?;
+        let emitted: Vec<_> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        check_header_fidelity(&req, &emitted)?;
+
+        let response = self
+            .client
+            .execute(request)
             .await
             .map_err(|err| TransportError::new(format!("request failed: {err}")))?;
         let status = response.status().as_u16();
