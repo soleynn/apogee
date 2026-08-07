@@ -140,6 +140,7 @@ fn a_standard_login_builds_both_fingerprinted_requests() {
             "accept-language: en-US,en;q=0.9",
             r#"cookie: _rsid="""#,
             "referer: https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us&time=2024-01-02-03-47",
+            "connection: Keep-Alive",
             "",
         ]
         .join("\n")
@@ -155,11 +156,71 @@ fn a_standard_login_builds_both_fingerprinted_requests() {
             r#"cookie: _rsid="""#,
             &format!("referer: {TOP_URL}"),
             "content-type: application/x-www-form-urlencoded",
+            "connection: Keep-Alive",
+            "cache-control: no-cache",
             "",
             "_STORED_=STOREDBLOB&sqexid=testuser&password=hunter2&otppw=",
         ]
         .join("\n")
     );
+}
+
+/// The two headers the reference launcher sends on this flow that were missing here.
+///
+/// Stated separately from the byte goldens above on purpose: a golden records what this crate emits,
+/// so it agreed with the code the whole time the headers were absent. This one records what the
+/// oracle emits (`Launcher.cs:475` for the top page, `:566-567` for the submit), which is the thing
+/// the goldens are supposed to be checked against. Header fidelity on the login path is bit-exact
+/// where SE plausibly sniffs, and a missing header is as visible as a wrong one.
+#[test]
+fn both_oauth_requests_keep_the_connection_and_the_submit_refuses_a_cache() {
+    let id = computer_id();
+    let transport = FixtureTransport::new([
+        top_response("STOREDBLOB"),
+        ProtoResponse::new(200, success_body("SESSIONXYZ").into_bytes()),
+    ]);
+
+    block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .expect("the top page");
+        flow.submit(Credentials {
+            sqexid: "testuser",
+            password: "hunter2",
+            otp: None,
+        })
+        .await
+        .expect("the submit")
+    });
+
+    let recorded = transport.recorded();
+    let header = |request: &sqex_proto::ProtoRequest, name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .map(|(_, v)| String::from_utf8_lossy(v.as_bytes()).into_owned())
+    };
+
+    assert_eq!(
+        header(&recorded[0], "connection").as_deref(),
+        Some("Keep-Alive")
+    );
+    assert_eq!(
+        header(&recorded[1], "connection").as_deref(),
+        Some("Keep-Alive")
+    );
+    // The oracle asks only the submit not to be cached, so the top page must not carry it either.
+    assert_eq!(
+        header(&recorded[1], "cache-control").as_deref(),
+        Some("no-cache")
+    );
+    assert_eq!(header(&recorded[0], "cache-control"), None);
 }
 
 #[test]
