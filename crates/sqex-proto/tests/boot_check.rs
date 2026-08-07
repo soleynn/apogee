@@ -51,6 +51,8 @@ fn builds_the_fingerprinted_request() {
         canonical_request(&recorded[0]),
         "GET http://patch-bootver.ffxiv.com/http/win32/ffxivneo_release_boot/2012.01.01.0000.0000/?time=2024-01-02-03-40\n\
          user-agent: FFXIV PATCH CLIENT\n\
+         accept: */*\n\
+         accept-encoding: gzip, deflate\n\
          host: patch-bootver.ffxiv.com\n"
     );
 }
