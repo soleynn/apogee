@@ -2744,6 +2744,19 @@ fn listening_port(state: &FlowState) -> Option<u16> {
     }
 }
 
+/// Push `bytes` from a chosen loopback address, so a test can be two devices at once.
+async fn push_from(from: Ipv4Addr, port: u16, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.bind(std::net::SocketAddr::new(IpAddr::V4(from), 0))?;
+    let mut stream = socket.connect((Ipv4Addr::LOCALHOST, port).into()).await?;
+    stream.write_all(bytes).await?;
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).await?;
+    Ok(answer)
+}
+
 /// Push `code` at the loopback listener on `port`, the way a companion app would.
 async fn push_code(port: u16, code: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
@@ -2995,4 +3008,66 @@ async fn a_cancelled_wait_never_logs_in() {
     assert!(states(&events).contains(&FlowState::Cancelled));
     assert_eq!(submitted_otp(&transport), None, "a stopped run submitted");
     assert!(h.store.load_uid_cache(h.account).unwrap().is_none());
+}
+
+/// A flood during a login is narrated, and the login still succeeds.
+///
+/// Section 4's gate at flow level. The crate's own test proves the listener survives; this proves the
+/// advisory reaches a shell, which is the only way a user learns that something on their network was
+/// hammering the port while they logged in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_during_a_login_is_narrated_and_the_login_succeeds() {
+    let h = harness(true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+
+    let (task, mut rx) = spawn_run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        CancellationToken::new(),
+    );
+
+    let mut events = Vec::new();
+    let waiting = await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the flow never opened the listener");
+    let port = listening_port(&waiting).expect("the waiting state carried no port");
+
+    // Complete request lines that are not deliverable codes, from a second loopback address, until
+    // that source is refused. None of them can win the race, so what is left is the flood.
+    let flooder = Ipv4Addr::new(127, 0, 0, 2);
+    let mut throttled = false;
+    for _ in 0..64 {
+        if push_from(flooder, port, b"GET /ffxivlauncher/12345 HTTP/1.1\r\n\r\n")
+            .await
+            .is_ok_and(|answer| answer.starts_with(b"HTTP/1.0 429"))
+        {
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled, "the listener never refused the flooding source");
+
+    push_code(port, "482913").await.unwrap();
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(submitted_otp(&transport).as_deref(), Some("482913"));
+    let flood_notice = events.iter().find_map(|event| match event {
+        Event::Notice(Notice::OtpListenerFlood { from, refused }) => Some((*from, *refused)),
+        _ => None,
+    });
+    let Some((from, refused)) = flood_notice else {
+        panic!("the flood was not narrated: {:?}", events);
+    };
+    assert_eq!(from, IpAddr::V4(flooder));
+    assert!(refused > 0, "the advisory counted nothing");
 }

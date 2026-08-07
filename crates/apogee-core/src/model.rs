@@ -100,9 +100,11 @@ pub enum OtpDelivery {
     Generate,
     /// A companion pushes one to this machine's listener while the login waits.
     ///
-    /// Set by the verb that takes the acknowledgment, and by nothing else: pointing an account here is
-    /// the decision to open a port on the user's network, so it is not a value a config edit or
-    /// another verb reaches sideways.
+    /// The only call in this crate that sets it is the one that takes the acknowledgment, because
+    /// pointing an account here is the decision to open a port on the user's network. That is a rule
+    /// about this crate's own callers and not a boundary: the field is public and deserializable, so a
+    /// user editing their own configuration to turn on their own feature reaches it, which is theirs
+    /// to do.
     Listen,
 }
 

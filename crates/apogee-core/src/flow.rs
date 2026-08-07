@@ -393,7 +393,12 @@ async fn authenticate(
     // stopped at that gate is not a login awaiting a code, so binding ahead of it would open a port on
     // the network for a login that is about to be abandoned.
     let pushed: Option<Code> = if wants_push {
-        let settings = ctx.store.load_settings().unwrap_or_default();
+        // Propagated rather than defaulted, which is the opposite of how every other settings read on
+        // this path behaves, and deliberately: this is the only one that decides how far onto the
+        // network something opens. Defaulting turns an unreadable file into a wildcard bind with no
+        // pin, which is strictly wider than whatever the user configured, and the state a shell
+        // renders carries only the port so nothing would look different.
+        let settings = ctx.store.load_settings()?;
         match wait_for_push(&settings.otp_listener, tx, cancel).await? {
             Some(code) => Some(code),
             None => return Ok(None),

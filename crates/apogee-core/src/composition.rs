@@ -820,7 +820,11 @@ impl Core {
     /// # Errors
     /// The store's own failure.
     pub fn set_listener_settings(&self, listener: ListenerSettings) -> Result<(), CoreError> {
-        let mut settings = self.store.load_settings().unwrap_or_default();
+        // Propagated rather than defaulted. A settings file that cannot be read is not an empty one:
+        // defaulting here would write a fresh record over it, and the field that would silently move
+        // is where secrets are kept, which sends the next run looking in a store the user's password
+        // is not in. Refusing to tune the listener is the cheap half of that trade.
+        let mut settings = self.store.load_settings()?;
         settings.otp_listener = listener;
         self.store.save_settings(&settings)?;
         Ok(())
