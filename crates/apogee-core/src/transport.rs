@@ -1,11 +1,13 @@
 //! The concrete network transport the core owns.
 //!
 //! `sqex-proto` never opens a socket; it hands each request to an injected transport. This adapter
-//! backs that seam with reqwest. The request contract is exact: emit precisely the declared headers,
-//! in order, and inject nothing of the client's own (no default `Accept`, no tracing header), because
-//! the header set is plausibly fingerprinted. `Accept-Encoding` is the one header the client answers
-//! for itself (`sqex_proto::NEGOTIATED_HEADERS`); everything else is checked back against the
-//! declaration before the request is sent.
+//! backs that seam with reqwest. The request contract is exact: emit precisely the declared headers, in
+//! order, and inject nothing of the client's own beyond `Accept-Encoding`, the one header the client
+//! answers for itself (`sqex_proto::NEGOTIATED_HEADERS`); everything else is checked back against the
+//! declaration before the request is sent. That read-back happens on the built request, before reqwest
+//! merges its own default `Accept: */*` into whatever still omits one, so an undeclared `Accept` reaches
+//! the wire invisibly to the check: every `sqex-proto` surface declares `accept` explicitly for exactly
+//! this reason, keeping the wire byte unchanged while bringing it inside the contract.
 
 use reqwest::header::{DATE, HeaderName, HeaderValue};
 use sqex_proto::{
@@ -399,6 +401,110 @@ mod tests {
                 "content-length: 4",
             ],
             "the wire head was: {head}"
+        );
+        Ok(())
+    }
+
+    /// The gap that motivated every `sqex-proto` surface declaring `accept` explicitly: a request that
+    /// declares none still gets `Accept: */*` on the wire, added by reqwest below the layer
+    /// `check_header_fidelity` reads back from, so the check sees nothing on either side to disagree
+    /// about and passes silently. Left undeclared, `gate_status`/`login_status` would fingerprint as
+    /// this repository's SQEXAuthor identity paired with an `Accept` the reference launcher itself never
+    /// sends.
+    #[tokio::test]
+    async fn an_undeclared_accept_still_reaches_the_wire() -> std::io::Result<()> {
+        let (url, captured) = capturing_head().await?;
+        let request = ProtoRequest::new(Method::GET, url).header(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_static("SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)"),
+        );
+
+        let transport = crate::composition::http_transport()
+            .map_err(|err| std::io::Error::other(format!("{err:?}")))?;
+        transport
+            .execute(request)
+            .await
+            .map_err(|err| std::io::Error::other(err.message().to_owned()))?;
+
+        let head = captured.await.map_err(std::io::Error::other)?;
+        let lines: Vec<&str> = head
+            .split("\r\n")
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        let accept_lines: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|line| line.to_ascii_lowercase().starts_with("accept:"))
+            .collect();
+        assert_eq!(
+            accept_lines,
+            ["accept: */*"],
+            "an undeclared accept should still reach the wire: {lines:?}"
+        );
+        Ok(())
+    }
+
+    /// The fix for the gap above: `frontier.rs` now declares `accept: */*` itself (the identical value
+    /// reqwest would otherwise inject), which brings the header inside `check_header_fidelity` and keeps
+    /// the wire byte unchanged. Proven here by mirroring `frontier.rs`'s own header set and asserting
+    /// `accept` reaches the wire exactly once, with the declared value and in the declared position, not
+    /// duplicated by a second one merged in behind it.
+    #[tokio::test]
+    async fn frontiers_declared_accept_reaches_the_wire_unchanged() -> std::io::Result<()> {
+        let (url, captured) = capturing_head().await?;
+        let request = ProtoRequest::new(Method::GET, url)
+            .header(
+                HeaderName::from_static("user-agent"),
+                HeaderValue::from_static("SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)"),
+            )
+            .header(
+                HeaderName::from_static("accept"),
+                HeaderValue::from_static("*/*"),
+            )
+            .header(
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("gzip, deflate"),
+            )
+            .header(
+                HeaderName::from_static("accept-language"),
+                HeaderValue::from_static("en-US,en;q=0.9"),
+            )
+            .header(
+                HeaderName::from_static("origin"),
+                HeaderValue::from_static("https://launcher.finalfantasyxiv.com"),
+            )
+            .header(
+                HeaderName::from_static("referer"),
+                HeaderValue::from_static("https://launcher.finalfantasyxiv.com/"),
+            )
+            .header(
+                HeaderName::from_static("connection"),
+                HeaderValue::from_static("Keep-Alive"),
+            );
+
+        let transport = crate::composition::http_transport()
+            .map_err(|err| std::io::Error::other(format!("{err:?}")))?;
+        transport
+            .execute(request)
+            .await
+            .map_err(|err| std::io::Error::other(err.message().to_owned()))?;
+
+        let head = captured.await.map_err(std::io::Error::other)?;
+        let lines: Vec<&str> = head
+            .split("\r\n")
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        let accept_lines: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|line| line.to_ascii_lowercase().starts_with("accept:"))
+            .collect();
+        assert_eq!(
+            accept_lines,
+            ["accept: */*"],
+            "accept should appear exactly once, matching the declaration: {lines:?}"
         );
         Ok(())
     }
