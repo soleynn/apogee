@@ -349,6 +349,45 @@ fn a_reflected_registration_url_does_not_leak_the_session_id() {
 }
 
 #[test]
+fn an_empty_uid_header_is_invalid_response() {
+    // Present but blank is not a credential: registering on it would report success and then send an
+    // empty patch-download header and an empty `DEV.TestSID` at launch, failing at the next hop with
+    // none of this step's context.
+    let response = ProtoResponse::new(204, Vec::new()).with_header(
+        HeaderName::from_static("x-patch-unique-id"),
+        HeaderValue::from_static(""),
+    );
+    let (_transport, outcome) = login_then_register(response);
+    let err = outcome.expect_err("empty uid");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::Register,
+            status: 204,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_whitespace_uid_header_is_invalid_response() {
+    let response = ProtoResponse::new(200, Vec::new()).with_header(
+        HeaderName::from_static("x-patch-unique-id"),
+        HeaderValue::from_static(" \t "),
+    );
+    let (_transport, outcome) = login_then_register(response);
+    let err = outcome.expect_err("blank uid");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::Register,
+            status: 200,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn non_ascii_uid_header_is_invalid_response() {
     // A UID header present but not visible ASCII is treated as absent (its `to_str` fails), so the
     // response is an invalid one, never a lossily-decoded credential.
