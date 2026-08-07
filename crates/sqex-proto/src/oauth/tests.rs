@@ -181,6 +181,50 @@ fn the_turkish_dotless_i_and_long_s_do_not_fold_to_their_lookalike() {
 }
 
 #[test]
+fn a_newly_cased_block_does_not_fold_to_its_lookalike() {
+    // U+16EBB..=U+16ED3 carries a Unicode simple uppercase mapping down to U+16EA0..=U+16EB8 (a
+    // script recent enough for Rust's Unicode tables to case-fold), but a real .NET 10
+    // OrdinalIgnoreCase run refuses every one of the 25 pairs: .NET's ordinal table predates the
+    // mapping. Folding them the general way would accept an id typed with the wrong character as a
+    // match for one typed with the right one, the same weakening the dotless-i/long-s exclusions
+    // above guard against. Every pair in the block, not just its ends: confirmed exhaustively (all
+    // ~1.1M Unicode scalar values, both directions) against real .NET, not spot-checked.
+    const PAIRS: [(&str, &str); 25] = [
+        ("\u{16EBB}", "\u{16EA0}"),
+        ("\u{16EBC}", "\u{16EA1}"),
+        ("\u{16EBD}", "\u{16EA2}"),
+        ("\u{16EBE}", "\u{16EA3}"),
+        ("\u{16EBF}", "\u{16EA4}"),
+        ("\u{16EC0}", "\u{16EA5}"),
+        ("\u{16EC1}", "\u{16EA6}"),
+        ("\u{16EC2}", "\u{16EA7}"),
+        ("\u{16EC3}", "\u{16EA8}"),
+        ("\u{16EC4}", "\u{16EA9}"),
+        ("\u{16EC5}", "\u{16EAA}"),
+        ("\u{16EC6}", "\u{16EAB}"),
+        ("\u{16EC7}", "\u{16EAC}"),
+        ("\u{16EC8}", "\u{16EAD}"),
+        ("\u{16EC9}", "\u{16EAE}"),
+        ("\u{16ECA}", "\u{16EAF}"),
+        ("\u{16ECB}", "\u{16EB0}"),
+        ("\u{16ECC}", "\u{16EB1}"),
+        ("\u{16ECD}", "\u{16EB2}"),
+        ("\u{16ECE}", "\u{16EB3}"),
+        ("\u{16ECF}", "\u{16EB4}"),
+        ("\u{16ED0}", "\u{16EB5}"),
+        ("\u{16ED1}", "\u{16EB6}"),
+        ("\u{16ED2}", "\u{16EB7}"),
+        ("\u{16ED3}", "\u{16EB8}"),
+    ];
+    for (lower, upper) in PAIRS {
+        assert!(
+            !eq_ordinal_ignore_case(lower, upper),
+            "{lower:?} must not fold to its look-alike {upper:?}"
+        );
+    }
+}
+
+#[test]
 fn the_greek_iota_subscript_pairs_fold_together() {
     // Each pair's full Unicode uppercase mapping expands to two characters (a base letter plus
     // capital iota), so the general single-char fold leaves every pair distinct; a real .NET
