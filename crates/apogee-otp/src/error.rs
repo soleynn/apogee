@@ -50,8 +50,17 @@ pub enum OtpError {
     #[error("the task generating the code was dropped")]
     Interrupted,
     /// The local listener could not take its port.
-    #[error("failed to bind the one-time-password listener")]
-    ListenerBind,
+    ///
+    /// Carries the port because that is the one fact that makes the answer actionable: something else
+    /// already holds it, which on this port is almost always a running reference launcher. There is no
+    /// fallback port, so this is terminal for the login rather than a condition anything retries. A
+    /// port is not a secret and not a caller-supplied value in the sense the rest of this taxonomy
+    /// refuses.
+    #[error("failed to bind the one-time-password listener on port {port}")]
+    ListenerBind {
+        /// The port that could not be taken.
+        port: u16,
+    },
     /// Nothing delivered a code inside the deadline.
     #[error("timed out waiting for a code")]
     Timeout,
@@ -146,7 +155,7 @@ mod tests {
                 OtpError::Secrets(_) => (),
                 OtpError::Clock => (),
                 OtpError::Interrupted => (),
-                OtpError::ListenerBind => (),
+                OtpError::ListenerBind { .. } => (),
                 OtpError::Timeout => (),
                 OtpError::Io(_) => (),
             }
@@ -183,8 +192,8 @@ mod tests {
                 "the task generating the code was dropped",
             ),
             (
-                OtpError::ListenerBind,
-                "failed to bind the one-time-password listener",
+                OtpError::ListenerBind { port: 4646 },
+                "failed to bind the one-time-password listener on port 4646",
             ),
             (OtpError::Timeout, "timed out waiting for a code"),
             (OtpError::Io(std::io::Error::other("socket")), "io error"),

@@ -15,7 +15,12 @@ zeroize.workspace = true
 totp-rs = { workspace = true, features = ["zeroize"] }
 base32.workspace = true
 # Runs the blocking secret-store read off the runtime's workers, so an async caller never drives the
-# platform credential client from a worker thread.
+# platform credential client from a worker thread. Also the local delivery listener: its socket, its
+# accept loop, the connection tasks it owns and aborts, and its two deadlines. `net`, `io-util`, `time`,
+# `sync`, `macros` and `rt-multi-thread` all arrive on the workspace line, so this needs no features of
+# its own. No HTTP crate joins it: the wire contract is not HTTP/1.1 (bare line feeds, a close-delimited
+# body), a general server is permissive exactly where this has to be strict, and a fuzzer needs a
+# function taking bytes rather than a service.
 tokio.workspace = true
 apogee-secrets = { path = "../apogee-secrets" }
 
