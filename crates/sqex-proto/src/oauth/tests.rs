@@ -363,6 +363,21 @@ fn login_callback_extracts_the_failure_message() {
 }
 
 #[test]
+fn login_callback_caps_a_runaway_success_payload() {
+    // A closing quote past MAX_CALLBACK is treated as absent, the same way an oversized
+    // `attribute_value` capture is: a huge `sid` field cannot ride the callback into `LaunchParams`
+    // (and, downstream, into an error's secret-scrub list).
+    let huge_sid = "x".repeat(20_000);
+    let body = format!(
+        r#"window.external.user("login=auth,ok,sid,{huge_sid},terms,1,region,3,etmadd,0,playable,1,ps3pkg,0,maxex,4");"#
+    );
+    assert!(matches!(
+        parse_login_callback(&body),
+        Err(CallbackReject::NotAuthOk { message: None })
+    ));
+}
+
+#[test]
 fn login_callback_flags_a_truncated_param_list() {
     let body = r#"window.external.user("login=auth,ok,sid,ABC");"#;
     assert!(matches!(
