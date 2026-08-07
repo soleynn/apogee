@@ -43,6 +43,8 @@ jobs:
           - secrets_frame
           - secrets_records
           - otp_import
+          - otp_listener_request
+          - otp_listener_framing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -18,6 +18,16 @@ fn a_live_code_can_be_neither_copied_nor_printed() {
     cases.compile_fail("tests/ui/code_orphan_display.rs");
 }
 
+/// The same two absences on what a wait hands back, which holds a live code until it is taken. Its
+/// own cases rather than a comment saying `Code`'s cover it: the wrapper is the type a caller actually
+/// holds, and a derive on it would be a second buffer whatever the inner type promises.
+#[test]
+fn a_delivered_code_can_be_neither_copied_nor_printed() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/received_clone.rs");
+    cases.compile_fail("tests/ui/received_display.rs");
+}
+
 /// Only this crate mints a code, so a code in a caller's hands came from a secret this crate holds.
 /// A public constructor would make that untrue, and every caller that took a `Code` would have to go
 /// back to checking where it came from.

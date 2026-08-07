@@ -5,6 +5,7 @@
 //! down) are [`FlowState`] values the shell narrates, not failures.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use apogee_otp::OtpSource;
@@ -191,6 +192,18 @@ pub enum Notice {
     /// said out loud anyway, because a clock this far out is a fact about the machine rather than
     /// about the login, and silently working around it leaves the user with no idea it is wrong.
     ClockSkew { seconds: i64 },
+    /// Something on the network spent the one-time-password listener's attempt budget while a login
+    /// was waiting for a code.
+    ///
+    /// `from` is the source the limiter shut off first rather than "the flood's source", since a
+    /// flood may have several; `refused` is how many connections the wait turned away in total. The
+    /// login was unaffected, which is what makes this a notice rather than a state: the budget a
+    /// flood can spend and the budget a real code needs are separate, so nothing reachable for free
+    /// consumes the second.
+    ///
+    /// Raised once per wait, not once per refusal. A notice per refusal is itself a flood, and the
+    /// channel a shell reads is unbounded.
+    OtpListenerFlood { from: IpAddr, refused: u32 },
 }
 
 /// Where a login-to-play flow currently stands. The shell narrates these; none is a failure.
@@ -204,6 +217,23 @@ pub enum FlowState {
     /// one is current. `seconds` is how long that is: a few seconds in the ordinary case, and at
     /// most the handful of windows the reuse guard steps over when codes repeat.
     WaitingForOtpWindow { seconds: u64 },
+    /// The local listener is open and nothing has pushed a code to it yet.
+    ///
+    /// `port` is what was actually bound, so a shell can name a reachable address rather than guess
+    /// one; `seconds` is the deadline, so a shell can count down. Named after
+    /// [`WaitingForOtpWindow`](Self::WaitingForOtpWindow), which is the existing shape for "the flow
+    /// is parked and here is how long for".
+    ///
+    /// The port and not the whole address, because the usual bind is every interface, which renders
+    /// as something nobody can type into a phone. Turning that into a dialable address means
+    /// enumerating this host's interfaces, which belongs to whatever presents it.
+    WaitingForPushedCode { port: u16, seconds: u64 },
+    /// A code arrived at the local listener, from this address.
+    ///
+    /// The address and never the digits. Said out loud because the first well-formed code wins
+    /// whoever sent it, so a user who sees one arrive from something that is not their phone learns
+    /// something no other signal carries.
+    PushedCodeReceived { from: IpAddr },
     /// The account must accept the terms of service before playing.
     NeedsTerms,
     /// No active service on the account, or the login server is closed.

@@ -16,7 +16,7 @@ use apogee_addons::{AddonError, AddonPaths, Addons};
 use crate::addons::AddonBackend;
 use crate::addons::addons_backend::AddonsBackend;
 use apogee_fetch::Fetcher;
-use apogee_otp::{Deviation, Otp, TotpParams};
+use apogee_otp::{Deviation, ListenerConsent, Otp, TotpParams};
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::{
@@ -36,7 +36,7 @@ use crate::flow::{self, FlowContext};
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
-use crate::model::{Account, OtpDelivery, Profile, SecretBackend, Settings};
+use crate::model::{Account, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings};
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
 use crate::steam::{NoSteam, SteamBackend};
@@ -612,13 +612,18 @@ impl Core {
     ///
     /// An account that was never there, or was already asking, is left alone: this runs on the way
     /// out of an account being deleted as well as on a plain sweep.
+    ///
+    /// Only an account that *derives* its codes is moved. One that receives them from a companion is
+    /// left where it is: a sweep takes its password and any stored secret, but it takes nothing the
+    /// listener needs, so there is no code it can no longer produce. Moving it would silently start
+    /// prompting for a typed code on the next login with nothing said about why.
     fn ask_for_typed_codes(&self, account: Uuid) -> Result<(), CoreError> {
         let mut record = match self.store.load_account(account) {
             Ok(record) => record,
             Err(StoreError::NotFound { .. }) => return Ok(()),
             Err(other) => return Err(other.into()),
         };
-        if record.otp_delivery == OtpDelivery::Ask {
+        if record.otp_delivery != OtpDelivery::Generate {
             return Ok(());
         }
         record.otp_delivery = OtpDelivery::Ask;
@@ -728,6 +733,11 @@ impl Core {
     /// gate never consults. The flags move only after the write succeeds: set over a failed store
     /// they would gate every login on a code nothing can derive.
     ///
+    /// An account that was receiving codes from a companion is moved onto the stored secret, which is
+    /// the deliberate rule that a generator beats a listener when both are configured. It is
+    /// surprising enough to say out loud: importing a secret closes the port that account would
+    /// otherwise have opened.
+    ///
     /// # Errors
     /// Returns [`CoreError::NoAccount`] if there is no such account, [`CoreError::Secrets`] with
     /// [`SecretsError::NotStoring`] if the account keeps nothing, [`CoreError::Otp`] if the text is
@@ -751,6 +761,73 @@ impl Core {
         record.otp_delivery = OtpDelivery::Generate;
         self.store.save_account(&record)?;
         Ok(deviations)
+    }
+
+    /// Point `account` at a code a companion pushes to this machine's listener.
+    ///
+    /// Takes the acknowledgment as a value rather than a flag, so the ability to say "the user asked
+    /// for this" belongs to the layer that can actually ask. Enabling this is the decision to open a
+    /// port on the user's network while a login waits, which is the one thing here that is visible to
+    /// anyone else on it.
+    ///
+    /// A `never_store` account is **not** refused, unlike importing a secret. Nothing is stored here
+    /// at all: an account that keeps nothing and takes its codes from a phone is arguably the best
+    /// configuration on a shared machine, since the second factor never touches the disk. The
+    /// symmetry with importing invites the opposite reflex, so it is stated.
+    ///
+    /// Turns the one-time password on as well, mirroring an import: the whole code path in a login is
+    /// gated on that flag, so a delivery mode set without it would be one nothing consults.
+    ///
+    /// # Errors
+    /// [`CoreError::NoAccount`] if there is no such account, or the store's own failure.
+    pub fn use_pushed_codes(
+        &self,
+        account: Uuid,
+        // Taken by value and never read. Holding one is the whole of what it proves, and consuming it
+        // stops a caller keeping one around to authorize a second decision with.
+        _consent: ListenerConsent,
+    ) -> Result<(), CoreError> {
+        let mut record = self.account_or_missing(account)?;
+        record.use_otp = true;
+        record.otp_delivery = OtpDelivery::Listen;
+        self.store.save_account(&record)?;
+        Ok(())
+    }
+
+    /// Point `account` back at a typed code, if a companion was pushing them.
+    ///
+    /// The way off the listener without deleting anything. An account that was deriving its codes is
+    /// left alone: it is not on the listener, and moving it would take away a working generator.
+    ///
+    /// # Errors
+    /// [`CoreError::NoAccount`] if there is no such account, or the store's own failure.
+    pub fn ask_for_pushed_codes_no_longer(&self, account: Uuid) -> Result<(), CoreError> {
+        let mut record = self.account_or_missing(account)?;
+        if record.otp_delivery != OtpDelivery::Listen {
+            return Ok(());
+        }
+        record.otp_delivery = OtpDelivery::Ask;
+        self.store.save_account(&record)?;
+        Ok(())
+    }
+
+    /// Tune where the listener binds, who may reach it, and how long a login waits for a push.
+    ///
+    /// Cannot turn anything on, because there is no switch here to turn: an account moves onto the
+    /// listener through [`Core::use_pushed_codes`], which is the call that takes the acknowledgment.
+    /// Keeping the two apart is what stops tuning being a way around the acknowledgment.
+    ///
+    /// # Errors
+    /// The store's own failure.
+    pub fn set_listener_settings(&self, listener: ListenerSettings) -> Result<(), CoreError> {
+        // Propagated rather than defaulted. A settings file that cannot be read is not an empty one:
+        // defaulting here would write a fresh record over it, and the field that would silently move
+        // is where secrets are kept, which sends the next run looking in a store the user's password
+        // is not in. Refusing to tune the listener is the cheap half of that trade.
+        let mut settings = self.store.load_settings()?;
+        settings.otp_listener = listener;
+        self.store.save_settings(&settings)?;
+        Ok(())
     }
 
     /// Back up the game config in `profile`'s prefix, then prune to the retention setting.
@@ -1073,9 +1150,11 @@ mod tests {
         use tempfile::TempDir;
         use uuid::Uuid;
 
+        use apogee_otp::ListenerConsent;
+
         use super::*;
         use crate::ImportOutcome;
-        use crate::model::OtpDelivery;
+        use crate::model::{ListenerSettings, OtpDelivery};
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
         fn core_with(store: Arc<MemoryStore>) -> (TempDir, Core) {
@@ -1607,6 +1686,104 @@ mod tests {
                 core.account(account.id).unwrap().otp_delivery,
                 OtpDelivery::Generate
             );
+        }
+
+        /// A sweep leaves an account that receives its codes from a companion where it is.
+        ///
+        /// The rule the sweep follows is about a secret it took: an account pointing at one that has
+        /// been deleted is gated on a code nothing can produce. Nothing the listener needs is stored,
+        /// so nothing is owed, and moving it would silently start prompting for a typed code on the
+        /// next login with nothing said about why.
+        #[test]
+        fn a_listening_account_survives_a_secret_sweep() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            core.use_pushed_codes(account.id, ListenerConsent::granted())
+                .unwrap();
+
+            assert!(core.forget_secrets(account.id).unwrap());
+
+            let saved = core.account(account.id).unwrap();
+            assert!(saved.use_otp, "the account stopped owing a code");
+            assert_eq!(saved.otp_delivery, OtpDelivery::Listen);
+        }
+
+        /// Importing a secret takes an account off the listener.
+        ///
+        /// The design's own rule that a generator beats a listener when both are configured. Correct,
+        /// and surprising enough to owe a test: importing a secret closes the port that account would
+        /// otherwise have opened.
+        #[test]
+        fn importing_a_secret_takes_an_account_off_the_listener() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            core.use_pushed_codes(account.id, ListenerConsent::granted())
+                .unwrap();
+
+            core.import_totp_secret(account.id, offered_secret())
+                .unwrap();
+
+            assert_eq!(
+                core.account(account.id).unwrap().otp_delivery,
+                OtpDelivery::Generate
+            );
+        }
+
+        /// An account that stores nothing may still receive pushed codes.
+        ///
+        /// Importing a secret refuses such an account, because it is about to write one. Nothing is
+        /// written here at all: an account that keeps nothing and takes its codes from a phone is
+        /// arguably the best configuration on a shared machine, so the symmetry with importing must
+        /// not be followed.
+        #[test]
+        fn an_account_that_stores_nothing_may_still_receive_pushed_codes() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                never_store: true,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+
+            core.use_pushed_codes(account.id, ListenerConsent::granted())
+                .unwrap();
+
+            let saved = core.account(account.id).unwrap();
+            assert_eq!(saved.otp_delivery, OtpDelivery::Listen);
+            assert!(saved.use_otp);
+            // And the way back off touches nothing else.
+            core.ask_for_pushed_codes_no_longer(account.id).unwrap();
+            assert_eq!(
+                core.account(account.id).unwrap().otp_delivery,
+                OtpDelivery::Ask
+            );
+        }
+
+        /// Tuning the listener cannot point an account at it.
+        ///
+        /// The two are separate calls because only one of them opens a port, and only that one takes
+        /// the acknowledgment. A tuning verb that could also enable would be a way around it.
+        #[test]
+        fn tuning_the_listener_enables_nothing() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+
+            core.set_listener_settings(ListenerSettings {
+                port: 5000,
+                ..ListenerSettings::default()
+            })
+            .unwrap();
+
+            assert_eq!(core.settings().unwrap().otp_listener.port, 5000);
+            let saved = core.account(account.id).unwrap();
+            assert_eq!(saved.otp_delivery, OtpDelivery::Ask);
+            assert!(!saved.use_otp);
         }
 
         /// A sweep for an account that was already typing its codes leaves the record alone, and one

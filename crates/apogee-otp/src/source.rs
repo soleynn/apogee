@@ -4,8 +4,6 @@ use std::fmt;
 
 use apogee_secrets::Secret;
 
-use crate::listener::ListenerConfig;
-
 /// Where a login's one-time password comes from.
 ///
 /// A typed code is a [`Secret`], not a `String`: the buffer is erased when it drops, and the type
@@ -18,7 +16,11 @@ pub enum OtpSource {
     /// A code the user typed.
     Manual(Secret),
     /// A code a companion will deliver to the local listener.
-    Listener(ListenerConfig),
+    ///
+    /// Carries nothing. Where the socket binds and who may reach it are facts about the machine that
+    /// the composition root resolves out of its own settings, not a choice a shell makes per login,
+    /// and a payload here would put a business rule in the layer documented as never branching on one.
+    Listener,
 }
 
 /// The variant name, never the code. A rendered `OtpSource` is one of the few ways a live code could
@@ -36,7 +38,7 @@ impl OtpSource {
         match self {
             Self::Totp => "Totp",
             Self::Manual(_) => "Manual",
-            Self::Listener(_) => "Listener",
+            Self::Listener => "Listener",
         }
     }
 }

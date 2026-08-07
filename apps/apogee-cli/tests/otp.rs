@@ -5,7 +5,8 @@
 //! how the code gets from the caller into the flow. The rule it holds to is that a live credential
 //! never appears in `/proc/<pid>/cmdline`, which is world-readable with no `hidepid`.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -297,6 +298,119 @@ fn forgetting_the_secret_asks_for_a_code_again() -> std::io::Result<()> {
         session_cached(config.path()),
         "the login did not complete: {}",
         stdout(&out)
+    );
+    Ok(())
+}
+
+/// The listener path, end to end through the binary: a code arrives over the network and the login
+/// completes with nothing typed.
+///
+/// The closest thing to the manual gate that can run without a phone. What the phone does is exactly
+/// this request, so what is left unproven here is the app's own bytes, which the gate records.
+///
+/// An ephemeral port, read back out of the line the run prints, because the real one is one a
+/// developer may have a launcher sitting on and because two tests must not collide.
+#[test]
+fn a_code_pushed_over_the_network_logs_in_with_nothing_typed() -> std::io::Result<()> {
+    let (config, _install) = with_otp_profile()?;
+
+    // Point the machine's listener at loopback and let the kernel pick the port.
+    let out = run(
+        config.path(),
+        "",
+        &[
+            "otp",
+            "listener",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--wait",
+            "20",
+        ],
+    )?;
+    assert!(out.status.success(), "otp listener: {}", stderr(&out));
+
+    // Point the account at it. The acknowledgment is a typed word, which is the whole of the gate.
+    let out = run(
+        config.path(),
+        "listen\n",
+        &["otp", "listen", "--profile", "otp"],
+    )?;
+    assert!(out.status.success(), "otp listen: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("will take its code from the listener"),
+        "the acknowledgment did not take: {}",
+        stdout(&out)
+    );
+
+    // Now run a login with nothing on stdin at all, and push the code once the run says where.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_apogee-cli"))
+        .args(["patch", "--profile", "otp"])
+        .env("HOME", config.path())
+        .env("XDG_CONFIG_HOME", config.path())
+        .env("XDG_DATA_HOME", config.path().join("data"))
+        .env("XDG_CACHE_HOME", config.path().join("cache"))
+        .env("APOGEE_FIXTURE_LOGIN", "current")
+        .env("APOGEE_FIXTURE_PASSPHRASE", PASSPHRASE)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let Some(stdout) = child.stdout.take() else {
+        return Err(std::io::Error::other("the run produced no output"));
+    };
+    let mut lines = BufReader::new(stdout).lines();
+    let mut seen = String::new();
+    let mut port = None;
+    for line in lines.by_ref() {
+        let line = line?;
+        seen.push_str(&line);
+        seen.push('\n');
+        if let Some((_, tail)) = line.rsplit_once("port ") {
+            port = tail.trim().parse::<u16>().ok();
+            if port.is_some() {
+                break;
+            }
+        }
+    }
+    let Some(port) = port else {
+        let _ = child.kill();
+        return Err(std::io::Error::other(format!(
+            "the run never said which port it was listening on: {seen}"
+        )));
+    };
+
+    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))?;
+    socket.write_all(b"GET /ffxivlauncher/246810 HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    let mut answer = Vec::new();
+    socket.read_to_end(&mut answer)?;
+    assert!(
+        answer.starts_with(b"HTTP/1.0 200 OK\n"),
+        "the push was not answered: {}",
+        String::from_utf8_lossy(&answer)
+    );
+
+    for line in lines {
+        seen.push_str(&line?);
+        seen.push('\n');
+    }
+    let out = child.wait_with_output()?;
+    assert!(out.status.success(), "patch: {seen}");
+    assert!(
+        !seen.contains("NeedsOtp"),
+        "the pushed code was not used: {seen}"
+    );
+    assert!(
+        seen.contains("a one-time code arrived from 127.0.0.1"),
+        "the arrival was not narrated: {seen}"
+    );
+    // The digits are the one thing that must never appear on a terminal or in a log.
+    assert!(!seen.contains("246810"), "the code was printed: {seen}");
+    assert!(
+        session_cached(config.path()),
+        "the login did not complete: {seen}"
     );
     Ok(())
 }
