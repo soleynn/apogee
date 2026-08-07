@@ -4,6 +4,8 @@
 //! are *values* in the result types, not errors; the variants here are genuine protocol failures.
 //! `#[non_exhaustive]`: further failures join as new surfaces land.
 
+use std::fmt;
+
 use crate::transport::{ProtoResponse, TransportError};
 use crate::version::{SanityKind, VersionRepo};
 
@@ -26,7 +28,9 @@ pub enum Step {
 }
 
 /// A protocol failure.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Debug` is hand-written (see below) so an excerpt cannot reach a log through `{:?}`.
+#[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum ProtoError {
     /// The transport could not complete the request.
@@ -75,6 +79,67 @@ pub enum ProtoError {
     /// install is corrupt but repairable; `repo` and `kind` locate the fault without carrying a path.
     #[error("version file for {repo:?} failed the sanity check: {kind:?}")]
     InvalidVersionFiles { repo: VersionRepo, kind: SanityKind },
+}
+
+/// Excerpts are kept out of `Debug`, which is what a logger, a panic message, or a `{err:?}` in a
+/// caller reaches for. Every excerpt is attacker-influenced text that can reflect what the request put
+/// on the wire (a URL bearing the session id, a form bearing the credentials); the construction sites
+/// scrub what they know about, but scrubbing is verbatim and best-effort, so nothing downstream should
+/// inherit an excerpt by accident. `Display` never carried one, and a shell that means to present one
+/// reads the field.
+impl fmt::Debug for ProtoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(err) => f.debug_tuple("Transport").field(err).finish(),
+            Self::InvalidResponse {
+                step,
+                status,
+                excerpt,
+            } => f
+                .debug_struct("InvalidResponse")
+                .field("step", step)
+                .field("status", status)
+                .field("excerpt", &Withheld(excerpt))
+                .finish(),
+            Self::PatchListParse { line, reason } => f
+                .debug_struct("PatchListParse")
+                .field("line", line)
+                .field("reason", reason)
+                .finish(),
+            Self::OauthFailed { excerpt } => f
+                .debug_struct("OauthFailed")
+                .field("excerpt", &Withheld(excerpt))
+                .finish(),
+            Self::SteamLinkNeeded => f.write_str("SteamLinkNeeded"),
+            Self::SteamWrongAccount { expected_hint } => f
+                .debug_struct("SteamWrongAccount")
+                .field("expected_hint", expected_hint)
+                .finish(),
+            Self::StoredNotFound { excerpt } => f
+                .debug_struct("StoredNotFound")
+                .field("excerpt", &Withheld(excerpt))
+                .finish(),
+            Self::LaunchParamsUnparseable { got_fields } => f
+                .debug_struct("LaunchParamsUnparseable")
+                .field("got_fields", got_fields)
+                .finish(),
+            Self::InvalidVersionFiles { repo, kind } => f
+                .debug_struct("InvalidVersionFiles")
+                .field("repo", repo)
+                .field("kind", kind)
+                .finish(),
+        }
+    }
+}
+
+/// An excerpt rendered as its size alone: enough to tell an empty body from a full one in a debug
+/// dump, none of the text.
+struct Withheld<'a>(&'a str);
+
+impl fmt::Debug for Withheld<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} chars withheld>", self.0.chars().count())
+    }
 }
 
 impl ProtoError {
@@ -330,6 +395,45 @@ mod tests {
             EXCERPT_MAX_CHARS * MAX_UTF8_BYTES - (MAX_UTF8_BYTES - 1)
         );
         assert_eq!(excerpt(&body).chars().count(), EXCERPT_MAX_CHARS);
+    }
+
+    #[test]
+    fn debug_withholds_every_excerpt() {
+        let excerpts = [
+            ProtoError::InvalidResponse {
+                step: Step::Register,
+                status: 404,
+                excerpt: "SESSIONSECRET not found".to_owned(),
+            },
+            ProtoError::OauthFailed {
+                excerpt: "SESSIONSECRET".to_owned(),
+            },
+            ProtoError::StoredNotFound {
+                excerpt: "SESSIONSECRET".to_owned(),
+            },
+        ];
+        for err in excerpts {
+            let rendered = format!("{err:?}");
+            assert!(!rendered.contains("SESSIONSECRET"), "{rendered}");
+            assert!(rendered.contains("chars withheld"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn debug_keeps_the_triage_context() {
+        let err = ProtoError::InvalidResponse {
+            step: Step::Register,
+            status: 404,
+            excerpt: String::new(),
+        };
+        assert_eq!(
+            format!("{err:?}"),
+            "InvalidResponse { step: Register, status: 404, excerpt: <0 chars withheld> }"
+        );
+        assert_eq!(
+            err.to_string(),
+            "unexpected response at Register: status 404"
+        );
     }
 
     proptest! {

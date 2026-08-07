@@ -338,6 +338,14 @@ fn a_reflected_registration_url_does_not_leak_the_session_id() {
         "session id leaked: {excerpt}"
     );
     assert!(excerpt.contains("[redacted]"), "excerpt: {excerpt}");
+
+    // The other way out is `Debug`, which is what a logger or a panic message reaches for: it reports
+    // the excerpt's size, never its text, so nothing inherits attacker-influenced page content by
+    // accident. A shell that means to present the excerpt reads the field, as this test just did.
+    let rendered = format!("{err:?}");
+    assert!(!rendered.contains(SESSION_ID), "{rendered}");
+    assert!(!rendered.contains("404 Not Found"), "{rendered}");
+    assert!(rendered.contains("status: 404"), "{rendered}");
 }
 
 #[test]
