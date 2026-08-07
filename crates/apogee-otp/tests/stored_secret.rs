@@ -46,18 +46,24 @@ fn at(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
-/// Mint for `account` at `seconds`, for the property tests, which assert on an `Option` rather than
-/// unwrapping: a free helper here may not.
+/// Read `account`'s secret and derive its code for `seconds`, which is the two steps a login takes:
+/// the store read that may sit on an unlock prompt, then the derivation against a clock the caller
+/// only has once the login server has answered.
+fn mint(otp: &Otp, account: Uuid, seconds: u64, skew: ClockSkew) -> Result<Minted, OtpError> {
+    otp.prepare_blocking(account)?.mint_at(at(seconds), skew)
+}
+
+/// [`mint`] for the property tests, which assert on an `Option` rather than unwrapping: a free helper
+/// here may not.
 fn mint_at(otp: &Otp, account: Uuid, seconds: u64) -> Option<Minted> {
-    otp.mint_blocking_at(account, at(seconds), ClockSkew::NONE)
-        .ok()
+    mint(otp, account, seconds, ClockSkew::NONE).ok()
 }
 
 #[test]
 fn an_account_with_nothing_stored_reports_no_secret() {
     let store = Arc::new(MemoryStore::new());
     let otp = handle(&store);
-    let answer = otp.mint_blocking_at(Uuid::from_u128(1), at(MIDWINDOW), ClockSkew::NONE);
+    let answer = mint(&otp, Uuid::from_u128(1), MIDWINDOW, ClockSkew::NONE);
     assert!(matches!(answer, Err(OtpError::NoSecret)), "{answer:?}");
 }
 
@@ -78,17 +84,14 @@ fn a_locked_store_reports_the_store_not_a_missing_secret() -> Result<(), OtpErro
     )?;
 
     let otp = handle(&store);
-    let answer = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE);
+    let answer = mint(&otp, account, MIDWINDOW, ClockSkew::NONE);
     assert!(
         matches!(answer, Err(OtpError::Secrets(SecretsError::Locked))),
         "{answer:?}"
     );
 
     store.now_failing(None);
-    assert!(
-        otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)
-            .is_ok()
-    );
+    assert!(mint(&otp, account, MIDWINDOW, ClockSkew::NONE).is_ok());
     Ok(())
 }
 
@@ -105,7 +108,7 @@ fn garbage_in_the_store_reports_stored() -> Result<(), OtpError> {
         Secret::new(vec![0xff, 0x01]),
     )?;
 
-    let answer = handle(&store).mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE);
+    let answer = mint(&handle(&store), account, MIDWINDOW, ClockSkew::NONE);
     assert!(matches!(answer, Err(OtpError::Stored { .. })), "{answer:?}");
     Ok(())
 }
@@ -113,7 +116,7 @@ fn garbage_in_the_store_reports_stored() -> Result<(), OtpError> {
 #[test]
 fn the_first_mint_is_current_and_waits_for_nothing() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
-    let minted = handle(&store).mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let minted = mint(&handle(&store), account, MIDWINDOW, ClockSkew::NONE)?;
     assert_eq!(minted.wait(), Duration::ZERO);
     assert_eq!(minted.valid_for(), Duration::from_secs(15));
     assert_eq!(minted.code().len(), 6);
@@ -128,9 +131,9 @@ fn a_submitted_code_is_not_minted_twice() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let otp = handle(&store);
 
-    let first = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let first = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     otp.submitted(account, first.code());
-    let second = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let second = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
 
     assert_eq!(second.wait(), Duration::from_secs(15));
     assert_eq!(second.valid_for(), Duration::from_secs(30));
@@ -145,8 +148,8 @@ fn minting_twice_without_submitting_repeats() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let otp = handle(&store);
 
-    let first = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
-    let second = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let first = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
+    let second = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     assert_eq!(first.code().expose(), second.code().expose());
     assert_eq!(second.wait(), Duration::ZERO);
     Ok(())
@@ -157,11 +160,11 @@ fn forgetting_an_account_clears_the_guard() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let otp = handle(&store);
 
-    let first = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let first = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     otp.submitted(account, first.code());
     otp.forget(account);
 
-    let again = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let again = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     assert_eq!(again.code().expose(), first.code().expose());
     assert_eq!(again.wait(), Duration::ZERO);
     Ok(())
@@ -179,11 +182,11 @@ fn what_one_account_submitted_is_not_held_against_another() -> Result<(), OtpErr
     seed(&store, two, KEY)?;
     let otp = handle(&Arc::new(store));
 
-    let first = otp.mint_blocking_at(one, at(MIDWINDOW), ClockSkew::NONE)?;
+    let first = mint(&otp, one, MIDWINDOW, ClockSkew::NONE)?;
     otp.submitted(one, first.code());
 
-    let moved_on = otp.mint_blocking_at(one, at(MIDWINDOW), ClockSkew::NONE)?;
-    let other = otp.mint_blocking_at(two, at(MIDWINDOW), ClockSkew::NONE)?;
+    let moved_on = mint(&otp, one, MIDWINDOW, ClockSkew::NONE)?;
+    let other = mint(&otp, two, MIDWINDOW, ClockSkew::NONE)?;
 
     assert_ne!(moved_on.code().expose(), first.code().expose());
     assert_eq!(other.code().expose(), first.code().expose());
@@ -201,9 +204,9 @@ fn nothing_the_guard_remembers_reaches_the_store() -> Result<(), OtpError> {
     let seeding = store.calls().len();
 
     let otp = handle(&store);
-    let first = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let first = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     otp.submitted(account, first.code());
-    otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
 
     assert!(
         store.calls()[seeding..]
@@ -214,7 +217,7 @@ fn nothing_the_guard_remembers_reaches_the_store() -> Result<(), OtpError> {
     );
     assert_eq!(store.stored(account, SecretKind::TotpSecret), before);
 
-    let fresh = handle(&store).mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let fresh = mint(&handle(&store), account, MIDWINDOW, ClockSkew::NONE)?;
     assert_eq!(fresh.code().expose(), first.code().expose());
     assert_eq!(fresh.wait(), Duration::ZERO);
     Ok(())
@@ -226,14 +229,14 @@ fn nothing_the_guard_remembers_reaches_the_store() -> Result<(), OtpError> {
 fn a_cloned_handle_shares_what_was_submitted() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let otp = handle(&store);
-    let sent = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let sent = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     otp.clone().submitted(account, sent.code());
 
-    let next = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let next = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     assert_ne!(next.code().expose(), sent.code().expose());
 
     otp.clone().forget(account);
-    let again = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let again = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     assert_eq!(again.code().expose(), sent.code().expose());
     Ok(())
 }
@@ -254,13 +257,13 @@ fn the_timing_follows_the_stored_period() -> Result<(), OtpError> {
     let otp = handle(&store);
 
     // Forty-five seconds into a sixty-second window, which is not a boundary of the usual one.
-    let first = otp.mint_blocking_at(account, at(1_234_567_905), ClockSkew::NONE)?;
+    let first = mint(&otp, account, 1_234_567_905, ClockSkew::NONE)?;
     assert_eq!(first.wait(), Duration::ZERO);
     assert_eq!(first.valid_for(), Duration::from_secs(15));
     assert_eq!(first.code().len(), 8);
 
     otp.submitted(account, first.code());
-    let second = otp.mint_blocking_at(account, at(1_234_567_905), ClockSkew::NONE)?;
+    let second = mint(&otp, account, 1_234_567_905, ClockSkew::NONE)?;
     assert_eq!(second.wait(), Duration::from_secs(15));
     assert_eq!(second.valid_for(), Duration::from_secs(60));
     Ok(())
@@ -276,20 +279,20 @@ fn a_code_with_no_window_left_is_stepped_over() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let otp = handle(&store);
     // The window holding MIDWINDOW closes at 1_234_567_920.
-    let spent = otp.mint_blocking_at(account, at(1_234_567_919), ClockSkew::NONE)?;
+    let spent = mint(&otp, account, 1_234_567_919, ClockSkew::NONE)?;
     assert_eq!(spent.wait(), Duration::from_secs(1));
     assert_eq!(spent.valid_for(), Duration::from_secs(30));
 
     // The code is the one that window really produces, so the hold ends on digits the server takes.
-    let after = otp.mint_blocking_at(account, at(1_234_567_920), ClockSkew::NONE)?;
+    let after = mint(&otp, account, 1_234_567_920, ClockSkew::NONE)?;
     assert_eq!(after.wait(), Duration::ZERO);
     assert_eq!(spent.code().expose(), after.code().expose());
 
     // The floor exactly: three seconds is life enough, two is not.
-    let floor = otp.mint_blocking_at(account, at(1_234_567_917), ClockSkew::NONE)?;
+    let floor = mint(&otp, account, 1_234_567_917, ClockSkew::NONE)?;
     assert_eq!(floor.wait(), Duration::ZERO);
     assert_eq!(floor.valid_for(), Duration::from_secs(3));
-    let under = otp.mint_blocking_at(account, at(1_234_567_918), ClockSkew::NONE)?;
+    let under = mint(&otp, account, 1_234_567_918, ClockSkew::NONE)?;
     assert_eq!(under.wait(), Duration::from_secs(2));
     Ok(())
 }
@@ -308,8 +311,12 @@ fn a_period_under_the_freshness_floor_still_mints_now() -> Result<(), OtpError> 
         &format!("otpauth://totp/x?secret={KEY}&period=2"),
     )?;
 
-    let minted =
-        handle(&Arc::new(store)).mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let minted = mint(
+        &handle(&Arc::new(store)),
+        account,
+        MIDWINDOW,
+        ClockSkew::NONE,
+    )?;
     assert_eq!(minted.wait(), Duration::ZERO);
     assert_eq!(minted.valid_for(), Duration::from_secs(1));
     Ok(())
@@ -324,18 +331,18 @@ fn the_skew_offset_moves_the_window_the_handle_mints_for() -> Result<(), OtpErro
     let (account, store) = seeded()?;
     let otp = handle(&store);
 
-    let shifted = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::from_seconds(30))?;
-    let ahead = otp.mint_blocking_at(account, at(MIDWINDOW + 30), ClockSkew::NONE)?;
+    let shifted = mint(&otp, account, MIDWINDOW, ClockSkew::from_seconds(30))?;
+    let ahead = mint(&otp, account, MIDWINDOW + 30, ClockSkew::NONE)?;
     assert_eq!(shifted.code().expose(), ahead.code().expose());
     assert_eq!(shifted.valid_for(), ahead.valid_for());
 
-    let local = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    let local = mint(&otp, account, MIDWINDOW, ClockSkew::NONE)?;
     assert_ne!(
         shifted.code().expose(),
         local.code().expose(),
         "the offset was dropped on the way to the counter"
     );
-    let behind = otp.mint_blocking_at(account, at(MIDWINDOW), ClockSkew::from_seconds(-30))?;
+    let behind = mint(&otp, account, MIDWINDOW, ClockSkew::from_seconds(-30))?;
     assert_ne!(
         shifted.code().expose(),
         behind.code().expose(),
@@ -350,7 +357,7 @@ fn the_skew_offset_moves_the_window_the_handle_mints_for() -> Result<(), OtpErro
 #[test]
 fn a_store_that_keeps_nothing_reports_no_secret() {
     let otp = Otp::new(Arc::new(Null) as Arc<dyn SecretStore + Send + Sync>);
-    let answer = otp.mint_blocking_at(Uuid::from_u128(9), at(MIDWINDOW), ClockSkew::NONE);
+    let answer = mint(&otp, Uuid::from_u128(9), MIDWINDOW, ClockSkew::NONE);
     assert!(matches!(answer, Err(OtpError::NoSecret)), "{answer:?}");
 }
 
@@ -370,11 +377,8 @@ fn every_way_the_store_can_refuse_is_carried_through() {
     ];
     for (state, name) in states {
         let store = Arc::new(MemoryStore::new().in_state(state));
-        let answer = Otp::new(store as Arc<dyn SecretStore + Send + Sync>).mint_blocking_at(
-            account,
-            at(MIDWINDOW),
-            ClockSkew::NONE,
-        );
+        let otp = Otp::new(store as Arc<dyn SecretStore + Send + Sync>);
+        let answer = mint(&otp, account, MIDWINDOW, ClockSkew::NONE);
         assert!(
             matches!(answer, Err(OtpError::Secrets(_))),
             "{name}: {answer:?}"
@@ -387,11 +391,8 @@ fn every_way_the_store_can_refuse_is_carried_through() {
                 step: "reach the secret store",
             }),
         );
-    let answer = Otp::new(failing as Arc<dyn SecretStore + Send + Sync>).mint_blocking_at(
-        account,
-        at(MIDWINDOW),
-        ClockSkew::NONE,
-    );
+    let otp = Otp::new(failing as Arc<dyn SecretStore + Send + Sync>);
+    let answer = mint(&otp, account, MIDWINDOW, ClockSkew::NONE);
     assert!(
         matches!(
             answer,
@@ -410,7 +411,7 @@ fn only_the_one_kind_is_read() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let before = store.calls().len();
 
-    handle(&store).mint_blocking_at(account, at(MIDWINDOW), ClockSkew::NONE)?;
+    mint(&handle(&store), account, MIDWINDOW, ClockSkew::NONE)?;
 
     assert_eq!(
         store.calls()[before..].to_vec(),
@@ -475,26 +476,27 @@ proptest! {
     }
 }
 
-/// The async wrapper runs the same read off the runtime's workers and answers like the blocking call
-/// reading the same clock. The blocking call is the contract; this is the one a caller on a runtime
-/// uses.
+/// The async wrapper runs the same read off the runtime's workers and hands back something that
+/// derives like what the blocking call hands back. The blocking call is the contract; this is the one
+/// a caller on a runtime uses, because the credential client cannot be driven from a worker thread.
 #[tokio::test]
-async fn the_async_mint_answers_like_the_blocking_one() -> Result<(), OtpError> {
+async fn the_async_read_answers_like_the_blocking_one() -> Result<(), OtpError> {
     let (account, store) = seeded()?;
     let otp = handle(&store);
 
-    let spawned = otp.mint(account, ClockSkew::NONE).await?;
-    let direct = otp.mint_blocking(account, ClockSkew::NONE)?;
-    assert_eq!(direct.code().len(), spawned.code().len());
-    // Both read the clock themselves, so they agree unless a window turned over between them, in
-    // which case the second one is the later window's and neither has waited for anything.
-    assert!(
-        direct.code().expose() == spawned.code().expose()
-            || direct.valid_for() > spawned.valid_for(),
-        "the two calls disagreed about more than the window"
-    );
+    let spawned = otp
+        .prepare(account)
+        .await?
+        .mint_at(at(MIDWINDOW), ClockSkew::NONE)?;
+    let direct = otp
+        .prepare_blocking(account)?
+        .mint_at(at(MIDWINDOW), ClockSkew::NONE)?;
+    // The same instant through both routes, so the two agree exactly: what differs between them is
+    // which thread read the store, and that is not an input to the code.
+    assert_eq!(direct.code().expose(), spawned.code().expose());
+    assert_eq!(direct.valid_for(), spawned.valid_for());
 
-    let missing = otp.mint(Uuid::from_u128(2), ClockSkew::NONE).await;
+    let missing = otp.prepare(Uuid::from_u128(2)).await;
     assert!(matches!(missing, Err(OtpError::NoSecret)), "{missing:?}");
     Ok(())
 }
@@ -540,15 +542,17 @@ fn window_with_room(least: u64) -> Result<u64, OtpError> {
     }
 }
 
-/// The instant a code is derived from is read after the store has answered, not before the call.
+/// The instant a code is derived from is read when the code is asked for, not when the store was.
 ///
-/// That read is the one that raises the unlock prompt, and a prompt lasts as long as the user takes
-/// to notice it. Anchored to the instant the call started, a mint hands back the code for a window
-/// that closed while the dialog was on screen and reports a lifetime it no longer has. Measured on
-/// the lifetime rather than on the digits: two windows' codes are equal once in a million, and an
-/// assertion that codes differ is a rare false failure waiting to happen.
+/// The store read is the one that raises the unlock prompt, and a prompt lasts as long as the user
+/// takes to notice it. A profile that pinned an instant while it was being read hands back the code
+/// for a window that closed with the dialog still on screen, and reports a lifetime it no longer has.
+/// Splitting the read from the derivation is what makes that unrepresentable; this measures that the
+/// split is real rather than two names for one call. Measured on the lifetime rather than on the
+/// digits: two windows' codes are equal once in a million, and an assertion that codes differ is a
+/// rare false failure waiting to happen.
 #[test]
-fn the_clock_is_read_once_the_key_is_in_hand() -> Result<(), OtpError> {
+fn the_clock_is_read_when_the_code_is_asked_for() -> Result<(), OtpError> {
     const DELAY: u64 = 2;
     let account = Uuid::from_u128(0x5104);
     let inner = MemoryStore::new();
@@ -562,7 +566,7 @@ fn the_clock_is_read_once_the_key_is_in_hand() -> Result<(), OtpError> {
     // Enough window left that the slow read cannot cross a boundary or land inside the freshness
     // floor, so the lifetime below can only be measuring when the clock was read.
     let left = window_with_room(DELAY + 5)?;
-    let minted = otp.mint_blocking(account, ClockSkew::NONE)?;
+    let minted = otp.prepare_blocking(account)?.mint(ClockSkew::NONE)?;
 
     assert_eq!(minted.wait(), Duration::ZERO);
     assert!(
@@ -571,5 +575,22 @@ fn the_clock_is_read_once_the_key_is_in_hand() -> Result<(), OtpError> {
          {}s reported after a {DELAY}s read",
         minted.valid_for().as_secs()
     );
+    Ok(())
+}
+
+/// One read serves every code derived from it. A login reads the store once and then derives against
+/// whatever clock it settles on, so a second derivation must not go back to the store: that is the
+/// call that prompts, and prompting twice for one login is the thing the split exists to prevent.
+#[test]
+fn one_read_serves_every_derivation() -> Result<(), OtpError> {
+    let (account, store) = seeded()?;
+    let prepared = handle(&store).prepare_blocking(account)?;
+    let reads = store.calls().len();
+
+    let local = prepared.mint_at(at(MIDWINDOW), ClockSkew::NONE)?;
+    let corrected = prepared.mint_at(at(MIDWINDOW), ClockSkew::from_seconds(30))?;
+
+    assert_eq!(store.calls().len(), reads, "{:?}", store.calls());
+    assert_ne!(local.code().expose(), corrected.code().expose());
     Ok(())
 }

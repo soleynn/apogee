@@ -7,8 +7,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use apogee_otp::{ClockSkew, Code, Otp, OtpError, OtpSource};
+use apogee_otp::{ClockSkew, Code, Minted, Otp, OtpError, OtpSource};
 use apogee_patcher::{InstallRequest, Repo, SePatch};
 use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
 use apogee_secrets::Secret;
@@ -24,7 +25,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::addons::AddonBackend;
-use crate::command::{Command, Event, FlowState, PrefixAction};
+use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
@@ -310,35 +311,39 @@ async fn authenticate(
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<Option<Authenticated>, CoreError> {
-    // A generated code is owned for the rest of the call, so `Credentials::otp` can borrow it across
-    // the submit await exactly as it borrows a typed one. Minting here, before any request, keeps
-    // the reuse guard's wait outside the login server's own window; the correction against server
-    // time arrives when the top page's `Date` is plumbed through.
-    let minted: Option<Code> = if account.use_otp && matches!(otp, OtpSource::Totp) {
-        match mint_totp(ctx, account.id, tx, cancel).await? {
-            Some(code) => Some(code),
-            // A disposition the mint has already narrated: nothing stored to derive a code from, or
-            // a run stopped while it held for the next window. Neither is a failure.
-            None => return Ok(None),
+    // The secret is read before any request, because that read is the one that raises the platform's
+    // unlock prompt and a prompt lasts as long as the user takes to notice it. The code itself cannot
+    // be derived yet: which thirty-second window to sign for is decided by the login server's clock,
+    // and that arrives with the top page below. So the read happens here and the derivation happens
+    // there, with nothing in between that can sit on a human.
+    let prepared = if account.use_otp && matches!(otp, OtpSource::Totp) {
+        match ctx.otp.prepare(account.id).await {
+            Ok(prepared) => Some(prepared),
+            // Nothing stored to derive from. The answer is to type a code or to import a secret,
+            // neither of which the login server has anything to do with, so it is not asked.
+            Err(OtpError::NoSecret) => {
+                emit(tx, FlowState::NeedsOtp);
+                return Ok(None);
+            }
+            Err(err) => return Err(err.into()),
         }
     } else {
         None
     };
 
-    // The one-time password: either the code just generated or the one that was typed. Borrowed out
-    // of whichever holds it rather than copied out, so the erased buffer is the only one this
-    // process holds.
-    let otp_code = match (account.use_otp, &otp, &minted) {
-        (false, _, _) => None,
-        (true, _, Some(code)) => Some(code.expose()),
-        (true, OtpSource::Manual(code), _) if !code.is_empty() => {
+    // The typed code, when that is where this login's comes from. Borrowed out of what holds it
+    // rather than copied out, so the erased buffer is the only one this process holds.
+    let typed = match &otp {
+        OtpSource::Manual(code) if account.use_otp && !code.is_empty() => {
             Some(std::str::from_utf8(code.expose()).map_err(|_| CoreError::InvalidCredential)?)
         }
-        (true, _, _) => {
-            emit(tx, FlowState::NeedsOtp);
-            return Ok(None);
-        }
+        _ => None,
     };
+    // An account that owes a code and has no way to produce one is answered before anything is sent.
+    if account.use_otp && prepared.is_none() && typed.is_none() {
+        emit(tx, FlowState::NeedsOtp);
+        return Ok(None);
+    }
     let password =
         std::str::from_utf8(password.expose()).map_err(|_| CoreError::InvalidCredential)?;
 
@@ -362,6 +367,32 @@ async fn authenticate(
         login_kind(ctx, account).await?,
     )
     .await?;
+    // Read first thing, so what the offset measures is the moment the page landed rather than the
+    // moment the code got around to being derived.
+    let arrived = SystemTime::now();
+
+    // A generated code is owned for the rest of the call, so `Credentials::otp` can borrow it across
+    // the submit await exactly as it borrows a typed one.
+    let minted: Option<Code> = match prepared {
+        Some(prepared) => {
+            let skew = server_skew(&flow, arrived, tx);
+            let minted = prepared.mint(skew)?;
+            // The key has done its work, and what follows can sit on a wall-clock wait of most of two
+            // minutes. Erased here rather than at the end of the arm, so nothing holds it across one.
+            drop(prepared);
+            match hold_for(minted, tx, cancel).await {
+                // A run stopped while it held for the next window, which the hold has narrated.
+                None => return Ok(None),
+                code => code,
+            }
+        }
+        None => None,
+    };
+    let otp_code = match &minted {
+        Some(code) => Some(code.expose()),
+        None => typed,
+    };
+
     let submitted = flow
         .submit(Credentials {
             sqexid: &account.sqex_id,
@@ -386,51 +417,90 @@ async fn authenticate(
     Ok(Some(auth))
 }
 
-/// Derive this account's code, holding out whatever wait the mint asks for.
+/// The correction this login's code is derived against, measured from the page that has just
+/// answered.
 ///
-/// `None` is a disposition this narrates itself: either nothing is stored to derive a code from (the
-/// answer is to type one or to import a secret) or the run was stopped while it held. The wait is
-/// the library's answer rather than its own sleep, because only this side holds the runtime, the
-/// event channel and the token; it is bounded by the windows the mint will step over.
-async fn mint_totp(
-    ctx: &FlowContext,
-    account: Uuid,
+/// [`ClockSkew::NONE`] whenever the reading is not there to be had: no `Date` header, a transport
+/// that did not surface it, or a stamp in a form the protocol crate does not read. All three answer
+/// the same way, which is the way this behaved before there was anything to correct against, so an
+/// unreadable stamp costs the correction and never the login.
+///
+/// A drift worth mentioning is mentioned once, here, rather than where it is applied: the code that
+/// goes on the wire is right either way, and what the user can act on is the clock.
+///
+/// The reading is taken at face value, with no bound on how far it may move the window. That is a
+/// decision and not an oversight: the correction exists because this host's clock can be arbitrarily
+/// wrong, so any bound narrow enough to catch a bad reading also refuses the days-out drift the whole
+/// thing is for. It means whoever answers the top page chooses which window this login's code is
+/// derived for, which is only reachable by terminating the TLS to the login server, and anyone there
+/// is already reading the password out of the submit that follows. What it costs is that a code
+/// intercepted there stops being a thing usable for thirty seconds and becomes one usable at a moment
+/// that party picked.
+fn server_skew(
+    flow: &sqex_proto::LoginFlow<'_>,
+    arrived: SystemTime,
+    tx: &UnboundedSender<Event>,
+) -> ClockSkew {
+    // A stamp naming an instant before the epoch is a broken header rather than a clock: no code is
+    // defined for it, so correcting against it would fail a login that was about to work. It is
+    // discarded with the unreadable ones, which is the rule that keeps a bad stamp from costing more
+    // than the correction.
+    let Some(server) = flow
+        .server_time()
+        .filter(|at| *at >= SystemTime::UNIX_EPOCH)
+    else {
+        tracing::debug!("the login page carried no usable clock; using this host's");
+        return ClockSkew::NONE;
+    };
+    let skew = ClockSkew::between(server, arrived);
+    if skew.is_advisory() {
+        tracing::warn!(
+            seconds = skew.seconds(),
+            "this host's clock disagrees with the login server's"
+        );
+        let _ = tx.send(Event::Notice(Notice::ClockSkew {
+            seconds: skew.seconds(),
+        }));
+    }
+    skew
+}
+
+/// Hold out whatever wait the mint asked for, then hand the code over. `None` is a run stopped while
+/// it held, which this narrates.
+///
+/// The wait is the library's answer rather than its own sleep, because only this side holds the
+/// runtime, the event channel and the token; it is bounded by the windows the mint steps over.
+///
+/// It is spent with the login page already fetched, which is the price of deriving against the
+/// server's clock: the page cannot say what time it is until it has been asked for. The page is an
+/// HTML form a person fills in by hand, so what it carries outlives a wait bounded by four
+/// thirty-second windows by a wide margin, and the common wait is the three seconds a code needs to
+/// survive the submit.
+async fn hold_for(
+    minted: Minted,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
-) -> Result<Option<Code>, CoreError> {
-    // No correction yet: server time is not in hand until the OAuth top page has answered, which is
-    // past the point a code has to exist. The instant the code is derived from is read inside the
-    // mint, after the store has answered, because that read can sit on an unlock prompt for as long
-    // as the user takes to notice it.
-    match ctx.otp.mint(account, ClockSkew::NONE).await {
-        Ok(minted) => {
-            let wait = minted.wait();
-            if !wait.is_zero() {
-                emit(
-                    tx,
-                    FlowState::WaitingForOtpWindow {
-                        seconds: wait.as_secs(),
-                    },
-                );
-                // The only wall-clock wait in a login, and the one moment a shell tells a user to
-                // sit still, so it is the moment cancel gets pressed. A sleep that ignored the token
-                // would go on to log in and cache a session for a run that was stopped.
-                tokio::select! {
-                    () = tokio::time::sleep(wait) => {}
-                    () = cancel.cancelled() => {
-                        emit(tx, FlowState::Cancelled);
-                        return Ok(None);
-                    }
-                }
+) -> Option<Code> {
+    let wait = minted.wait();
+    if !wait.is_zero() {
+        emit(
+            tx,
+            FlowState::WaitingForOtpWindow {
+                seconds: wait.as_secs(),
+            },
+        );
+        // The only wall-clock wait in a login, and the one moment a shell tells a user to sit still,
+        // so it is the moment cancel gets pressed. A sleep that ignored the token would go on to log
+        // in and cache a session for a run that was stopped.
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = cancel.cancelled() => {
+                emit(tx, FlowState::Cancelled);
+                return None;
             }
-            Ok(Some(minted.into_code()))
         }
-        Err(OtpError::NoSecret) => {
-            emit(tx, FlowState::NeedsOtp);
-            Ok(None)
-        }
-        Err(err) => Err(err.into()),
     }
+    Some(minted.into_code())
 }
 
 /// Which login variant an account logs in with, minting a Steam ticket when it needs one.
