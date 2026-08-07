@@ -56,6 +56,38 @@ fn scrape_stored_caps_a_runaway_value() {
     ));
 }
 
+#[test]
+fn scrape_stored_rejects_an_empty_value() {
+    // An empty blob is not a session. Accepting one submits a blank `_STORED_` and turns the real
+    // diagnosis, a top page that no longer has the shape this scanner reads, into a vaguer failure one
+    // request later.
+    let html = r#"<input type="hidden" name="_STORED_" value="">"#;
+    assert!(matches!(
+        scrape_stored(html),
+        Err(ProtoError::StoredNotFound { .. })
+    ));
+}
+
+#[test]
+fn scrape_stored_does_not_read_a_neighbouring_element() {
+    // Nothing in HTML fixes attribute order, so a page emitting `value=` before `name=` walks the
+    // window out of the `_STORED_` tag and into the next element, whose value belongs to a different
+    // input. Here that neighbour holds a value, so only the tag-boundary check refuses it.
+    let html =
+        r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="someone">"#;
+    assert!(matches!(
+        scrape_stored(html),
+        Err(ProtoError::StoredNotFound { .. })
+    ));
+    // The reported shape: on a real top page that neighbour is the empty visible sqexid input.
+    let empty_neighbour =
+        r#"<input value="REALSTOREDBLOB" name="_STORED_"><input name="sqexid" value="">"#;
+    assert!(matches!(
+        scrape_stored(empty_neighbour),
+        Err(ProtoError::StoredNotFound { .. })
+    ));
+}
+
 /// The visible login form's own username input, present on every top page including a Steam one.
 const VISIBLE_INPUT: &str =
     r#"<input class="item-input" name="sqexid" id="sqexid" type="text" value="" tabindex="1">"#;

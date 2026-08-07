@@ -67,13 +67,17 @@ pub(crate) enum CallbackReject {
 /// Lift the `_STORED_` blob out of the login top page.
 ///
 /// Anchors on `name="_STORED_"`, then reads the `value="..."` that follows within a bounded window,
-/// capturing up to the closing quote under a hard length cap. Any miss is a [`ProtoError::StoredNotFound`]
-/// carrying a length-capped page excerpt (the top page carries no submitted credentials). The returned
-/// slice borrows `html`.
+/// capturing up to the closing quote under a hard length cap. An empty capture is a miss, as it is for
+/// [`scrape_steam_id`]: a blank blob is not a session, and carrying one into the submit would defer the
+/// real diagnosis (a page that no longer has the shape this scanner reads) to a later, vaguer failure.
+/// Any miss is a [`ProtoError::StoredNotFound`] carrying a length-capped page excerpt (the top page
+/// carries no submitted credentials). The returned slice borrows `html`.
 pub fn scrape_stored(html: &str) -> Result<&str, ProtoError> {
-    attribute_value(html, STORED_ANCHOR, MAX_STORED).ok_or_else(|| ProtoError::StoredNotFound {
-        excerpt: excerpt(html.as_bytes()),
-    })
+    attribute_value(html, STORED_ANCHOR, MAX_STORED)
+        .filter(|stored| !stored.is_empty())
+        .ok_or_else(|| ProtoError::StoredNotFound {
+            excerpt: excerpt(html.as_bytes()),
+        })
 }
 
 /// Lift the SE account id the Steam ticket is linked to out of the login top page.
@@ -88,6 +92,11 @@ pub(crate) fn scrape_steam_id(html: &str) -> Option<&str> {
 
 /// The `value="…"` following `anchor` within a bounded window, capped at `max` bytes.
 ///
+/// The window is also scoped to the anchor's own element: a `<` or `>` before `value="` means the scan
+/// has walked out of that tag, and the next element's value describes a different input. Nothing in
+/// HTML fixes attribute order, so a page that emits `value=` ahead of `name=` reads as a miss rather
+/// than as its neighbour's value, which on a real top page is the empty visible sqexid input.
+///
 /// `find` returns an ASCII boundary and every delimiter here is ASCII, so no slice can split a
 /// multi-byte character. A closing quote past the cap reads as absent rather than truncating, so a
 /// page with no closing quote cannot hand back a runaway capture.
@@ -96,6 +105,9 @@ fn attribute_value<'h>(html: &'h str, anchor: &str, max: usize) -> Option<&'h st
     let after = &html[at + anchor.len()..];
 
     let open = after.find(VALUE_OPEN).filter(|&p| p <= ATTR_WINDOW)?;
+    if after[..open].contains(['<', '>']) {
+        return None;
+    }
     let value = &after[open + VALUE_OPEN.len()..];
 
     let end = value.find('"').filter(|&e| e <= max)?;
