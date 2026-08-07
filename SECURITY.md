@@ -37,3 +37,24 @@ worker.
 Out of scope: Square Enix's own services and endpoints; Wine, Proton, and the game client; and issues
 that require an already-compromised machine or physical access. Reports about third-party dependencies
 are welcome, though upstream is usually the right place to fix them.
+
+## TLS trust anchors
+
+The client that carries account credentials validates Square Enix's certificates against the four roots
+those endpoints issue from (DigiCert Global Root G2 and G3, GTS Root R1 and R4) rather than against
+every root the machine trusts. A TLS-intercepting proxy or a root installed by malware is therefore
+refused, where by default either would be accepted and could read the account password out of the login
+submit.
+
+Certificates and intermediates are deliberately not pinned. The login host reissues on a two-to-four
+week cycle with a fresh key each time, so a pin on either would break logins on a day nothing shipped.
+
+If this blocks you, `APOGEE_TLS_SYSTEM_ROOTS=1` puts that run back on the machine's own trust store:
+
+```sh
+APOGEE_TLS_SYSTEM_ROOTS=1 apogee-cli login
+```
+
+Needing it means either the network is intercepting TLS or Square Enix has moved to an authority this
+build does not carry. The second is worth reporting, and is an ordinary issue rather than a private
+advisory.
