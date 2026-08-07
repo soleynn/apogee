@@ -14,6 +14,7 @@ is tagged with its change type. Versioning aims to follow
 - Generate one-time codes against the login server's clock (#123) _(added)_
 - Validate Square Enix TLS against the roots it issues from (#124) _(added)_
 - Derive the computer-id from the install, not the host (#129) _(fixed)_
+- Stop the install-id store swallowing I/O errors, memoize the ephemeral fallback (#139) _(fixed)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
