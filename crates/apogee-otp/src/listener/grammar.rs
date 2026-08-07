@@ -119,9 +119,12 @@ pub(crate) fn parse_request_line(line: &[u8]) -> Result<Digits, Refusal> {
     let Some(rest) = line.strip_prefix(b"GET ") else {
         return Err(Refusal::Method);
     };
-    // The target ends at the first space, not the last. The reference's pattern is greedy, so
-    // `GET /ffxivlauncher/123456 HTTP nonsense HTTP/1.1` hands it everything up to the final marker
-    // and it submits the lot as a code; ours refuses that on length.
+    // The target ends at the first space, not the last, and the difference is visible on
+    // `GET /ffxivlauncher/123456 HTTP nonsense HTTP/1.1`. The reference's pattern is greedy, so it
+    // captures `/ffxivlauncher/123456 HTTP nonsense` and submits all of that as the code; stopping at
+    // the first space takes the six digits the sender actually put in the path. Capturing greedily
+    // here would instead refuse the line on length, which is a third answer again. This is the one
+    // shape where what we hand the login server and what the reference hands it differ.
     let Some(end) = rest.iter().position(|byte| *byte == b' ') else {
         return Err(Refusal::Version);
     };

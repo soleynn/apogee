@@ -276,9 +276,13 @@ impl Listener {
     /// Wait up to `deadline` for a well-formed code, then close.
     ///
     /// Consumes the listener, so the port is gone by the time this returns on every path there is,
-    /// including the error paths, and a caller cannot hold it open by forgetting to drop it.
-    /// A code that arrives afterwards is refused by the operating system, which is honest: answering
-    /// success for a code that will not be used would make the phone report a login that then fails.
+    /// including the error paths, and a caller cannot hold it open by forgetting to drop it. A code
+    /// that arrives after that is refused by the operating system rather than answered.
+    ///
+    /// One window is not covered by that, and it is worth naming: a second connection that had
+    /// already read a valid line before the first one won still writes its own success answer during
+    /// the grace below, and its code goes nowhere. It lasts a few hundred milliseconds at most, the
+    /// reference does no better, and closing it would mean tracking which handler won.
     ///
     /// The first well-formed code wins, including a hostile one, and the port closes before the
     /// response to it is written. A peer that beats the phone makes this login fail with a rejected
@@ -300,7 +304,13 @@ impl Listener {
     /// retried: one bad accept may not end a wait a phone can still rescue.
     pub async fn wait_for_code(self, deadline: Duration) -> Result<Received, OtpError> {
         let Self { socket, allow, .. } = self;
-        let until = Instant::now() + deadline;
+        // Checked, because adding a duration to an instant panics on overflow and `deadline` arrives
+        // from a settings file. A value that cannot be added to the clock is one no wait will ever
+        // reach, so it becomes the longest one that can be expressed rather than an abort: this crate
+        // denies panics everywhere the lint can see them, and this is one it cannot.
+        let until = Instant::now()
+            .checked_add(deadline)
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(60 * 60 * 24));
         let idle = tokio::time::sleep_until(until);
         tokio::pin!(idle);
 

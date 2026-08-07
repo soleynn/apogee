@@ -40,20 +40,30 @@ pub(crate) const TRACKED: usize = 64;
 /// routing prefix holds a /64's worth of legitimate addresses, so keying on the full address is the
 /// same bug as keying on nothing. The allowlist still compares full addresses, because a pinned phone
 /// is a specific device rather than a network.
+/// The family travels beside the bytes, and it is not decoration. Both arms write into the leading
+/// window of one zeroed array, so without it an IPv4 address and the /64 whose prefix spells the same
+/// four octets share a row: five charges from anywhere in `c0a8:105::/64` would leave `192.168.1.5`
+/// reading as spent, and its next connection would be answered without being read. That is the one
+/// way a source could get *less* than its budget, which is the direction that costs a login.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SourceKey([u8; 16]);
+pub(crate) struct SourceKey([u8; 16], bool);
 
 impl SourceKey {
     /// The key `peer` is accounted under. `peer` is already canonical.
     pub(crate) fn of(peer: IpAddr) -> Self {
         let mut key = [0u8; 16];
         match peer {
-            IpAddr::V4(v4) => key[..4].copy_from_slice(&v4.octets()),
+            IpAddr::V4(v4) => {
+                key[..4].copy_from_slice(&v4.octets());
+                Self(key, false)
+            }
             // The prefix only. The remaining eight bytes stay zero, which is what folds a whole
             // interface identifier range onto one row.
-            IpAddr::V6(v6) => key[..8].copy_from_slice(&v6.octets()[..8]),
+            IpAddr::V6(v6) => {
+                key[..8].copy_from_slice(&v6.octets()[..8]);
+                Self(key, true)
+            }
         }
-        Self(key)
     }
 }
 

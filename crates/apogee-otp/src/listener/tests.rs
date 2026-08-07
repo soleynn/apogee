@@ -139,6 +139,9 @@ fn leading_zeros_survive_the_grammar() {
 #[case::nothing_after_space(b"GET /ffxivlauncher/123456 ".as_slice(), false)]
 #[case::wrong_token(b"GET /ffxivlauncher/123456 X".as_slice(), false)]
 #[case::short_token(b"GET /ffxivlauncher/123456 HTT".as_slice(), false)]
+// The shape the first-space rule exists for, and where our answer and the reference's differ: it
+// captures greedily to the last marker and submits `123456 HTTP nonsense` as the code.
+#[case::second_http_token(b"GET /ffxivlauncher/123456 HTTP nonsense HTTP/1.1".as_slice(), true)]
 fn the_version_token_is_the_reference_rule(#[case] offered: &[u8], #[case] accepted: bool) {
     match parsed(offered) {
         Ok(digits) => {
@@ -381,6 +384,41 @@ fn an_ipv6_source_is_accounted_on_its_prefix() {
     }
     assert!(limiter.spent(same_prefix, now));
     assert!(!limiter.spent(other_prefix, now));
+}
+
+/// An address family is part of the key.
+///
+/// Both arms write into the leading window of one zeroed array, so without a discriminator an IPv4
+/// address and the /64 whose prefix spells the same four octets share a row. The consequence runs the
+/// wrong way for once: a source would get *less* than its budget, and its next code would be answered
+/// without being read. The test above cannot see this, because it only ever compares IPv6 to IPv6.
+#[test]
+fn an_address_family_is_part_of_the_key() {
+    let now = Instant::now();
+    let mut limiter = Limiter::new();
+    let v4 = SourceKey::of(v4(192, 168, 1, 5));
+    // `c0a8:0105::/64` is 192.168.1.5 in the leading four octets.
+    let v6 = SourceKey::of(IpAddr::V6(Ipv6Addr::new(0xc0a8, 0x0105, 0, 0, 0, 0, 0, 1)));
+
+    assert_ne!(v4, v6);
+    for _ in 0..ATTEMPTS {
+        limiter.charge(v6, now);
+    }
+    assert!(limiter.spent(v6, now));
+    assert!(
+        !limiter.spent(v4, now),
+        "an IPv6 prefix spent an IPv4 address's budget"
+    );
+}
+
+/// The budget is measured on a monotonic clock.
+///
+/// Type-level, and that is the whole of it: a wall clock here would let a user correcting their
+/// machine's time grant or revoke budget, on a project that already knows its clocks drift.
+#[test]
+fn the_limiter_reads_a_monotonic_clock() {
+    const fn monotonic(_: fn(&Limiter, SourceKey, Instant) -> bool) {}
+    monotonic(Limiter::spent);
 }
 
 // --- the filter --------------------------------------------------------------------------------
