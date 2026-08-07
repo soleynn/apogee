@@ -14,7 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqex_crypto::TickCount;
 use sqex_proto::{ComputerId, LauncherTime};
-use uuid::Uuid;
 
 use crate::error::CoreError;
 use crate::store::Store;
@@ -44,12 +43,16 @@ pub fn system_clock() -> Clock {
 /// signal of its own; a single random id minted per install and kept satisfies both halves.
 ///
 /// A store that cannot be read or written falls back to a value good for this run alone, which costs
-/// stability rather than privacy.
+/// stability rather than privacy. That fallback is [`Store::ephemeral_install_id`], memoized on the
+/// store itself, so this function's own repeated calls agree even though it mints fresh randomness
+/// and touches disk on every invocation otherwise: the memoization is what keeps `pub` safe against a
+/// second call site being added later, since without it a mid-session id change is exactly the
+/// anomalous-fingerprint risk this module exists to eliminate.
 #[must_use]
 pub fn computer_id(store: &Store) -> ComputerId {
     let install = store.install_id().unwrap_or_else(|err| {
         tracing::warn!(%err, "no install id could be stored; using a value for this run only");
-        Uuid::new_v4()
+        store.ephemeral_install_id()
     });
     // The install id is the whole input. The remaining facts are fixed rather than read from the
     // host, so there is no channel for one to reach the digest.
@@ -126,6 +129,8 @@ fn launcher_time_from_epoch(secs: u64, millis: u64) -> LauncherTime {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -177,6 +182,26 @@ mod tests {
         let (_one, one) = store();
         let (_two, two) = store();
         assert_ne!(computer_id(&one), computer_id(&two));
+    }
+
+    /// `computer_id` is `pub`, reads like a pure function, and today has exactly one call site
+    /// keeping it safe; a second one must not be able to observe the id changing mid-process. Proven
+    /// on the one path where nothing is durably persisted to agree on: an unwritable store, where
+    /// each call would otherwise mint its own fresh randomness.
+    #[cfg(unix)]
+    #[test]
+    fn computer_id_is_stable_within_a_process_on_the_ephemeral_fallback_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+
+        let first = computer_id(&store);
+        let second = computer_id(&store);
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(first, second);
     }
 
     /// The shape the launcher user agent embeds: five bytes rendered as ten lowercase hex
