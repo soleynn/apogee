@@ -37,6 +37,14 @@ const MAX_STEAM_ID: usize = 128;
 const CALLBACK_OPEN: &str = "window.external.user(\"login=auth,";
 /// The Steam relink callback (`restartup`). A standard login never triggers it.
 const RESTARTUP_MARKER: &str = "window.external.user(\"restartup\")";
+/// The most bytes read between [`CALLBACK_OPEN`] and the closing quote, bounding both branches the
+/// content splits into: the `launchParams` list ([`parse_launch_params`] copies `sid` out of it verbatim
+/// into [`LaunchParams::session_id`], which later rides into an error's secret-scrub list) and the
+/// failure message capped separately by [`MAX_MESSAGE`]. A real callback runs under 150 bytes; this
+/// leaves generous headroom while still refusing a closing quote placed arbitrarily far into an
+/// oversized response, the same way a runaway [`attribute_value`] capture is treated as absent rather
+/// than accepted whole.
+const MAX_CALLBACK: usize = 1024;
 /// The most characters kept from a failure message, bounding the capture on hostile input.
 const MAX_MESSAGE: usize = 512;
 
@@ -123,7 +131,8 @@ pub(crate) fn is_restartup(html: &str) -> bool {
 
 /// Peel the `login=auth,{status},...` callback out of a `login.send` body. A `login=auth,ok,` payload
 /// is parsed as launch params; a `login=auth,ng,{type},{message}` payload yields the failure message;
-/// no callback at all yields [`CallbackReject::NotAuthOk`] with no message.
+/// no callback at all, or one whose content runs past [`MAX_CALLBACK`], yields
+/// [`CallbackReject::NotAuthOk`] with no message.
 pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackReject> {
     let start = body
         .find(CALLBACK_OPEN)
@@ -131,6 +140,7 @@ pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackR
     let rest = &body[start + CALLBACK_OPEN.len()..];
     let end = rest
         .find('"')
+        .filter(|&e| e <= MAX_CALLBACK)
         .ok_or(CallbackReject::NotAuthOk { message: None })?;
     let content = &rest[..end];
 
