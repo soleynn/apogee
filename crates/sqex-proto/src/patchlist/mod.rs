@@ -157,10 +157,19 @@ fn normalize_newlines(body: &str) -> String {
 }
 
 fn parse_entry(line: &str, line_no: u32) -> Result<PatchListEntry, ProtoError> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    match fields.len() {
-        GAME_FIELDS => parse_game_entry(&fields, line_no),
-        BOOT_FIELDS => parse_boot_entry(&fields, line_no),
+    // Counted before collecting, the same technique `parse_patch_list` uses one level up for the line
+    // count: a `Vec<&str>` over a line's fields costs 16 bytes per field, so a single line within the
+    // overall body cap could still amplify by itself if collected before its count is checked.
+    let field_count = line.matches('\t').count() + 1;
+    match field_count {
+        GAME_FIELDS | BOOT_FIELDS => {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if field_count == GAME_FIELDS {
+                parse_game_entry(&fields, line_no)
+            } else {
+                parse_boot_entry(&fields, line_no)
+            }
+        }
         n if n < BOOT_FIELDS => Err(parse_error(line_no, "too few tab-separated fields")),
         _ => Err(parse_error(line_no, "unexpected tab-separated field count")),
     }
@@ -201,7 +210,7 @@ fn parse_length(field: &str, line_no: u32) -> Result<u64, ProtoError> {
         .map_err(|_| parse_error(line_no, "invalid patch length"))
 }
 
-/// Check that a URL field is an absolute HTTP(S) URL, and return it unchanged.
+/// Check that a URL field is an absolute HTTP(S) URL, and return `Url::parse`'s normalized form.
 ///
 /// Only well-formedness is checked here, not the `/(game|boot)/{repoId}/` rule that resolves a URL
 /// to its repo. That rule stays with the consumer on purpose: resolving a repo means deciding what an
@@ -215,10 +224,13 @@ fn parse_length(field: &str, line_no: u32) -> Result<u64, ProtoError> {
 /// fetched, `apogee-patcher` already `Url::parse`s it before doing so, and failing on the line that
 /// carried it reports a line number instead of a bare parse error several layers later. It is kept
 /// as a `String` rather than a `Url` so the entry stays cheap to clone and the consumer owns the
-/// parse it actually needs.
+/// parse it actually needs. The stored string is `url.to_string()`, the parsed and normalized form,
+/// not the raw field: `Url::parse` can trim surrounding whitespace or rewrite a minor malformation
+/// (e.g. filling in an absent `//` authority separator), so storing the raw field would let a byte
+/// sequence reach the consumer that was never actually what got validated.
 fn parse_url(field: &str, line_no: u32) -> Result<String, ProtoError> {
     match Url::parse(field) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(field.to_string()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(url.to_string()),
         _ => Err(parse_error(line_no, "malformed patch URL")),
     }
 }

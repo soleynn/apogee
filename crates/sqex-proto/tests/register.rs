@@ -318,6 +318,46 @@ fn a_whitespace_body_with_uid_is_not_treated_as_current() {
     assert!(matches!(err, ProtoError::PatchListParse { .. }));
 }
 
+/// U+FEFF is not whitespace to `char::is_whitespace`, so a BOM-stamped empty body has to be stripped
+/// rather than trimmed, the same fix `check_boot_version` already applies (`bootver.rs`). Left
+/// unstripped it falls through to the parser and reports "patchlist too short" instead of registering
+/// with no pending patches.
+#[test]
+fn a_bom_only_body_with_uid_is_registered_with_no_patches() {
+    let (_transport, outcome) = login_then_register(uid_response(b"\xef\xbb\xbf".to_vec()));
+    match outcome.expect("registration") {
+        Registration::Registered {
+            pending_patches, ..
+        } => assert!(pending_patches.is_empty()),
+        other => panic!("expected Registered, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_bom_and_whitespace_body_with_uid_still_fails_loudly() {
+    // Unlike the boot check (which treats BOM-plus-whitespace as current too), registration's gate is
+    // exact-empty even after the BOM strip: only a bare BOM reads as "no patches". A BOM followed by
+    // stray whitespace still reaches the parser and fails loudly rather than being silently accepted.
+    let (_transport, outcome) = login_then_register(uid_response(b"\xef\xbb\xbf  \r\n".to_vec()));
+    let err = outcome.expect_err("bom plus whitespace body");
+    assert!(matches!(err, ProtoError::PatchListParse { .. }));
+}
+
+#[test]
+fn a_bom_prefixed_patchlist_still_parses() {
+    // The same stamp on a body that does carry patches: stripping before the parse keeps the mark out
+    // of the opening boundary, which the envelope check would otherwise reject.
+    let mut body = b"\xef\xbb\xbf".to_vec();
+    body.extend(game_patchlist(&[&game_entry()]));
+    let (_transport, outcome) = login_then_register(uid_response(body));
+    match outcome.expect("registration") {
+        Registration::Registered {
+            pending_patches, ..
+        } => assert_eq!(pending_patches.len(), 1),
+        other => panic!("expected Registered, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_reflected_registration_url_does_not_leak_the_session_id() {
     // The registration URL carries the live session id as its last path segment, so a 404 page that
@@ -725,14 +765,21 @@ fn install_mode_ignores_the_bck_gate() {
 #[test]
 fn install_mode_refuses_a_present_but_corrupt_ver() {
     // Base-fallback relaxes *absence*, not corruption: a present `.ver` still runs the content gate, so
-    // an embedded line feed cannot splice a forged extra record into the report body SE receives, and an
-    // all-NUL body cannot ship raw NULs. Both are the strict path's verdict for the same file.
+    // an embedded line feed cannot splice a forged extra record into the report body SE receives, an
+    // all-NUL body cannot ship raw NULs, a single embedded NUL cannot ride along either, and an embedded
+    // tab cannot forge a field the way a line feed forges a record. Every case is the strict path's
+    // verdict for the same file: both paths run the same `check_sanity`.
     for (bytes, kind) in [
         (
             b"2024.03.28.0000.0000\nex9\tinjected".to_vec(),
             SanityKind::ContainsNewline,
         ),
         (vec![0u8; 8], SanityKind::AllNul),
+        (
+            b"2024.03.28.0000.0000\x00".to_vec(),
+            SanityKind::EmbeddedNul,
+        ),
+        (b"2024.03.28.0000.0000\t".to_vec(), SanityKind::EmbeddedTab),
     ] {
         let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
         std::fs::write(dir.path().join("game/ffxivgame.ver"), &bytes).expect("corrupt game ver");

@@ -60,6 +60,12 @@ pub enum SanityKind {
     ContainsNewline,
     /// Every byte is NUL.
     AllNul,
+    /// The file carries an embedded NUL byte (but not every byte, which is [`SanityKind::AllNul`]).
+    EmbeddedNul,
+    /// The file carries an embedded tab: the version report splices expansion lines together with
+    /// tabs, so a version string that itself contains one can forge a field the same way an embedded
+    /// line feed forges a whole record.
+    EmbeddedTab,
     /// The file exists but could not be read (a non-not-found I/O error).
     Unreadable,
 }
@@ -361,7 +367,16 @@ pub fn decode_ver(bytes: &[u8]) -> String {
 }
 
 /// The version-file content gate, over the decoded text: not empty/whitespace, no embedded line feed
-/// (`\n` only, not `\r`), and not all-NUL. Mirrors the reference launcher's `IsBadVersionSanity`.
+/// (`\n` only, not `\r`), not all-NUL, no embedded NUL, and no embedded tab.
+///
+/// The first three checks mirror the reference launcher's `IsBadVersionSanity`
+/// (`Launcher.cs:332-347`) exactly. The last two do not exist there: `IsBadVersionSanity` only
+/// rejects a body that is *entirely* NUL bytes, so a single embedded NUL still passes its gate and
+/// XL's own `IsBadVersionSanity` splices it verbatim into the report; it likewise never checks for a
+/// tab at all. Both gaps are real injection classes here, the same family the newline check already
+/// exists to close one delimiter up (a version string reaches the report body as a whole line, and as
+/// a tab-separated field within an expansion line), so this crate closes them too even though the
+/// oracle does not: a deliberate hardening beyond parity, not a port-bug fix.
 fn check_sanity(text: &str) -> Result<(), SanityKind> {
     if !text.is_empty() && text.bytes().all(|b| b == 0) {
         return Err(SanityKind::AllNul);
@@ -371,6 +386,12 @@ fn check_sanity(text: &str) -> Result<(), SanityKind> {
     }
     if text.contains('\n') {
         return Err(SanityKind::ContainsNewline);
+    }
+    if text.contains('\0') {
+        return Err(SanityKind::EmbeddedNul);
+    }
+    if text.contains('\t') {
+        return Err(SanityKind::EmbeddedTab);
     }
     Ok(())
 }
@@ -444,6 +465,35 @@ mod tests {
         // A lone trailing CR is not a newline to the gate; the value passes and is embedded verbatim.
         assert_eq!(check_sanity("2024.01.01.0000.0000\r"), Ok(()));
         assert_eq!(check_sanity("2024.01.01.0000.0000"), Ok(()));
+    }
+
+    #[test]
+    fn sanity_flags_a_single_embedded_nul_even_though_not_every_byte_is_nul() {
+        // AllNul only fires when the whole body is NUL; one embedded NUL byte among real content used
+        // to pass the gate and would have been spliced verbatim into the registration POST body.
+        assert_eq!(
+            check_sanity("2024.01.01.0000.0000\u{0}"),
+            Err(SanityKind::EmbeddedNul)
+        );
+        assert_eq!(
+            check_sanity("2024\u{0}01.01.0000.0000"),
+            Err(SanityKind::EmbeddedNul)
+        );
+    }
+
+    #[test]
+    fn sanity_flags_an_embedded_tab() {
+        // The version report splices expansion lines together with tabs (`ex{n}\t{ver}`); a version
+        // string carrying its own tab is the newline-forges-a-record injection one delimiter down,
+        // forging a field instead of a whole record.
+        assert_eq!(
+            check_sanity("2024.01.01.0000.0000\t"),
+            Err(SanityKind::EmbeddedTab)
+        );
+        assert_eq!(
+            check_sanity("2024\t01.01.0000.0000"),
+            Err(SanityKind::EmbeddedTab)
+        );
     }
 
     #[test]
