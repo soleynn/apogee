@@ -7,7 +7,9 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use super::{Migrate, Store, StoreError, UidCacheEntry};
-use crate::model::{Account, AccountKind, Profile, SecretBackend, Settings};
+use crate::model::{
+    Account, AccountKind, ListenerSettings, ListenerSources, Profile, SecretBackend, Settings,
+};
 
 fn cache_entry(game_version: &str, expires_at: u64) -> UidCacheEntry {
     UidCacheEntry {
@@ -35,6 +37,7 @@ fn settings_round_trips_at_the_current_version() {
         keep_patches: true,
         backups_kept: 3,
         backup_before_patch: false,
+        otp_listener: ListenerSettings::default(),
     };
     store.save_settings(&settings).unwrap();
     assert_eq!(store.load_settings().unwrap(), settings);
@@ -52,6 +55,7 @@ fn missing_settings_loads_the_default() {
 #[case(3)]
 #[case(4)]
 #[case(5)]
+#[case(6)]
 fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) {
     let (dir, store) = store();
     // Each historical shape carries only the fields that existed at that version.
@@ -65,9 +69,13 @@ fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) 
             "language": "fr", "close_after_launch": false, "keep_patches": false,
             "backups_kept": 5
         }),
-        _ => serde_json::json!({
+        5 => serde_json::json!({
             "language": "fr", "close_after_launch": false, "keep_patches": false,
             "backups_kept": 5, "backup_before_patch": true
+        }),
+        _ => serde_json::json!({
+            "language": "fr", "close_after_launch": false, "keep_patches": false,
+            "backups_kept": 5, "backup_before_patch": true, "secret_backend": "platform"
         }),
     };
     let envelope = serde_json::json!({ "schema_version": version, "data": data });
@@ -81,6 +89,12 @@ fn settings_migrate_forward_from_every_historical_version(#[case] version: u32) 
     // Every install that predates the choice was using the platform store, so that is the only
     // answer a migration may reach: any other would move a user off the store their password is in.
     assert_eq!(loaded.secret_backend, SecretBackend::Platform);
+    // The whole of the off-by-default guarantee for an install that already exists: the listener's
+    // tuning appears, and nothing about it opens a port. No account is pointed at it here, and being
+    // pointed at it is the only thing that binds anything.
+    assert_eq!(loaded.otp_listener, ListenerSettings::default());
+    assert!(loaded.otp_listener.bind.is_unspecified());
+    assert_eq!(loaded.otp_listener.sources, ListenerSources::Any);
 
     // A re-save rewrites the envelope at the current schema version.
     store.save_settings(&loaded).unwrap();
@@ -290,6 +304,7 @@ proptest::proptest! {
             keep_patches: keep,
             backups_kept: 5,
             backup_before_patch: true,
+            otp_listener: ListenerSettings::default(),
         };
         store.save_settings(&settings).unwrap();
         proptest::prop_assert_eq!(store.load_settings().unwrap(), settings);

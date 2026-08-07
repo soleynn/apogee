@@ -136,7 +136,7 @@ impl Migrate for Profile {
 }
 
 impl Migrate for Account {
-    const CURRENT_VERSION: u32 = 2;
+    const CURRENT_VERSION: u32 = 3;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -149,6 +149,12 @@ impl Migrate for Account {
                 obj.entry("never_store")
                     .or_insert(serde_json::Value::Bool(false));
             }
+            // Nothing to insert. The delivery field gained a third value rather than a new key, so
+            // every older file still reads, and this arm exists only so the version moves: a build
+            // that predates the new value would otherwise meet it under a version it recognizes,
+            // fail to deserialize, and report the file as corrupt instead of as one a newer launcher
+            // wrote.
+            2 => {}
             other => return Err(format!("no migration from schema version {other}")),
         }
         Ok(value)
@@ -190,7 +196,7 @@ impl Migrate for UidCacheEntry {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 6;
+    const CURRENT_VERSION: u32 = 7;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -222,6 +228,18 @@ impl Migrate for Settings {
             5 => {
                 obj.entry("secret_backend")
                     .or_insert(serde_json::Value::from("platform"));
+            }
+            // Gained where a companion pushes a one-time code. The default admits anything on every
+            // interface, and inserting it opens nothing: no port is taken until an account is pointed
+            // at the listener, which is a separate decision that takes an acknowledgment. A migration
+            // that pointed an account there would be opening a port on a machine whose owner never
+            // asked for one.
+            6 => {
+                obj.entry("otp_listener").or_insert(
+                    serde_json::to_value(crate::model::ListenerSettings::default()).map_err(
+                        |err| format!("the default listener settings do not encode: {err}"),
+                    )?,
+                );
             }
             other => return Err(format!("no migration from schema version {other}")),
         }

@@ -1,0 +1,8 @@
+error[E0277]: the trait bound `Received: Clone` is not satisfied
+ --> tests/ui/received_clone.rs:9:5
+  |
+7 | #[derive(Clone)]
+  |          ----- in this derive macro expansion
+8 | struct Attempt {
+9 |     received: Received,
+  |     ^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `Received`

@@ -1,0 +1,9 @@
+error[E0277]: `Received` doesn't implement `std::fmt::Display`
+ --> tests/ui/received_display.rs:8:14
+  |
+8 |     format!("{received}")
+  |              ^^^^^^^^^^ `Received` cannot be formatted with the default formatter
+  |
+  = help: the trait `std::fmt::Display` is not implemented for `Received`
+  = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+  = note: required for `&Received` to implement `std::fmt::Display`

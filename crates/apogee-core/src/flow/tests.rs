@@ -1,6 +1,7 @@
 //! Headless flow tests: every login branch driven against the fixture transport and a fake launch
 //! backend, plus the session-cache fast path. No network, no real process.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -23,7 +24,10 @@ use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
-use crate::model::{Account, AccountKind, Profile, STEAM_APP_ID, SecretBackend, Settings};
+use crate::model::{
+    Account, AccountKind, ListenerSettings, ListenerSources, Profile, STEAM_APP_ID, SecretBackend,
+    Settings,
+};
 use crate::patch::PatchBackend;
 use crate::patch::fake::FakePatchBackend;
 use crate::steam::fake::FakeSteam;
@@ -365,6 +369,15 @@ fn otp_with_secret(account: Uuid) -> Otp {
         .set(account, SecretKind::TotpSecret, params.into_secret())
         .unwrap();
     Otp::new(Arc::new(store))
+}
+
+/// A one-time-password handle over an empty store.
+///
+/// A login that takes its code from the listener never reads the store at all, so an empty one is
+/// what the arrangement under test actually has: if the flow ever reached for a secret here, it would
+/// find nothing and the test would say so.
+fn otp_empty() -> Otp {
+    Otp::new(Arc::new(MemoryStore::new()))
 }
 
 /// A context over the usual fakes, with the caller's one-time-password handle.
@@ -1509,6 +1522,7 @@ async fn close_after_launch_detaches_without_supervising() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            otp_listener: ListenerSettings::default(),
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(play_then_current()));
@@ -1614,6 +1628,7 @@ async fn a_patch_captures_nothing_when_the_setting_is_off() {
     h.store
         .save_settings(&Settings {
             backup_before_patch: false,
+            otp_listener: ListenerSettings::default(),
             ..Settings::default()
         })
         .unwrap();
@@ -1762,6 +1777,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            otp_listener: ListenerSettings::default(),
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(play_then_current()));
@@ -1800,6 +1816,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            otp_listener: ListenerSettings::default(),
         })
         .unwrap();
     let transport = Arc::new(FixtureTransport::new(play_then_current()));
@@ -2657,4 +2674,400 @@ async fn stopping_a_prefix_while_it_is_being_created_is_narrated_rather_than_fai
     // Nothing was spawned and nothing was set up: there is no prefix to do either in.
     assert_eq!(launch.launch_count(), 0);
     assert!(addons.calls().is_empty(), "{:?}", addons.calls());
+}
+
+// --- a code pushed to the local listener --------------------------------------------------------
+
+/// Point this machine's listener at an ephemeral loopback port.
+///
+/// Ephemeral because two of these tests run at once under the runner, and the real port is one a
+/// developer may well have a launcher sitting on. The port that was actually taken comes back on the
+/// waiting state, which is the only reason that state carries it.
+fn listen_on_ephemeral(h: &Harness, sources: ListenerSources) {
+    let mut settings = h.store.load_settings().unwrap_or_default();
+    settings.otp_listener = ListenerSettings {
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 0,
+        sources,
+        wait_seconds: 20,
+    };
+    h.store.save_settings(&settings).unwrap();
+}
+
+/// Start a run and hand back its event stream, so a test can act while the flow is still going.
+///
+/// [`run`] drains after the fact, which cannot drive a flow that is waiting on the test to do
+/// something.
+fn spawn_run(
+    ctx: FlowContext,
+    cmd: Command,
+    cancel: CancellationToken,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<Event>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (tokio::spawn(drive(ctx, cmd, tx, cancel)), rx)
+}
+
+/// Pull events until one matches, keeping everything seen on the way.
+async fn await_state(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+    seen: &mut Vec<Event>,
+    want: impl Fn(&FlowState) -> bool,
+) -> Option<FlowState> {
+    while let Some(event) = rx.recv().await {
+        let matched = match &event {
+            Event::State(state) if want(state) => Some(state.clone()),
+            _ => None,
+        };
+        seen.push(event);
+        if matched.is_some() {
+            return matched;
+        }
+    }
+    None
+}
+
+/// Drain whatever is left once a run has finished.
+fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, seen: &mut Vec<Event>) {
+    while let Ok(event) = rx.try_recv() {
+        seen.push(event);
+    }
+}
+
+/// The port a run said it was listening on.
+fn listening_port(state: &FlowState) -> Option<u16> {
+    match state {
+        FlowState::WaitingForPushedCode { port, .. } => Some(*port),
+        _ => None,
+    }
+}
+
+/// Push `bytes` from a chosen loopback address, so a test can be two devices at once.
+async fn push_from(from: Ipv4Addr, port: u16, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.bind(std::net::SocketAddr::new(IpAddr::V4(from), 0))?;
+    let mut stream = socket.connect((Ipv4Addr::LOCALHOST, port).into()).await?;
+    stream.write_all(bytes).await?;
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).await?;
+    Ok(answer)
+}
+
+/// Push `code` at the loopback listener on `port`, the way a companion app would.
+async fn push_code(port: u16, code: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    stream
+        .write_all(
+            format!("GET /ffxivlauncher/{code} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+        )
+        .await?;
+    stream.flush().await
+}
+
+/// A code pushed from the network reaches the submit, and the session is cached.
+///
+/// The analogue of the typed-code case: nothing is derived, nothing is asked for, and what goes on
+/// the wire is exactly what arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pushed_code_reaches_the_submit() {
+    let h = harness(true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+
+    let (task, mut rx) = spawn_run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        CancellationToken::new(),
+    );
+
+    let mut events = Vec::new();
+    let waiting = await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the flow never opened the listener");
+    let port = listening_port(&waiting).expect("the waiting state carried no port");
+    push_code(port, "246810").await.unwrap();
+
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(
+        submitted_otp(&transport).as_deref(),
+        Some("246810"),
+        "the pushed code did not reach the submit"
+    );
+    assert!(
+        states(&events).contains(&FlowState::PushedCodeReceived {
+            from: IpAddr::V4(Ipv4Addr::LOCALHOST)
+        }),
+        "the arrival was not narrated: {:?}",
+        states(&events)
+    );
+    assert_eq!(
+        h.store
+            .load_uid_cache(h.account)
+            .unwrap()
+            .unwrap()
+            .unique_id,
+        UNIQUE_ID
+    );
+}
+
+/// A pushed code raises no clock advisory.
+///
+/// It was derived on the phone against the phone's clock, so this host's disagreement with the login
+/// server is not something this login worked around and not something to say. The same property the
+/// typed-code path already has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pushed_code_raises_no_clock_notice() {
+    let h = harness(true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    // A host clock far from the scripted page's, which is what would raise the advisory on a login
+    // that derived its own code.
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+
+    let (task, mut rx) = spawn_run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        CancellationToken::new(),
+    );
+
+    let mut events = Vec::new();
+    let waiting = await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the flow never opened the listener");
+    push_code(listening_port(&waiting).unwrap(), "135791")
+        .await
+        .unwrap();
+
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(Notice::ClockSkew { .. }))),
+        "a login that derived nothing raised a clock advisory"
+    );
+}
+
+/// Nothing is bound before the maintenance gate.
+///
+/// The ordering decision, made a test. Opening a port for a login that is about to be abandoned is
+/// the thing this avoids, and the worse half is making someone walk to their phone and only then
+/// hear that the login server is closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_is_bound_before_the_maintenance_gate() {
+    let h = harness(true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new([fx::login_status_closed(
+        "Maintenance",
+    )]));
+    let ctx = context_otp(&h, transport, otp_empty(), NOW);
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    assert_eq!(states(&events), [FlowState::NoService]);
+    assert!(
+        !states(&events)
+            .iter()
+            .any(|state| matches!(state, FlowState::WaitingForPushedCode { .. })),
+        "a port was opened for a login the gate stopped"
+    );
+}
+
+/// A wait nobody answered leaves the account owing a code, and is not a failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wait_nobody_answered_needs_an_otp() {
+    let h = harness(true);
+    let mut settings = h.store.load_settings().unwrap_or_default();
+    settings.otp_listener = ListenerSettings {
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 0,
+        sources: ListenerSources::Any,
+        wait_seconds: 0,
+    };
+    h.store.save_settings(&settings).unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert!(
+        states(&events).contains(&FlowState::NeedsOtp),
+        "{:?}",
+        states(&events)
+    );
+    assert_eq!(submitted_otp(&transport), None, "something was submitted");
+}
+
+/// A pin that admits nobody opens no port at all.
+///
+/// Fail-closed, and answered as the same disposition as an account with no way to produce a code.
+/// Only a hand-edited settings file reaches this, because the shell refuses to write it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_allowlist_does_not_open_a_port() {
+    let h = harness(true);
+    listen_on_ephemeral(
+        &h,
+        ListenerSources::Only {
+            addresses: Vec::new(),
+        },
+    );
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert!(states(&events).contains(&FlowState::NeedsOtp));
+    assert!(
+        !states(&events)
+            .iter()
+            .any(|state| matches!(state, FlowState::WaitingForPushedCode { .. })),
+        "a port was opened for a pin that admits nobody"
+    );
+    assert_eq!(submitted_otp(&transport), None);
+}
+
+/// A run stopped while it waited for a phone logs in with nothing and caches nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_wait_never_logs_in() {
+    let h = harness(true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+    let cancel = CancellationToken::new();
+
+    let (task, mut rx) = spawn_run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        cancel.clone(),
+    );
+
+    let mut events = Vec::new();
+    await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the flow never opened the listener");
+    cancel.cancel();
+
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+
+    assert!(states(&events).contains(&FlowState::Cancelled));
+    assert_eq!(submitted_otp(&transport), None, "a stopped run submitted");
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_none());
+}
+
+/// A flood during a login is narrated, and the login still succeeds.
+///
+/// Section 4's gate at flow level. The crate's own test proves the listener survives; this proves the
+/// advisory reaches a shell, which is the only way a user learns that something on their network was
+/// hammering the port while they logged in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_during_a_login_is_narrated_and_the_login_succeeds() {
+    let h = harness(true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context_otp(&h, transport.clone(), otp_empty(), NOW);
+
+    let (task, mut rx) = spawn_run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        CancellationToken::new(),
+    );
+
+    let mut events = Vec::new();
+    let waiting = await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the flow never opened the listener");
+    let port = listening_port(&waiting).expect("the waiting state carried no port");
+
+    // Complete request lines that are not deliverable codes, from a second loopback address, until
+    // that source is refused. None of them can win the race, so what is left is the flood.
+    let flooder = Ipv4Addr::new(127, 0, 0, 2);
+    let mut throttled = false;
+    for _ in 0..64 {
+        if push_from(flooder, port, b"GET /ffxivlauncher/12345 HTTP/1.1\r\n\r\n")
+            .await
+            .is_ok_and(|answer| answer.starts_with(b"HTTP/1.0 429"))
+        {
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled, "the listener never refused the flooding source");
+
+    push_code(port, "482913").await.unwrap();
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(submitted_otp(&transport).as_deref(), Some("482913"));
+    let flood_notice = events.iter().find_map(|event| match event {
+        Event::Notice(Notice::OtpListenerFlood { from, refused }) => Some((*from, *refused)),
+        _ => None,
+    });
+    let Some((from, refused)) = flood_notice else {
+        panic!("the flood was not narrated: {:?}", events);
+    };
+    assert_eq!(from, IpAddr::V4(flooder));
+    assert!(refused > 0, "the advisory counted nothing");
 }

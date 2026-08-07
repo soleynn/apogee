@@ -158,8 +158,26 @@ hits=$(grep -rnE 'XChaCha20Poly1305|Argon2|getrandom::' crates/apogee-secrets/sr
 #    creating a store on the user's behalf, which is the silent fallback the design refuses. The crate
 #    that defines the token is exempt, because its own tests construct one; `apps/` is where the
 #    layers that can actually ask a user live, so it is not scanned.
-hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^crates/apogee-secrets/src/' || true)
+hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^crates/apogee-secrets/src/' | grep -v 'ListenerConsent::granted' || true)
 [ -z "$hits" ] || report "a library mints its own fallback-store consent" "$hits"
+
+# 8b. The same rule for the other thing only a user may ask for: opening a port on their network while
+#    a login waits for a code. Pointing an account at the local listener takes a token with one
+#    constructor, and a library minting its own would be opening that port on the user's behalf, which
+#    is the silent default this design refuses just as firmly as a silent fallback store. Gate 8's grep
+#    is name-specific and would never have seen this token.
+#
+#    Scanned through `scan_source` (6e) rather than with a plain grep, so an inline `#[cfg(test)]`
+#    module is skipped by brace depth: a test that exercises the verb has to construct the token, and
+#    the alternative is a rule that dictates which file a crate's tests live in. `tests.rs` siblings are
+#    dropped for the same reason. The crate that defines the token is exempt, and `apps/` is not
+#    scanned at all, because that is where the layers that can actually ask a user live.
+hits=$(find crates -path '*/src/*' -name '*.rs' -not -name 'tests.rs' -not -path '*/target/*' \
+  -not -path 'crates/apogee-otp/src/*' \
+  | sort \
+  | while read -r f; do scan_source "$f"; done \
+  | grep 'ListenerConsent::granted' || true)
+[ -z "$hits" ] || report "a library opens a network port on the user's behalf" "$hits"
 
 # 9. keyring names no backend by default: a target that selects none of its store features resolves
 #    `mock`, an in-process map that answers every call. Dropping `apple-native` from the Apple

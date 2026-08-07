@@ -495,6 +495,15 @@ jobs:
       # anything is allocated for them, and an over-large reservation is the failure that would mean
       # one of those caps stopped being checked first.
       - run: cargo +nightly-2026-07-23 fuzz run otp_import --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build otp_listener_request --target x86_64-unknown-linux-gnu
+      # The tightest malloc bound in the set. This parser reads bytes a stranger on the network chose
+      # and is meant to allocate nothing at all beyond the one fixed buffer the reader owns, so a
+      # megabyte is already far more than a clean run can touch.
+      - run: cargo +nightly-2026-07-23 fuzz run otp_listener_request --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=16
+      - run: cargo +nightly-2026-07-23 fuzz build otp_listener_framing --target x86_64-unknown-linux-gnu
+      # This one asserts an equality rather than an absence, so unlike every other target here it can
+      # fail without crashing: a verdict that depends on how the input was split trips its own assert.
+      - run: cargo +nightly-2026-07-23 fuzz run otp_listener_framing --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=16
       - run: cargo +nightly-2026-07-23 fuzz build launch_args --target x86_64-unknown-linux-gnu
       # No malloc bound here, unlike the two above: this target's allocations are bounded by the input
       # length rather than by a number read out of it, so a limit could only fire on a bug the builder's

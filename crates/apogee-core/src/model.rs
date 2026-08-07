@@ -5,6 +5,7 @@
 //! TOTP material by UUID in the secret store, keeping the model serializable without ever touching
 //! plaintext.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,14 @@ pub enum OtpDelivery {
     Ask,
     /// Derive one from the stored secret, with nothing to type. Set by importing a secret.
     Generate,
+    /// A companion pushes one to this machine's listener while the login waits.
+    ///
+    /// The only call in this crate that sets it is the one that takes the acknowledgment, because
+    /// pointing an account here is the decision to open a port on the user's network. That is a rule
+    /// about this crate's own callers and not a boundary: the field is public and deserializable, so a
+    /// user editing their own configuration to turn on their own feature reaches it, which is theirs
+    /// to do.
+    Listen,
 }
 
 /// How an account authenticates and what entitlements it carries.
@@ -212,6 +221,67 @@ pub struct Settings {
     /// Capture the game's settings before applying patches. On by default: a capture is tens of
     /// kilobytes, and a patch is the moment settings are most likely to be rewritten.
     pub backup_before_patch: bool,
+    /// Where a companion pushes a one-time code, for the accounts set to receive one that way.
+    pub otp_listener: ListenerSettings,
+}
+
+/// The local endpoint a companion app pushes a one-time code to, and who may reach it.
+///
+/// Machine facts rather than account facts: which interface faces the phone, which port is free,
+/// which device may push, and how patient the user is are all properties of this PC. Two accounts
+/// cannot each take the same port, only one login awaits a code at a time by design, and the phone
+/// that pushes is one device per household rather than one per Square Enix account.
+///
+/// Which *login* uses it stays on the account as its delivery mode, and that is also the only switch.
+/// There is no separate enable here, because an account's delivery already defaults to asking, and a
+/// second flag would be a second thing to keep consistent with the first: it would also make tuning
+/// the listener a way to turn it on without the acknowledgment that is supposed to gate exactly that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerSettings {
+    /// The interface to take.
+    ///
+    /// The unspecified address is every interface this host answers on, which is more than "the LAN":
+    /// it includes a VPN tunnel, a container bridge, and on a machine with a public address, the
+    /// internet. It is the default because it is what makes the phone app work with no configuration,
+    /// and it is a field because a multi-homed host should be able to say which interface it means.
+    pub bind: IpAddr,
+    /// The port to take. The compatibility port unless something else on this machine holds it.
+    pub port: u16,
+    /// Which sources may deliver a code.
+    pub sources: ListenerSources,
+    /// How long a login waits for a push before giving up.
+    pub wait_seconds: u64,
+}
+
+/// Which sources the listener admits.
+///
+/// A tagged enum rather than a list whose emptiness carries meaning: an empty list reads as both
+/// "admit anything" and "admit nothing", and a round trip through a config file that drops empty
+/// collections silently turns one into the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ListenerSources {
+    /// Anything that can reach the bound interface.
+    Any,
+    /// Only these addresses. An empty list admits nothing, and the flow refuses to bind rather than
+    /// opening a port no one can use.
+    Only { addresses: Vec<IpAddr> },
+}
+
+impl Default for ListenerSettings {
+    fn default() -> Self {
+        Self {
+            bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: apogee_otp::COMPAT_PORT,
+            sources: ListenerSources::Any,
+            // Long enough to fetch a phone, unlock it, open the app and tap, which is the whole of
+            // what this wait is for. Shorter fails real people; much longer holds a port open on the
+            // network past any plausible attention span, and the port being brief is most of what
+            // makes the endpoint defensible at all.
+            wait_seconds: 90,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -226,6 +296,9 @@ impl Default for Settings {
             keep_patches: true,
             backups_kept: 5,
             backup_before_patch: true,
+            // Tuning only. Nothing here opens a port: the listener binds when an account set to
+            // receive pushed codes begins a login, and no account is set that way by default.
+            otp_listener: ListenerSettings::default(),
         }
     }
 }
