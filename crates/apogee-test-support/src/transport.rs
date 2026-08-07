@@ -2,12 +2,17 @@
 //!
 //! Replays scripted responses in call order, records every request it receives, and renders a request
 //! to a canonical text form so a test can assert request fidelity against a golden: the drift alarm
-//! that fails loudly when a surface changes the bytes it sends to SE.
+//! that fails loudly when a surface changes the bytes it sends to SE. `execute` also runs
+//! [`check_header_fidelity`] against a header set translated through an [`http::HeaderMap`], the same
+//! name-grouping step every production `Transport` adapter's underlying client performs when it builds
+//! its own request, so a request builder that declares a duplicate header name out of order fails here
+//! rather than staying green through the whole suite and surfacing only against the live network.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
 
-use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError};
+use http::{HeaderMap, HeaderName, HeaderValue};
+use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError, check_header_fidelity};
 
 /// A scripted transport for driving `sqex-proto` surfaces without a network.
 pub struct FixtureTransport {
@@ -53,6 +58,8 @@ impl FixtureTransport {
 #[async_trait::async_trait]
 impl Transport for FixtureTransport {
     async fn execute(&self, req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+        check_header_fidelity(&req, &translated_headers(&req.headers))?;
+
         self.recorded
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -68,6 +75,21 @@ impl Transport for FixtureTransport {
             ))
         })
     }
+}
+
+/// Recreate the grouping every production `Transport` adapter's underlying client performs when it
+/// translates an ordered header list into its own request representation: repeats of the same header
+/// name collapse together, wherever they first appeared. An [`HeaderMap`] is exactly that behavior (it
+/// is the type reqwest's own `Request::headers()` returns), so this reproduces the fidelity check's
+/// real target without opening a socket.
+fn translated_headers(headers: &[(HeaderName, HeaderValue)]) -> Vec<(HeaderName, HeaderValue)> {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        map.append(name.clone(), value.clone());
+    }
+    map.iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 /// Render a request to a canonical text form for golden comparison: the method and URL on the first
@@ -172,6 +194,39 @@ mod tests {
         let _ = block_on(transport.execute(get("a"))).unwrap();
         let second = block_on(transport.execute(get("b")));
         assert!(second.is_err());
+    }
+
+    /// Every `sqex-proto`/`apogee-core` test drives this transport, so the fidelity contract has to be
+    /// enforced here or a request builder that regresses stays green through the whole suite and only
+    /// surfaces against the live network. `HeaderMap` groups a repeated name together wherever it first
+    /// appeared, so a declaration that interleaves two `cookie` headers around a `referer` cannot
+    /// survive the translation this fixture now runs, mirroring `apogee_core::transport`'s own
+    /// wire-level proof of the same defect class.
+    #[test]
+    fn a_header_set_a_client_would_reorder_is_refused() {
+        let url = Url::parse("http://patch.example.invalid/x").unwrap();
+        let request = ProtoRequest::new(Method::GET, url)
+            .header(
+                HeaderName::from_static("cookie"),
+                HeaderValue::from_static("a=1"),
+            )
+            .header(
+                HeaderName::from_static("referer"),
+                HeaderValue::from_static("http://example.invalid/"),
+            )
+            .header(
+                HeaderName::from_static("cookie"),
+                HeaderValue::from_static("b=2"),
+            );
+        let transport = FixtureTransport::once(ProtoResponse::new(200, Vec::new()));
+
+        let err = block_on(transport.execute(request)).expect_err("a reordered header set fails");
+
+        assert!(format!("{err}").contains("altered the header set"), "{err}");
+        assert!(
+            transport.recorded().is_empty(),
+            "a rejected request should not be recorded as sent"
+        );
     }
 
     #[test]

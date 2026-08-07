@@ -62,6 +62,13 @@ pub async fn check_boot_version(
 /// Build the boot-check request. The dynamic path and query segments are percent-encoded through the
 /// URL builder, so a malformed input yields a valid-but-wrong URL rather than an injection; the error
 /// arms exist only to keep the build panic-free and are unreachable for the constant base.
+///
+/// `accept` and `accept-encoding` are declared even though the reference launcher sends neither: a
+/// reqwest client merges its own default `Accept: */*` and negotiated encoding into any request that
+/// omits them, and it does that after the point the fidelity check reads the built request back, so an
+/// undeclared default is invisible to it. Declaring the identical `*/*` here keeps the wire byte
+/// unchanged while bringing the header inside the check; `accept-encoding`'s value is exempt from the
+/// comparison (see [`crate::NEGOTIATED_HEADERS`]).
 fn build_request(boot_version: &str, now: &LauncherTime) -> Result<ProtoRequest, TransportError> {
     let mut url = parse_base(BOOT_VERSION_BASE, "invalid boot-version base URL")?;
     url.path_segments_mut()
@@ -75,6 +82,14 @@ fn build_request(boot_version: &str, now: &LauncherTime) -> Result<ProtoRequest,
         .header(
             HeaderName::from_static("user-agent"),
             HeaderValue::from_static(PATCHER_USER_AGENT),
+        )
+        .header(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("*/*"),
+        )
+        .header(
+            HeaderName::from_static("accept-encoding"),
+            HeaderValue::from_static("gzip, deflate"),
         )
         .header(
             HeaderName::from_static("host"),

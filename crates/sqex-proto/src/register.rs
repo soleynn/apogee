@@ -130,8 +130,15 @@ fn unique_id(response: &ProtoResponse) -> Option<UniqueId> {
 }
 
 /// Build the registration POST: `{base}/{gamever}/{sessionId}` with the patcher identity and the
-/// report body. Headers are the exact set and order the reference launcher sends: no `Host` (the
-/// transport supplies it) and no `Content-Type`.
+/// report body. Headers otherwise match the exact set and order the reference launcher sends: no
+/// `Host` (the transport supplies it) and no `Content-Type`.
+///
+/// `accept`/`accept-encoding` are the one exception: the reference launcher sends neither, but a
+/// reqwest client merges its own default `Accept: */*` and negotiated encoding into any request that
+/// omits them, and it does that after the point the fidelity check reads the built request back, so an
+/// undeclared default is invisible to it. Declaring the identical `*/*` here keeps the wire byte
+/// unchanged while bringing the header inside the check; `accept-encoding`'s value is exempt from the
+/// comparison (see [`crate::NEGOTIATED_HEADERS`]).
 fn build_request(
     auth: &Authenticated,
     report: &VersionReport,
@@ -150,6 +157,14 @@ fn build_request(
         .header(
             HeaderName::from_static("user-agent"),
             HeaderValue::from_static(PATCHER_USER_AGENT),
+        )
+        .header(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("*/*"),
+        )
+        .header(
+            HeaderName::from_static("accept-encoding"),
+            HeaderValue::from_static("gzip, deflate"),
         )
         .header(
             HeaderName::from_static("x-hash-check"),

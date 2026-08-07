@@ -178,6 +178,8 @@ fn register_posts_the_fingerprinted_request() {
         "POST https://patch-gamever.ffxiv.com/http/win32/ffxivneo_release_game/{GAME_VER}/{SESSION_ID}\n\
          connection: Keep-Alive\n\
          user-agent: FFXIV PATCH CLIENT\n\
+         accept: */*\n\
+         accept-encoding: gzip, deflate\n\
          x-hash-check: enabled\n\
          \n\
          {}",
