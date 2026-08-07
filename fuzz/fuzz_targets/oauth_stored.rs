@@ -6,5 +6,5 @@ use libfuzzer_sys::fuzz_target;
 // sequence: it only ever returns a borrowed slice or a typed error.
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
-    let _ = sqex_proto::scrape_stored(&text);
+    let _ = sqex_proto::scrape_stored(&text, &[]);
 });
