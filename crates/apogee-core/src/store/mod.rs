@@ -4,13 +4,16 @@
 //! through a migration chain to the current version before returning it. A file that will not parse
 //! or migrate is copied aside and reported as [`StoreError::Corrupt`]; it is never deleted or
 //! overwritten, so a bad file can always be inspected or restored. The single exception is
-//! [`Store::install_id`], which replaces its own unreadable file after the copy aside, because what
-//! it holds is opaque randomness rather than anything a user could want back. Writes are atomic
-//! (write-temp-then-rename), so an interrupted save never leaves a half-file the next load misreads.
+//! [`Store::install_id`], which replaces its own corrupt file after the copy aside, because what it
+//! holds is opaque randomness rather than anything a user could want back; a plain I/O failure
+//! (permission denied, an unreadable mount) is not corruption and is never treated as one. Writes are
+//! atomic (write-temp-then-rename), so an interrupted save never leaves a half-file the next load
+//! misreads.
 
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -261,17 +264,23 @@ impl Migrate for Settings {
 /// Per-entity storage rooted at one base directory: `profiles/<id>.json`, `accounts/<id>.json`, and
 /// `settings.json`. One file per entity keeps a corrupt file's blast radius to a single record.
 ///
-/// A cheap handle over a path: clone it to share (the flow driver holds its own copy).
+/// A cheap handle over a path: clone it to share (the flow driver holds its own copy). Cloning also
+/// shares [`Store::ephemeral_install_id`]'s memoized value, which is the point of that slot: every
+/// clone of one `Store` is the same install for the life of the process.
 #[derive(Clone)]
 pub struct Store {
     base: PathBuf,
+    ephemeral_install_id: Arc<Mutex<Option<Uuid>>>,
 }
 
 impl Store {
     /// A store rooted at `base`. Directories are created lazily on first write.
     #[must_use]
     pub fn new(base: PathBuf) -> Self {
-        Self { base }
+        Self {
+            base,
+            ephemeral_install_id: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn profiles_dir(&self) -> PathBuf {
@@ -403,15 +412,35 @@ impl Store {
     ///
     /// A stored value that will not parse is replaced rather than reported. Its content is opaque
     /// randomness with nothing in it to recover, the load has already copied the offending bytes
-    /// aside, and refusing to start over an unreadable one buys nobody anything.
+    /// aside, and refusing to start over an unreadable one buys nobody anything. An [`StoreError::Io`]
+    /// is a different failure entirely, permission denied, a mount gone away mid-read, with a file
+    /// that may well hold the real id: minting fresh over that would silently and permanently rotate
+    /// the identity, so it propagates instead.
     pub fn install_id(&self) -> Result<Uuid, StoreError> {
         let path = self.install_id_file();
-        if let Ok(id) = self.load::<Uuid>(&path) {
-            return Ok(id);
+        match self.load::<Uuid>(&path) {
+            Ok(id) => return Ok(id),
+            Err(StoreError::NotFound { .. } | StoreError::Corrupt { .. }) => {}
+            Err(err) => return Err(err),
         }
         let id = Uuid::new_v4();
         self.save(&path, &id)?;
         Ok(id)
+    }
+
+    /// A stand-in for [`Store::install_id`] for the rest of this process, for a caller that already
+    /// decided the real one cannot be had (an [`StoreError::Io`] from [`Store::install_id`]). Minted
+    /// once and kept in memory for the life of this handle and every clone of it, never written to
+    /// disk: a second call, from a second call site, in the same run gets back the same value instead
+    /// of a fresh one, matching what "a value good for one run" is supposed to mean. A new process, or
+    /// a `Store` built fresh rather than cloned, mints again.
+    #[must_use]
+    pub fn ephemeral_install_id(&self) -> Uuid {
+        let mut slot = self
+            .ephemeral_install_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *slot.get_or_insert_with(Uuid::new_v4)
     }
 
     /// Serialize `value` under the current schema version and write it atomically.
