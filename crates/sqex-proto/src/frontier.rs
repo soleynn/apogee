@@ -218,8 +218,14 @@ pub async fn check_login_status(
     parse_status(&response, Step::LoginStatus)
 }
 
-/// The launcher's frontier request header set, in order. `gate`/`login` send no `Accept` (their
-/// content type is unset), so it is omitted here.
+/// The launcher's frontier request header set, in order.
+///
+/// `accept` is declared even though the reference launcher sends neither it nor `Accept-Encoding` on
+/// `gate`/`login` (their content type is unset): a reqwest client merges its own default `Accept: */*`
+/// and negotiated encoding into any request that omits them, and it does that after the point the
+/// fidelity check reads the built request back, so an undeclared default is invisible to it. Declaring
+/// the identical `*/*` here keeps the wire byte unchanged while bringing the header inside the check;
+/// `accept-encoding`'s value is exempt from the comparison (see [`crate::NEGOTIATED_HEADERS`]).
 fn build_request(
     url: Url,
     context: &FrontierContext<'_>,
@@ -231,6 +237,10 @@ fn build_request(
         .header(
             HeaderName::from_static("user-agent"),
             dynamic_header(&user_agent)?,
+        )
+        .header(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("*/*"),
         )
         .header(
             HeaderName::from_static("accept-encoding"),
