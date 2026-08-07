@@ -861,6 +861,9 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             println!("keep_patches        {}", s.keep_patches);
             println!("backups_kept        {}", s.backups_kept);
             println!("backup_before_patch {}", s.backup_before_patch);
+            // Where a user looks for machine-wide state, and where the listener sits is exactly that.
+            // Nothing here says whether it is in use: that is per account, and `otp status` says it.
+            print_listener_settings(&s.otp_listener);
             Ok(())
         }
         SettingsCommand::Set(args) => {
@@ -1291,9 +1294,14 @@ fn otp_listen(core: &Core, target: &str) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // The user's own configuration, before the question rather than only after it: the accuracy of
+    // this screen is the entire point of the gate, and half of what follows depends on whether a pin
+    // is already set.
+    println!("this is what is being turned on:");
+    print_listener_settings(&listener);
     println!(
-        "while a login is waiting, this machine opens port {} and takes a code from whoever
-sends one first:",
+        "while a login is waiting, this machine opens port {} and takes a code from whoever sends \
+         one first:",
         listener.port
     );
     if listener.bind.is_unspecified() {
@@ -1302,12 +1310,23 @@ sends one first:",
     } else {
         println!("  it listens on {}", listener.bind);
     }
-    println!("  any device that can route a packet here can submit a code");
-    println!("  so can a web page you visit, from the browser on this machine");
+    let pinned = matches!(
+        &listener.sources,
+        ListenerSources::Only { addresses } if !addresses.is_empty()
+    );
+    if pinned {
+        println!("  only the addresses listed above can submit a code; every other source is");
+        println!("  closed on before it is read");
+    } else {
+        println!("  any device that can route a packet here can submit a code");
+        println!("  so can a web page you visit, from the browser on this machine");
+    }
     println!("  a wrong code submitted first fails the login, and you start over");
     println!("  the code travels in plain text, which is what the phone apps speak");
-    println!("pin your phone with `apogee-cli otp listener --allow <address>` to narrow that,");
-    println!("which also bounds what the listener has to keep track of");
+    if !pinned {
+        println!("pin your phone with `apogee-cli otp listener --allow <address>` to narrow that,");
+        println!("which also bounds what the listener has to keep track of");
+    }
     if !confirmed("listen")? {
         println!("left alone");
         return Ok(());
@@ -1356,6 +1375,17 @@ fn otp_listener(core: &Core, args: ListenerArgs) -> Result<(), CliError> {
     }
     core.set_listener_settings(listener.clone())?;
     print_listener_settings(&listener);
+    // Accepted and then said out loud, rather than refused. Each is a real thing to want (a test, or
+    // a deliberately closed window) and neither can hurt anything, but both produce a listener that
+    // no phone will ever reach, and silently writing one is how that becomes a mystery.
+    if listener.port == 0 {
+        println!("warning: port 0 takes whichever port is free at the time, so the companion app");
+        println!("         will not find it. Set a fixed port for a listener you mean to use.");
+    }
+    if listener.wait_seconds == 0 {
+        println!("warning: a wait of 0 seconds opens the port and gives up before anything can");
+        println!("         connect.");
+    }
     Ok(())
 }
 
