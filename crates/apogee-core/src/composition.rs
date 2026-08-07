@@ -612,13 +612,18 @@ impl Core {
     ///
     /// An account that was never there, or was already asking, is left alone: this runs on the way
     /// out of an account being deleted as well as on a plain sweep.
+    ///
+    /// Only an account that *derives* its codes is moved. One that receives them from a companion is
+    /// left where it is: a sweep takes its password and any stored secret, but it takes nothing the
+    /// listener needs, so there is no code it can no longer produce. Moving it would silently start
+    /// prompting for a typed code on the next login with nothing said about why.
     fn ask_for_typed_codes(&self, account: Uuid) -> Result<(), CoreError> {
         let mut record = match self.store.load_account(account) {
             Ok(record) => record,
             Err(StoreError::NotFound { .. }) => return Ok(()),
             Err(other) => return Err(other.into()),
         };
-        if record.otp_delivery == OtpDelivery::Ask {
+        if record.otp_delivery != OtpDelivery::Generate {
             return Ok(());
         }
         record.otp_delivery = OtpDelivery::Ask;
