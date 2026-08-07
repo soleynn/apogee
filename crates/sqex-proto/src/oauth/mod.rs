@@ -499,31 +499,40 @@ fn build_top_request(
 /// ready-made folds is that rule. `str::eq_ignore_ascii_case` folds only `A-Z`, so it refuses a
 /// non-ASCII id the launcher accepts; `str::to_uppercase` folds further, expanding `ß` to `SS` where
 /// .NET leaves `ß`, so it accepts a pair the launcher refuses. Taking a `char`'s uppercase form only
-/// when that form is one `char` is the same rule, over the code points a Rust `str` can hold, save two
+/// when that form is one `char` is the same rule, over the code points a Rust `str` can hold, save the
 /// known corrections [`fold`] applies on top of it.
 fn eq_ordinal_ignore_case(left: &str, right: &str) -> bool {
     left.chars().map(fold).eq(right.chars().map(fold))
 }
 
 /// The fold [`eq_ordinal_ignore_case`] compares by: `char::to_uppercase` when that yields exactly one
-/// `char`, corrected against a real .NET run for two known ways that rule alone diverges from
+/// `char`, corrected against a real .NET run for the known ways that rule alone diverges from
 /// `OrdinalIgnoreCase`.
 ///
-/// - **Over-matching**: Unicode's simple uppercase mapping sends the Turkish dotless i (`ı`, U+0131)
-///   to `I` and the long s (`ſ`, U+017F) to `S`, but .NET's ordinal fold does not apply either
-///   mapping; it leaves both letters distinct from their look-alike. Folding them the general way
-///   would accept an id typed with the wrong letter as a match for one typed with the right one, the
-///   opposite direction from every other correction here: it *weakens* the check
-///   [`ProtoError::SteamWrongAccount`] exists to enforce.
+/// - **Over-matching**: Unicode's simple uppercase mapping folds some code points that .NET's ordinal
+///   fold does not, leaving both sides distinct from their look-alike. Folding them the general way
+///   would accept an id typed with the wrong character as a match for one typed with the right one,
+///   the opposite direction from every other correction here: it *weakens* the check
+///   [`ProtoError::SteamWrongAccount`] exists to enforce. Two are individual letters: the Turkish
+///   dotless i (`ı`, U+0131) folds to `I` and the long s (`ſ`, U+017F) folds to `S` under Unicode's
+///   mapping, but .NET treats each as its own letter. The rest are a single contiguous block,
+///   U+16EBB..=U+16ED3, which Unicode gives a simple uppercase mapping down to U+16EA0..=U+16EB8, a
+///   mapping .NET's ordinal fold does not apply; the pattern matches a script old enough for Rust's
+///   Unicode tables to case-fold but too new for .NET's ordinal table to have picked up.
 /// - **Under-matching**: the Greek "prosgegrammeni"/"ypogegrammeni" case pairs ([`iota_subscript_fold`])
 ///   have no single-`char` uppercase form at all: Rust's full case mapping expands each to two
 ///   characters (a base letter plus capital iota), so the general rule falls through to identity and
 ///   leaves every pair distinct. .NET folds them through a simple one-to-one table instead.
+///
+/// Both directions verified exhaustively: every one of the ~1.1M valid Unicode scalar values was
+/// grouped by this function and diffed against .NET 10's own `OrdinalIgnoreCase` grouping of the same
+/// range (via `StringComparer.OrdinalIgnoreCase`, not a candidate-pair guess) with zero remaining
+/// divergence in either direction.
 fn fold(c: char) -> char {
     if let Some(mapped) = iota_subscript_fold(c) {
         return mapped;
     }
-    if matches!(c, '\u{0131}' | '\u{017F}') {
+    if matches!(c, '\u{0131}' | '\u{017F}' | '\u{16EBB}'..='\u{16ED3}') {
         return c;
     }
     let mut upper = c.to_uppercase();
