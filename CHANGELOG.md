@@ -48,6 +48,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### sqex-proto
 - Log in with a Steam service account (#96) _(added)_
+- Remove dead ComputerId::from_host and LauncherTime::now (#126) _(fixed)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
