@@ -38,7 +38,13 @@ pub async fn check_boot_version(
     }
 
     if !response.is_ok() {
-        return Err(ProtoError::invalid_response(Step::BootVersion, &response));
+        // No secrets to scrub: the boot-version check runs before login, carrying only the installed
+        // boot version.
+        return Err(ProtoError::invalid_response(
+            Step::BootVersion,
+            &response,
+            &[],
+        ));
     }
 
     // `str::trim` follows `char::is_whitespace`, which does not classify U+FEFF, so a body carrying a

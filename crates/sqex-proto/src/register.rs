@@ -101,17 +101,27 @@ pub async fn register_session(
                     pending_patches,
                 })
             }
-            None => Err(ProtoError::invalid_response(Step::Register, &response)),
+            // The request URL carries the live session id as its last path segment, so a response
+            // that reflects it back (a 404 page naming what it could not find) would carry the id
+            // into the excerpt.
+            None => Err(ProtoError::invalid_response(
+                Step::Register,
+                &response,
+                &[auth.session_id().expose()],
+            )),
         },
     }
 }
 
 /// Read the `X-Patch-Unique-Id` header into a redacted newtype. A header value that is not visible
-/// ASCII is treated as absent (defensive: a real UID is hex).
+/// ASCII, or that carries no non-whitespace character, is treated as absent (defensive: a real UID is
+/// hex). Blank counts as absent because the alternative is registering with a credential that
+/// authorizes nothing: it would be sent as an empty header on every patch request and as an empty
+/// `DEV.TestSID` at launch, failing at the next hop with none of this step's context.
 fn unique_id(response: &ProtoResponse) -> Option<UniqueId> {
     let header = HeaderName::from_static(UNIQUE_ID_HEADER);
     let value = response.header(&header)?;
-    let text = value.to_str().ok()?;
+    let text = value.to_str().ok().filter(|text| !text.trim().is_empty())?;
     Some(UniqueId(Zeroizing::new(text.to_owned())))
 }
 

@@ -437,6 +437,143 @@ fn a_wrong_password_is_oauth_failed_with_a_scrubbed_excerpt() {
 }
 
 #[test]
+fn a_username_that_prefixes_the_password_is_still_scrubbed() {
+    let id = computer_id();
+    // The submitted form reflected back by a 400 (a WAF block, an edge error page). The credentials
+    // are prefix-shaped on purpose: the username is a literal prefix of the password, of the OTP, and
+    // of the `_STORED_` blob. Redacting one secret at a time over a shared buffer eats the shared span
+    // first, leaving each longer secret's tail in plaintext.
+    let transport = FixtureTransport::new([
+        top_response("aliceSTOREDBLOB"),
+        ProtoResponse::new(
+            400,
+            b"rejected form _STORED_=aliceSTOREDBLOB&sqexid=alice&password=alice123!&otppw=alice42"
+                .to_vec(),
+        ),
+    ]);
+
+    let err = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        flow.submit(Credentials {
+            sqexid: "alice",
+            password: "alice123!",
+            otp: Some("alice42"),
+        })
+        .await
+        .unwrap_err()
+    });
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert_eq!(
+        excerpt,
+        "rejected form _STORED_=[redacted]&sqexid=[redacted]&password=[redacted]&otppw=[redacted]"
+    );
+}
+
+#[test]
+fn a_reflected_top_url_does_not_leak_the_steam_ticket() {
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    let size = ticket.length();
+    // A non-200 whose body echoes the request URI back. The ticket rides in that URI unescaped, and it
+    // is a bearer credential `sqex-crypto` refuses to `Display` at all.
+    let body = format!(
+        "Bad Request: {TOP_URL}&issteam=1&session_ticket={text}&ticket_size={size}\nreference #42"
+    );
+    let transport = FixtureTransport::once(ProtoResponse::new(400, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    // The parameter lands ~50 characters inside the excerpt's window, so an unredacted excerpt carries
+    // a long contiguous run of the real ticket.
+    assert!(!excerpt.contains(&text[..16]), "ticket leaked: {excerpt}");
+    assert!(
+        excerpt.contains("session_ticket=[redacted]"),
+        "excerpt: {excerpt}"
+    );
+}
+
+#[test]
+fn a_bare_reflected_ticket_is_scrubbed_by_value() {
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    // The ticket echoed on its own, with no parameter name to redact by shape: the flow holds the
+    // ticket at this arm, so the excerpt scrubs it by value as well.
+    let body = format!("upstream rejected ticket {text}");
+    let transport = FixtureTransport::once(ProtoResponse::new(400, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert_eq!(excerpt, "upstream rejected ticket [redacted]");
+}
+
+#[test]
+fn a_top_page_that_reflects_the_ticket_does_not_leak_it_when_stored_is_missing() {
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    // The same reflection on a 200 page that carries a linked id but no `_STORED_`. This excerpt is
+    // built by the page scanner, which is handed the page and never the ticket, so only a redaction by
+    // shape can catch it.
+    let body = format!(
+        "Error: {TOP_URL}&issteam=1&session_ticket={text}\n\
+         <input name=\"sqexid\" type=\"hidden\" value=\"{LINKED_ID}\"/>"
+    );
+    let transport = FixtureTransport::once(ProtoResponse::new(200, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::StoredNotFound { excerpt } = &err else {
+        panic!("expected StoredNotFound, got {err:?}");
+    };
+    assert!(!excerpt.contains(&text[..16]), "ticket leaked: {excerpt}");
+}
+
+#[test]
 fn a_top_page_without_stored_is_stored_not_found() {
     let id = computer_id();
     let transport = FixtureTransport::once(ProtoResponse::new(
