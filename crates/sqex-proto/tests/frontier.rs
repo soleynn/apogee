@@ -42,6 +42,7 @@ fn gate_status_builds_the_fingerprinted_request() {
         canonical_request(&recorded[0]),
         "GET https://frontier.ffxiv.com/worldStatus/gate_status.json?lang=en-us&_=1704164820000\n\
          user-agent: SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)\n\
+         accept: */*\n\
          accept-encoding: gzip, deflate\n\
          accept-language: en-US,en;q=0.9\n\
          origin: https://launcher.finalfantasyxiv.com\n\
