@@ -58,8 +58,11 @@ const MAX_LINES: usize = HEADER_LINES + MAX_ENTRIES + TRAILER_LINES;
 /// one lowercase-hex digest per block (the final block is short).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockHashes {
+    /// The digest algorithm, as SE names it. Every capture observed so far is `sha1`.
     pub hash_type: String,
+    /// The byte span each hash in [`Self::hashes`] covers (commonly 50 MB). The final block is short.
     pub block_size: u64,
+    /// One lowercase-hex digest per block, in block order.
     pub hashes: Vec<String>,
 }
 
@@ -67,9 +70,14 @@ pub struct BlockHashes {
 /// `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchListEntry {
+    /// The patch's length in bytes.
     pub length: u64,
+    /// SE's version identifier for this patch (e.g. `D2023.04.28.0000.0001`).
     pub version_id: String,
+    /// The download URL: a well-formed absolute HTTP(S) URL, validated but not classified into a
+    /// repo — that resolution is left to the consumer (see the module docs).
     pub url: String,
+    /// The per-block hashes, or `None` for a boot entry (whose integrity check is ZiPatch chunk CRCs).
     pub hashes: Option<BlockHashes>,
 }
 

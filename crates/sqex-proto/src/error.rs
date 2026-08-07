@@ -25,6 +25,8 @@ pub enum Step {
     OauthLogin,
     /// The session-registration version report.
     Register,
+    /// The dormant `gen_token` patch-URL tokenization request.
+    GenToken,
 }
 
 /// A protocol failure.
@@ -41,19 +43,30 @@ pub enum ProtoError {
     /// The excerpt is redacted and length-capped at the construction site.
     #[error("unexpected response at {step:?}: status {status}")]
     InvalidResponse {
+        /// Which protocol step the response was for.
         step: Step,
+        /// The HTTP status SE answered with.
         status: u16,
+        /// A redacted, length-capped slice of the response body.
         excerpt: String,
     },
 
     /// A patchlist line could not be parsed. `line` is 1-based; `reason` is a stable, static tag.
     #[error("patchlist parse error at line {line}: {reason}")]
-    PatchListParse { line: u32, reason: &'static str },
+    PatchListParse {
+        /// The 1-based line number of the offending entry.
+        line: u32,
+        /// A stable, static tag identifying what about the line was wrong. Never the line's own bytes.
+        reason: &'static str,
+    },
 
     /// The OAuth submission did not return the success callback. The excerpt is scrubbed of the
     /// submitted credentials and length-capped at the construction site.
     #[error("oauth login rejected")]
-    OauthFailed { excerpt: String },
+    OauthFailed {
+        /// A scrubbed, length-capped slice of SE's rejection page or message.
+        excerpt: String,
+    },
 
     /// The top page asked the client to relink a Steam account (`window.external.user("restartup")`).
     /// Wired for the Steam variant; a standard login never reaches it.
@@ -63,22 +76,36 @@ pub enum ProtoError {
     /// The Steam ticket is linked to a different SE account than the one submitted. `expected_hint` is
     /// a masked form of the linked id, never the full value.
     #[error("steam ticket is linked to a different account")]
-    SteamWrongAccount { expected_hint: String },
+    SteamWrongAccount {
+        /// A masked hint of the account the ticket is actually linked to (e.g. `a***z`).
+        expected_hint: String,
+    },
 
     /// The top page carried no `_STORED_` blob. The excerpt is length-capped and redacted of a
     /// reflected `session_ticket`; the top page carries no submitted credentials.
     #[error("_STORED_ not found on the login top page")]
-    StoredNotFound { excerpt: String },
+    StoredNotFound {
+        /// A redacted, length-capped slice of the page that should have carried `_STORED_`.
+        excerpt: String,
+    },
 
     /// The `launchParams` list was too short or malformed to read the fields a login needs. `got_fields`
     /// is a count only, never the field contents (which include the session id).
     #[error("launchParams unparseable ({got_fields} fields)")]
-    LaunchParamsUnparseable { got_fields: usize },
+    LaunchParamsUnparseable {
+        /// How many comma-separated fields the callback actually carried.
+        got_fields: usize,
+    },
 
     /// A version file failed the sanity gate before session registration, so no request was made. The
     /// install is corrupt but repairable; `repo` and `kind` locate the fault without carrying a path.
     #[error("version file for {repo:?} failed the sanity check: {kind:?}")]
-    InvalidVersionFiles { repo: VersionRepo, kind: SanityKind },
+    InvalidVersionFiles {
+        /// Which repository's version file (or boot EXE backup) failed.
+        repo: VersionRepo,
+        /// What about it failed.
+        kind: SanityKind,
+    },
 }
 
 /// Excerpts are kept out of `Debug`, which is what a logger, a panic message, or a `{err:?}` in a
