@@ -654,6 +654,78 @@ fn install_mode_ignores_the_bck_gate() {
 }
 
 #[test]
+fn install_mode_refuses_a_present_but_corrupt_ver() {
+    // Base-fallback relaxes *absence*, not corruption: a present `.ver` still runs the content gate, so
+    // an embedded line feed cannot splice a forged extra record into the report body SE receives, and an
+    // all-NUL body cannot ship raw NULs. Both are the strict path's verdict for the same file.
+    for (bytes, kind) in [
+        (
+            b"2024.03.28.0000.0000\nex9\tinjected".to_vec(),
+            SanityKind::ContainsNewline,
+        ),
+        (vec![0u8; 8], SanityKind::AllNul),
+    ] {
+        let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+        std::fs::write(dir.path().join("game/ffxivgame.ver"), &bytes).expect("corrupt game ver");
+        let err = VersionReport::from_install_or_base(&InstallPaths::new(dir.path()), 1)
+            .expect_err("corrupt game ver");
+        assert!(
+            matches!(
+                err,
+                ProtoError::InvalidVersionFiles {
+                    repo: VersionRepo::Game,
+                    kind: got,
+                } if got == kind
+            ),
+            "expected {kind:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn install_mode_refuses_a_corrupt_expansion_ver() {
+    // An expansion `.ver` reaches the report body as a whole tab-separated record, so a line feed there
+    // is the sharpest injection channel: it forges an entire extra `ex{n}` line.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::write(
+        dir.path().join("game/sqpack/ex1/ex1.ver"),
+        "2024.03.28.0001.0000\nex2\t2099.01.01.0000.0000",
+    )
+    .expect("corrupt ex1 ver");
+    let err = VersionReport::from_install_or_base(&InstallPaths::new(dir.path()), 1)
+        .expect_err("corrupt ex1 ver");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Ex(1),
+            kind: SanityKind::ContainsNewline,
+        }
+    ));
+}
+
+#[test]
+fn boot_version_or_sentinel_refuses_a_present_but_corrupt_ver() {
+    // The boot-check counterpart: the corrupt text is not returned verbatim, and it is not silently
+    // base-versioned either. Only absence and whitespace are the sentinel.
+    let dir = build_game_install(BOOT_VER, exes(), GAME_VER, &[EX1]).expect("install");
+    std::fs::write(
+        dir.path().join("boot/ffxivboot.ver"),
+        "2024.02.01.0000.0000\n",
+    )
+    .expect("corrupt boot ver");
+    let err = InstallPaths::new(dir.path())
+        .boot_version_or_sentinel()
+        .expect_err("corrupt boot ver");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidVersionFiles {
+            repo: VersionRepo::Boot,
+            kind: SanityKind::ContainsNewline,
+        }
+    ));
+}
+
+#[test]
 fn boot_version_or_sentinel_reports_base_when_absent() {
     // The boot-check counterpart: an absent boot `.ver` reports the sentinel so the server returns the
     // full boot chain into an empty install.

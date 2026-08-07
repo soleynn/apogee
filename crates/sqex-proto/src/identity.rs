@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use sha1::{Digest, Sha1};
 
 use crate::time::LauncherTime;
@@ -16,6 +17,16 @@ pub const PATCHER_USER_AGENT: &str = "FFXIV PATCH CLIENT";
 
 /// A computer-id is a checksum byte followed by the first four bytes of the host-facts hash.
 const COMPUTER_ID_LEN: usize = 5;
+
+/// What a language code may carry into the referer's query string unescaped: the RFC 3986 unreserved
+/// set. Every locale SE serves is entirely inside it (`en-us` -> `en_us`), so the emitted referer stays
+/// byte-identical to the oracle's for real input; the encoding only fires on a code carrying `&`, `#`,
+/// or `?`, which would otherwise inject or truncate the query the sibling `lang` parameter escapes.
+const REFERER_LANG: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// A machine identifier SE's launcher sends on frontier and OAuth requests: five bytes rendered as ten
 /// lowercase hex characters.
@@ -63,12 +74,45 @@ pub fn launcher_user_agent(computer_id: &ComputerId) -> String {
 }
 
 /// Fill a caller-supplied frontier referer template: `{lang}` becomes the language code with dashes
-/// turned to underscores (`en-us` -> `en_us`); `{time}` becomes the supplied UTC timestamp.
+/// turned to underscores (`en-us` -> `en_us`) and percent-encoded; `{time}` becomes the supplied UTC
+/// timestamp.
+///
+/// The template is scanned once, left to right, and substituted text is never re-examined, matching the
+/// oracle's positional `string.Format` (`Launcher.cs:700-703`): a language code that itself contains
+/// `{time}` fills the language slot literally instead of being overwritten by the timestamp.
 #[must_use]
 pub fn frontier_referer(template: &str, language: &str, timestamp: &str) -> String {
-    template
-        .replace("{lang}", &language.replace('-', "_"))
-        .replace("{time}", timestamp)
+    let language = language.replace('-', "_");
+    // The timestamp needs no escaping: it comes from `LauncherTime`'s renderers, whose output is digits
+    // and dashes by construction. Unlike `language` it is not a free-form locale string.
+    fill_template(
+        template,
+        &utf8_percent_encode(&language, REFERER_LANG).to_string(),
+        timestamp,
+    )
+}
+
+/// Substitute `{lang}` and `{time}` in one left-to-right pass over `template`, so inserted text is
+/// never re-examined as a placeholder. An unrecognized `{...}` run is copied through untouched.
+fn fill_template(template: &str, language: &str, timestamp: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(brace) = rest.find('{') {
+        out.push_str(&rest[..brace]);
+        rest = &rest[brace..];
+        if let Some(tail) = rest.strip_prefix("{lang}") {
+            out.push_str(language);
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("{time}") {
+            out.push_str(timestamp);
+            rest = tail;
+        } else {
+            out.push('{');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The per-install, per-locale client values every launcher request carries: the computer-id, the
@@ -154,5 +198,64 @@ mod tests {
             referer,
             "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us&time=2024-01-02-03-40"
         );
+    }
+
+    #[test]
+    fn fill_template_does_not_rescan_substituted_text() {
+        // One left-to-right pass, matching the oracle's positional `string.Format`: a language whose text
+        // is itself the `{time}` placeholder fills the language slot literally. Sequential `.replace()`
+        // calls would let the second replacement overwrite the first's output with the timestamp.
+        assert_eq!(
+            fill_template("?rc_lang={lang}&time={time}", "{time}", "2024-01-02-03-40"),
+            "?rc_lang={time}&time=2024-01-02-03-40"
+        );
+        // The reverse direction too: a timestamp containing `{lang}` is not re-read as a placeholder.
+        assert_eq!(
+            fill_template("?rc_lang={lang}&time={time}", "en_us", "{lang}"),
+            "?rc_lang=en_us&time={lang}"
+        );
+    }
+
+    #[test]
+    fn fill_template_passes_through_an_unknown_placeholder() {
+        assert_eq!(
+            fill_template("?a={unknown}&b={lang}&c={", "en_us", "t"),
+            "?a={unknown}&b=en_us&c={"
+        );
+    }
+
+    #[test]
+    fn frontier_referer_escapes_query_structure_in_the_language() {
+        // The sibling `lang` query parameter is percent-encoded by the `url` crate; the referer must not
+        // be the one surface where a language code can inject or truncate query structure.
+        let escape = |language| {
+            frontier_referer(
+                "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+                language,
+                "2024-01-02-03-40",
+            )
+        };
+        assert_eq!(
+            escape("en-us&admin=1"),
+            "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us%26admin%3D1&time=2024-01-02-03-40"
+        );
+        assert_eq!(
+            escape("en-us#frag&x=1"),
+            "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us%23frag%26x%3D1&time=2024-01-02-03-40"
+        );
+        assert_eq!(
+            escape("en-us?evil=1"),
+            "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us%3Fevil%3D1&time=2024-01-02-03-40"
+        );
+    }
+
+    #[test]
+    fn frontier_referer_leaves_every_real_locale_byte_identical() {
+        // Encoding must be invisible for the input SE actually serves: the unreserved set covers every
+        // locale code, so the emitted referer stays byte-identical to the reference launcher's.
+        for language in ["en-us", "ja-jp", "de-de", "fr-fr", "zh-cn"] {
+            let referer = frontier_referer("{lang}", language, "t");
+            assert_eq!(referer, language.replace('-', "_"));
+        }
     }
 }

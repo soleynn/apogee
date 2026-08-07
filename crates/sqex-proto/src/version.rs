@@ -123,8 +123,9 @@ impl InstallPaths {
 
     /// Read the boot version for the boot-version check, substituting [`BASE_GAME_VERSION`] when
     /// `ffxivboot.ver` is absent or whitespace-only. Opt-in, for install-from-nothing: an absent boot
-    /// repository must report the base sentinel so the server returns the full boot chain. A present but
-    /// unreadable file is still a repairable fault.
+    /// repository must report the base sentinel so the server returns the full boot chain. A present file
+    /// that is unreadable or fails the content gate (embedded line feed, all-NUL) is still a repairable
+    /// fault.
     pub fn boot_version_or_sentinel(&self) -> Result<String, ProtoError> {
         read_ver_or_sentinel(&self.boot_ver(), VersionRepo::Boot)
     }
@@ -223,15 +224,20 @@ impl VersionReport {
     /// into an empty install.
     ///
     /// Opt-in and deliberately unlike [`VersionReport::from_install`]: a missing game or expansion
-    /// `.ver` is the expected state here, not a fault, so no sanity gate runs and no `.bck` is consulted;
-    /// a present `.ver` is reported as-is. The boot line still names the installed boot version
-    /// (base-fallback when absent) and the four boot EXEs, which must be present: install-from-nothing
-    /// brings up the boot component first, then reports the game at the sentinel.
+    /// `.ver` is the expected state here, not a fault, so absence is the sentinel and no `.bck` is
+    /// consulted. A `.ver` that is *present* is still content-gated, so local corruption (an embedded
+    /// line feed, an all-NUL body) is a repairable [`ProtoError::InvalidVersionFiles`] and never reaches
+    /// the report body, where a stray line feed would forge a whole extra record. The boot line still
+    /// names the installed boot version (base-fallback when absent) and the four boot EXEs, which must be
+    /// present: install-from-nothing brings up the boot component first, then reports the game at the
+    /// sentinel.
     ///
     /// This is *per-repository* base-fallback, mirroring the reference launcher's ordinary
     /// `Repository.GetVer` (`Repository.cs:67-76`: absent/whitespace → base, present → verbatim), which
-    /// is the semantics its non-forced register uses. For install-from-nothing (the game and every
-    /// expansion repo absent) the bytes are byte-identical to what the reference registers. It is
+    /// is the semantics its non-forced register uses; the content gate on a present file is Apogee's
+    /// divergence, the same refuse-a-corrupt-install posture the strict path takes. For
+    /// install-from-nothing (the game and every expansion repo absent) the bytes are byte-identical to
+    /// what the reference registers. It is
     /// **not** the reference's blanket `forceBaseVersion` Repair report (`Launcher.cs:271-283,402`),
     /// which forces base even for a present `.ver`; Apogee's repair is block-level over the index, not a
     /// base re-registration, so do not reuse this for repair.
@@ -268,20 +274,26 @@ fn read_sane_ver(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
     Ok(text)
 }
 
-/// Read a `.ver` the way the install-from-nothing report does, mirroring the reference launcher's
-/// `Repository.GetVer` (`Repository.cs:67-76`): an absent or whitespace-only file reports
-/// [`BASE_GAME_VERSION`]; a present file's decoded content is used verbatim (no sanity gate — the
-/// install-mode paths substitute base for a missing repository, they never reject one). A present but
-/// unreadable file is still a repairable [`ProtoError::InvalidVersionFiles`].
+/// Read a `.ver` the way the install-from-nothing report does: an absent or whitespace-only file
+/// reports [`BASE_GAME_VERSION`], mirroring the reference launcher's `Repository.GetVer`
+/// (`Repository.cs:67-76`).
+///
+/// What install-mode relaxes is *absence*, not corruption: a file present with real content still runs
+/// [`check_sanity`], so an embedded line feed or an all-NUL body is a repairable
+/// [`ProtoError::InvalidVersionFiles`] instead of content spliced into the report body verbatim. A
+/// present but unreadable file is likewise repairable. Only content that passes the gate is used as-is.
 fn read_ver_or_sentinel(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
     match std::fs::read(path) {
         Ok(bytes) => {
             let text = decode_ver(&bytes);
-            Ok(if text.trim().is_empty() {
-                BASE_GAME_VERSION.to_owned()
-            } else {
-                text
-            })
+            if text.trim().is_empty() {
+                // Whitespace-only is the sentinel, not a fault, so it never reaches the gate (which
+                // would call it `Empty`). Past here the gate can only report `AllNul` or
+                // `ContainsNewline`.
+                return Ok(BASE_GAME_VERSION.to_owned());
+            }
+            check_sanity(&text).map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind })?;
+            Ok(text)
         }
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(BASE_GAME_VERSION.to_owned()),
         Err(_) => Err(ProtoError::InvalidVersionFiles {
