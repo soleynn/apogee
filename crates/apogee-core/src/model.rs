@@ -62,6 +62,14 @@ pub struct Account {
     /// account rather than per launcher, because a shared machine may hold one login worth saving
     /// and one that is not.
     pub never_store: bool,
+    /// Where the one-time password comes from when [`Account::use_otp`] is set.
+    ///
+    /// Persisted because a front end has to choose what to ask for before it calls the core, and
+    /// secrets are write-only: "is a secret stored for this account" is not a question a shell may
+    /// put to the store. An account file written before this field existed reads as
+    /// [`OtpDelivery::Ask`], which is what every account did then.
+    #[serde(default)]
+    pub otp_delivery: OtpDelivery,
 }
 
 impl Account {
@@ -74,8 +82,21 @@ impl Account {
             kind,
             use_otp: false,
             never_store: false,
+            otp_delivery: OtpDelivery::default(),
         }
     }
+}
+
+/// Where an account's one-time password comes from when it uses one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OtpDelivery {
+    /// Ask for a code. What every account did before a secret could be stored.
+    #[default]
+    Ask,
+    /// Derive one from the stored secret, with nothing to type. Set by importing a secret.
+    Generate,
 }
 
 /// How an account authenticates and what entitlements it carries.

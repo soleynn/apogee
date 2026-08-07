@@ -177,6 +177,11 @@ pub enum Event {
 pub enum FlowState {
     /// A one-time password is required but none was usable.
     NeedsOtp,
+    /// The code this account generates cannot be sent as it stands, either because the server has
+    /// already seen it or because its window is nearly over, so the flow is holding until the next
+    /// one is current. `seconds` is how long that is: a few seconds in the ordinary case, and at
+    /// most the handful of windows the reuse guard steps over when codes repeat.
+    WaitingForOtpWindow { seconds: u64 },
     /// The account must accept the terms of service before playing.
     NeedsTerms,
     /// No active service on the account, or the login server is closed.

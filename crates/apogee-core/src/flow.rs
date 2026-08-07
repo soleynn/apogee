@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use apogee_otp::OtpSource;
+use apogee_otp::{ClockSkew, Code, Otp, OtpError, OtpSource};
 use apogee_patcher::{InstallRequest, Repo, SePatch};
 use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
 use apogee_secrets::Secret;
@@ -61,6 +61,8 @@ pub(crate) struct FlowContext {
     pub(crate) launch: Arc<dyn LaunchBackend>,
     pub(crate) addons: Arc<dyn AddonBackend>,
     pub(crate) steam: Arc<dyn SteamBackend>,
+    /// Where a generated one-time code comes from, and what remembers the last one submitted.
+    pub(crate) otp: Otp,
     pub(crate) store: Store,
     pub(crate) clock: Clock,
     pub(crate) computer_id: ComputerId,
@@ -81,7 +83,7 @@ pub(crate) async fn drive(
             profile,
             password,
             otp,
-        } => login(&ctx, profile, password, otp, &tx).await,
+        } => login(&ctx, profile, password, otp, &tx, &cancel).await,
         Command::Launch { profile } => launch_cached(&ctx, profile, &tx, &cancel).await,
         Command::PatchAndPlay {
             profile,
@@ -187,9 +189,10 @@ async fn login(
     password: Secret,
     otp: OtpSource,
     tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, account) = resolve(ctx, profile_id)?;
-    let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx).await? else {
+    let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx, cancel).await? else {
         return Ok(());
     };
     let report = build_report(InstallMode::Update, &profile.game_path, auth.max_expansion)?;
@@ -236,7 +239,7 @@ async fn play(
     {
         return launch_game(ctx, &profile, &account, &session, tx, cancel).await;
     }
-    let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx).await? else {
+    let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx, cancel).await? else {
         return Ok(());
     };
     let Some(session) = patch_to_current(ctx, &profile, &auth, mode, tx, cancel).await? else {
@@ -295,8 +298,9 @@ async fn launch_cached(
 }
 
 /// The authenticate step (OTP gate → login-status gate → OAuth submit → terms/service gates). Returns
-/// the completed login, or `None` when a disposition (needs-otp/terms/service) was narrated and the
-/// flow should stop.
+/// the completed login, or `None` when a disposition (needs-otp/terms/service/cancelled) was narrated
+/// and the flow should stop.
+#[allow(clippy::too_many_arguments)]
 async fn authenticate(
     ctx: &FlowContext,
     profile: &Profile,
@@ -304,16 +308,33 @@ async fn authenticate(
     password: Secret,
     otp: OtpSource,
     tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
 ) -> Result<Option<Authenticated>, CoreError> {
-    // The one-time password: only a manually entered code is honored for now. Borrowed out of the
-    // source rather than copied out of it, so the erased buffer the shell typed into is the only one
-    // this process holds.
-    let otp_code = match (account.use_otp, &otp) {
-        (false, _) => None,
-        (true, OtpSource::Manual(code)) if !code.is_empty() => {
+    // A generated code is owned for the rest of the call, so `Credentials::otp` can borrow it across
+    // the submit await exactly as it borrows a typed one. Minting here, before any request, keeps
+    // the reuse guard's wait outside the login server's own window; the correction against server
+    // time arrives when the top page's `Date` is plumbed through.
+    let minted: Option<Code> = if account.use_otp && matches!(otp, OtpSource::Totp) {
+        match mint_totp(ctx, account.id, tx, cancel).await? {
+            Some(code) => Some(code),
+            // A disposition the mint has already narrated: nothing stored to derive a code from, or
+            // a run stopped while it held for the next window. Neither is a failure.
+            None => return Ok(None),
+        }
+    } else {
+        None
+    };
+
+    // The one-time password: either the code just generated or the one that was typed. Borrowed out
+    // of whichever holds it rather than copied out, so the erased buffer is the only one this
+    // process holds.
+    let otp_code = match (account.use_otp, &otp, &minted) {
+        (false, _, _) => None,
+        (true, _, Some(code)) => Some(code.expose()),
+        (true, OtpSource::Manual(code), _) if !code.is_empty() => {
             Some(std::str::from_utf8(code.expose()).map_err(|_| CoreError::InvalidCredential)?)
         }
-        (true, _) => {
+        (true, _, _) => {
             emit(tx, FlowState::NeedsOtp);
             return Ok(None);
         }
@@ -341,13 +362,19 @@ async fn authenticate(
         login_kind(ctx, account).await?,
     )
     .await?;
-    let auth = flow
+    let submitted = flow
         .submit(Credentials {
             sqexid: &account.sqex_id,
             password,
             otp: otp_code,
         })
-        .await?;
+        .await;
+    // Recorded whichever way the submit went. The login server has seen the code either way, and it
+    // is the server's replay rule this guards against, not our own success.
+    if let Some(code) = &minted {
+        ctx.otp.submitted(account.id, code);
+    }
+    let auth = submitted?;
     if !auth.terms_accepted {
         emit(tx, FlowState::NeedsTerms);
         return Ok(None);
@@ -357,6 +384,53 @@ async fn authenticate(
         return Ok(None);
     }
     Ok(Some(auth))
+}
+
+/// Derive this account's code, holding out whatever wait the mint asks for.
+///
+/// `None` is a disposition this narrates itself: either nothing is stored to derive a code from (the
+/// answer is to type one or to import a secret) or the run was stopped while it held. The wait is
+/// the library's answer rather than its own sleep, because only this side holds the runtime, the
+/// event channel and the token; it is bounded by the windows the mint will step over.
+async fn mint_totp(
+    ctx: &FlowContext,
+    account: Uuid,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<Option<Code>, CoreError> {
+    // No correction yet: server time is not in hand until the OAuth top page has answered, which is
+    // past the point a code has to exist. The instant the code is derived from is read inside the
+    // mint, after the store has answered, because that read can sit on an unlock prompt for as long
+    // as the user takes to notice it.
+    match ctx.otp.mint(account, ClockSkew::NONE).await {
+        Ok(minted) => {
+            let wait = minted.wait();
+            if !wait.is_zero() {
+                emit(
+                    tx,
+                    FlowState::WaitingForOtpWindow {
+                        seconds: wait.as_secs(),
+                    },
+                );
+                // The only wall-clock wait in a login, and the one moment a shell tells a user to
+                // sit still, so it is the moment cancel gets pressed. A sleep that ignored the token
+                // would go on to log in and cache a session for a run that was stopped.
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = cancel.cancelled() => {
+                        emit(tx, FlowState::Cancelled);
+                        return Ok(None);
+                    }
+                }
+            }
+            Ok(Some(minted.into_code()))
+        }
+        Err(OtpError::NoSecret) => {
+            emit(tx, FlowState::NeedsOtp);
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Which login variant an account logs in with, minting a Steam ticket when it needs one.

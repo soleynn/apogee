@@ -1,0 +1,9 @@
+error[E0277]: `Code` doesn't implement `std::fmt::Display`
+ --> tests/ui/code_display.rs:7:14
+  |
+7 |     format!("{code}")
+  |              ^^^^^^ `Code` cannot be formatted with the default formatter
+  |
+  = help: the trait `std::fmt::Display` is not implemented for `Code`
+  = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+  = note: required for `&Code` to implement `std::fmt::Display`

@@ -1,5 +1,7 @@
 //! The storage seam and the handle the composition root holds.
 
+use std::sync::Arc;
+
 use uuid::Uuid;
 
 use crate::{BackendReport, OsKeyring, Secret, SecretKind, SecretsError};
@@ -86,8 +88,11 @@ pub trait SecretStore {
 }
 
 /// The concrete secret store the composition root holds, wrapping one chosen backend.
+///
+/// The backend is held behind a reference count so a subsystem that has to read a secret from a
+/// thread of its own can be handed a share of the one store rather than a borrow of it.
 pub struct Secrets {
-    backend: Box<dyn SecretStore + Send + Sync>,
+    backend: Arc<dyn SecretStore + Send + Sync>,
 }
 
 impl Secrets {
@@ -99,7 +104,7 @@ impl Secrets {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            backend: Box::new(OsKeyring::new()),
+            backend: Arc::new(OsKeyring::new()),
         }
     }
 
@@ -110,13 +115,25 @@ impl Secrets {
     /// for the same reason [`Secrets::new`] does not.
     #[must_use]
     pub fn with_backend(backend: Box<dyn SecretStore + Send + Sync>) -> Self {
-        Self { backend }
+        Self {
+            backend: Arc::from(backend),
+        }
     }
 
     /// Borrow the active backend.
     #[must_use]
     pub fn store(&self) -> &(dyn SecretStore + Send + Sync) {
         self.backend.as_ref()
+    }
+
+    /// A share of the active backend.
+    ///
+    /// What a subsystem takes when it has to reach the store from somewhere a borrow cannot go: a
+    /// blocking task, which is where every read belongs, owns what it reads from for as long as it
+    /// runs. It is the same backend, not a copy, so a store that keeps a derived key keeps one.
+    #[must_use]
+    pub fn shared(&self) -> Arc<dyn SecretStore + Send + Sync> {
+        Arc::clone(&self.backend)
     }
 }
 
