@@ -86,6 +86,26 @@ jobs:
       # oracle tree. These skip when the corpus is unprimed (every-push), so they run here.
       - run: cargo test -p apogee-zipatch --test apply_boot --test index_corpus
 
+  trust-anchors:
+    name: trust-anchors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The credential-carrying client accepts only the authorities Square Enix issues from, so a fifth
+      # one refuses every login the day it starts being served. Nothing in the repository can see that
+      # coming: it is a fact about certificates Square Enix rotates, so it is checked against the live
+      # endpoints here rather than waited for. A failure means the shipped anchor set needs a root
+      # adding before the next release, not that anything in this change broke.
+      - run: "APOGEE_TLS_LIVE=1 cargo test -p apogee-core --lib trust:: -- --ignored --nocapture"
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest

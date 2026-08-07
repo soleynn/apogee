@@ -49,6 +49,11 @@ submit.
 Certificates and intermediates are deliberately not pinned. The login host reissues on a two-to-four
 week cycle with a fresh key each time, so a pin on either would break logins on a day nothing shipped.
 
+A refused certificate says so, names the setting below, and does not report the host as unreachable,
+so hitting this looks like what it is rather than like a network fault. The nightly build checks the
+live endpoints against the shipped roots, so a move to a new authority is caught before a release
+rather than by users.
+
 If this blocks you, `APOGEE_TLS_SYSTEM_ROOTS=1` puts that run back on the machine's own trust store:
 
 ```sh

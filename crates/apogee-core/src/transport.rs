@@ -90,7 +90,11 @@ impl Transport for HttpTransport {
 /// So the host is named and the path is not, which loses nothing a user could act on: which of the
 /// endpoints was unreachable is the actionable part, and the path is fixed by the protocol.
 fn why(url: &Url, err: &reqwest::Error) -> String {
-    let what = if err.is_timeout() {
+    let what = if refused_the_certificate(err) {
+        "presented a certificate from an authority this launcher does not accept, which is either \
+         something on this network reading the connection or Square Enix moving to an authority \
+         this build predates; set APOGEE_TLS_SYSTEM_ROOTS=1 to trust this machine's own list instead"
+    } else if err.is_timeout() {
         "timed out"
     } else if err.is_connect() {
         "could not be reached"
@@ -111,9 +115,32 @@ fn why(url: &Url, err: &reqwest::Error) -> String {
     }
 }
 
+/// Whether the handshake failed because nothing would vouch for the certificate.
+///
+/// Read off the rendering rather than a predicate, because reqwest has none: rustls reports a chain
+/// it will not accept through a boxed source that `is_connect` reports along with a refused
+/// connection and a dead route. Those three want different sentences. This one is the only failure
+/// the launcher itself causes, by narrowing the authorities it accepts (see [`crate::trust`]), so it
+/// is also the only one where the answer is a setting rather than the network coming back.
+///
+/// The rendering is walked and never quoted, so the URL the message above is careful to withhold
+/// stays out of it.
+fn refused_the_certificate(err: &reqwest::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(cause) = source {
+        let rendered = format!("{cause:?}").to_ascii_lowercase();
+        if rendered.contains("unknownissuer") || rendered.contains("invalidcertificate") {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apogee_test_support::chaos::ChaosServer;
     use reqwest::Method;
     use tokio::io::AsyncWriteExt;
 
@@ -172,6 +199,68 @@ mod tests {
         // parser has no business seeing, and the seam's contract is that they do not travel.
         assert_eq!(response.headers.len(), 2, "{:?}", response.headers);
         Ok(())
+    }
+
+    /// A refused certificate is named as one, and points at the setting that gets past it.
+    ///
+    /// The launcher narrows the authorities it will accept, so this is the one connection failure it
+    /// causes itself, and the one whose answer is a setting rather than waiting for the network. Told
+    /// apart from the others it would otherwise be filed with: reqwest reports it through the same
+    /// `is_connect` as a refused connection and a dead route, so before this it read as the login
+    /// server being unreachable, which is both false and unactionable.
+    ///
+    /// Driven through a real handshake against a server whose certificate nothing here vouches for,
+    /// because the classification reads a rustls rendering that no fixture can reproduce faithfully.
+    #[tokio::test]
+    async fn a_refused_certificate_says_so_and_names_the_way_past_it() {
+        let server = ChaosServer::builder(1, 64)
+            .tls()
+            .start()
+            .await
+            .expect("the chaos server starts");
+        let url = Url::parse(server.url("file.bin").as_str()).expect("a url");
+        let transport = HttpTransport::new(
+            reqwest::Client::builder()
+                .tls_built_in_root_certs(false)
+                .build()
+                .expect("a client trusting nothing"),
+        );
+
+        let err = transport
+            .execute(ProtoRequest::new(Method::GET, url))
+            .await
+            .expect_err("a client trusting nothing must refuse this");
+
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("certificate"),
+            "a refused certificate was not named as one: {rendered}"
+        );
+        assert!(
+            rendered.contains("APOGEE_TLS_SYSTEM_ROOTS"),
+            "the message does not say what to do about it: {rendered}"
+        );
+        assert!(
+            !rendered.contains("could not be reached"),
+            "a reachable server was reported unreachable: {rendered}"
+        );
+    }
+
+    /// Every other connection failure keeps the sentence it had. The classification above reads a
+    /// rendering, so it is exactly the shape that starts matching things it was not meant to.
+    #[tokio::test]
+    async fn a_dead_route_is_still_a_dead_route() {
+        let url = Url::parse("http://127.0.0.1:1/").expect("a url");
+        let transport = HttpTransport::new(reqwest::Client::new());
+
+        let err = transport
+            .execute(ProtoRequest::new(Method::GET, url))
+            .await
+            .expect_err("nothing listens on port 1");
+
+        let rendered = format!("{err}");
+        assert!(rendered.contains("could not be reached"), "{rendered}");
+        assert!(!rendered.contains("certificate"), "{rendered}");
     }
 
     /// The registration step puts the session id in the path, so the whole URL must never reach the
