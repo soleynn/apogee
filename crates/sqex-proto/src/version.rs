@@ -353,9 +353,6 @@ fn read_file(path: &Path, repo: VersionRepo) -> Result<Vec<u8>, ProtoError> {
     }
 }
 
-/// Decode a version file's bytes to text the way the reference launcher does: lossy UTF-8 with a single
-/// leading byte-order mark stripped (`File.ReadAllText` consumes a BOM). The result is what the report
-/// embeds and what the sanity gate inspects, so both stay byte-identical to the oracle.
 /// Decode a `.ver` file's bytes to its canonical version string: lossy UTF-8, with one leading UTF-8
 /// BOM stripped (the reference launcher's `File.ReadAllText` consumes it). This is the one decode every
 /// `.ver` reader must share, so a version compared against the registration report or the signed index

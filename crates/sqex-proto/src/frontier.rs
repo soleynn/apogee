@@ -41,10 +41,14 @@ const LOGIN_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/login_sta
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct GateStatus {
+    /// Whether the service is open. SE sends this as an integer (`0` closed, non-zero open), though a
+    /// bool or `"true"`/`"false"` is also accepted (see the module docs for the full shape).
     #[serde(deserialize_with = "deserialize_open_flag")]
     pub status: bool,
+    /// Display strings shown alongside the status (e.g. a maintenance notice).
     #[serde(deserialize_with = "deserialize_display_list")]
     pub message: Vec<String>,
+    /// Display strings for current news items.
     #[serde(deserialize_with = "deserialize_display_list")]
     pub news: Vec<String>,
 }
@@ -181,6 +185,7 @@ impl<'de> Deserialize<'de> for DisplayItem {
 
 /// The per-install, per-locale values a frontier request carries.
 pub struct FrontierContext<'a> {
+    /// The shared client identity and locale plumbing.
     pub client: ClientContext<'a>,
 }
 
