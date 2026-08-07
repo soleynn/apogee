@@ -76,6 +76,41 @@ fn gate_status_parses_a_closed_gate() {
     assert_eq!(status.message, ["Scheduled maintenance"]);
 }
 
+/// The leniency reaches the real surface, not just `serde_json::from_str`: a payload whose flag is a
+/// float and whose display lists are `null` still answers the caller instead of failing the request.
+#[test]
+fn gate_status_degrades_a_wobbly_payload_end_to_end() {
+    let id = computer_id();
+    let transport = FixtureTransport::once(ProtoResponse::new(
+        200,
+        br#"{"status": 1.0, "message": null, "news": ["patch 7.1", 7]}"#.to_vec(),
+    ));
+    let status = block_on(check_gate_status(&transport, &context(&id), &fixed_time())).unwrap();
+    assert!(status.status);
+    assert!(status.message.is_empty());
+    assert_eq!(status.news, ["patch 7.1", "7"]);
+}
+
+/// The other half of the same decision: a flag with no readable open/closed meaning is reported as a
+/// failed check rather than guessed into an answer the caller would act on.
+#[test]
+fn gate_status_reports_an_unreadable_flag_rather_than_guessing() {
+    let id = computer_id();
+    let transport = FixtureTransport::once(ProtoResponse::new(
+        200,
+        br#"{"status": "maintenance"}"#.to_vec(),
+    ));
+    let err = block_on(check_gate_status(&transport, &context(&id), &fixed_time())).unwrap_err();
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::GateStatus,
+            status: 200,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn a_non_200_status_is_an_invalid_response() {
     let id = computer_id();

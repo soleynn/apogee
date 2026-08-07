@@ -2,8 +2,9 @@
 //!
 //! A plain-HTTP GET asking whether the boot component is current. A current boot answers `204 No
 //! Content`; a pending one a `200` whose body is a boot patchlist naming the patches in order. An
-//! empty or whitespace `200` body is also read as current. This is also the one endpoint CI is
-//! allowed to call live, to keep the patchlist parser honest against genuinely-current SE output.
+//! empty or whitespace `200` body is also read as current, including one stamped with a byte-order
+//! mark. This is also the one endpoint CI is allowed to call live, to keep the patchlist parser honest
+//! against genuinely-current SE output.
 
 use http::{HeaderName, HeaderValue, Method};
 
@@ -40,11 +41,16 @@ pub async fn check_boot_version(
         return Err(ProtoError::invalid_response(Step::BootVersion, &response));
     }
 
-    let body = String::from_utf8_lossy(&response.body);
+    // `str::trim` follows `char::is_whitespace`, which does not classify U+FEFF, so a body carrying a
+    // byte-order mark reads as non-empty and falls through to the parser: a BOM-stamped current boot
+    // would report a patch that does not exist. Strip one leading mark before both the emptiness gate
+    // and the parse, the way `decode_ver` does for the version files SE stamps the same way.
+    let decoded = String::from_utf8_lossy(&response.body);
+    let body = decoded.strip_prefix('\u{feff}').unwrap_or(&decoded);
     if body.trim().is_empty() {
         return Ok(Vec::new());
     }
-    parse_patch_list(&body)
+    parse_patch_list(body)
 }
 
 /// Build the boot-check request. The dynamic path and query segments are percent-encoded through the

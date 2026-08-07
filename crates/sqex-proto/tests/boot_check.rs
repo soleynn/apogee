@@ -77,6 +77,38 @@ fn whitespace_body_means_boot_is_current() {
     assert!(entries.is_empty());
 }
 
+/// U+FEFF is not whitespace to `char::is_whitespace`, so a BOM-stamped empty body has to be stripped
+/// rather than trimmed. Left unstripped it falls through to the parser and reports a boot patch that
+/// does not exist, which aborts the flow one layer up.
+#[test]
+fn a_bom_only_body_means_boot_is_current() {
+    let transport = FixtureTransport::once(ProtoResponse::new(200, b"\xef\xbb\xbf".to_vec()));
+    let entries = block_on(check_boot_version(&transport, BOOT_VERSION, &fixed_time())).unwrap();
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn a_bom_and_whitespace_body_means_boot_is_current() {
+    let transport =
+        FixtureTransport::once(ProtoResponse::new(200, b"\xef\xbb\xbf  \r\n\t".to_vec()));
+    let entries = block_on(check_boot_version(&transport, BOOT_VERSION, &fixed_time())).unwrap();
+    assert!(entries.is_empty());
+}
+
+/// The same stamp on a body that does carry patches: stripping before the parse keeps the mark out of
+/// the opening boundary, which the envelope check would otherwise reject.
+#[test]
+fn a_bom_prefixed_patchlist_still_parses() {
+    let entry = "900\t0\t0\t0\tD2024.01.01.0000.0000\t\
+        http://patch-dl.example.invalid/boot/2b5cbc63/D2024.01.01.0000.0000.patch";
+    let mut body = b"\xef\xbb\xbf".to_vec();
+    body.extend(boot_patchlist(&[entry]));
+    let transport = FixtureTransport::once(ProtoResponse::new(200, body));
+    let entries = block_on(check_boot_version(&transport, BOOT_VERSION, &fixed_time())).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].length, 900);
+}
+
 #[test]
 fn parses_a_returned_boot_patchlist() {
     let entry = "900\t0\t0\t0\tD2024.01.01.0000.0000\t\
