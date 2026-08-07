@@ -223,9 +223,12 @@ pub trait Transport: Send + Sync {
 /// fingerprint divergence rather than a silent one: see the wire-level test in the core's adapter,
 /// which pins what the production client actually appends.
 ///
-/// Nothing else belongs here. Framing headers a client adds after this check (`host`, `content-length`)
-/// are added below the layer an adapter reads back from, so they never reach the comparison; if a
-/// client ever starts adding them earlier, the check firing is the intended outcome.
+/// Nothing else belongs here. A client's own late framing additions (`host`, `content-length`) are
+/// added below the layer an adapter reads back from when a surface leaves them undeclared, so an
+/// undeclared one never reaches the comparison; if a client ever starts adding one earlier, the check
+/// firing is the intended outcome. One surface is a deliberate exception: `bootver.rs` declares `host`
+/// explicitly, matching the reference launcher's own explicit `Host` header on that endpoint, so there
+/// it is an ordinary declared header in the comparison rather than an implicit framing one.
 pub const NEGOTIATED_HEADERS: [HeaderName; 1] = [http::header::ACCEPT_ENCODING];
 
 /// Check that `emitted` is exactly the request's declared headers, in the same order, ignoring
