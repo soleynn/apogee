@@ -1,9 +1,10 @@
 //! Patchlist parser tests over synthetic bodies (no SE bytes): both entry shapes, the multipart-frame
-//! validation, line-numbered errors, line-ending equivalence, and a panic-freedom property.
+//! validation, line-numbered errors, line-ending equivalence, the input bounds, and a panic-freedom
+//! property.
 
 use proptest::prelude::*;
 
-use super::parse_patch_list;
+use super::{MAX_BODY_BYTES, MAX_ENTRIES, parse_patch_list};
 use crate::ProtoError;
 
 /// An obviously-synthetic multipart boundary. The parser only requires it to open with `--`.
@@ -214,6 +215,137 @@ fn full_parse_is_pinned() {
     );
     let entries = parse_patch_list(&envelope(&[game.as_str(), boot.as_str()])).unwrap();
     insta::assert_debug_snapshot!("patchlist_game_and_boot", entries);
+}
+
+/// The `reason` tag of a parse error, for tests that only care which guard fired.
+fn reason_of(err: ProtoError) -> &'static str {
+    match err {
+        ProtoError::PatchListParse { reason, .. } => reason,
+        other => panic!("expected a patchlist parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_a_game_entry_with_a_stray_trailing_tab() {
+    // A well-formed nine-field game entry plus one stray tab. XL's parser reclassifies any non-nine
+    // count as a boot entry, which would read field 5 (`sha1`) as the URL and silently drop the
+    // block hashes; the exact dispatch refuses it instead.
+    let line = game_entry(
+        1200,
+        "D2024.01.02.0000.0000",
+        52_428_800,
+        TWO_HASHES,
+        "http://patch-dl.example.invalid/game/ex1/abcd1234/D2024.01.02.0000.0000.patch",
+    );
+    let err = parse_patch_list(&envelope(&[format!("{line}\t").as_str()])).unwrap_err();
+    assert_eq!(reason_of(err), "unexpected tab-separated field count");
+}
+
+#[test]
+fn only_six_and_nine_field_entries_are_accepted() {
+    // Field counts between and beyond the two real shapes are errors, not boot entries. Seven and
+    // eight sit between them; ten is a game entry that grew a field.
+    for extra in [1, 2, 4] {
+        let line = format!(
+            "100\t0\t0\t0\tD2024\thttp://x/boot/y/z.patch{}",
+            "\tx".repeat(extra)
+        );
+        let err = parse_patch_list(&envelope(&[line.as_str()])).unwrap_err();
+        assert_eq!(
+            reason_of(err),
+            "unexpected tab-separated field count",
+            "a {}-field entry must not parse",
+            6 + extra
+        );
+    }
+}
+
+#[test]
+fn rejects_content_in_the_final_blank_trailer_line() {
+    // A full entry line placed where the envelope's final blank belongs is outside the window XL
+    // (and this parser) reads, so it would be dropped with an `Ok`.
+    let good = boot_entry(1, "D1", "http://x/boot/y/a.patch");
+    let smuggled = boot_entry(2, "D2", "http://x/boot/y/b.patch");
+    // No trailing newline: the smuggled line lands *in* the final-blank slot rather than shifting
+    // the window (which the closing-boundary check would already catch).
+    let body = format!("{}{smuggled}", envelope(&[good.as_str()]));
+    let err = parse_patch_list(&body).unwrap_err();
+    assert!(matches!(
+        err,
+        ProtoError::PatchListParse {
+            line: 8,
+            reason: "unexpected content after closing multipart boundary",
+        }
+    ));
+}
+
+#[test]
+fn a_whitespace_trailer_line_is_still_valid() {
+    let line = boot_entry(1, "D1", "http://x/boot/y/a.patch");
+    let body = envelope(&[line.as_str()]).replace("--\r\n", "--\r\n  \t");
+    assert_eq!(parse_patch_list(&body).unwrap().len(), 1);
+}
+
+#[test]
+fn rejects_a_body_over_the_size_cap() {
+    let body = "x".repeat(MAX_BODY_BYTES + 1);
+    let err = parse_patch_list(&body).unwrap_err();
+    assert_eq!(reason_of(err), "patchlist body too large");
+}
+
+#[test]
+fn rejects_more_entry_lines_than_the_cap_allows() {
+    // Blank filler, not real entries: the cap has to reject before the entry loop can allocate, so
+    // a body that never reaches `parse_entry` still has to be refused on its line count alone.
+    let filler = vec![""; MAX_ENTRIES + 1];
+    let err = parse_patch_list(&envelope(&filler)).unwrap_err();
+    assert_eq!(reason_of(err), "too many patchlist entries");
+}
+
+#[test]
+fn an_entry_count_at_the_cap_is_accepted() {
+    let line = boot_entry(1, "D1", "http://x/boot/y/a.patch");
+    let entries = vec![line.as_str(); MAX_ENTRIES];
+    assert_eq!(
+        parse_patch_list(&envelope(&entries)).unwrap().len(),
+        MAX_ENTRIES
+    );
+}
+
+#[test]
+fn rejects_a_url_field_that_is_not_a_url() {
+    // The value a stray-tab game entry used to land in `url` before the field count was matched
+    // exactly: a second line of defense on the same mis-slice.
+    let bad = "100\t0\t0\t0\tD2024\tsha1";
+    let err = parse_patch_list(&envelope(&[bad])).unwrap_err();
+    assert_eq!(reason_of(err), "malformed patch URL");
+
+    // A relative path and a non-HTTP scheme are likewise not fetchable.
+    for url in ["/boot/y/z.patch", "file:///etc/passwd"] {
+        let line = boot_entry(100, "D2024", url);
+        let err = parse_patch_list(&envelope(&[line.as_str()])).unwrap_err();
+        assert_eq!(
+            reason_of(err),
+            "malformed patch URL",
+            "{url} must not parse"
+        );
+    }
+}
+
+#[test]
+fn repo_resolution_is_deliberately_left_to_the_consumer() {
+    // Pins the scope decision documented on `parse_url`: a URL with no `/(game|boot)/{repoId}/`
+    // segment, and one naming a repo beyond the range this workspace enumerates, are both accepted
+    // here. Classifying them is the consumer's call (`apogee_core::patch::classify_repo`), and
+    // rejecting an unknown-but-fetchable repo would make a new expansion a hard patch-day failure.
+    for url in [
+        "http://patch-dl.example.invalid/not-a-repo-segment/x.patch",
+        "http://patch-dl.example.invalid/game/ex6/abcd1234/D2024.01.02.0000.0000.patch",
+    ] {
+        let line = boot_entry(100, "D2024", url);
+        let entries = parse_patch_list(&envelope(&[line.as_str()])).unwrap();
+        assert_eq!(entries[0].url, url);
+    }
 }
 
 proptest! {
