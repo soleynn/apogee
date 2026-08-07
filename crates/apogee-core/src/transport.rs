@@ -1,13 +1,17 @@
 //! The concrete network transport the core owns.
 //!
 //! `sqex-proto` never opens a socket; it hands each request to an injected transport. This adapter
-//! backs that seam with reqwest. The request contract is exact: emit precisely the declared
-//! headers, in order, and inject nothing of the client's own (no default `Accept`, no
-//! `Accept-Encoding`), because the header set is plausibly fingerprinted. The request translation
-//! and response mapping land with the login flow that first drives this.
+//! backs that seam with reqwest. The request contract is exact: emit precisely the declared headers,
+//! in order, and inject nothing of the client's own (no default `Accept`, no tracing header), because
+//! the header set is plausibly fingerprinted. `Accept-Encoding` is the one header the client answers
+//! for itself (`sqex_proto::NEGOTIATED_HEADERS`); everything else is checked back against the
+//! declaration before the request is sent.
 
-use reqwest::header::{DATE, HeaderName};
-use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError};
+use reqwest::header::{DATE, HeaderName, HeaderValue};
+use sqex_proto::{
+    NEGOTIATED_HEADERS, ProtoRequest, ProtoResponse, Transport, TransportError,
+    check_header_fidelity,
+};
 use url::Url;
 
 /// A reqwest-backed [`Transport`]: a pooled client with dual-stack dialing. Internal wiring: the
@@ -32,8 +36,9 @@ impl Transport for HttpTransport {
         for (name, value) in &req.headers {
             // reqwest runs its own content negotiation (the client enables gzip/deflate); forwarding
             // the declared accept-encoding would suppress its automatic decompression, leaving the
-            // parser a compressed body.
-            if name.as_str() == "accept-encoding" {
+            // parser a compressed body. This is the one header the seam's contract lets a client
+            // answer for itself, and the check below is narrowed to match.
+            if NEGOTIATED_HEADERS.contains(name) {
                 continue;
             }
             builder = builder.header(name.clone(), value.clone());
@@ -42,7 +47,24 @@ impl Transport for HttpTransport {
             builder = builder.body(body.as_bytes().to_vec());
         }
 
-        let response = builder.send().await.map_err(|err| {
+        // Build first and read the headers back out of reqwest's own representation, rather than
+        // sending straight from the builder. The header set is what SE fingerprints, and the loop
+        // above is one edit away from reordering or dropping part of it; reading back is what makes
+        // the seam's fidelity contract something this adapter proves rather than promises.
+        let request = builder.build().map_err(|err| {
+            TransportError::new(format!(
+                "building the request failed: {}",
+                why(&req.url, &err)
+            ))
+        })?;
+        let emitted: Vec<(HeaderName, HeaderValue)> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        check_header_fidelity(&req, &emitted)?;
+
+        let response = self.client.execute(request).await.map_err(|err| {
             TransportError::new(format!("request failed: {}", why(&req.url, &err)))
         })?;
         let status = response.status().as_u16();
@@ -142,7 +164,8 @@ mod tests {
     use super::*;
     use apogee_test_support::chaos::ChaosServer;
     use reqwest::Method;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::task::JoinHandle;
 
     /// Answer one request with a fixed response carrying `headers`, and hand back the address to send
     /// it to. The request is drained rather than parsed: what is under test is the response side.
@@ -164,6 +187,27 @@ mod tests {
         Ok(url)
     }
 
+    /// The mirror of [`one_shot`]: answer one request and hand back the request head as it arrived on
+    /// the socket, so a test can read the header set SE would see rather than the one this process
+    /// meant to send.
+    async fn capturing_head() -> std::io::Result<(Url, JoinHandle<String>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = Url::parse(&format!("http://{}/oauth/top", listener.local_addr()?))
+            .map_err(|_| std::io::Error::other("the listener's address is not a url"))?;
+        let captured = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return String::new();
+            };
+            let mut buf = vec![0u8; 8192];
+            let read = socket.read(&mut buf).await.unwrap_or(0);
+            let response = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+            String::from_utf8_lossy(&buf[..read]).into_owned()
+        });
+        Ok((url, captured))
+    }
+
     /// The `Date` header comes back off a real socket.
     ///
     /// The one test that fails if the surfaced-header list above stops naming it. Every fixture in
@@ -182,7 +226,7 @@ mod tests {
         let response = transport
             .execute(ProtoRequest::new(Method::GET, url))
             .await
-            .map_err(|err| std::io::Error::other(err.message))?;
+            .map_err(|err| std::io::Error::other(err.message().to_owned()))?;
 
         assert_eq!(
             response
@@ -286,5 +330,123 @@ mod tests {
             rendered.contains("127.0.0.1"),
             "the error should still name the host: {rendered}"
         );
+    }
+
+    /// What SE actually sees, out of the client the launcher really ships.
+    ///
+    /// The seam's contract is that a transport emits exactly the declared headers, in order, and adds
+    /// nothing of its own; `NEGOTIATED_HEADERS` narrows it by the one header reqwest answers for
+    /// itself. A socket is the only vantage point where that narrowing is visible, and the only one
+    /// that sees what a client merges *after* a request is built, which is where reqwest applies both
+    /// its negotiated encoding and any configured default header. So this drives the composition
+    /// root's own transport rather than a client assembled here: a default header added to that client
+    /// reddens this test, and nothing else in the repository would notice.
+    ///
+    /// It is also where the one remaining divergence is legible: the declared `gzip, deflate` never
+    /// travels, and reqwest's own unspaced value stands in its place after every declared header.
+    /// Pinning the whole head means a dependency bump that changes what reqwest appends reddens this
+    /// rather than quietly changing the fingerprint.
+    #[tokio::test]
+    async fn the_declared_headers_reach_the_wire_and_only_the_encoding_is_substituted()
+    -> std::io::Result<()> {
+        let (url, captured) = capturing_head().await?;
+        let authority = url.authority().to_owned();
+        let request = ProtoRequest::new(Method::POST, url)
+            .header(
+                HeaderName::from_static("user-agent"),
+                HeaderValue::from_static("SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)"),
+            )
+            .header(
+                HeaderName::from_static("accept"),
+                HeaderValue::from_static("image/gif, */*"),
+            )
+            .header(
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("gzip, deflate"),
+            )
+            .header(
+                HeaderName::from_static("accept-language"),
+                HeaderValue::from_static("en-US,en;q=0.9"),
+            )
+            .header(
+                HeaderName::from_static("cookie"),
+                HeaderValue::from_static("_rsid=\"\""),
+            )
+            .body(sqex_proto::RequestBody::new(b"body".to_vec()));
+
+        let transport = crate::composition::http_transport()
+            .map_err(|err| std::io::Error::other(format!("{err:?}")))?;
+        transport
+            .execute(request)
+            .await
+            .map_err(|err| std::io::Error::other(err.message().to_owned()))?;
+
+        let head = captured.await.map_err(std::io::Error::other)?;
+        let lines: Vec<&str> = head
+            .split("\r\n")
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "user-agent: SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)",
+                "accept: image/gif, */*",
+                "accept-language: en-US,en;q=0.9",
+                "cookie: _rsid=\"\"",
+                "accept-encoding: gzip,deflate",
+                &format!("host: {authority}"),
+                "content-length: 4",
+            ],
+            "the wire head was: {head}"
+        );
+        Ok(())
+    }
+
+    /// The fidelity check is not a debug assertion: a build that ships refuses a request whose header
+    /// set is not the one the protocol declared, rather than sending it and hoping.
+    ///
+    /// The wrong header set here is a reordering reqwest performs on its own. Its request headers are
+    /// a `HeaderMap`, which groups repeats of a name together, so a declaration that interleaves them
+    /// (`cookie`, `referer`, `cookie`) cannot survive the translation: what comes back out is
+    /// `cookie`, `cookie`, `referer`. That is a real, silent alteration of the fingerprint, and the
+    /// adapter's own loop is not what causes it.
+    ///
+    /// Aimed at a port nothing listens on, so the only way this can report an altered header set
+    /// rather than an unreachable host is if the check ran before the send. It carries no debug
+    /// assertion and passes identically under `--release`.
+    #[tokio::test]
+    async fn a_header_set_the_client_reorders_is_refused_before_the_send() {
+        let transport = HttpTransport::new(reqwest::Client::new());
+        let url = Url::parse("http://127.0.0.1:1/oauth/top").expect("a url");
+        let request = ProtoRequest::new(Method::GET, url)
+            .header(
+                HeaderName::from_static("cookie"),
+                HeaderValue::from_static("a=1"),
+            )
+            .header(
+                HeaderName::from_static("referer"),
+                HeaderValue::from_static("http://example.invalid/"),
+            )
+            .header(
+                HeaderName::from_static("cookie"),
+                HeaderValue::from_static("b=2"),
+            );
+
+        let err = transport
+            .execute(request)
+            .await
+            .expect_err("a reordered header set must not reach the network");
+
+        let rendered = format!("{err}");
+        assert!(rendered.contains("altered the header set"), "{rendered}");
+        assert!(
+            !rendered.contains("could not be reached"),
+            "the request was sent anyway: {rendered}"
+        );
+        // Names only: the referer's URL and the cookie's value are not diagnostics for an ordering
+        // bug, and one of them is a credential on the registration step.
+        assert!(!rendered.contains("a=1"), "{rendered}");
+        assert!(!rendered.contains("example.invalid"), "{rendered}");
     }
 }

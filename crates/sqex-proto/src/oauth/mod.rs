@@ -43,6 +43,12 @@ const OAUTH_ACCEPT: &str = "image/gif, image/jpeg, image/pjpeg, application/x-ms
     application/xaml+xml, application/x-ms-xbap, */*";
 const RSID_COOKIE: &str = "_rsid=\"\"";
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+/// Both OAuth steps ask to keep the connection, as the reference launcher does on each
+/// (`Launcher.cs:475,566`) and as `register.rs` already does on the step after them.
+const KEEP_ALIVE: &str = "Keep-Alive";
+/// The submit step alone asks not to be cached (`Launcher.cs:567`): it is the one POST whose answer is
+/// a one-shot login result rather than a page.
+const NO_CACHE: &str = "no-cache";
 
 /// The RFC 3986 unreserved set: everything else is percent-encoded. The launcher escapes form fields
 /// this way (SE's `EscapeDataString`), not with `+`-for-space form encoding.
@@ -300,7 +306,8 @@ impl LoginFlow<'_> {
         }
     }
 
-    /// The launcher's submit header set, in order. The referer is the step-one URL verbatim.
+    /// The launcher's submit header set, in order. The referer is the step-one URL verbatim, and
+    /// `cache-control` is the one header this step sends that the top page does not.
     fn build_login_request(&self, body: RequestBody) -> Result<ProtoRequest, TransportError> {
         let url = parse_base(LOGIN_SEND_URL, "invalid login URL")?;
         Ok(ProtoRequest::new(Method::POST, url)
@@ -331,6 +338,14 @@ impl LoginFlow<'_> {
             .header(
                 HeaderName::from_static("content-type"),
                 HeaderValue::from_static(FORM_CONTENT_TYPE),
+            )
+            .header(
+                HeaderName::from_static("connection"),
+                HeaderValue::from_static(KEEP_ALIVE),
+            )
+            .header(
+                HeaderName::from_static("cache-control"),
+                HeaderValue::from_static(NO_CACHE),
             )
             .body(body))
     }
@@ -469,7 +484,11 @@ fn build_top_request(
             HeaderName::from_static("cookie"),
             HeaderValue::from_static(RSID_COOKIE),
         )
-        .header(HeaderName::from_static("referer"), dynamic_header(referer)?))
+        .header(HeaderName::from_static("referer"), dynamic_header(referer)?)
+        .header(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static(KEEP_ALIVE),
+        ))
 }
 
 /// Whether two account ids name the same account, under the launcher's own comparison.
