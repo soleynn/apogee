@@ -11,6 +11,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-core
 - Keep the session id out of error text, and refuse before reading (#112) _(fixed)_
+- Generate one-time codes against the login server's clock (#123) _(added)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
