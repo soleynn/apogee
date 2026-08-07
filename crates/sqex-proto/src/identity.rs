@@ -45,13 +45,6 @@ impl ComputerId {
         bytes[0] = 0u8.wrapping_sub(sum);
         Self(bytes)
     }
-
-    /// Derive a computer-id from the running host. The stability-versus-privacy choice (host-derived
-    /// like SE, or random per install) is settled with the login surface.
-    #[must_use]
-    pub fn from_host() -> Self {
-        todo!("read host identity facts")
-    }
 }
 
 impl fmt::Display for ComputerId {

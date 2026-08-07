@@ -37,12 +37,6 @@ impl LauncherTime {
         }
     }
 
-    /// Read the host clock. Filled in by the composition root.
-    #[must_use]
-    pub fn now() -> Self {
-        todo!("read the host UTC clock")
-    }
-
     /// The boot-version check timestamp `yyyy-MM-dd-HH-mm` with the minute floored to the ten: SE
     /// overwrites the minute's ones-digit with `0` to coarsen the CDN cache key.
     #[must_use]
