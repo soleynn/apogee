@@ -1,8 +1,11 @@
 //! Client identities: the user-agent strings, the machine computer-id, and the frontier referer.
 //!
 //! SE fingerprints these, so each is reproduced exactly. The launcher user agent embeds a computer-id
-//! whose derivation (SHA1 over the UTF-16LE encoding of host facts, with a checksum byte prepended) is
-//! an easy thing to port wrong, so it is golden-tested (`Launcher.cs:657-673`).
+//! whose derivation (SHA1 over the UTF-16LE encoding of caller-supplied facts, with a checksum byte
+//! prepended) is an easy thing to port wrong, so it is golden-tested (`Launcher.cs:657-673`). The facts
+//! are caller-supplied rather than read here on purpose: `apogee-core`'s production caller deliberately
+//! feeds it a random per-install id instead of the host's real machine name and username, so the value
+//! carries no link back to the host.
 
 use std::fmt;
 
@@ -34,9 +37,13 @@ const REFERER_LANG: &AsciiSet = &NON_ALPHANUMERIC
 pub struct ComputerId([u8; COMPUTER_ID_LEN]);
 
 impl ComputerId {
-    /// Derive a computer-id from fixed host facts: SHA1 over the UTF-16LE encoding of
+    /// Derive a computer-id from the supplied facts: SHA1 over the UTF-16LE encoding of
     /// `machine_name + user_name + os_version + processor_count`, with the digest's first four bytes at
-    /// positions 1-4 and a checksum (the two's-complement negation of their sum) at position 0.
+    /// positions 1-4 and a checksum (the two's-complement negation of their sum) at position 0. Pure and
+    /// general on purpose, so it can be golden-tested against the documented algorithm for any input; it
+    /// does not choose what the facts are. `apogee-core`'s production caller does not pass real host
+    /// facts here: it folds in a random id minted once per install as `machine_name`, with the other
+    /// three fields empty, so the value on the wire carries no link back to the host.
     #[must_use]
     pub fn from_facts(
         machine_name: &str,
