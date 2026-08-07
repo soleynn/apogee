@@ -392,6 +392,7 @@ impl Core {
             AddonPaths::new(addons_dir),
         );
         let otp = Otp::new(secrets.shared());
+        let computer_id = host::computer_id(&store);
 
         Ok(Self {
             transport,
@@ -404,7 +405,7 @@ impl Core {
             secrets,
             otp,
             store,
-            computer_id: host::computer_id(),
+            computer_id,
             clock: host::system_clock(),
             prefixes_dir,
             backups_dir,

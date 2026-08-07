@@ -194,7 +194,7 @@ fn context_with_otp(
         otp,
         store: h.store.clone(),
         clock: Arc::new(move || now),
-        computer_id: host::computer_id(),
+        computer_id: host::computer_id(&h.store),
         prefixes_dir: h.prefixes.path().to_path_buf(),
         backups_dir: h.backups.path().to_path_buf(),
     }

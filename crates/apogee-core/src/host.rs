@@ -1,20 +1,23 @@
 //! Host identity and time for the login flow.
 //!
-//! The composition root owns identity and the clock: `sqex-proto`'s own `ComputerId::from_host` and
-//! `LauncherTime::now`, and `sqex-crypto`'s `TickCount`, defer here by design. [`computer_id`] builds
-//! the launcher's machine fingerprint from best-effort host facts (not server-validated, so a
-//! stable-per-host value is enough). [`launcher_time_now`] stamps requests with the current UTC wall
-//! clock. [`game_tick`] reads the monotonic tick the game re-derives its launch-argument key from.
-//! [`Clock`] is the injectable now-in-seconds source the session cache measures its validity window
-//! against, so the window is deterministically testable.
+//! The protocol crates read no clock and no environment of their own: each exports a pure
+//! constructor over facts a caller supplies, and this module is where those facts are gathered, so
+//! the composition root is the only place that touches the host. [`computer_id`] folds the install's
+//! stored identifier into `sqex-proto`'s `ComputerId::from_facts`. [`launcher_time_now`] decomposes
+//! the UTC wall clock into a `LauncherTime::from_parts`. [`game_tick`] reads the monotonic tick the
+//! game re-derives its launch-argument key from, as `sqex-crypto`'s `TickCount`. [`Clock`] is the
+//! injectable now-in-seconds source the session cache measures its validity window against, so the
+//! window is deterministically testable.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqex_crypto::TickCount;
 use sqex_proto::{ComputerId, LauncherTime};
+use uuid::Uuid;
 
 use crate::error::CoreError;
+use crate::store::Store;
 
 /// A source of the current time in whole seconds since the Unix epoch. Injectable so the session
 /// cache's validity window can be driven deterministically in tests.
@@ -31,17 +34,26 @@ pub fn system_clock() -> Clock {
     })
 }
 
-/// The launcher's machine fingerprint, from best-effort host facts. The value is not validated by
-/// the server (a random-per-install id is accepted), so env-derived facts with plain fallbacks are
-/// sufficient, and it is stable for a given host.
+/// The machine identifier every frontier and OAuth request carries, folded from this install's own
+/// stored id rather than from anything about the host.
+///
+/// The reference launcher hashes the machine and user names, which pins a persistent, unrotatable
+/// identifier to a string that is frequently a real person's name. A live login established that the
+/// server does not validate this value at all, so nothing on the wire asks for that linkage. What
+/// the wire does expect is a value that holds still, since one that changed per request would be a
+/// signal of its own; a single random id minted per install and kept satisfies both halves.
+///
+/// A store that cannot be read or written falls back to a value good for this run alone, which costs
+/// stability rather than privacy.
 #[must_use]
-pub fn computer_id() -> ComputerId {
-    let machine = env_or("HOSTNAME", "apogee");
-    let user = env_or("USER", "apogee");
-    let processors = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1) as u32;
-    ComputerId::from_facts(&machine, &user, "Linux", processors)
+pub fn computer_id(store: &Store) -> ComputerId {
+    let install = store.install_id().unwrap_or_else(|err| {
+        tracing::warn!(%err, "no install id could be stored; using a value for this run only");
+        Uuid::new_v4()
+    });
+    // The install id is the whole input. The remaining facts are fixed rather than read from the
+    // host, so there is no channel for one to reach the digest.
+    ComputerId::from_facts(&install.to_string(), "", "", 0)
 }
 
 /// The monotonic tick the game will re-derive its launch-argument key from.
@@ -112,17 +124,17 @@ fn launcher_time_from_epoch(secs: u64, millis: u64) -> LauncherTime {
     LauncherTime::from_parts(year, month, day, hour, minute, millis)
 }
 
-/// The value of environment variable `var`, or `fallback` when it is unset or empty.
-fn env_or(var: &str, fallback: &str) -> String {
-    std::env::var(var)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
+
+    fn store() -> (TempDir, Store) {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        (dir, store)
+    }
 
     /// `referer_timestamp` renders `yyyy-MM-dd-HH-mm`, so it pins every decomposed field.
     #[test]
@@ -149,9 +161,44 @@ mod tests {
         );
     }
 
+    /// Minted on the first read and kept: a second run over the same store reads the id the first
+    /// one wrote, so what the server sees holds still.
     #[test]
-    fn computer_id_is_stable_for_a_host() {
-        assert_eq!(computer_id(), computer_id());
+    fn computer_id_is_stable_across_runs() {
+        let (dir, first_run) = store();
+        let second_run = Store::new(dir.path().to_path_buf());
+        assert_eq!(computer_id(&first_run), computer_id(&second_run));
+    }
+
+    /// Nothing about the machine is folded in, so two installs share nothing, whether they sit on
+    /// one host or two. This is the property the whole derivation exists for.
+    #[test]
+    fn computer_id_differs_between_installs() {
+        let (_one, one) = store();
+        let (_two, two) = store();
+        assert_ne!(computer_id(&one), computer_id(&two));
+    }
+
+    /// The shape the launcher user agent embeds: five bytes rendered as ten lowercase hex
+    /// characters, whose sum is zero because the leading byte is the checksum of the other four.
+    #[test]
+    fn computer_id_keeps_the_wire_shape() {
+        let (_dir, store) = store();
+        let rendered = computer_id(&store).to_string();
+
+        assert_eq!(rendered.len(), 10);
+        assert!(
+            rendered
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+
+        let mut sum = 0u8;
+        for pair in 0..5 {
+            let byte = u8::from_str_radix(&rendered[pair * 2..pair * 2 + 2], 16).unwrap();
+            sum = sum.wrapping_add(byte);
+        }
+        assert_eq!(sum, 0);
     }
 
     #[cfg(target_os = "linux")]
