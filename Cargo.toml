@@ -50,7 +50,14 @@ zbus             = "4"
 # used, so the TLS-oriented default features are off. Must resolve to the version keyring picks for
 # macOS or the downcast that reads the code silently never matches; scripts/audit.sh asserts it.
 security-framework = { version = "3", default-features = false }
+# RFC 6238 code generation. The `otpauth` feature is deliberately never enabled by any member: its
+# URI parser unwraps the host of an authority-less URI, so a pasted `otpauth:totp/x` takes the whole
+# process down, and the crate that needs URIs parses them itself.
 totp-rs          = "5"
+# The transport encoding a shared one-time-password secret arrives in. Taken directly rather than
+# through totp-rs's own wrapper, whose equality operator unwraps a decode and whose `Display` renders
+# the key.
+base32           = "0.5"
 # The fallback secret store's key derivation and its seal, gated to apogee-secrets. Foundation
 # cryptography used like a standard library, same RustCrypto generation as sha1/sha2/md-5 above.
 # Default features are off on both: the AEAD's random-nonce adapter is unused, and argon2's `alloc`

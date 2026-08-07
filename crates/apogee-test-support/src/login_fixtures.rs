@@ -6,6 +6,8 @@
 //! version not serviced). Bodies are sanitized synthetic markup, not captures; the parsers they feed
 //! are oracle-pinned elsewhere.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use http::header::DATE;
 use http::{HeaderName, HeaderValue};
 use sqex_proto::ProtoResponse;
@@ -20,8 +22,27 @@ pub const GAME_VERSION: &str = "2024.03.28.0000.0000";
 /// id on purpose: the page's spelling is the canonical one, and the check against it ignores case.
 pub const STEAM_LINKED_ID: &str = "TestUser";
 
-/// The `Date` header stamped on the OAuth top page (the flow uses it for TOTP clock-skew correction).
+/// The `Date` header stamped on the OAuth top page, which is where the login flow reads the clock it
+/// derives a one-time code against.
+///
+/// A fixed instant rather than the wall clock, and that is what makes a generated code assertable.
+/// The correction is an offset, not a pinned instant: the flow measures `this - now` and the mint
+/// then reads `now` again, so the two readings cancel and what the code is derived for collapses onto
+/// this constant, whatever the machine running the test believes the time is.
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";
+
+/// [`SERVER_DATE`] in seconds since the epoch, for a test computing the code the flow will send.
+///
+/// It sits on a thirty-second boundary on purpose. What the flow actually derives for is this instant
+/// plus however long the run takes to reach the mint, so starting a window here leaves the whole of
+/// one before the counter moves, instead of the fraction of a second an arbitrary instant would.
+pub const SERVER_UNIX_SECS: u64 = 1_752_062_400;
+
+/// [`SERVER_UNIX_SECS`] as an instant.
+#[must_use]
+pub fn server_time() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(SERVER_UNIX_SECS)
+}
 
 /// The response header carrying the registration unique id.
 const UID_HEADER: &str = "x-patch-unique-id";
@@ -42,11 +63,83 @@ pub fn login_status_closed(message: &str) -> ProtoResponse {
 /// The OAuth top page carrying the hidden `_STORED_` blob and a `Date` header.
 #[must_use]
 pub fn oauth_top(stored: &str) -> ProtoResponse {
+    top_page(stored).with_header(DATE, HeaderValue::from_static(SERVER_DATE))
+}
+
+/// [`oauth_top`] stamped with a clock the caller chooses, for driving a login whose skew is a known
+/// quantity.
+#[must_use]
+pub fn oauth_top_at(stored: &str, at: SystemTime) -> ProtoResponse {
+    let stamp = http_date(at);
+    // The formatter emits printable ASCII and nothing else, so there is no instant it can name that
+    // a header value cannot carry.
+    let value = HeaderValue::from_str(&stamp).unwrap_or_else(|_| unreachable!("{stamp:?}"));
+    top_page(stored).with_header(DATE, value)
+}
+
+/// [`oauth_top`] from a server that stamped no clock on its answer at all.
+#[must_use]
+pub fn oauth_top_undated(stored: &str) -> ProtoResponse {
+    top_page(stored)
+}
+
+/// [`oauth_top`] carrying `date` verbatim, for driving what a caller does with a stamp it cannot
+/// read. Every well-formed instant goes through [`oauth_top_at`] instead.
+#[must_use]
+pub fn oauth_top_stamped(stored: &str, date: &'static str) -> ProtoResponse {
+    top_page(stored).with_header(DATE, HeaderValue::from_static(date))
+}
+
+/// The top page's body, before any header is stamped on it.
+fn top_page(stored: &str) -> ProtoResponse {
     let body = format!(
         r#"<html><body><form><input type="hidden" name="_STORED_" value="{stored}"></form></body></html>"#
     );
     ProtoResponse::new(200, body.into_bytes())
-        .with_header(DATE, HeaderValue::from_static(SERVER_DATE))
+}
+
+/// An instant as the `IMF-fixdate` a server stamps on a response.
+///
+/// Written out rather than shared with the reader in `sqex-proto`: a formatter and a parser built
+/// from one table agree with each other whether or not either agrees with the specification, and this
+/// is the input that decides which code a test expects.
+fn http_date(at: SystemTime) -> String {
+    const DAY_NAMES: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    // An instant before the epoch is not one any of this is asked to render, and reads as the epoch.
+    let seconds = at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    // 1970-01-01 was a Thursday, which is why the table above starts there. Both indices below are
+    // remainders of their own table's length, so neither can leave it.
+    let day_name = DAY_NAMES[usize::try_from(days % 7).unwrap_or_default()];
+
+    // Howard Hinnant's civil_from_days, in the positive half only: eras of four hundred years, with
+    // March as the first month so a leap day falls at the end of the shifted year.
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = era * 400 + year_of_era + u64::from(month <= 2);
+
+    format!(
+        "{day_name}, {day:02} {} {year:04} {:02}:{:02}:{:02} GMT",
+        MONTHS[usize::try_from(month.saturating_sub(1) % 12).unwrap_or_default()],
+        rest / 3_600,
+        (rest % 3_600) / 60,
+        rest % 60,
+    )
 }
 
 /// The OAuth top page a Steam login gets: the same blob, plus the hidden input naming the SE account
@@ -263,5 +356,66 @@ mod tests {
         assert_eq!(register_current("UID").status, 204);
         assert_eq!(register_needs_boot().status, 409);
         assert_eq!(register_not_serviced().status, 410);
+    }
+
+    /// The formatter and the constant name one instant. Everything a flow test asserts about a
+    /// generated code rests on those two agreeing, and they are written down independently.
+    #[test]
+    fn the_stamped_clock_and_its_constant_are_the_same_instant() {
+        assert_eq!(http_date(server_time()), SERVER_DATE);
+        assert_eq!(SERVER_UNIX_SECS % 30, 0, "the fixture starts a code window");
+    }
+
+    /// Round-tripped through the reader that will actually see it, so a formatter that agrees only
+    /// with itself is caught here rather than as a wrong code in a flow test.
+    #[test]
+    fn what_is_stamped_is_what_the_protocol_crate_reads_back() {
+        for offset in [0, 1, 59, 60, 86_399, 86_400, 951_868_800, 1_800_000_000] {
+            let at = UNIX_EPOCH + Duration::from_secs(offset);
+            assert_eq!(
+                sqex_proto::parse_http_date(&http_date(at)),
+                Some(at),
+                "{offset}"
+            );
+        }
+    }
+
+    /// A leap day and the day either side of it, which is where a calendar conversion written from
+    /// the wrong direction lands one day out.
+    #[test]
+    fn a_leap_day_formats_as_itself() {
+        let leap_day = UNIX_EPOCH + Duration::from_secs(1_709_164_800);
+        assert_eq!(http_date(leap_day), "Thu, 29 Feb 2024 00:00:00 GMT");
+        assert_eq!(
+            http_date(leap_day - Duration::from_secs(86_400)),
+            "Wed, 28 Feb 2024 00:00:00 GMT"
+        );
+        assert_eq!(
+            http_date(leap_day + Duration::from_secs(86_400)),
+            "Fri, 01 Mar 2024 00:00:00 GMT"
+        );
+    }
+
+    /// The three top pages differ in exactly one thing: whether and when the server says it is.
+    #[test]
+    fn the_top_pages_differ_only_in_the_clock_they_carry() {
+        let dated = oauth_top("BLOB");
+        let undated = oauth_top_undated("BLOB");
+        let chosen = oauth_top_at("BLOB", server_time() + Duration::from_secs(45));
+
+        assert_eq!(dated.body, undated.body);
+        assert_eq!(dated.body, chosen.body);
+        assert!(undated.header(&DATE).is_none());
+        assert_eq!(
+            dated.header(&DATE).and_then(|v| v.to_str().ok()),
+            Some(SERVER_DATE)
+        );
+        assert_eq!(
+            chosen
+                .header(&DATE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(sqex_proto::parse_http_date),
+            Some(server_time() + Duration::from_secs(45))
+        );
     }
 }

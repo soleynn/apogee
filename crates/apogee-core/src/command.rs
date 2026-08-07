@@ -168,7 +168,29 @@ pub enum Event {
     /// A report rather than a stream of findings: the whole point is the list a user decides about,
     /// and a list arriving one item at a time is one a shell has to reassemble before it can ask.
     PrefixHealth(apogee_runtime::PrefixHealth),
+    /// Something true and worth saying that the run has already worked around.
+    ///
+    /// Its own variant rather than a [`FlowState`] because a flow is never *in* one of these: nothing
+    /// waits on it, the next step follows regardless, and a shell binding a status line to the last
+    /// state would sit on a notice the run moved past a moment later.
+    Notice(Notice),
     Error(CoreError),
+}
+
+/// An advisory a run raises in passing: true, actionable by the user later, and not something the run
+/// is waiting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Notice {
+    /// This host's clock and the login server's disagree by more than the launcher is willing to pass
+    /// over. `seconds` is how far the server is ahead, negative when it is behind.
+    ///
+    /// Raised by a login that generates its own one-time code, which is the one that has both clocks
+    /// in hand and the one the drift would otherwise break. That login is unaffected: the code was
+    /// derived against the server's own reading, which is the clock it gets checked against. It is
+    /// said out loud anyway, because a clock this far out is a fact about the machine rather than
+    /// about the login, and silently working around it leaves the user with no idea it is wrong.
+    ClockSkew { seconds: i64 },
 }
 
 /// Where a login-to-play flow currently stands. The shell narrates these; none is a failure.
@@ -177,6 +199,11 @@ pub enum Event {
 pub enum FlowState {
     /// A one-time password is required but none was usable.
     NeedsOtp,
+    /// The code this account generates cannot be sent as it stands, either because the server has
+    /// already seen it or because its window is nearly over, so the flow is holding until the next
+    /// one is current. `seconds` is how long that is: a few seconds in the ordinary case, and at
+    /// most the handful of windows the reuse guard steps over when codes repeat.
+    WaitingForOtpWindow { seconds: u64 },
     /// The account must accept the terms of service before playing.
     NeedsTerms,
     /// No active service on the account, or the login server is closed.

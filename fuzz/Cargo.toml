@@ -24,6 +24,7 @@ apogee-addons = { path = "../crates/apogee-addons" }
 # `fuzzing` only, never `testing`: that one gates tests which drive whatever credential store is
 # really on the machine, and a dependency edge is how it would get switched on everywhere.
 apogee-secrets = { path = "../crates/apogee-secrets", features = ["fuzzing"] }
+apogee-otp = { path = "../crates/apogee-otp", features = ["fuzzing"] }
 
 [[bin]]
 name = "patchlist"
@@ -42,6 +43,13 @@ bench = false
 [[bin]]
 name = "oauth_launch_params"
 path = "fuzz_targets/oauth_launch_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_date"
+path = "fuzz_targets/http_date.rs"
 test = false
 doc = false
 bench = false
@@ -175,6 +183,13 @@ bench = false
 [[bin]]
 name = "secrets_records"
 path = "fuzz_targets/secrets_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otp_import"
+path = "fuzz_targets/otp_import.rs"
 test = false
 doc = false
 bench = false

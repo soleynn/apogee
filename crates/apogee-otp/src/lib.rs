@@ -1,111 +1,77 @@
 #![forbid(unsafe_code)]
-//! TOTP generation and the local one-time-password listener.
+#![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+//! Time-based one-time-password codes for an account, and the local listener a companion can
+//! deliver one to.
 //!
-//! STUB: public shape only (error taxonomy, [`import`]/[`generate`], the [`Listener`], and the
-//! [`Otp`] handle the composition root holds); TOTP math and the local listener are not yet built.
+//! [`TotpParams::parse`] turns an `otpauth` URI or a bare base32 secret into a validated profile,
+//! [`TotpParams::into_secret`] renders it in the one form this crate stores, and [`Otp`] is the
+//! handle that reads it back and remembers what was last submitted so the same digits are not sent
+//! twice. A [`Minted`] carries the code and how long to wait before sending it: nothing here sleeps,
+//! because only a caller holds the runtime and the cancellation token.
+//!
+//! Reading the secret and deriving a code are two calls, not one. [`Otp::prepare`] is the call that
+//! raises the platform's unlock prompt and is bounded only by how long the user takes to notice it;
+//! [`Prepared::mint`] names a thirty-second window and has to run once the caller knows which window
+//! the login server is in. Fusing them would put an unbounded wait between those two facts.
+//!
+//! [`ClockSkew`] is a signed offset, not a tolerance window. This crate is a generator, not a
+//! verifier: it has to produce the one code the login server expects, so "the clock is seven seconds
+//! fast" is the case that has to be representable.
+//!
+//! # Blocking
+//! [`Otp::prepare_blocking`] reads the secret store, which blocks and may raise the platform's unlock
+//! prompt. On Linux the credential client cannot be driven from an async runtime's worker at all, so
+//! a caller on a runtime uses [`Otp::prepare`], which runs the read off the workers.
+//!
+//! # Layout
+//! - [`Otp`] the handle: read the secret, record what was submitted.
+//! - [`Prepared`] one account's secret, in hand and waiting for the clock it derives against.
+//! - [`TotpParams`] the validated profile, and the import grammar behind it.
+//! - [`Code`] and [`Minted`] a live code and when it may be sent.
+//! - [`ClockSkew`] the offset between this host's clock and the login server's.
+//! - [`OtpSource`] where a login's code comes from.
+//! - [`Listener`] the local delivery endpoint (not built).
 
-use std::fmt;
-use std::time::SystemTime;
+mod code;
+mod error;
+mod guard;
+mod listener;
+mod otp;
+mod params;
+mod skew;
+mod source;
+mod window;
 
-use apogee_secrets::Secret;
-use thiserror::Error;
-use uuid::Uuid;
+pub use code::{Code, Minted};
+pub use error::{OtpError, Rejected};
+pub use listener::{Listener, ListenerConfig};
+pub use otp::{Otp, Prepared};
+pub use params::{Algorithm, Deviation, TotpParams};
+pub use skew::ClockSkew;
+pub use source::OtpSource;
 
-/// One-time-password failures.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum OtpError {
-    #[error("invalid otp import: {reason}")]
-    ImportInvalid { reason: String },
-    #[error("no otp secret stored")]
-    NoSecret,
-    #[error("failed to bind the otp listener")]
-    ListenerBind,
-    #[error("timed out waiting for a code")]
-    Timeout,
-    #[error("io error")]
-    Io(#[from] std::io::Error),
-}
-
-/// Where a login's one-time password comes from.
+/// The import grammar, for the fuzz workspace and nothing else.
 ///
-/// A typed code is a [`Secret`], not a `String`: the buffer is erased when it drops, and the type
-/// carries no `Clone`, so a caller cannot leave a second copy behind on the heap. That is why the
-/// enum is neither `Clone` nor derived-`Debug` either.
-pub enum OtpSource {
-    Totp,
-    Manual(Secret),
-    Listener(ListenerConfig),
+/// The property: any text at all produces a clean answer, allocates nothing it did not first bound,
+/// and never takes the process down.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_import(offered: &str) {
+    let _ = TotpParams::parse(offered);
 }
 
-/// The variant name, never the code. A rendered `OtpSource` is one of the few ways a live code could
-/// reach a log, so there is nothing else to render.
-impl fmt::Debug for OtpSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-impl OtpSource {
-    /// The variant's name, for a caller rendering a redacted view of something holding one.
-    #[must_use]
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Totp => "Totp",
-            Self::Manual(_) => "Manual",
-            Self::Listener(_) => "Listener",
-        }
-    }
-}
-
-/// Parsed TOTP parameters (secret + period + digits), from an otpauth URI or a base32 secret.
-#[derive(Debug, Clone, Default)]
-pub struct TotpParams {/* secret + period + digits not yet modeled */}
-
-/// A generated one-time-password code.
-#[derive(Debug, Clone)]
-pub struct Code(pub String);
-
-/// Allowed clock drift, in periods, when generating a code.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ClockSkew {
-    pub steps: u8,
-}
-
-/// Configuration for the local listener that receives a code from a companion.
-#[derive(Debug, Clone, Default)]
-pub struct ListenerConfig {
-    pub port: u16,
-}
-
-/// The local one-time-password listener.
-#[derive(Debug)]
-pub struct Listener {/* socket not yet modeled */}
-
-impl Listener {
-    /// Bind the listener per `cfg`.
-    pub fn bind(_cfg: ListenerConfig) -> Result<Self, OtpError> {
-        todo!("bind the local OTP listener")
-    }
-}
-
-/// Import a TOTP secret from an otpauth URI or a raw base32 secret.
-pub fn import(_uri_or_base32: &str) -> Result<TotpParams, OtpError> {
-    todo!("parse a TOTP secret from an otpauth URI or base32")
-}
-
-/// Generate the current code for `account`.
-pub fn generate(_account: Uuid, _now: SystemTime, _skew: ClockSkew) -> Result<Code, OtpError> {
-    todo!("generate the current TOTP code")
-}
-
-/// The concrete OTP service the composition root holds (`apogee-core`'s `otp` field).
-#[derive(Debug, Default)]
-pub struct Otp;
-
-impl Otp {
-    /// Create the OTP service.
-    pub fn new() -> Self {
-        Self
-    }
-}
+/// The handle is held by the composition root, cloned onto blocking tasks and shared across them,
+/// and the error is wrapped by the launcher's top-level error. A code, a profile and a secret read
+/// back out of the store are moved into one task and dropped there; none may become
+/// `Sync`-by-accident shared state, and none may become `Clone`, because a clone is a second buffer
+/// with its own lifetime.
+const _: fn() = || {
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    fn assert_send_static<T: Send + 'static>() {}
+    assert_send_sync_static::<Otp>();
+    assert_send_sync_static::<OtpError>();
+    assert_send_static::<Code>();
+    assert_send_static::<Minted>();
+    assert_send_static::<TotpParams>();
+    assert_send_static::<Prepared>();
+};

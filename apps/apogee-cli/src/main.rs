@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
+    Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig, Deviation,
     EncryptedFile, Event, ExternalAddon, FileState, ForeignCredentialStore, ForeignKey,
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
-    KdfCost, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region,
-    RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend,
-    SecretKind, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    KdfCost, Notice, OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixHealth,
+    Profile, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
+    SecretBackend, SecretKind, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -80,7 +80,7 @@ enum Commands {
         #[command(subcommand)]
         action: SettingsCommand,
     },
-    /// Manage the passwords the launcher keeps for an account.
+    /// Manage the passwords and one-time-password secrets the launcher keeps for an account.
     Secrets {
         #[command(subcommand)]
         action: SecretsCommand,
@@ -112,6 +112,13 @@ enum SecretsCommand {
     Status,
     /// Save a profile's account password, read from the terminal.
     Save(TargetArgs),
+    /// Save the secret a profile's account derives its one-time passwords from, read from stdin, and
+    /// stop asking for a code. Takes an `otpauth://` link or the bare base32 secret behind it.
+    ///
+    /// Read from stdin like every other secret here and never taken as an argument: a shared secret
+    /// in `/proc/<pid>/cmdline` is readable by every local user, and it is worse to leak than a code,
+    /// which expires in half a minute.
+    Totp(TargetArgs),
     /// Delete every secret stored for a profile's account.
     Forget(TargetArgs),
     /// Stop keeping a profile's account password, or start again. Turning it on deletes whatever is
@@ -565,10 +572,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     }
 }
 
-/// The passwords the launcher keeps, and where they come from.
+/// The secrets the launcher keeps, and where they come from.
 ///
 /// There is no verb that prints one. A saved secret is read inside the login flow and nowhere else,
-/// so no amount of driving this binary gets a password back out of the store.
+/// so no amount of driving this binary gets a password, or the secret a one-time password is derived
+/// from, back out of the store.
 fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
     match action {
         SecretsCommand::Status => {
@@ -593,6 +601,22 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             println!("saved the password for account {account}");
             Ok(())
         }
+        SecretsCommand::Totp(args) => {
+            let account = resolve_profile(core, &args.profile)?.account;
+            let offered = read_line_erased("otpauth link or secret: ")?;
+            let text = std::str::from_utf8(offered.expose())
+                .map_err(|_| "what was typed is not valid text")?;
+            let deviations = core.import_totp_secret(account, text)?;
+            println!("saved the one-time-password secret for account {account}");
+            println!("account {account} will generate its own codes from now on");
+            // Stored exactly as it was given, so the answer is a warning rather than a refusal: the
+            // secret may well be right for somewhere else, and rewriting it to what the login server
+            // takes would produce wrong codes with nothing said.
+            for deviation in &deviations {
+                println!("warning: {}", render_deviation(deviation));
+            }
+            Ok(())
+        }
         SecretsCommand::Forget(args) => {
             let account = resolve_profile(core, &args.profile)?.account;
             if core.forget_secrets(account)? {
@@ -604,14 +628,17 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
         }
         SecretsCommand::NeverStore(args) => {
             let id = resolve_profile(core, &args.profile)?.account;
-            let mut account = core.account(id)?;
-            account.never_store = args.on;
             // Sweep before recording the choice. A user who asks the launcher to stop keeping a
             // password means the one it already has, and a run that saved the flag and then failed
             // to sweep would report success over a password still in the store.
             if args.on && !core.forget_secrets(id)? {
                 println!("no secret store answered, so nothing already saved was deleted");
             }
+            // Read after the sweep. A sweep rewrites the record itself (an account deriving its own
+            // codes goes back to being asked for one), so a copy taken beforehand would put that
+            // back when this saves.
+            let mut account = core.account(id)?;
+            account.never_store = args.on;
             core.save_account(&account)?;
             if args.on {
                 println!("account {id} will be asked for its password every time");
@@ -950,6 +977,28 @@ fn render_health(health: &PrefixHealth) -> String {
         out.push_str(&render_health_issue(issue));
     }
     out
+}
+
+/// One line per parameter of an imported secret the login server will not accept a code from. The
+/// core decides what counts and names both halves of every comparison; this only writes the
+/// sentence, so what counts as accepted is never spelled out twice.
+fn render_deviation(deviation: &Deviation) -> String {
+    match deviation {
+        Deviation::Algorithm { offered, accepted } => format!(
+            "this secret is hashed with {}, and the login server only takes {}",
+            offered.label(),
+            accepted.label()
+        ),
+        Deviation::Digits { offered, accepted } => format!(
+            "this secret makes {offered}-digit codes, and the login server only takes {accepted}"
+        ),
+        Deviation::Period { offered, accepted } => format!(
+            "this secret's codes change every {offered} seconds, and the login server expects {accepted}"
+        ),
+        // `Deviation` is `#[non_exhaustive]`: a parameter named later is still a parameter that will
+        // not be accepted, and saying so is better than printing nothing at all.
+        _ => "this secret has a setting the login server does not take".to_owned(),
+    }
 }
 
 fn render_health_issue(issue: &HealthIssue) -> String {
@@ -1452,18 +1501,21 @@ fn confirmed(word: &str) -> Result<bool, CliError> {
     Ok(prompt_line(&format!("Type `{word}` to continue: "))? == word)
 }
 
-/// The one-time-password source: a code read off stdin when the account uses one, and nothing
-/// otherwise.
+/// The one-time-password source: whatever the account is set to, which is a code read off stdin, a
+/// secret the core derives one from, or nothing at all.
 ///
-/// There is no flag for it, and there must not be one. `/proc/<pid>/cmdline` is world-readable with
-/// no `hidepid`, so an argument holding a live code is readable by every local user for as long as
-/// the run lasts; stdin is readable by nobody. A script that has to supply one pipes it in, the same
-/// line-per-answer shape as every other prompt here.
+/// There is no flag for a typed code, and there must not be one. `/proc/<pid>/cmdline` is
+/// world-readable with no `hidepid`, so an argument holding a live code is readable by every local
+/// user for as long as the run lasts; stdin is readable by nobody. A script that has to supply one
+/// pipes it in, the same line-per-answer shape as every other prompt here.
+///
+/// The account's own setting decides, not a look in the secret store: those are write-only, so
+/// whether one holds a secret is not a question this side may ask.
 fn read_otp(account: &Account) -> Result<OtpSource, CliError> {
-    if account.use_otp {
-        Ok(OtpSource::Manual(read_line_erased("One-time password: ")?))
-    } else {
-        Ok(OtpSource::Manual(Secret::new(Vec::new())))
+    match (account.use_otp, account.otp_delivery) {
+        (false, _) => Ok(OtpSource::Manual(Secret::new(Vec::new()))),
+        (true, OtpDelivery::Generate) => Ok(OtpSource::Totp),
+        (true, _) => Ok(OtpSource::Manual(read_line_erased("One-time password: ")?)),
     }
 }
 
@@ -1734,8 +1786,25 @@ fn render(event: &Event) -> String {
         Event::Setup(setup) => render_setup(setup),
         Event::Frontier(_) => "frontier data received".to_owned(),
         Event::PrefixHealth(health) => render_health(health),
+        Event::Notice(notice) => render_notice(notice),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+/// Render an advisory the run raised in passing.
+fn render_notice(notice: &Notice) -> String {
+    match notice {
+        // Said from the host's point of view, which is the one the user can do something about: the
+        // server being ahead is this machine being slow. `unsigned_abs` because the offset is a
+        // measurement and an absurd one saturates at `i64::MIN`, which has no negation.
+        Notice::ClockSkew { seconds } => format!(
+            "warning: this machine's clock is {} seconds {} the login server's; the code sent was \
+             generated against the server's time, but everything else here has the wrong time",
+            seconds.unsigned_abs(),
+            if *seconds > 0 { "behind" } else { "ahead of" },
+        ),
+        _ => "warning: an unrecognized advisory".to_owned(),
     }
 }
 
