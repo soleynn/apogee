@@ -73,14 +73,19 @@ pub struct OauthContext<'a> {
 /// Not `Clone`: the Steam arm owns a bearer ticket that deliberately cannot be copied.
 #[non_exhaustive]
 pub enum LoginKind {
-    /// A standard username/password (optionally OTP) login. `free_trial` sets the top-page `isft` flag.
-    Standard { free_trial: bool },
+    /// A standard username/password (optionally OTP) login.
+    Standard {
+        /// Sets the top-page `isft` flag.
+        free_trial: bool,
+    },
     /// A Steam service account. The ticket rides in the top-page query and the page answers with the
     /// SE account it is linked to, which [`LoginFlow::submit`] checks the submitted username against.
     /// `free_trial` is independent of the ticket: the launcher sets `isft` from the app id it
     /// initialized Steam with, and sends both flags together.
     Steam {
+        /// The obfuscated Steam authentication ticket, already built by `sqex-crypto`.
         ticket: ObfuscatedTicket,
+        /// Sets the top-page `isft` flag.
         free_trial: bool,
     },
 }
@@ -105,8 +110,11 @@ impl LoginKind {
 /// Borrowed login credentials. Deliberately implements no `Debug`/`Clone`/`Serialize`: it is borrowed
 /// only to build the one submit body and never stored, so it cannot appear in a log or an error.
 pub struct Credentials<'a> {
+    /// The SE account id.
     pub sqexid: &'a str,
+    /// The account password.
     pub password: &'a str,
+    /// The one-time password, if the account has one configured; `None` submits an empty `otppw`.
     pub otp: Option<&'a str>,
 }
 
@@ -135,9 +143,15 @@ impl fmt::Debug for SessionId {
 #[derive(Debug)]
 pub struct Authenticated {
     session_id: SessionId,
+    /// The account's region, forwarded to the launch args (`SYS.Region`).
     pub region: u16,
+    /// The entitled maximum expansion, clamped to five. Drives the version report's depth.
     pub max_expansion: u8,
+    /// Whether the account has an active service. `false` is the `NoService` disposition, not an
+    /// error: the caller narrates it.
     pub playable: bool,
+    /// Whether the account has accepted SE's terms of service. `false` is the `NoTerms` disposition,
+    /// not an error: the account must accept them in the official launcher or on SE's site first.
     pub terms_accepted: bool,
 }
 

@@ -21,9 +21,14 @@ use zeroize::Zeroizing;
 /// `ProtoRequest` can derive `Debug` without leaking it.
 #[derive(Debug, Clone)]
 pub struct ProtoRequest {
+    /// The HTTP method.
     pub method: Method,
+    /// The full request URL, including its query.
     pub url: Url,
+    /// The exact headers to send, in this order. See the type docs: a transport must emit these and
+    /// nothing more, [`NEGOTIATED_HEADERS`] excepted.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// The request body, for methods that carry one.
     pub body: Option<RequestBody>,
 }
 
@@ -85,12 +90,16 @@ impl fmt::Debug for RequestBody {
 
 /// A response: the status, the raw body, and any headers a surface needs to read. Most surfaces read
 /// only the status and body; the OAuth top page reads the `Date` header (for TOTP skew correction) and
-/// session registration will read `X-Patch-Unique-Id`, so a header a transport chooses to surface rides
+/// session registration reads `X-Patch-Unique-Id`, so a header a transport chooses to surface rides
 /// along here. A transport carries only the headers a surface asks for, not the whole response set.
 #[derive(Debug, Clone)]
 pub struct ProtoResponse {
+    /// The HTTP status code.
     pub status: u16,
+    /// The raw response body.
     pub body: Vec<u8>,
+    /// The headers a transport chose to surface (not necessarily the full response set); read with
+    /// [`Self::header`].
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
@@ -211,6 +220,8 @@ pub(crate) fn parse_base(url: &str, invalid_msg: &'static str) -> Result<Url, Tr
 /// caller owns retry policy because it owns the UX of a failed request.
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
+    /// Send `req` and return the response, or a [`TransportError`] if the request could not complete.
+    /// Never retried by this crate: a caller that wants retries applies its own policy around the call.
     async fn execute(&self, req: ProtoRequest) -> Result<ProtoResponse, TransportError>;
 }
 

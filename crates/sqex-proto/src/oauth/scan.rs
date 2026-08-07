@@ -45,10 +45,15 @@ const MAX_MESSAGE: usize = 512;
 /// consumed immediately into the redacted session-id type, and never logged. The id is held zeroizing
 /// so it scrubs on drop.
 pub struct LaunchParams {
+    /// The OAuth session id: becomes the session-registration path segment and `DEV.TestSID`.
     pub session_id: Zeroizing<String>,
+    /// Whether the account has accepted SE's terms of service.
     pub terms_accepted: bool,
+    /// The account's region, forwarded to the launch args (`SYS.Region`).
     pub region: u16,
+    /// Whether the account has an active service.
     pub playable: bool,
+    /// The entitled maximum expansion.
     pub max_expansion: u8,
 }
 
@@ -68,12 +73,12 @@ pub(crate) enum CallbackReject {
 ///
 /// Anchors on `name="_STORED_"`, then reads the `value="..."` that follows within a bounded window,
 /// capturing up to the closing quote under a hard length cap. An empty capture is a miss, as it is for
-/// [`scrape_steam_id`]: a blank blob is not a session, and carrying one into the submit would defer the
-/// real diagnosis (a page that no longer has the shape this scanner reads) to a later, vaguer failure.
-/// Any miss is a [`ProtoError::StoredNotFound`] carrying a length-capped page excerpt, scrubbed of
-/// `secrets`: the top page carries no submitted credentials, but a Steam login's request query carries
-/// a bearer ticket the page can reflect back. Callers pass the same list they scrub their own OAuth-top
-/// excerpts with. The returned slice borrows `html`.
+/// the (crate-private) Steam-linked-id scan: a blank blob is not a session, and carrying one into the
+/// submit would defer the real diagnosis (a page that no longer has the shape this scanner reads) to a
+/// later, vaguer failure. Any miss is a [`ProtoError::StoredNotFound`] carrying a length-capped page
+/// excerpt, scrubbed of `secrets`: the top page carries no submitted credentials, but a Steam login's
+/// request query carries a bearer ticket the page can reflect back. Callers pass the same list they
+/// scrub their own OAuth-top excerpts with. The returned slice borrows `html`.
 pub fn scrape_stored<'h>(html: &'h str, secrets: &[&str]) -> Result<&'h str, ProtoError> {
     attribute_value(html, STORED_ANCHOR, MAX_STORED)
         .filter(|stored| !stored.is_empty())
