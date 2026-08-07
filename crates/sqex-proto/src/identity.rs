@@ -45,7 +45,6 @@ impl ComputerId {
         bytes[0] = 0u8.wrapping_sub(sum);
         Self(bytes)
     }
-
 }
 
 impl fmt::Display for ComputerId {
