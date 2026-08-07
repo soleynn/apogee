@@ -187,6 +187,41 @@ fn a_damaged_install_id_is_replaced_rather_than_reported() {
     assert_eq!(fs::read(&preserved[0]).unwrap(), damaged);
 }
 
+/// An unreadable file is not corruption: nothing was ever parsed to find it wanting. Unlike a
+/// corrupt file, this must not be treated as an invitation to mint and persist a replacement over
+/// it, since the original bytes (a real install id) may still be exactly what a permission fix or a
+/// remount would recover.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_install_id_is_reported_not_silently_rotated() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, store) = store();
+    let minted = store.install_id().unwrap();
+    let path = dir.path().join("install-id.json");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let err = store.install_id().unwrap_err();
+    assert!(
+        matches!(err, StoreError::Io { .. }),
+        "expected an Io error for an unreadable file, got {err:?}"
+    );
+    // No corrupt-backup sidecar: this never reached the parse step that produces one.
+    let preserved: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| p.to_string_lossy().ends_with(".corrupt"))
+        .collect();
+    assert!(
+        preserved.is_empty(),
+        "no corruption occurred, nothing should be preserved"
+    );
+
+    // Restoring access recovers the original id: it was never silently replaced.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(store.install_id().unwrap(), minted);
+}
+
 #[test]
 fn a_profile_round_trips_through_the_store() {
     let (_dir, store) = store();
