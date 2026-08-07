@@ -90,6 +90,14 @@ pub enum ProtoError {
 impl fmt::Debug for ProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // `TransportError`'s own derived `Debug` prints its `message` field verbatim, and that
+            // field only ever redacts URL-shaped content (see `TransportError::new`). That is a
+            // narrower guarantee than this crate's other excerpts get, but every construction site in
+            // this crate passes it a `&'static str` or a format string naming a header, never a value
+            // read off the wire (audited: `bootver.rs`, `register.rs`, and `transport.rs` itself), so
+            // there is nothing left for this arm to scrub. A non-URL secret in that field would have
+            // to come from the `Transport` implementor's own message text, which is out of this
+            // crate's reach and stays the implementor's (`apogee-core`, in production) responsibility.
             Self::Transport(err) => f.debug_tuple("Transport").field(err).finish(),
             Self::InvalidResponse {
                 step,
@@ -199,7 +207,15 @@ pub(crate) fn scrubbed_excerpt(body: &[u8], secrets: &[&str]) -> String {
     // before the final cut, without decoding or copying a large body.
     let max_secret = secrets.iter().map(|s| s.chars().count()).max().unwrap_or(0);
     let window = EXCERPT_MAX_CHARS + max_secret.saturating_sub(1);
-    let text = redact_secrets(&lossy_head(body, window), secrets);
+    let head = lossy_head(body, window);
+    // That budget covers exactly one redaction's shrinkage: `REDACTED` is shorter than any secret
+    // worth scrubbing, so redacting an occurrence pulls later content forward into view. A *second*
+    // occurrence can then straddle the window boundary the decode stopped at, so `redact_secrets`
+    // sees only its head. Only pass the ambiguity guard when the decode actually hit that boundary
+    // (`head` filled the window): a body that fit entirely inside it has no more text to worry about,
+    // and every occurrence in `head` is already known complete.
+    let truncated = head.chars().count() >= window;
+    let text = redact_secrets(&head, secrets, if truncated { max_secret } else { 0 });
     redact_secret_params(&text)
         .chars()
         .take(EXCERPT_MAX_CHARS)
@@ -245,7 +261,15 @@ fn excerpt_bytes(body: &[u8], max_chars: usize) -> &[u8] {
 /// consumes the shared span first and leaves the longer secret's tail behind in plaintext. Matching
 /// once over disjoint ranges redacts each occurrence exactly once and never re-reads a placeholder it
 /// just wrote.
-fn redact_secrets(text: &str, secrets: &[&str]) -> String {
+///
+/// `tail_guard` is the length of the longest secret that could still be waiting past `text`'s end (0
+/// when it cannot be: the caller already held the whole body, so there is nothing more to reveal).
+/// Once fewer than `tail_guard` characters remain unmatched, a real occurrence could have started
+/// there and had its close cut off by the caller's decode window: `rest.starts_with(secret)` can only
+/// prove a *complete* string absent, never a partial one, so continuing would risk copying an
+/// unredacted fragment. Stopping there instead trades a few characters of excerpt for the guarantee
+/// that nothing this function did not fully see ever reaches the output.
+fn redact_secrets(text: &str, secrets: &[&str], tail_guard: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while !rest.is_empty() {
@@ -259,6 +283,7 @@ fn redact_secrets(text: &str, secrets: &[&str]) -> String {
                 out.push_str(REDACTED);
                 rest = &rest[len..];
             }
+            None if rest.chars().count() < tail_guard => break,
             None => rest = push_one_char(&mut out, rest),
         }
     }
@@ -436,19 +461,120 @@ mod tests {
         );
     }
 
+    /// A secret-shaped string of exactly `len` characters. Cycling the alphabet rather than repeating
+    /// one character means an arbitrary fragment of it (as [`assert_no_partial_leak`] checks for) is
+    /// still recognizably a piece of *this* string, not a coincidental match against filler.
+    fn secret_of_len(len: usize) -> String {
+        (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
+    }
+
+    /// The shortest fragment of a secret this module treats as a meaningful leak, not a coincidence.
+    /// A flat cap rather than a fraction of the secret's length: the window-straddle bug does not
+    /// leak a fixed proportion (the 720-char `_STORED_` blob repro loses only ~150 of it, one fifth),
+    /// so a "half the secret" bar misses real leaks on anything long. 16 exact characters survives
+    /// coincidentally only if a filler was engineered to produce it.
+    const LEAK_FRAGMENT_LEN: usize = 16;
+
+    /// Fails if a fragment of `secret` at least [`LEAK_FRAGMENT_LEN`] characters long (or the whole
+    /// secret, if it is shorter than that) survives anywhere in `text`. `!text.contains(secret)` is
+    /// not enough to catch the window-truncation bug this guards: under that bug the excerpt held
+    /// neither the whole secret nor nothing of it, but a long exact fragment, which whole-string
+    /// containment is structurally blind to. Checking fixed-length fragments (rather than every
+    /// substring) is sufficient: any leaked run longer than the threshold contains one of this length
+    /// too.
+    fn assert_no_partial_leak(text: &str, secret: &str) {
+        let chars: Vec<char> = secret.chars().collect();
+        let threshold = chars.len().clamp(1, LEAK_FRAGMENT_LEN);
+        for window in chars.windows(threshold) {
+            let fragment: String = window.iter().collect();
+            assert!(
+                !text.contains(&fragment),
+                "partial leak: {fragment:?} (fragment of a {}-char secret) survives in {text:?}",
+                chars.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_id_reflected_twice_does_not_leak_past_the_window() {
+        // register_session's error path: the session id rides in the request URL, so a "not found"
+        // page that names the path it could not find reflects it. A second reflection, far enough
+        // into the body, lands past the window `scrubbed_excerpt` widens to catch exactly one
+        // redaction's shrinkage. This exact shape (a 54-char session id, 150 filler characters
+        // between the two reflections) is the repro that measured a 25-character plaintext leak.
+        let sid = secret_of_len(54);
+        let filler = " ".repeat(150);
+        let body = format!("404 not found: {sid}{filler}{sid}");
+        let text = scrubbed_excerpt(body.as_bytes(), &[&sid]);
+        assert_no_partial_leak(&text, &sid);
+    }
+
+    #[test]
+    fn a_password_reflected_three_times_does_not_leak_past_the_window() {
+        // LoginFlow::submit's error path: a rejected-form page can echo the submitted password more
+        // than once (once per field it complains about). This is an equivalent adversarial shape to
+        // the captured repro (a 67-char password, reflected a third time far enough in to straddle
+        // the window): not a byte-for-byte replay of that response body, but the same bug class.
+        let pw = secret_of_len(67);
+        let prefix = "400: rejected form password=";
+        let mid1 = format!("&why={}", "-".repeat(15));
+        let mid2 = format!("&again={}", "-".repeat(13));
+        let body = format!("{prefix}{pw}{mid1}{pw}{mid2}{pw}");
+        let text = scrubbed_excerpt(body.as_bytes(), &[&pw]);
+        assert_no_partial_leak(&text, &pw);
+    }
+
+    #[test]
+    fn a_stored_blob_reflected_twice_does_not_leak_past_the_window() {
+        // LoginFlow::submit's error path: an edge error page that echoes the top page's own body
+        // reflects the _STORED_ blob wherever the top page carried it, including a second time in an
+        // echoed debug field. Equivalent adversarial shape to the captured repro (a 720-char blob
+        // reflected twice), not a byte-for-byte replay of that response body.
+        let blob = secret_of_len(720);
+        let body = format!("500: error parsing _STORED_={blob} debug_echo={blob}");
+        let text = scrubbed_excerpt(body.as_bytes(), &[&blob]);
+        assert_no_partial_leak(&text, &blob);
+    }
+
+    /// Reverting `lossy_head`'s bounded-byte cut back to `String::from_utf8_lossy(body)` leaves every
+    /// other test in this module green: they never hand it a body big enough to notice the cost.
+    /// A near-end invalid byte forces the whole-body path to reallocate and copy the entire buffer
+    /// (`from_utf8_lossy` only borrows when the input is entirely valid UTF-8), which the windowed
+    /// path never touches, because the window sits nowhere near the tail. 50ms is far above the
+    /// windowed path's cost (microseconds) and far below a 64MB whole-body copy even unoptimized.
+    #[test]
+    fn constructing_an_excerpt_never_touches_the_body_past_its_window() {
+        let mut body = vec![b'x'; 64 * 1024 * 1024];
+        *body.last_mut().unwrap() = 0xFF;
+        let started = std::time::Instant::now();
+        let text = excerpt(&body);
+        assert!(text.chars().all(|c| c == 'x'));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "excerpt construction took {:?}; the decode is no longer bounded to the window",
+            started.elapsed()
+        );
+    }
+
     proptest! {
-        /// Digits only, and digit filler: the placeholder is spelled out of letters, so a generated
-        /// secret could otherwise be a substring of the redaction that replaced it.
+        /// Secrets and filler large enough to actually cross the 200-char excerpt window (not just
+        /// short digit runs that always fit inside it), so this exercises the truncation boundary the
+        /// window-straddle bug lived at, and each secret repeats (matching the real repros, which all
+        /// needed a second reflection to trigger). `first`, `second`, and `filler` draw from disjoint
+        /// alphabets (lowercase, uppercase, digits-and-space) so no generated case, however proptest
+        /// shrinks it, can make [`assert_no_partial_leak`] see a coincidental cross-match instead of a
+        /// genuine one: a real leak is the only way a fragment of one can appear where another was
+        /// generated.
         #[test]
         fn no_secret_survives_a_scrub(
-            first in "[0-9]{1,8}",
-            second in "[0-9]{1,8}",
-            filler in "[0-9 ]{0,50}",
+            first in "[a-m]{20,90}",
+            second in "[A-M]{20,90}",
+            filler in "[0-9 ]{0,300}",
         ) {
             let body = format!("{filler}{first}{filler}{second}{filler}{first}{second}");
             let text = scrubbed_excerpt(body.as_bytes(), &[&first, &second]);
-            prop_assert!(!text.contains(&first), "{text}");
-            prop_assert!(!text.contains(&second), "{text}");
+            assert_no_partial_leak(&text, &first);
+            assert_no_partial_leak(&text, &second);
         }
 
         #[test]
