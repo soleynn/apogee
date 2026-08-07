@@ -26,8 +26,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqex_proto::{
-    check_boot_version, LauncherTime, ProtoError, ProtoRequest, ProtoResponse, Transport,
-    TransportError,
+    check_boot_version, check_header_fidelity, LauncherTime, ProtoError, ProtoRequest,
+    ProtoResponse, Transport, TransportError,
 };
 
 /// Old enough that SE answers with the pending boot patch chain, so the parser is exercised and the
@@ -140,8 +140,22 @@ impl Transport for HttpTransport {
             builder = builder.body(body.as_bytes().to_vec());
         }
 
-        let response = builder
-            .send()
+        // Read the headers back out of reqwest's own representation before sending: this job talks to
+        // the live service, so the request it puts on the wire is the one the seam's fidelity contract
+        // is about.
+        let request = builder
+            .build()
+            .map_err(|err| TransportError::new(format!("building the request failed: {err}")))?;
+        let emitted: Vec<_> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        check_header_fidelity(&req, &emitted)?;
+
+        let response = self
+            .client
+            .execute(request)
             .await
             .map_err(|err| TransportError::new(format!("request failed: {err}")))?;
         let status = response.status().as_u16();

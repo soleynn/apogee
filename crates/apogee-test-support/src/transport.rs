@@ -83,14 +83,52 @@ pub fn canonical_request(req: &ProtoRequest) -> String {
     for (name, value) in &req.headers {
         s.push_str(name.as_str());
         s.push_str(": ");
-        s.push_str(&String::from_utf8_lossy(value.as_bytes()));
+        push_escaped(&mut s, value.as_bytes());
         s.push('\n');
     }
     if let Some(body) = &req.body {
         s.push('\n');
-        s.push_str(&String::from_utf8_lossy(body.as_bytes()));
+        push_escaped(&mut s, body.as_bytes());
     }
     s
+}
+
+/// Append `bytes` to `out` as text, escaping anything that is not valid UTF-8 as `\xNN`.
+///
+/// This backs a golden comparison whose whole claim is that the request bytes match exactly, so the
+/// rendering has to be injective: a lossy decode maps every invalid sequence to one replacement
+/// character, and two different wrong bodies would then render identically and pass. The backslash is
+/// escaped as well, or a body containing the literal text `\xNN` would collide with a real escape.
+///
+/// Header values allow bytes outside UTF-8 too, so they go through the same path as the body.
+fn push_escaped(out: &mut String, bytes: &[u8]) {
+    let mut rest = bytes;
+    loop {
+        let (valid, invalid) = match std::str::from_utf8(rest) {
+            Ok(text) => (text, &[][..]),
+            Err(error) => {
+                let (head, tail) = rest.split_at(error.valid_up_to());
+                // `valid_up_to` is a UTF-8 boundary by definition, so the head decodes; an unexpected
+                // end of input has no error length and ends the run.
+                let text = std::str::from_utf8(head).unwrap_or_default();
+                let bad = error.error_len().unwrap_or(tail.len());
+                (text, &tail[..bad])
+            }
+        };
+        for c in valid.chars() {
+            if c == '\\' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        if invalid.is_empty() {
+            return;
+        }
+        for byte in invalid {
+            out.push_str(&format!("\\x{byte:02X}"));
+        }
+        rest = &rest[valid.len() + invalid.len()..];
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +181,48 @@ mod tests {
             rendered,
             "GET http://patch.example.invalid/http/win32/x/?time=2024-01-02-03-40\n\
              user-agent: FFXIV PATCH CLIENT\n"
+        );
+    }
+
+    /// The comparison this helper backs claims the request bytes match exactly, so two different
+    /// wrong bodies must not render the same. A lossy decode folds every invalid sequence onto one
+    /// replacement character and would pass all four of these against each other.
+    #[test]
+    fn two_different_invalid_bodies_do_not_render_alike() {
+        let render = |body: &[u8]| {
+            canonical_request(&get("x").body(sqex_proto::RequestBody::new(body.to_vec())))
+        };
+
+        let renderings = [
+            render(&[0xFF]),
+            render(&[0xFE]),
+            render(&[0xFF, 0xFE]),
+            // The replacement character a lossy decode would have produced for any of the above.
+            render("\u{FFFD}".as_bytes()),
+            // And the literal text of an escape, which is why the backslash is escaped too.
+            render(br"\xFF"),
+        ];
+
+        for (i, left) in renderings.iter().enumerate() {
+            for right in &renderings[i + 1..] {
+                assert_ne!(left, right);
+            }
+        }
+    }
+
+    /// Valid text still renders verbatim: the escaping must not disturb the goldens it backs.
+    #[test]
+    fn valid_text_is_unchanged_by_the_escaping() {
+        let rendered = canonical_request(
+            &get("x").body(sqex_proto::RequestBody::new(
+                "_STORED_=blob&sqexid=user&password=hünter2"
+                    .as_bytes()
+                    .to_vec(),
+            )),
+        );
+        assert!(
+            rendered.ends_with("\n\n_STORED_=blob&sqexid=user&password=hünter2"),
+            "{rendered}"
         );
     }
 }
