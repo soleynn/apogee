@@ -250,10 +250,13 @@ fn build_request(
 }
 
 fn parse_status(response: &ProtoResponse, step: Step) -> Result<GateStatus, ProtoError> {
+    // No secrets to scrub: the frontier requests are unauthenticated, carrying only the locale and the
+    // computer id.
     if !response.is_ok() {
-        return Err(ProtoError::invalid_response(step, response));
+        return Err(ProtoError::invalid_response(step, response, &[]));
     }
-    serde_json::from_slice(&response.body).map_err(|_| ProtoError::invalid_response(step, response))
+    serde_json::from_slice(&response.body)
+        .map_err(|_| ProtoError::invalid_response(step, response, &[]))
 }
 
 #[cfg(test)]

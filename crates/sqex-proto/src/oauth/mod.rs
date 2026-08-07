@@ -355,8 +355,20 @@ pub async fn begin_login<'t>(
     )?;
     let response = transport.execute(request).await?;
 
+    // The ticket is a bearer credential and rides in the top-page query unescaped, so any page that
+    // echoes the request URL back reflects it. Scrubbing it by value here covers a page that reflects
+    // the ticket text alone; `excerpt` redacts the query parameter by shape for the re-encoded case
+    // and for `scrape_stored`, which is handed the page and never the ticket. Empty for a standard
+    // login, which the scrub skips.
+    let ticket_text = kind.ticket().map_or("", ObfuscatedTicket::text);
+    let secrets = [ticket_text];
+
     if !response.is_ok() {
-        return Err(ProtoError::invalid_response(Step::OauthTop, &response));
+        return Err(ProtoError::invalid_response(
+            Step::OauthTop,
+            &response,
+            &secrets,
+        ));
     }
 
     let text = String::from_utf8_lossy(&response.body);
@@ -369,7 +381,7 @@ pub async fn begin_login<'t>(
         return Err(if steam {
             ProtoError::SteamLinkNeeded
         } else {
-            ProtoError::invalid_response(Step::OauthTop, &response)
+            ProtoError::invalid_response(Step::OauthTop, &response, &secrets)
         });
     }
 
@@ -379,7 +391,7 @@ pub async fn begin_login<'t>(
     let steam_linked_id = if steam {
         Some(
             scrape_steam_id(&text)
-                .ok_or_else(|| ProtoError::invalid_response(Step::OauthTop, &response))?
+                .ok_or_else(|| ProtoError::invalid_response(Step::OauthTop, &response, &secrets))?
                 .to_owned(),
         )
     } else {

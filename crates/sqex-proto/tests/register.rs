@@ -319,6 +319,75 @@ fn a_whitespace_body_with_uid_is_not_treated_as_current() {
 }
 
 #[test]
+fn a_reflected_registration_url_does_not_leak_the_session_id() {
+    // The registration URL carries the live session id as its last path segment, so a 404 page that
+    // names the path it could not find reflects it back into the excerpt.
+    let body = format!(
+        "<html><head><title>404 Not Found</title></head><body>The requested URL \
+         /http/win32/ffxivneo_release_game/{GAME_VER}/{SESSION_ID} was not found on this server.\
+         </body></html>"
+    );
+    let (_transport, outcome) = login_then_register(ProtoResponse::new(404, body.into_bytes()));
+    let err = outcome.expect_err("404");
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert!(
+        !excerpt.contains(SESSION_ID),
+        "session id leaked: {excerpt}"
+    );
+    assert!(excerpt.contains("[redacted]"), "excerpt: {excerpt}");
+
+    // The other way out is `Debug`, which is what a logger or a panic message reaches for: it reports
+    // the excerpt's size, never its text, so nothing inherits attacker-influenced page content by
+    // accident. A shell that means to present the excerpt reads the field, as this test just did.
+    let rendered = format!("{err:?}");
+    assert!(!rendered.contains(SESSION_ID), "{rendered}");
+    assert!(!rendered.contains("404 Not Found"), "{rendered}");
+    assert!(rendered.contains("status: 404"), "{rendered}");
+}
+
+#[test]
+fn an_empty_uid_header_is_invalid_response() {
+    // Present but blank is not a credential: registering on it would report success and then send an
+    // empty patch-download header and an empty `DEV.TestSID` at launch, failing at the next hop with
+    // none of this step's context.
+    let response = ProtoResponse::new(204, Vec::new()).with_header(
+        HeaderName::from_static("x-patch-unique-id"),
+        HeaderValue::from_static(""),
+    );
+    let (_transport, outcome) = login_then_register(response);
+    let err = outcome.expect_err("empty uid");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::Register,
+            status: 204,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_whitespace_uid_header_is_invalid_response() {
+    let response = ProtoResponse::new(200, Vec::new()).with_header(
+        HeaderName::from_static("x-patch-unique-id"),
+        HeaderValue::from_static(" \t "),
+    );
+    let (_transport, outcome) = login_then_register(response);
+    let err = outcome.expect_err("blank uid");
+    assert!(matches!(
+        err,
+        ProtoError::InvalidResponse {
+            step: Step::Register,
+            status: 200,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn non_ascii_uid_header_is_invalid_response() {
     // A UID header present but not visible ASCII is treated as absent (its `to_str` fails), so the
     // response is an invalid one, never a lossily-decoded credential.
