@@ -221,6 +221,48 @@ fn a_steam_login_carries_the_ticket_unescaped_and_submits_the_linked_id() {
     );
 }
 
+/// A linked id whose case difference is invisible to an ASCII-only fold.
+const LINKED_ID_NON_ASCII: &str = "café-account";
+
+#[test]
+fn a_steam_login_folds_a_non_ascii_id_like_the_launcher() {
+    let id = computer_id();
+    let transport = FixtureTransport::new([
+        steam_top_response("STOREDBLOB", LINKED_ID_NON_ASCII),
+        ProtoResponse::new(200, success_body("SESSIONXYZ").into_bytes()),
+    ]);
+
+    block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Steam {
+                ticket: long_ticket().unwrap(),
+                free_trial: false,
+            },
+        )
+        .await
+        .unwrap();
+        // The launcher's comparison folds this to the page's id and submits; an ASCII-only one refuses
+        // the account the ticket is actually linked to, and `submit` returns `SteamWrongAccount`.
+        flow.submit(Credentials {
+            sqexid: "CAFÉ-ACCOUNT",
+            password: "hunter2",
+            otp: None,
+        })
+        .await
+        .unwrap()
+    });
+
+    let recorded = transport.recorded();
+    let body = String::from_utf8(recorded[1].body.as_ref().unwrap().as_bytes().to_vec()).unwrap();
+    assert_eq!(
+        body,
+        "_STORED_=STOREDBLOB&sqexid=caf%C3%A9-account&password=hunter2&otppw="
+    );
+}
+
 #[test]
 fn a_steam_free_trial_sets_isft_beside_the_ticket() {
     let id = computer_id();

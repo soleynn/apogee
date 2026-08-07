@@ -3,11 +3,11 @@
 
 use proptest::prelude::*;
 
-use super::mask_id;
 use super::scan::{
     CallbackReject, is_restartup, parse_launch_params, parse_login_callback, scrape_steam_id,
     scrape_stored,
 };
+use super::{eq_ordinal_ignore_case, mask_id};
 use crate::error::ProtoError;
 
 const FULL_PARAMS: &str =
@@ -129,6 +129,29 @@ fn a_masked_id_keeps_the_ends_and_reports_no_length() {
     assert_eq!(mask_id("tr"), "***");
     assert_eq!(mask_id("t"), "***");
     assert_eq!(mask_id(""), "***");
+}
+
+#[test]
+fn account_ids_fold_case_past_ascii() {
+    // The launcher's `OrdinalIgnoreCase` reads these as one account; an ASCII-only fold refuses them
+    // and the login never reaches the server that would have accepted it.
+    assert!(eq_ordinal_ignore_case("café-account", "CAFÉ-ACCOUNT"));
+    assert!(eq_ordinal_ignore_case("ÅÄÖ", "åäö"));
+    assert!(eq_ordinal_ignore_case("linked-account", "LINKED-ACCOUNT"));
+}
+
+#[test]
+fn account_ids_fold_no_further_than_the_launcher_does() {
+    // .NET's ordinal casing is one code point to one code point: `ß` has no single-char uppercase, so
+    // it stays itself and does not match `SS`. Rust's `to_uppercase` would expand it and call these
+    // the same account, accepting a pair the launcher refuses.
+    assert!(!eq_ordinal_ignore_case("straße", "STRASSE"));
+    // Nor does it keep the first character of an expansion it cannot use: that would fold `ß` to `S`
+    // and equate two letters .NET holds apart.
+    assert!(!eq_ordinal_ignore_case("ß", "S"));
+    // Different letters, not different cases of one.
+    assert!(!eq_ordinal_ignore_case("é", "e"));
+    assert!(!eq_ordinal_ignore_case("linked-account", "someone-else"));
 }
 
 #[test]
