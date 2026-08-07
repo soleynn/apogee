@@ -59,6 +59,7 @@ is tagged with its change type. Versioning aims to follow
 - Correct identity.rs doc comments on computer-id derivation (#134) _(documentation)_
 - Close the window-straddle gap in the error excerpt scrub (#135) _(fixed)_
 - Close four residual patchlist and version-file gaps (#136) _(fixed)_
+- Close the header-fidelity contract's remaining gaps (#137) _(fixed)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
