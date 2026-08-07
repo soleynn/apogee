@@ -37,6 +37,13 @@ const MAX_STEAM_ID: usize = 128;
 const CALLBACK_OPEN: &str = "window.external.user(\"login=auth,";
 /// The Steam relink callback (`restartup`). A standard login never triggers it.
 const RESTARTUP_MARKER: &str = "window.external.user(\"restartup\")";
+/// The most bytes read between [`CALLBACK_OPEN`] and the closing quote, bounding both branches the
+/// content splits into: the `launchParams` list ([`parse_launch_params`] copies `sid` out of it verbatim
+/// into [`LaunchParams::session_id`], which later rides into an error's secret-scrub list) and the
+/// failure message. A real callback runs under 150 bytes; this leaves generous headroom while still
+/// refusing a closing quote placed arbitrarily far into an oversized response, the same way
+/// [`attribute_value`] already treats a runaway capture as absent rather than accepted whole.
+const MAX_CALLBACK: usize = 1024;
 
 /// The launch parameters SE returns on a successful login. `session_id` authorizes the next stage, so
 /// this type deliberately implements no `Debug`/`Display`/`Serialize`: it is a transient parse result,
@@ -130,9 +137,9 @@ pub(crate) fn is_restartup(html: &str) -> bool {
 
 /// Peel the `login=auth,{status},...` callback out of a `login.send` body. A `login=auth,ok,` payload
 /// is parsed as launch params; a `login=auth,ng,{type},{message}` payload yields the failure message,
-/// borrowed verbatim and uncapped (see [`CallbackReject`]: the caller's own excerpt builder owns
-/// bounding it, and does so cheaply regardless of length); no callback at all yields
-/// [`CallbackReject::NotAuthOk`] with no message.
+/// borrowed verbatim and uncapped past [`MAX_CALLBACK`] (see [`CallbackReject`]: the caller's own
+/// excerpt builder owns bounding it, and does so cheaply regardless of length); no callback at all, or
+/// one whose content runs past [`MAX_CALLBACK`], yields [`CallbackReject::NotAuthOk`] with no message.
 pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackReject<'_>> {
     let start = body
         .find(CALLBACK_OPEN)
@@ -140,6 +147,7 @@ pub(crate) fn parse_login_callback(body: &str) -> Result<LaunchParams, CallbackR
     let rest = &body[start + CALLBACK_OPEN.len()..];
     let end = rest
         .find('"')
+        .filter(|&e| e <= MAX_CALLBACK)
         .ok_or(CallbackReject::NotAuthOk { message: None })?;
     let content = &rest[..end];
 
