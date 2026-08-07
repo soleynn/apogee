@@ -94,6 +94,38 @@ fn long_ticket() -> Result<ObfuscatedTicket, CryptoError> {
     ObfuscatedTicket::from_auth_ticket(&raw, ServerTime(1_700_000_000))
 }
 
+/// A secret-shaped string of exactly `len` characters. Cycling the alphabet rather than repeating one
+/// character means an arbitrary fragment of it (as [`assert_no_partial_leak`] checks for) is still
+/// recognizably a piece of *this* string, not a coincidental match against filler. Mirrors
+/// `error.rs`'s private `secret_of_len`, duplicated here because this is a separate integration-test
+/// binary and these end-to-end tests must drive the real public API, not call the redactor directly.
+fn secret_of_len(len: usize) -> String {
+    (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
+}
+
+/// The shortest fragment of a secret this treats as a meaningful leak, not a coincidence. See
+/// `error.rs`'s `LEAK_FRAGMENT_LEN`: a flat cap rather than a fraction of the secret's length, because
+/// none of the three redaction bugs found across PRs #131/#135/#138 leaked a fixed proportion of the
+/// secret.
+const LEAK_FRAGMENT_LEN: usize = 16;
+
+/// Fails if a fragment of `secret` at least [`LEAK_FRAGMENT_LEN`] characters long (or the whole secret,
+/// if it is shorter than that) survives anywhere in `text`. `!text.contains(secret)` alone would miss a
+/// partial leak, where the excerpt holds neither the whole secret nor nothing of it but a long exact
+/// fragment.
+fn assert_no_partial_leak(text: &str, secret: &str) {
+    let chars: Vec<char> = secret.chars().collect();
+    let threshold = chars.len().clamp(1, LEAK_FRAGMENT_LEN);
+    for window in chars.windows(threshold) {
+        let fragment: String = window.iter().collect();
+        assert!(
+            !text.contains(&fragment),
+            "partial leak: {fragment:?} (fragment of a {}-char secret) survives in {text:?}",
+            chars.len()
+        );
+    }
+}
+
 #[test]
 fn a_standard_login_builds_both_fingerprinted_requests() {
     let id = computer_id();
@@ -861,4 +893,241 @@ fn a_real_captured_login_carries_an_otp_in_the_submit_body() {
         body.ends_with("&otppw=135791"),
         "submit body did not carry the otp: {body}"
     );
+}
+
+// The tests below drive every `ProtoError` variant that can carry redacted, attacker-influenced text
+// through the real public API (`begin_login`/`LoginFlow::submit`), with adversarial secrets shaped to
+// have tripped each of the three distinct credential-leak bugs found across PRs #131, #135, and #138:
+// the original whole-buffer-replace-order bug (a secret that is a literal prefix of a longer one),
+// the window-straddle bug (a secret reflected a second time far enough in to land past the window one
+// redaction's shrinkage budgets for), and the truncation-bypass bug (an upstream length cap, like the
+// OAuth failure message's now-removed `MAX_MESSAGE`, that ran before the redactor ever saw the whole
+// secret). None of these call `scrubbed_excerpt`/`redact_secrets` directly: that style of test is
+// exactly what let the second and third bugs slip past the first two review rounds.
+
+#[test]
+fn oauth_failed_scrubs_a_stored_blob_the_old_message_cap_would_have_cut() {
+    // The confirmed truncation-bypass repro: the `_STORED_` blob scraped from the top page, reflected
+    // once in the OAuth "ng" failure message, far enough in that the now-removed MAX_MESSAGE=512
+    // pre-truncation in `oauth::scan::parse_login_callback` would have cut the message mid-secret
+    // before it ever reached `scrubbed_excerpt`. That bug leaked 488 of a 720-char blob verbatim; this
+    // uses the same 720-char shape. `scrubbed_excerpt`'s own window (`EXCERPT_MAX_CHARS + secret_len -
+    // 1`, here 919) only ever protects a secret it is handed whole, so this test would pass for the
+    // wrong reason (the window happening to be big enough) unless the message truly reaches it uncapped
+    // — which is exactly the property `parse_login_callback` returning a borrow rather than an owned,
+    // pre-truncated `String` is meant to guarantee.
+    let id = computer_id();
+    let blob = secret_of_len(720);
+    let transport = FixtureTransport::new([
+        top_response(&blob),
+        ProtoResponse::new(
+            200,
+            format!(
+                r#"<script>window.external.user("login=auth,ng,err,upstream rejected _STORED_={blob}");</script>"#
+            )
+            .into_bytes(),
+        ),
+    ]);
+
+    let err = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        flow.submit(Credentials {
+            sqexid: "user",
+            password: "wrong",
+            otp: None,
+        })
+        .await
+        .unwrap_err()
+    });
+
+    let ProtoError::OauthFailed { excerpt } = err else {
+        panic!("expected OauthFailed, got {err:?}");
+    };
+    assert_no_partial_leak(&excerpt, &blob);
+}
+
+#[test]
+fn oauth_failed_scrubs_a_password_reflected_twice_past_the_window() {
+    // The window-straddle bug's shape, driven through `OauthFailed` specifically: no test drove this
+    // variant through the real API with a secret long enough to matter before.
+    let id = computer_id();
+    let password = secret_of_len(90);
+    let filler = "-".repeat(150);
+    let transport = FixtureTransport::new([
+        top_response("STOREDBLOB"),
+        ProtoResponse::new(
+            200,
+            format!(
+                r#"<script>window.external.user("login=auth,ng,err,rejected {password} again {filler}{password}");</script>"#
+            )
+            .into_bytes(),
+        ),
+    ]);
+
+    let err = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        flow.submit(Credentials {
+            sqexid: "user",
+            password: &password,
+            otp: None,
+        })
+        .await
+        .unwrap_err()
+    });
+
+    let ProtoError::OauthFailed { excerpt } = err else {
+        panic!("expected OauthFailed, got {err:?}");
+    };
+    assert_no_partial_leak(&excerpt, &password);
+}
+
+#[test]
+fn submit_scrubs_a_password_reflected_three_times_past_the_window() {
+    // The window-straddle bug's shape, driven through submit's `InvalidResponse` arm (`Step::
+    // OauthLogin`) rather than by calling `scrubbed_excerpt` directly.
+    let id = computer_id();
+    let password = secret_of_len(90);
+    let mid1 = format!("&why={}", "-".repeat(15));
+    let mid2 = format!("&again={}", "-".repeat(13));
+    let body = format!("400: rejected form password={password}{mid1}{password}{mid2}{password}");
+    let transport = FixtureTransport::new([
+        top_response("STOREDBLOB"),
+        ProtoResponse::new(400, body.into_bytes()),
+    ]);
+
+    let err = block_on(async {
+        let flow = begin_login(
+            &transport,
+            &context(&id),
+            &fixed_time(),
+            LoginKind::Standard { free_trial: false },
+        )
+        .await
+        .unwrap();
+        flow.submit(Credentials {
+            sqexid: "user",
+            password: &password,
+            otp: None,
+        })
+        .await
+        .unwrap_err()
+    });
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert_no_partial_leak(excerpt, &password);
+}
+
+#[test]
+fn a_reflected_top_url_does_not_leak_the_steam_ticket_past_the_window() {
+    // The window-straddle bug's shape, driven through `begin_login`'s `OauthTop` `InvalidResponse` arm
+    // with two reflections rather than the one `a_reflected_top_url_does_not_leak_the_steam_ticket`
+    // uses.
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    let filler = " ".repeat(150);
+    let body = format!("Bad Request: reference {text}{filler}{text}");
+    let transport = FixtureTransport::once(ProtoResponse::new(400, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert_no_partial_leak(excerpt, &text);
+}
+
+#[test]
+fn a_top_page_without_stored_does_not_leak_a_twice_reflected_ticket() {
+    // The window-straddle bug's shape, driven through `scrape_stored`'s `StoredNotFound` arm with two
+    // reflections rather than the one reflection the existing bare-ticket coverage uses. The prefix and
+    // filler are short on purpose: a long prefix (this page's real markup) pushes the straddled leak
+    // toward the tail of the window, and the final `EXCERPT_MAX_CHARS` cut then trims most or all of it
+    // away before this test ever sees it, so a test built against the real markup shape would pass
+    // whether or not the guard it means to check is even present. Confirmed by temporarily disabling
+    // the guard: the real-markup shape stayed green while this tight one went red.
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    let filler = " ".repeat(20);
+    // The hidden linked-id input has to be present and short: `begin_login` reads the Steam-linked id
+    // before `_STORED_`, so a page missing it fails at that earlier `OauthTop` check instead of ever
+    // reaching `scrape_stored`.
+    let body =
+        format!(r#"<input name="sqexid" type="hidden" value="id"/>ticket {text}{filler}{text}"#);
+    let transport = FixtureTransport::once(ProtoResponse::new(200, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::StoredNotFound { excerpt } = &err else {
+        panic!("expected StoredNotFound, got {err:?}");
+    };
+    assert_no_partial_leak(excerpt, &text);
+}
+
+#[test]
+fn a_real_markup_top_page_without_stored_does_not_leak_a_twice_reflected_ticket() {
+    // The real top-page markup shape (an anchor and a neighbouring input) reflecting the ticket twice.
+    // Kept alongside the tight version above because it is the shape an actual SE response would carry,
+    // even though its long prefix means it alone would not catch a disabled guard (see that test's
+    // comment).
+    let id = computer_id();
+    let ticket = long_ticket().unwrap();
+    let text = ticket.text().to_owned();
+    let filler = " ".repeat(150);
+    let body = format!(
+        "<html>debug: rejected ticket {text}{filler}{text}\n\
+         <input name=\"sqexid\" type=\"hidden\" value=\"{LINKED_ID}\"/></html>"
+    );
+    let transport = FixtureTransport::once(ProtoResponse::new(200, body.into_bytes()));
+
+    let err = block_on(begin_login(
+        &transport,
+        &context(&id),
+        &fixed_time(),
+        LoginKind::Steam {
+            ticket,
+            free_trial: false,
+        },
+    ))
+    .unwrap_err();
+
+    let ProtoError::StoredNotFound { excerpt } = &err else {
+        panic!("expected StoredNotFound, got {err:?}");
+    };
+    assert_no_partial_leak(excerpt, &text);
 }

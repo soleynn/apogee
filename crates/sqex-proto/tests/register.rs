@@ -390,6 +390,62 @@ fn a_reflected_registration_url_does_not_leak_the_session_id() {
     assert!(rendered.contains("status: 404"), "{rendered}");
 }
 
+/// A secret-shaped string of exactly `len` characters, cycling the alphabet so an arbitrary fragment of
+/// it is still recognizably a piece of *this* string. Mirrors `error.rs`'s private `secret_of_len` and
+/// `tests/oauth.rs`'s copy of the same helper, duplicated here because this is a separate
+/// integration-test binary and this test must drive the real public API (`register_session`), not call
+/// the redactor directly.
+fn secret_of_len(len: usize) -> String {
+    (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
+}
+
+/// The shortest fragment of a secret this treats as a meaningful leak. See `error.rs`'s
+/// `LEAK_FRAGMENT_LEN`: `!text.contains(secret)` alone misses a partial leak, where the excerpt holds
+/// neither the whole secret nor nothing of it but a long exact fragment.
+const LEAK_FRAGMENT_LEN: usize = 16;
+
+fn assert_no_partial_leak(text: &str, secret: &str) {
+    let chars: Vec<char> = secret.chars().collect();
+    let threshold = chars.len().clamp(1, LEAK_FRAGMENT_LEN);
+    for window in chars.windows(threshold) {
+        let fragment: String = window.iter().collect();
+        assert!(
+            !text.contains(&fragment),
+            "partial leak: {fragment:?} (fragment of a {}-char secret) survives in {text:?}",
+            chars.len()
+        );
+    }
+}
+
+#[test]
+fn a_session_id_reflected_twice_does_not_leak_past_the_window() {
+    // The window-straddle bug's shape (PR #135), driven through `register_session` specifically with a
+    // session id long enough, and reflected a second time far enough in, to land past the window
+    // `scrubbed_excerpt` widens to catch exactly one redaction's shrinkage — unlike
+    // `a_reflected_registration_url_does_not_leak_the_session_id` above, whose short, single-reflection
+    // `SESSION_ID` fixture would pass even with the window-straddle bug present.
+    let id = computer_id();
+    let sid = secret_of_len(54);
+    let filler = " ".repeat(150);
+    let body = format!("404 not found: {sid}{filler}{sid}");
+    let transport = FixtureTransport::new([
+        ProtoResponse::new(200, top_page("STOREDBLOB").into_bytes()),
+        ProtoResponse::new(200, success_body(&sid).into_bytes()),
+        ProtoResponse::new(404, body.into_bytes()),
+    ]);
+
+    let outcome = block_on(async {
+        let auth = login(&transport, &id).await?;
+        register_session(&transport, &auth, &request_report()).await
+    });
+    let err = outcome.expect_err("404");
+
+    let ProtoError::InvalidResponse { excerpt, .. } = &err else {
+        panic!("expected InvalidResponse, got {err:?}");
+    };
+    assert_no_partial_leak(excerpt, &sid);
+}
+
 #[test]
 fn an_empty_uid_header_is_invalid_response() {
     // Present but blank is not a credential: registering on it would report success and then send an
