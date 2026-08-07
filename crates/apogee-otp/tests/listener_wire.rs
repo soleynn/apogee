@@ -12,6 +12,8 @@
 use std::error::Error;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use apogee_otp::{Listener, ListenerConfig, OtpError, Received, SourceFilter};
@@ -63,6 +65,22 @@ async fn shove(addr: SocketAddr, bytes: &[u8]) {
 /// Whether anything is still accepting on `addr`.
 async fn reachable(addr: SocketAddr) -> bool {
     TcpStream::connect(addr).await.is_ok()
+}
+
+/// Push until the listener actually answers success.
+///
+/// A refused connection closes cleanly and reads back nothing, which is indistinguishable from a
+/// delivered code if a caller only checks that the call returned. Under contention a real phone would
+/// be retried by its user; this retries for them.
+async fn push_until_taken(addr: SocketAddr, code: &str, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(answer) = push(addr, request(code).as_bytes()).await
+            && answer.starts_with(b"HTTP/1.0 200")
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 /// The exact bytes the reference answers a delivered code with.
@@ -421,5 +439,205 @@ async fn two_waits_in_a_row_can_take_the_same_port() -> Fallible {
 
     let second = Listener::bind(config(port, SourceFilter::Any)).await?;
     assert_eq!(second.local_addr().port(), port);
+    Ok(())
+}
+
+/// A flood never starves a second source.
+///
+/// Section 4's hostile-LAN gate at crate level, and the reason the two budgets are separate. One
+/// address hammers the port with garbage and with well-formed wrong codes for as long as the wait
+/// lasts; the phone pushes from another address in the middle of it and its code still comes back.
+///
+/// The assertion is on the outcome and on which source the limiter shut off, never on a timing: a
+/// version that asserted "the flood was still running" would pass whenever the machine was slow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_never_starves_a_second_source() -> Fallible {
+    let listener = bound().await?;
+    let addr = listener.local_addr();
+    let stop = Arc::new(AtomicBool::new(false));
+    // Set the moment the flooding source reads its first refusal. The phone waits for it rather than
+    // for a duration, so the ordering this test needs is a fact it observed and not a race it hopes
+    // to win: by the time the code is pushed, the limiter has demonstrably engaged.
+    let throttled = Arc::new(AtomicBool::new(false));
+
+    // Loopback is a whole /8, so a second source needs no second machine: binding the client side to
+    // another address in it is a genuinely different peer as far as the listener is concerned.
+    let flooding = stop.clone();
+    let announce = throttled.clone();
+    let flood = tokio::spawn(async move {
+        while !flooding.load(Ordering::Relaxed) {
+            for shape in [
+                // Complete request lines, so each one spends an attempt, but none of them is a
+                // deliverable code. Under one-shot delivery a well-formed six-digit push from the
+                // flooding source would simply win the race, which is a different property, and an
+                // accepted one, from the starvation this test is about.
+                b"GET /ffxivlauncher/12345 HTTP/1.1\r\n\r\n".as_slice(),
+                b"GET /nope HTTP/1.1\r\n\r\n".as_slice(),
+                // And one that never terminates, which must spend nothing at all.
+                b"not a request line and never terminated".as_slice(),
+            ] {
+                let Ok(socket) = tokio::net::TcpSocket::new_v4() else {
+                    return;
+                };
+                if socket
+                    .bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 0))
+                    .is_err()
+                {
+                    return;
+                }
+                let Ok(mut stream) = socket.connect(addr).await else {
+                    continue;
+                };
+                let _ = stream.write_all(shape).await;
+                let mut answer = Vec::new();
+                let _ = stream.read_to_end(&mut answer).await;
+                if answer.starts_with(b"HTTP/1.0 429") {
+                    announce.store(true, Ordering::Relaxed);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    // The phone, from the ordinary loopback address, pushing once the flood is established.
+    let done = stop.clone();
+    let phone = tokio::spawn(async move {
+        while !throttled.load(Ordering::Relaxed) {
+            // The bail-out matters: if the wait ends without the limiter ever engaging, this task
+            // still has to finish, or the failure it should report becomes a hang instead.
+            if done.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        push_until_taken(addr, "482913", &done).await;
+    });
+
+    let received = listener.wait_for_code(GENEROUS).await?;
+    stop.store(true, Ordering::Relaxed);
+    let _ = phone.await;
+    let _ = flood.await;
+
+    assert_eq!(received.from(), HERE, "the flood's code won the race");
+    assert!(
+        received.refused() > 0,
+        "nothing was turned away, so the flood never reached the listener"
+    );
+    // The limiter engaged, and against the flooder. This is what separates a flood that was stopped
+    // from a flood that was merely slow, and it is the half a timing assertion cannot pin.
+    assert_eq!(
+        received.limited(),
+        Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+        "the limiter never shut the flooding source off"
+    );
+    assert_eq!(received.into_code().expose(), "482913");
+    Ok(())
+}
+
+/// One source cannot hold more than its share of the slots at once.
+///
+/// The per-source cap is what makes the overall concurrency bound mean anything: without it a single
+/// scripted address holds every slot and the phone's connection is never accepted at all.
+///
+/// Asserted on the refusal count rather than on whether the phone got in, and that choice is the
+/// whole design of this test. "The phone still got in" is a race the phone usually wins anyway, so it
+/// stays green with the cap deleted; the count is arithmetic. Eight connections are opened from one
+/// address before the wait starts, so all eight are sitting in the backlog when it begins accepting
+/// and the cap meets them as a burst: two are served and six are turned away. Delete the cap and the
+/// count is zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_source_cannot_hold_more_than_its_share_of_the_slots() -> Fallible {
+    const SQUATTERS: u32 = 8;
+
+    let listener = bound().await?;
+    let addr = listener.local_addr();
+
+    // Established before anything accepts, so the burst is what the accept loop meets. Held for the
+    // length of the test: a slot released early would let a later one through and soften the count.
+    let mut held = Vec::new();
+    for _ in 0..SQUATTERS {
+        let socket = tokio::net::TcpSocket::new_v4()?;
+        socket.bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 0))?;
+        held.push(socket.connect(addr).await?);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = stop.clone();
+    let phone = tokio::spawn(async move { push_until_taken(addr, "864209", &done).await });
+
+    let received = listener.wait_for_code(GENEROUS).await?;
+    stop.store(true, Ordering::Relaxed);
+    let _ = phone.await;
+    drop(held);
+
+    assert_eq!(received.from(), HERE);
+    assert_eq!(
+        received.refused(),
+        SQUATTERS - 2,
+        "one address held a different number of slots than the cap permits"
+    );
+    assert_eq!(received.into_code().expose(), "864209");
+    Ok(())
+}
+
+/// The overall concurrency bound holds however many addresses arrive.
+///
+/// The other half of the pair: the per-source cap stops one address taking everything, and this stops
+/// many addresses doing it between them. Loopback is a whole /8, so twenty distinct sources cost
+/// nothing to produce, and two connections each is exactly what the per-source cap allows, which is
+/// what leaves this measuring only the overall bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_number_of_sources_exceeds_the_overall_bound() -> Fallible {
+    const SOURCES: u32 = 20;
+    const EACH: u32 = 2;
+    const SLOTS: u32 = 16;
+
+    let listener = bound().await?;
+    let addr = listener.local_addr();
+
+    let mut held = Vec::new();
+    for host in 0..SOURCES {
+        for _ in 0..EACH {
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            // 127.0.0.2 upwards, leaving 127.0.0.1 to the phone.
+            socket.bind(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 1, (host + 2) as u8)),
+                0,
+            ))?;
+            held.push(socket.connect(addr).await?);
+        }
+    }
+
+    // Retried gently rather than as fast as the loop goes round. Every slot is occupied until a
+    // three-second connection deadline frees one, so a tight retry adds tens of thousands of
+    // refusals of its own and drowns the number being measured.
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = stop.clone();
+    let phone = tokio::spawn(async move {
+        while !done.load(Ordering::Relaxed) {
+            if let Ok(answer) = push(addr, request("975310").as_bytes()).await
+                && answer.starts_with(b"HTTP/1.0 200")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let received = listener.wait_for_code(GENEROUS).await?;
+    stop.store(true, Ordering::Relaxed);
+    let _ = phone.await;
+    drop(held);
+
+    assert_eq!(received.from(), HERE);
+    // A lower bound, not an equality: the phone's own refused attempts are counted too, and how many
+    // it makes depends on when a slot frees. What the bound rules out is the shape with no cap at
+    // all, where all forty are served at once and nothing is turned away.
+    assert!(
+        received.refused() >= SOURCES * EACH - SLOTS,
+        "only {} connections were turned away, so more than {SLOTS} were served at once",
+        received.refused()
+    );
+    assert_eq!(received.into_code().expose(), "975310");
     Ok(())
 }
