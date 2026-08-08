@@ -41,6 +41,7 @@ is tagged with its change type. Versioning aims to follow
 - Classify, compile and gate the Apple credential-store path (#119) _(fixed)_
 - Give the Windows secret store an owner-only access list (#120) _(fixed)_
 - Pin five hardening fixes that reverted green (#154) _(testing)_
+- Fence the Io payload on Debug and the source chain, not just Display (#155) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
