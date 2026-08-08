@@ -1,13 +1,15 @@
 //! The version report and the install's version files.
 //!
-//! [`VersionReport`] is the tamper-check body sent with session registration: a boot line naming the
-//! four boot EXEs by length and SHA1, then one line per installed expansion. [`VersionReport::from_parts`]
-//! is pure and testable; [`VersionReport::from_install`] is the crate's only filesystem access
-//! (read-only, synchronous, run before any request). It reads the `.ver` files and hashes the boot
-//! EXEs, gating on a sanity check first: a `.ver` (or a present `.bck`) that is empty, carries an
-//! embedded line feed, or is all-NUL is a repairable [`ProtoError::InvalidVersionFiles`] and no report
-//! is produced. Unlike the reference launcher, a missing or corrupt file is never silently replaced
-//! with the base version.
+//! [`VersionReport`] is the tamper-check body sent with session registration: a boot line naming
+//! the four boot EXEs by length and SHA1, then one line per installed expansion.
+//! [`VersionReport::from_parts`] is pure and testable; [`VersionReport::from_install`] is the
+//! crate's only filesystem access (read-only, synchronous, run before any request). It reads the
+//! `.ver` files and hashes the boot EXEs, gating on a sanity check first: a `.ver` (or a present
+//! `.bck`) that is empty, carries an embedded line feed, or is all-NUL is a repairable
+//! [`ProtoError::InvalidVersionFiles`] and no report is produced. Unlike the reference launcher, a
+//! missing or corrupt file is never silently replaced with the base version outside the opt-in
+//! install-mode paths ([`VersionReport::from_install_or_base`],
+//! [`InstallPaths::boot_version_or_sentinel`]).
 
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -17,7 +19,6 @@ use sha1::{Digest, Sha1};
 
 use crate::error::ProtoError;
 
-/// The four boot EXEs, in the fixed order they are hashed into the boot line.
 const BOOT_EXES: [&str; 4] = [
     "ffxivboot.exe",
     "ffxivboot64.exe",
@@ -25,22 +26,40 @@ const BOOT_EXES: [&str; 4] = [
     "ffxivupdater64.exe",
 ];
 
-/// The highest expansion index a version report carries.
 const MAX_EXPANSION: u8 = 5;
 
-/// The base-game version string (`YYYY.MM.DD.PPPP.RRRR` at all zeros): the sentinel a repository
-/// reports when it is not installed, so the server returns the full patch chain for
-/// install-from-nothing. It is substituted only through the opt-in install-mode paths
-/// ([`VersionReport::from_install_or_base`], [`InstallPaths::boot_version_or_sentinel`]); the strict
-/// paths reject a missing repository instead of silently base-versioning it.
+/// The sentinel a repository reports when it is not installed, so the server returns the full patch
+/// chain for install-from-nothing.
+///
+/// Substituted only through the opt-in install-mode paths ([`VersionReport::from_install_or_base`],
+/// [`InstallPaths::boot_version_or_sentinel`]); the strict paths ([`VersionReport::from_install`],
+/// [`InstallPaths::boot_version`]) reject a missing repository instead of silently base-versioning
+/// it.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::BASE_GAME_VERSION;
+///
+/// assert_eq!(BASE_GAME_VERSION, "2012.01.01.0000.0000");
+/// ```
 pub const BASE_GAME_VERSION: &str = "2012.01.01.0000.0000";
 
-/// Which repository a bad version file belongs to, for triage. `Boot` covers `ffxivboot.ver` and the
-/// four boot EXEs (the boot directory is the unit of repair).
+/// Which repository a bad version file belongs to, for triage.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::VersionRepo;
+///
+/// assert_eq!(VersionRepo::Ex(1), VersionRepo::Ex(1));
+/// assert_ne!(VersionRepo::Boot, VersionRepo::Game);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VersionRepo {
-    /// The boot component (`{root}/boot`).
+    /// The boot component (`{root}/boot`). Covers `ffxivboot.ver` and the four boot EXEs: the boot
+    /// directory is the unit of repair.
     Boot,
     /// The base game (`{root}/game`).
     Game,
@@ -49,6 +68,24 @@ pub enum VersionRepo {
 }
 
 /// How a version file failed the sanity gate.
+///
+/// The first three variants mirror the reference launcher's own `IsBadVersionSanity`
+/// (`Launcher.cs:332-347`) exactly. The last two do not exist there: the reference only rejects a
+/// body that is *entirely* NUL, so a
+/// single embedded NUL still passes its gate and would splice verbatim into the report, and it
+/// never checks for an embedded tab at all. Both are real injection classes in this crate's report
+/// format (a version string reaches the report body as a whole line, and as a tab-separated field
+/// within an expansion line), so this crate closes them even though the reference does not: this is
+/// deliberate hardening beyond parity with the reference launcher, not a port-bug fix, and should
+/// not be removed in the name of matching it byte-for-byte.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::SanityKind;
+///
+/// assert_ne!(SanityKind::Empty, SanityKind::AllNul);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SanityKind {
@@ -60,11 +97,12 @@ pub enum SanityKind {
     ContainsNewline,
     /// Every byte is NUL.
     AllNul,
-    /// The file carries an embedded NUL byte (but not every byte, which is [`SanityKind::AllNul`]).
+    /// The file carries an embedded NUL byte (but not every byte, which is
+    /// [`SanityKind::AllNul`]).
     EmbeddedNul,
     /// The file carries an embedded tab: the version report splices expansion lines together with
-    /// tabs, so a version string that itself contains one can forge a field the same way an embedded
-    /// line feed forges a whole record.
+    /// tabs, so a version string that itself contains one can forge a field the same way an
+    /// embedded line feed forges a whole record.
     EmbeddedTab,
     /// The file exists but could not be read (a non-not-found I/O error).
     Unreadable,
@@ -78,6 +116,14 @@ pub struct InstallPaths {
 
 impl InstallPaths {
     /// An install rooted at `root` (the directory containing `boot/` and `game/`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::InstallPaths;
+    ///
+    /// let paths = InstallPaths::new("/opt/ffxiv");
+    /// ```
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -119,19 +165,49 @@ impl InstallPaths {
         self.ex_dir(n).join(format!("ex{n}.bck"))
     }
 
-    /// Read the boot repository's version for the boot-version check, using the strict posture: a
-    /// missing or corrupt `ffxivboot.ver` is a repairable [`ProtoError::InvalidVersionFiles`], never a
-    /// silent base-version fallback. This is the default; [`InstallPaths::boot_version_or_sentinel`] is
-    /// the opt-in install-from-nothing variant.
+    /// Read the boot repository's version for the boot-version check.
+    ///
+    /// The strict posture: a missing or corrupt `ffxivboot.ver` is a repairable fault, never a
+    /// silent base-version fallback. This is the default entry point;
+    /// [`InstallPaths::boot_version_or_sentinel`] is the opt-in install-from-nothing variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::InvalidVersionFiles`] when `ffxivboot.ver` is missing, unreadable, or
+    /// fails the content sanity gate (empty, an embedded newline/NUL/tab, or all-NUL).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::InstallPaths;
+    ///
+    /// let paths = InstallPaths::new("/nonexistent/install");
+    /// assert!(paths.boot_version().is_err());
+    /// ```
     pub fn boot_version(&self) -> Result<String, ProtoError> {
         read_sane_ver(&self.boot_ver(), VersionRepo::Boot)
     }
 
     /// Read the boot version for the boot-version check, substituting [`BASE_GAME_VERSION`] when
-    /// `ffxivboot.ver` is absent or whitespace-only. Opt-in, for install-from-nothing: an absent boot
-    /// repository must report the base sentinel so the server returns the full boot chain. A present file
-    /// that is unreadable or fails the content gate (embedded line feed, all-NUL) is still a repairable
-    /// fault.
+    /// `ffxivboot.ver` is absent or whitespace-only.
+    ///
+    /// Opt-in, for install-from-nothing: an absent boot repository must report the base sentinel so
+    /// the server returns the full boot chain. A present file that is unreadable or fails the
+    /// content gate is still a repairable fault.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::InvalidVersionFiles`] when `ffxivboot.ver` is present but unreadable or
+    /// fails the content sanity gate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::{BASE_GAME_VERSION, InstallPaths};
+    ///
+    /// let paths = InstallPaths::new("/nonexistent/install");
+    /// assert_eq!(paths.boot_version_or_sentinel().unwrap(), BASE_GAME_VERSION);
+    /// ```
     pub fn boot_version_or_sentinel(&self) -> Result<String, ProtoError> {
         read_ver_or_sentinel(&self.boot_ver(), VersionRepo::Boot)
     }
@@ -139,9 +215,9 @@ impl InstallPaths {
 
 /// A version report: the base-game version for the request URL and the report body for its payload.
 ///
-/// The body is byte-identical to the reference launcher's `GetVersionReport` output; the sanity gate
-/// in [`VersionReport::from_install`] is Apogee's deliberate divergence (it refuses a corrupt install
-/// rather than silently substituting the base version).
+/// The body is byte-identical to the reference launcher's `GetVersionReport` output; the sanity
+/// gate in [`VersionReport::from_install`] is Apogee's deliberate divergence (it refuses a corrupt
+/// install rather than silently substituting the base version).
 #[derive(Debug)]
 pub struct VersionReport {
     game_version: String,
@@ -150,23 +226,61 @@ pub struct VersionReport {
 
 impl VersionReport {
     /// The base-game version: the `{gamever}` URL path segment for session registration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::VersionReport;
+    ///
+    /// let hashes = std::array::from_fn(|i| (i as u64, format!("{i:040x}")));
+    /// let report = VersionReport::from_parts("2024.03.01.0000.0000".to_owned(), "b", hashes, &[]);
+    /// assert_eq!(report.game_version(), "2024.03.01.0000.0000");
+    /// ```
     #[must_use]
     pub fn game_version(&self) -> &str {
         &self.game_version
     }
 
     /// The report body: the exact bytes POSTed to the registration endpoint.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::VersionReport;
+    ///
+    /// let hashes = std::array::from_fn(|i| (i as u64, format!("{i:040x}")));
+    /// let report = VersionReport::from_parts("g".to_owned(), "b", hashes, &[]);
+    /// assert!(report.body().starts_with("b="));
+    /// ```
     #[must_use]
     pub fn body(&self) -> &str {
         &self.body
     }
 
-    /// Assemble a report from its already-read parts. Pure: no filesystem, no sanity checks (callers
-    /// reading from disk go through [`VersionReport::from_install`], which gates on sanity first).
+    /// Assemble a report from its already-read parts.
     ///
-    /// `exe_hashes` is `(byte length, lowercase-hex SHA1)` for the four boot EXEs in `BOOT_EXES`
-    /// order; `expansions` is the `ex{n}.ver` contents, expansion 1 first. The body always ends with a
-    /// line feed, matching the reference launcher.
+    /// Pure: no filesystem access and no sanity checks (callers reading from disk go through
+    /// [`VersionReport::from_install`], which gates on sanity first). `exe_hashes` is `(byte
+    /// length, lowercase-hex SHA1)` for the four boot EXEs in fixed order (`ffxivboot.exe`,
+    /// `ffxivboot64.exe`, `ffxivlauncher64.exe`, `ffxivupdater64.exe`); `expansions` is the
+    /// `ex{n}.ver` contents, expansion 1 first. The body always ends with a line feed, matching the
+    /// reference launcher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::VersionReport;
+    ///
+    /// let hashes = std::array::from_fn(|i| (i as u64, format!("{i:040x}")));
+    /// let report = VersionReport::from_parts(
+    ///     "2024.03.01.0000.0000".to_owned(),
+    ///     "2024.02.01.0000.0000",
+    ///     hashes,
+    ///     &["2024.02.01.0000.0001".to_owned()],
+    /// );
+    /// assert!(report.body().starts_with("2024.02.01.0000.0000="));
+    /// assert!(report.body().ends_with("ex1\t2024.02.01.0000.0001\n"));
+    /// ```
     #[must_use]
     pub fn from_parts(
         game_version: String,
@@ -192,17 +306,32 @@ impl VersionReport {
         Self { game_version, body }
     }
 
-    /// Read `paths`' version files and hash its boot EXEs into a report for `max_expansion` expansions.
+    /// Read `paths`' version files and hash its boot EXEs into a report for `max_expansion`
+    /// expansions.
     ///
-    /// The crate's only filesystem access: read-only and synchronous, run before any request. Every
-    /// `.ver` and any present `.bck` consulted must pass the sanity gate, or this is a repairable
-    /// [`ProtoError::InvalidVersionFiles`] and no report is produced. Expansions above `MAX_EXPANSION`
-    /// are ignored (the report carries at most that many).
+    /// The crate's only filesystem access: read-only and synchronous, run before any request.
+    /// Every `.ver` and any present `.bck` consulted must pass the sanity gate, in the reference
+    /// launcher's order (boot, base game, then each expansion), or this is a repairable fault and
+    /// no report is produced. Expansions above the crate's maximum are ignored (the report carries
+    /// at most that many).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::InvalidVersionFiles`] if any `.ver` (or a present `.bck`) this
+    /// function must read is missing, unreadable, or fails the content sanity gate, or if a boot
+    /// EXE is missing or unreadable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::{InstallPaths, VersionReport};
+    ///
+    /// let paths = InstallPaths::new("/nonexistent/install");
+    /// assert!(VersionReport::from_install(&paths, 5).is_err());
+    /// ```
     pub fn from_install(paths: &InstallPaths, max_expansion: u8) -> Result<Self, ProtoError> {
         let expansions = max_expansion.min(MAX_EXPANSION);
 
-        // Sanity-gate the `.ver` (and any present `.bck`) of every repository the report reads, in the
-        // reference launcher's order: boot, base game, then each expansion.
         let boot_ver = read_sane_ver(&paths.boot_ver(), VersionRepo::Boot)?;
         check_bck(&paths.boot_bck(), VersionRepo::Boot)?;
         let game_version = read_sane_ver(&paths.game_ver(), VersionRepo::Game)?;
@@ -226,27 +355,43 @@ impl VersionReport {
     }
 
     /// Read `paths` into a report for install-from-nothing, reporting [`BASE_GAME_VERSION`] for any
-    /// repository whose `.ver` is absent or whitespace-only, so the server returns the full patch chain
-    /// into an empty install.
+    /// repository whose `.ver` is absent or whitespace-only, so the server returns the full patch
+    /// chain into an empty install.
     ///
     /// Opt-in and deliberately unlike [`VersionReport::from_install`]: a missing game or expansion
     /// `.ver` is the expected state here, not a fault, so absence is the sentinel and no `.bck` is
-    /// consulted. A `.ver` that is *present* is still content-gated, so local corruption (an embedded
-    /// line feed, an all-NUL body) is a repairable [`ProtoError::InvalidVersionFiles`] and never reaches
-    /// the report body, where a stray line feed would forge a whole extra record. The boot line still
-    /// names the installed boot version (base-fallback when absent) and the four boot EXEs, which must be
-    /// present: install-from-nothing brings up the boot component first, then reports the game at the
+    /// consulted. A `.ver` that is *present* is still content-gated, so local corruption is still a
+    /// repairable [`ProtoError::InvalidVersionFiles`] and never reaches the report body, where a
+    /// stray line feed would forge a whole extra record. The boot line still names the installed
+    /// boot version (base-fallback when absent) and the four boot EXEs, which must be present:
+    /// install-from-nothing brings up the boot component first, then reports the game at the
     /// sentinel.
     ///
-    /// This is *per-repository* base-fallback, mirroring the reference launcher's ordinary
-    /// `Repository.GetVer` (`Repository.cs:67-76`: absent/whitespace → base, present → verbatim), which
-    /// is the semantics its non-forced register uses; the content gate on a present file is Apogee's
-    /// divergence, the same refuse-a-corrupt-install posture the strict path takes. For
-    /// install-from-nothing (the game and every expansion repo absent) the bytes are byte-identical to
-    /// what the reference registers. It is
-    /// **not** the reference's blanket `forceBaseVersion` Repair report (`Launcher.cs:271-283,402`),
-    /// which forces base even for a present `.ver`; Apogee's repair is block-level over the index, not a
-    /// base re-registration, so do not reuse this for repair.
+    /// This is *per-repository* base-fallback, mirroring the reference launcher's ordinary,
+    /// non-forced `Repository.GetVer` (`Repository.cs:67-76`: absent/whitespace reads as base, a
+    /// present `.ver` reads verbatim), which is the semantics its non-forced register uses. The
+    /// content gate on a present file is Apogee's divergence from that, the same
+    /// refuse-a-corrupt-install posture the strict path takes. For install-from-nothing (the game
+    /// and every expansion repo absent) the bytes are byte-identical to what the reference
+    /// registers. It is **not** the reference's blanket `forceBaseVersion` Repair report
+    /// (`Launcher.cs:271-283,402`), which forces base even for a present `.ver`; Apogee's repair is
+    /// block-level over the index, not a base re-registration, so do not reuse this for repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::InvalidVersionFiles`] if a present `.ver` fails the content sanity
+    /// gate, if any `.ver` is present but unreadable, or if a boot EXE is missing or unreadable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::{BASE_GAME_VERSION, InstallPaths, VersionReport};
+    ///
+    /// let paths = InstallPaths::new("/nonexistent/install");
+    /// // No boot EXEs on disk, so even install-from-nothing still refuses here.
+    /// assert!(VersionReport::from_install_or_base(&paths, 5).is_err());
+    /// # let _ = BASE_GAME_VERSION;
+    /// ```
     pub fn from_install_or_base(
         paths: &InstallPaths,
         max_expansion: u8,
@@ -272,22 +417,12 @@ impl VersionReport {
     }
 }
 
-/// Read a required `.ver` file, gate it on sanity, and return its decoded contents (embedded into the
-/// report unchanged). A missing or unreadable file is a repairable fault, never a base-version fallback.
 fn read_sane_ver(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
     let text = decode_ver(&read_file(path, repo)?);
     check_sanity(&text).map_err(|kind| ProtoError::InvalidVersionFiles { repo, kind })?;
     Ok(text)
 }
 
-/// Read a `.ver` the way the install-from-nothing report does: an absent or whitespace-only file
-/// reports [`BASE_GAME_VERSION`], mirroring the reference launcher's `Repository.GetVer`
-/// (`Repository.cs:67-76`).
-///
-/// What install-mode relaxes is *absence*, not corruption: a file present with real content still runs
-/// [`check_sanity`], so an embedded line feed or an all-NUL body is a repairable
-/// [`ProtoError::InvalidVersionFiles`] instead of content spliced into the report body verbatim. A
-/// present but unreadable file is likewise repairable. Only content that passes the gate is used as-is.
 fn read_ver_or_sentinel(path: &Path, repo: VersionRepo) -> Result<String, ProtoError> {
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -309,7 +444,6 @@ fn read_ver_or_sentinel(path: &Path, repo: VersionRepo) -> Result<String, ProtoE
     }
 }
 
-/// Sanity-check a `.bck` backup only when it is present; an absent backup is the normal healthy state.
 fn check_bck(path: &Path, repo: VersionRepo) -> Result<(), ProtoError> {
     match std::fs::read(path) {
         Ok(bytes) => check_sanity(&decode_ver(&bytes))
@@ -322,10 +456,6 @@ fn check_bck(path: &Path, repo: VersionRepo) -> Result<(), ProtoError> {
     }
 }
 
-/// SHA1-hash the four boot EXEs into `(byte length, lowercase-hex digest)` pairs in `BOOT_EXES`
-/// order. A missing or unreadable EXE is a repairable boot-repository fault, matching the `.ver`
-/// treatment (the reference launcher instead throws on a missing EXE). EXE contents are hashed as-is,
-/// never sanity-checked.
 fn hash_boot_exes(paths: &InstallPaths) -> Result<[(u64, String); 4], ProtoError> {
     let boot = paths.boot_dir();
     let mut hashes: [(u64, String); 4] = std::array::from_fn(|_| (0, String::new()));
@@ -337,8 +467,6 @@ fn hash_boot_exes(paths: &InstallPaths) -> Result<[(u64, String); 4], ProtoError
     Ok(hashes)
 }
 
-/// Read a required file, mapping absence and I/O failure to a typed repairable fault (no path or
-/// `io::Error` is carried, keeping the error taxonomy leak-free).
 fn read_file(path: &Path, repo: VersionRepo) -> Result<Vec<u8>, ProtoError> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(bytes),
@@ -353,27 +481,32 @@ fn read_file(path: &Path, repo: VersionRepo) -> Result<Vec<u8>, ProtoError> {
     }
 }
 
-/// Decode a `.ver` file's bytes to its canonical version string: lossy UTF-8, with one leading UTF-8
-/// BOM stripped (the reference launcher's `File.ReadAllText` consumes it). This is the one decode every
-/// `.ver` reader must share, so a version compared against the registration report or the signed index
-/// catalog matches byte-for-byte regardless of a BOM or stray non-UTF-8 byte.
+/// Decode a `.ver` file's bytes to its canonical version string: lossy UTF-8, with one leading
+/// UTF-8 BOM stripped (the reference launcher's `File.ReadAllText` consumes it).
+///
+/// This is the one decode every `.ver` reader must share, so a version compared against the
+/// registration report or a signed catalog matches byte-for-byte regardless of a BOM or a stray
+/// non-UTF-8 byte. A caller that decodes a `.ver` its own way can silently diverge from this one
+/// and miss a catalog match on a BOM-prefixed file.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::decode_ver;
+///
+/// assert_eq!(
+///     decode_ver(b"\xef\xbb\xbf2024.01.01.0000.0000"),
+///     "2024.01.01.0000.0000"
+/// );
+/// assert_eq!(decode_ver(b"2024.01.01.0000.0000"), "2024.01.01.0000.0000");
+/// ```
 #[must_use]
 pub fn decode_ver(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned()
 }
 
-/// The version-file content gate, over the decoded text: not empty/whitespace, no embedded line feed
-/// (`\n` only, not `\r`), not all-NUL, no embedded NUL, and no embedded tab.
-///
-/// The first three checks mirror the reference launcher's `IsBadVersionSanity`
-/// (`Launcher.cs:332-347`) exactly. The last two do not exist there: `IsBadVersionSanity` only
-/// rejects a body that is *entirely* NUL bytes, so a single embedded NUL still passes its gate and
-/// XL's own `IsBadVersionSanity` splices it verbatim into the report; it likewise never checks for a
-/// tab at all. Both gaps are real injection classes here, the same family the newline check already
-/// exists to close one delimiter up (a version string reaches the report body as a whole line, and as
-/// a tab-separated field within an expansion line), so this crate closes them too even though the
-/// oracle does not: a deliberate hardening beyond parity, not a port-bug fix.
+// See SanityKind's doc for the reference-launcher divergence this gate deliberately introduces.
 fn check_sanity(text: &str) -> Result<(), SanityKind> {
     if !text.is_empty() && text.bytes().all(|b| b == 0) {
         return Err(SanityKind::AllNul);
@@ -393,7 +526,6 @@ fn check_sanity(text: &str) -> Result<(), SanityKind> {
     Ok(())
 }
 
-/// Render bytes as lowercase, space-free hex.
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -407,7 +539,6 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Four placeholder `(length, sha1)` pairs: length = index, digest = the index as 40 hex chars.
     fn placeholder_hashes() -> [(u64, String); 4] {
         std::array::from_fn(|i| (i as u64, format!("{i:040x}")))
     }

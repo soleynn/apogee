@@ -1,6 +1,3 @@
-//! Unit tests for the OAuth page scanners. Inputs are synthetic (no SE bytes); the flow itself is
-//! exercised end-to-end through the fixture transport in `tests/oauth.rs`.
-
 use proptest::prelude::*;
 
 use super::scan::{
@@ -102,7 +99,6 @@ fn scrape_stored_scrubs_a_secret_reflected_with_no_labelling_prefix() {
     assert!(excerpt.contains("[redacted]"), "{excerpt}");
 }
 
-/// The visible login form's own username input, present on every top page including a Steam one.
 const VISIBLE_INPUT: &str =
     r#"<input class="item-input" name="sqexid" id="sqexid" type="text" value="" tabindex="1">"#;
 

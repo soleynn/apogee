@@ -1,11 +1,3 @@
-//! Session-registration integration tests, driven through the fixture transport.
-//!
-//! Each disposition test drives a full login (so it can obtain an [`Authenticated`], whose fields are
-//! private and only produced by the flow) and then registers, scripting the registration response. The
-//! POST is asserted byte-for-byte (the drift alarm). The version-report bytes are golden-matched
-//! against the reference launcher for a synthetic install, and the sanity gate is proven to reject a
-//! corrupt install before any registration request.
-
 use apogee_test_support::golden::assert_golden_bytes;
 use apogee_test_support::rt::block_on;
 use apogee_test_support::sandbox::build_game_install;
@@ -56,23 +48,16 @@ fn success_body(session_id: &str) -> String {
     )
 }
 
-/// The four boot EXE contents used by the goldens. `ffxivupdater64.exe` is empty to pin that EXEs are
-/// hashed, not sanity-checked (`sha1("") = da39a3ee…`).
 fn exes() -> [&'static [u8]; 4] {
     [b"boot" as &[u8], b"boot64", b"launcher64", b""]
 }
 
-/// Remove the game tree (its `.ver` and the whole `sqpack` subtree) from an install, leaving the boot
-/// component present. This is the state install-from-nothing reaches once the boot component is brought
-/// up but before the game is. `?`-based (no unwrap) so it satisfies the integration-test helper lint.
 fn strip_game_tree(root: &std::path::Path) -> std::io::Result<()> {
     std::fs::remove_file(root.join("game/ffxivgame.ver"))?;
     std::fs::remove_dir_all(root.join("game/sqpack"))?;
     Ok(())
 }
 
-/// A version report built purely (no filesystem), used for the request golden and the disposition
-/// tests. `game_version` becomes the URL segment; the body is asserted against the drift golden.
 fn request_report() -> VersionReport {
     VersionReport::from_parts(
         GAME_VER.to_owned(),
@@ -82,7 +67,6 @@ fn request_report() -> VersionReport {
     )
 }
 
-/// A registration response with `status`, carrying the UID header and `body`.
 fn uid_response_status(status: u16, body: Vec<u8>) -> ProtoResponse {
     ProtoResponse::new(status, body).with_header(
         HeaderName::from_static("x-patch-unique-id"),
@@ -90,12 +74,10 @@ fn uid_response_status(status: u16, body: Vec<u8>) -> ProtoResponse {
     )
 }
 
-/// A `200` registration response carrying the UID header and `body`.
 fn uid_response(body: Vec<u8>) -> ProtoResponse {
     uid_response_status(200, body)
 }
 
-/// Wrap synthetic nine-field game entries in the multipart envelope the parser expects.
 fn game_patchlist(entries: &[&str]) -> Vec<u8> {
     let boundary = "--SYNTHETIC_BOUNDARY_APOGEE";
     let mut body = String::new();
@@ -118,7 +100,6 @@ fn game_patchlist(entries: &[&str]) -> Vec<u8> {
     body.into_bytes()
 }
 
-/// A nine-field game patchlist entry with two per-block SHA1s.
 fn game_entry() -> String {
     let h1 = "a".repeat(40);
     let h2 = "b".repeat(40);
@@ -128,9 +109,6 @@ fn game_entry() -> String {
     )
 }
 
-/// Drive the OAuth flow (top page + submit) to an [`Authenticated`], through a transport already
-/// scripted with the top and login responses. Uses `?` (no unwrap) so it satisfies the integration-test
-/// helper lint; a scripting mistake surfaces as the returned error, not a panic.
 async fn login(transport: &FixtureTransport, id: &ComputerId) -> Result<Authenticated, ProtoError> {
     let flow = begin_login(
         transport,
@@ -147,8 +125,6 @@ async fn login(transport: &FixtureTransport, id: &ComputerId) -> Result<Authenti
     .await
 }
 
-/// Drive login then registration through one transport scripted with `[top, login, register]`,
-/// returning the transport (for request inspection) and the registration outcome.
 fn login_then_register(
     register: ProtoResponse,
 ) -> (FixtureTransport, Result<Registration, ProtoError>) {
@@ -217,8 +193,6 @@ fn a_204_no_content_is_registered_with_no_patches() {
     }
 }
 
-/// The response mirrors the sanitized capture in `fixtures/register_current.txt`: 204 No Content with
-/// the real observed header set (unique id redacted) and an empty body.
 fn real_current_capture() -> ProtoResponse {
     ProtoResponse::new(204, Vec::new())
         .with_header(
@@ -320,10 +294,6 @@ fn a_whitespace_body_with_uid_is_not_treated_as_current() {
     assert!(matches!(err, ProtoError::PatchListParse { .. }));
 }
 
-/// U+FEFF is not whitespace to `char::is_whitespace`, so a BOM-stamped empty body has to be stripped
-/// rather than trimmed, the same fix `check_boot_version` already applies (`bootver.rs`). Left
-/// unstripped it falls through to the parser and reports "patchlist too short" instead of registering
-/// with no pending patches.
 #[test]
 fn a_bom_only_body_with_uid_is_registered_with_no_patches() {
     let (_transport, outcome) = login_then_register(uid_response(b"\xef\xbb\xbf".to_vec()));
@@ -390,18 +360,10 @@ fn a_reflected_registration_url_does_not_leak_the_session_id() {
     assert!(rendered.contains("status: 404"), "{rendered}");
 }
 
-/// A secret-shaped string of exactly `len` characters, cycling the alphabet so an arbitrary fragment of
-/// it is still recognizably a piece of *this* string. Mirrors `error.rs`'s private `secret_of_len` and
-/// `tests/oauth.rs`'s copy of the same helper, duplicated here because this is a separate
-/// integration-test binary and this test must drive the real public API (`register_session`), not call
-/// the redactor directly.
 fn secret_of_len(len: usize) -> String {
     (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
 }
 
-/// The shortest fragment of a secret this treats as a meaningful leak. See `error.rs`'s
-/// `LEAK_FRAGMENT_LEN`: `!text.contains(secret)` alone misses a partial leak, where the excerpt holds
-/// neither the whole secret nor nothing of it but a long exact fragment.
 const LEAK_FRAGMENT_LEN: usize = 16;
 
 fn assert_no_partial_leak(text: &str, secret: &str) {

@@ -1,9 +1,9 @@
-//! The network seam.
+//! The network seam: this crate never opens a socket itself.
 //!
-//! This crate never opens a socket: every request is handed to an injected [`Transport`], whose
-//! production implementation (reqwest, with dual-stack dialing) is assembled in the composition root.
-//! Tests supply a fixture transport. The crate names neither `reqwest` nor `tokio`; the only async
-//! surface is the `async fn` on this trait.
+//! Every request this crate builds is handed to an injected [`Transport`], whose production
+//! implementation (reqwest, with dual-stack dialing) is assembled in the composition root; tests
+//! supply a fixture. Naming neither `reqwest` nor `tokio` keeps the crate transport-free, so
+//! [`Transport::execute`] is the only `async fn` anywhere in it.
 
 use std::fmt;
 
@@ -11,29 +11,57 @@ use http::{HeaderName, HeaderValue, Method};
 use url::Url;
 use zeroize::Zeroizing;
 
-/// A single HTTP request, fully specified.
+/// A request built by this crate, ready to hand to a [`Transport`].
 ///
-/// The header list is ordered and complete: a transport emits exactly these headers, in this order,
-/// and injects nothing of its own (no default `Accept`, no tracing header). The one exception is
-/// [`NEGOTIATED_HEADERS`], which a client answers for itself. SE plausibly fingerprints the header
-/// set, so fidelity is a contract; [`check_header_fidelity`] is how an adapter proves it at the
-/// boundary. The [`RequestBody`] keeps a credential-bearing body zeroizing and out of `Debug`, so
-/// `ProtoRequest` can derive `Debug` without leaking it.
+/// `headers` is ordered and complete: a transport is expected to emit exactly these headers, in
+/// this order, and inject nothing of its own (no default `Accept`, no tracing header) beyond what
+/// [`NEGOTIATED_HEADERS`] exempts. SE plausibly fingerprints the header set, so this fidelity is a
+/// contract, not a nicety; [`check_header_fidelity`] is how an adapter proves it at the boundary.
+///
+/// # Examples
+///
+/// ```
+/// use http::{HeaderName, HeaderValue, Method};
+/// use sqex_proto::{ProtoRequest, RequestBody};
+/// use url::Url;
+///
+/// let url = Url::parse("https://example.invalid/").unwrap();
+/// let req = ProtoRequest::new(Method::GET, url)
+///     .header(
+///         HeaderName::from_static("user-agent"),
+///         HeaderValue::from_static("FFXIV PATCH CLIENT"),
+///     )
+///     .body(RequestBody::new(b"payload".to_vec()));
+/// assert_eq!(req.headers.len(), 1);
+/// assert_eq!(req.body.unwrap().as_bytes(), b"payload");
+/// ```
 #[derive(Debug, Clone)]
 pub struct ProtoRequest {
     /// The HTTP method.
     pub method: Method,
-    /// The full request URL, including its query.
+    /// The request URL.
     pub url: Url,
-    /// The exact headers to send, in this order. See the type docs: a transport must emit these and
-    /// nothing more, [`NEGOTIATED_HEADERS`] excepted.
+    /// The headers to send, in the exact order they should go on the wire.
     pub headers: Vec<(HeaderName, HeaderValue)>,
-    /// The request body, for methods that carry one.
+    /// The request body, if any.
     pub body: Option<RequestBody>,
 }
 
 impl ProtoRequest {
-    /// A request with no headers and no body.
+    /// Start a request with no headers and no body.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use http::Method;
+    /// use sqex_proto::ProtoRequest;
+    /// use url::Url;
+    ///
+    /// let url = Url::parse("https://example.invalid/").unwrap();
+    /// let req = ProtoRequest::new(Method::GET, url);
+    /// assert!(req.headers.is_empty());
+    /// assert!(req.body.is_none());
+    /// ```
     #[must_use]
     pub fn new(method: Method, url: Url) -> Self {
         Self {
@@ -44,14 +72,41 @@ impl ProtoRequest {
         }
     }
 
-    /// Append a header, preserving order.
+    /// Append a header, builder-style. Headers keep the order they are added in.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use http::{HeaderName, HeaderValue, Method};
+    /// use sqex_proto::ProtoRequest;
+    /// use url::Url;
+    ///
+    /// let url = Url::parse("https://example.invalid/").unwrap();
+    /// let req = ProtoRequest::new(Method::GET, url).header(
+    ///     HeaderName::from_static("accept"),
+    ///     HeaderValue::from_static("*/*"),
+    /// );
+    /// assert_eq!(req.headers[0].0.as_str(), "accept");
+    /// ```
     #[must_use]
     pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.push((name, value));
         self
     }
 
-    /// Attach a request body.
+    /// Attach a body, builder-style.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use http::Method;
+    /// use sqex_proto::{ProtoRequest, RequestBody};
+    /// use url::Url;
+    ///
+    /// let url = Url::parse("https://example.invalid/").unwrap();
+    /// let req = ProtoRequest::new(Method::GET, url).body(RequestBody::new(b"payload".to_vec()));
+    /// assert_eq!(req.body.unwrap().as_bytes(), b"payload");
+    /// ```
     #[must_use]
     pub fn body(mut self, body: RequestBody) -> Self {
         self.body = Some(body);
@@ -59,23 +114,50 @@ impl ProtoRequest {
     }
 }
 
-/// The bytes of a request body.
+/// A request body, held zeroizing because a login submission carries percent-encoded credentials.
 ///
-/// Held zeroizing because a login submit carries percent-encoded credentials, so the crate's copy
-/// scrubs on drop instead of lingering in freed heap; and rendered in `Debug` as only its length, so a
-/// logged request cannot leak it. This is defense in depth for the crate's own copy: a transport
-/// (reqwest, TLS, and kernel buffers) makes further copies this type cannot reach.
+/// Zeroizing this crate's own copy on drop is defense in depth for that copy only: a transport
+/// (reqwest, TLS, kernel buffers) makes further copies this type cannot reach. `Debug` prints only
+/// the byte length, never the content.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::RequestBody;
+///
+/// let body = RequestBody::new(b"payload".to_vec());
+/// assert_eq!(body.as_bytes(), b"payload");
+/// assert_eq!(format!("{body:?}"), "[7 bytes]");
+/// ```
 #[derive(Clone)]
 pub struct RequestBody(Zeroizing<Vec<u8>>);
 
 impl RequestBody {
-    /// Wrap `bytes` as a request body; they are held zeroizing from here on.
+    /// Wrap `bytes` as a request body.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::RequestBody;
+    ///
+    /// let body = RequestBody::new(b"payload".to_vec());
+    /// assert_eq!(body.as_bytes(), b"payload");
+    /// ```
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(Zeroizing::new(bytes))
     }
 
-    /// The body bytes, for a transport to write.
+    /// The body's raw bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::RequestBody;
+    ///
+    /// let body = RequestBody::new(vec![1, 2, 3]);
+    /// assert_eq!(body.as_bytes(), &[1, 2, 3]);
+    /// ```
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -88,23 +170,41 @@ impl fmt::Debug for RequestBody {
     }
 }
 
-/// A response: the status, the raw body, and any headers a surface needs to read. Most surfaces read
-/// only the status and body; the OAuth top page reads the `Date` header (for TOTP skew correction) and
-/// session registration reads `X-Patch-Unique-Id`, so a header a transport chooses to surface rides
-/// along here. A transport carries only the headers a surface asks for, not the whole response set.
+/// A response a [`Transport`] reads back off the wire.
+///
+/// A `Transport` implementation constructs this directly from what it read; this crate never
+/// constructs one except in its own tests and doctests.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::ProtoResponse;
+///
+/// let response = ProtoResponse::new(200, b"ok".to_vec());
+/// assert!(response.is_ok());
+/// assert_eq!(response.body, b"ok");
+/// ```
 #[derive(Debug, Clone)]
 pub struct ProtoResponse {
     /// The HTTP status code.
     pub status: u16,
     /// The raw response body.
     pub body: Vec<u8>,
-    /// The headers a transport chose to surface (not necessarily the full response set); read with
-    /// [`Self::header`].
+    /// The response headers, in whatever order the transport read them.
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl ProtoResponse {
-    /// Build a response from its status and body, carrying no headers.
+    /// Construct a response with no headers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::ProtoResponse;
+    ///
+    /// let response = ProtoResponse::new(200, b"ok".to_vec());
+    /// assert!(response.headers.is_empty());
+    /// ```
     #[must_use]
     pub fn new(status: u16, body: Vec<u8>) -> Self {
         Self {
@@ -114,39 +214,83 @@ impl ProtoResponse {
         }
     }
 
-    /// Attach a response header, preserving insertion order.
+    /// Append a header, builder-style.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use http::{HeaderName, HeaderValue};
+    /// use sqex_proto::ProtoResponse;
+    ///
+    /// let response = ProtoResponse::new(200, Vec::new())
+    ///     .with_header(HeaderName::from_static("date"), HeaderValue::from_static("today"));
+    /// assert_eq!(
+    ///     response.header(&HeaderName::from_static("date")),
+    ///     Some(&HeaderValue::from_static("today"))
+    /// );
+    /// ```
     #[must_use]
     pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.push((name, value));
         self
     }
 
-    /// The first value carried for `name`, if any.
+    /// The value of the first header matching `name`, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use http::HeaderName;
+    /// use sqex_proto::ProtoResponse;
+    ///
+    /// let response = ProtoResponse::new(200, Vec::new());
+    /// assert_eq!(response.header(&HeaderName::from_static("date")), None);
+    /// ```
     #[must_use]
     pub fn header(&self, name: &HeaderName) -> Option<&HeaderValue> {
         self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
-    /// Whether SE answered with exactly `200 OK`. The protocol treats any other status as invalid, so
-    /// this is a strict equality, not a 2xx-range check.
+    /// Whether the status is exactly `200`.
+    ///
+    /// Every surface in this crate that treats a non-`200` status as an ordinary disposition (a
+    /// `204` current-boot answer, a `409`/`410` registration outcome) checks `status` directly
+    /// rather than through this method; `is_ok` is the plain "did this succeed" reading used
+    /// everywhere else.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::ProtoResponse;
+    ///
+    /// assert!(ProtoResponse::new(200, Vec::new()).is_ok());
+    /// assert!(!ProtoResponse::new(204, Vec::new()).is_ok());
+    /// ```
     #[must_use]
     pub fn is_ok(&self) -> bool {
         self.status == 200
     }
 }
 
-/// A transport-layer failure: DNS, connect, TLS, timeout, or a truncated read.
+/// A [`Transport`] implementation could not complete a request.
 ///
-/// The message is the one free-form string an implementor outside this crate writes into the protocol's
-/// error taxonomy, and it travels out of the CLI on stderr. So the type carries the obligation rather
-/// than stating it: the field is private and every construction runs [`TransportError::new`], which
-/// strips the path, query, and fragment from any URL in the text. That is the leak this seam has
-/// actually had. A client library renders a failed send as `error sending request for url (<the whole
-/// url>)`, and one step of the login flow puts the OAuth session id in the URL path, so an implementor
-/// that passes the rendering through hands a live credential to whatever prints the error.
+/// The message is the one free-form string an implementor outside this crate writes into the
+/// protocol's error taxonomy, and it can travel as far as a CLI's stderr. So the type carries the
+/// redaction obligation itself rather than merely stating it: the field is private, and every
+/// construction runs through [`TransportError::new`], which strips the path, query, and fragment
+/// from any URL found in the text. That is the leak this seam has actually had: a client library's
+/// own error rendering can produce `error sending request for url (<the whole url>)`, and a
+/// login-flow request's URL carries the OAuth session id in its path, so an implementor that passed
+/// that rendering straight through would hand a live credential to whatever prints the error.
 ///
-/// `Debug` is derived because the field is unreachable except through that constructor: there is
-/// nothing left for a hand-written one to hide.
+/// # Examples
+///
+/// ```
+/// use sqex_proto::TransportError;
+///
+/// let err = TransportError::new("error sending request for url (https://a.invalid/x?secret=1)");
+/// assert_eq!(err.message(), "error sending request for url (https://a.invalid/…)");
+/// ```
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("transport failure: {message}")]
 pub struct TransportError {
@@ -154,7 +298,16 @@ pub struct TransportError {
 }
 
 impl TransportError {
-    /// Build a transport error, dropping the path, query, and fragment of any URL in `message`.
+    /// Build a `TransportError`, redacting any URL's path, query, and fragment out of `message`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::TransportError;
+    ///
+    /// let err = TransportError::new("connection refused");
+    /// assert_eq!(err.message(), "connection refused");
+    /// ```
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -162,20 +315,22 @@ impl TransportError {
         }
     }
 
-    /// The redacted failure text.
+    /// The redacted message text.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::TransportError;
+    ///
+    /// let err = TransportError::new("timed out");
+    /// assert_eq!(err.message(), "timed out");
+    /// ```
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 }
 
-/// Rewrite every `scheme://host/path?query#fragment` in `text` down to `scheme://host/…`.
-///
-/// The host is kept because which endpoint was unreachable is the whole diagnostic; the path is
-/// dropped because it is fixed by the protocol and is where the credentials ride. The scan walks
-/// occurrences of `://` rather than parsing, since the text around a URL is arbitrary prose: the
-/// authority ends at the first path/query/fragment mark or at whatever delimiter the surrounding
-/// sentence used, and only a path/query/fragment is dropped, never the prose that follows a bare host.
 fn redact_url_paths(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -201,63 +356,111 @@ fn redact_url_paths(text: &str) -> String {
     out
 }
 
-/// Build a header value from a caller-supplied string, failing rather than panicking on stray control
-/// bytes (the launcher's own values are always valid, so this is a guard, not a live path). Shared by
-/// every surface that sets a header from a dynamic string.
 pub(crate) fn dynamic_header(value: &str) -> Result<HeaderValue, TransportError> {
     HeaderValue::from_str(value).map_err(|_| TransportError::new("invalid header value"))
 }
 
-/// Parse a compile-time-constant base URL, mapping the (unreachable for our constants) parse failure
-/// to a typed transport error so request building stays panic-free.
 pub(crate) fn parse_base(url: &str, invalid_msg: &'static str) -> Result<Url, TransportError> {
     Url::parse(url).map_err(|_| TransportError::new(invalid_msg))
 }
 
-/// The only way this crate touches the network.
+/// The seam this crate sends every request through. Implement this over an HTTP client to give the
+/// crate a way onto the wire.
 ///
-/// Implementations own pooling, dual-stack dialing, timeouts, and TLS. The crate never retries: the
-/// caller owns retry policy because it owns the UX of a failed request.
+/// # Examples
+///
+/// ```
+/// use sqex_proto::{ProtoRequest, ProtoResponse, Transport, TransportError};
+///
+/// struct Fixture;
+///
+/// #[async_trait::async_trait]
+/// impl Transport for Fixture {
+///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+///         Ok(ProtoResponse::new(200, b"ok".to_vec()))
+///     }
+/// }
+/// ```
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
-    /// Send `req` and return the response, or a [`TransportError`] if the request could not complete.
-    /// Never retried by this crate: a caller that wants retries applies its own policy around the call.
+    /// Send `req` and return the response, or a [`TransportError`] if the request could not be
+    /// completed.
+    ///
+    /// Never retried by this crate: a caller that wants retries applies its own policy around the
+    /// call. An implementation should send `req.headers` unmodified and in order (see
+    /// [`check_header_fidelity`]) and must not treat a non-`200` status as a reason to return an
+    /// error itself; every surface in this crate that needs to distinguish response statuses reads
+    /// [`ProtoResponse::status`](ProtoResponse) itself.
     async fn execute(&self, req: ProtoRequest) -> Result<ProtoResponse, TransportError>;
 }
 
-/// The headers a client answers for itself, exempt from the fidelity contract on both sides.
+/// Headers a client answers for itself, exempt from [`check_header_fidelity`]'s comparison on both
+/// sides.
 ///
-/// `accept-encoding` is the only one. A transport that forwards a declared value switches off its
-/// client's own automatic decompression (that is how every mainstream client decides whether the
-/// caller took over negotiation), which leaves the parser a compressed body. So the declared value
-/// records what the reference launcher negotiates and the client substitutes its own, which is a known
-/// fingerprint divergence rather than a silent one: see the wire-level test in the core's adapter,
-/// which pins what the production client actually appends.
+/// `accept-encoding` is the only one. A transport that forwards a declared value verbatim switches
+/// off its client's own automatic decompression (that is how mainstream HTTP clients decide
+/// whether the caller took over negotiation), which would leave this crate's parsers a compressed
+/// body instead of the decoded one they expect. So the header this crate declares records what the
+/// reference launcher negotiates, and a transport substitutes its own value: a known fingerprint
+/// divergence rather than a silent one (a wire-level test in the composition root's adapter pins
+/// what the production client actually appends).
 ///
-/// Nothing else belongs here. A client's own late framing additions (`host`, `content-length`) are
-/// added below the layer an adapter reads back from when a surface leaves them undeclared, so an
-/// undeclared one never reaches the comparison; if a client ever starts adding one earlier, the check
-/// firing is the intended outcome. One surface is a deliberate exception: `bootver.rs` declares `host`
-/// explicitly, matching the reference launcher's own explicit `Host` header on that endpoint, so there
-/// it is an ordinary declared header in the comparison rather than an implicit framing one.
+/// A client's own late framing additions (`Host`, `Content-Length`) are added below the layer an
+/// adapter reads back from when a surface leaves them undeclared, so an undeclared one never
+/// reaches this comparison at all. One surface is a deliberate exception:
+/// [`check_boot_version`](crate::check_boot_version) declares `Host` explicitly, matching the
+/// reference launcher's own explicit `Host` header on that endpoint, so there it is an ordinary
+/// declared header in the comparison rather than an implicit framing one.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::NEGOTIATED_HEADERS;
+///
+/// assert_eq!(NEGOTIATED_HEADERS[0], http::header::ACCEPT_ENCODING);
+/// ```
 pub const NEGOTIATED_HEADERS: [HeaderName; 1] = [http::header::ACCEPT_ENCODING];
 
-/// Check that `emitted` is exactly the request's declared headers, in the same order, ignoring
-/// [`NEGOTIATED_HEADERS`] on both sides.
+/// Compare the headers a [`ProtoRequest`] declared against what a transport adapter actually
+/// emitted, to catch a translation that reordered them, dropped one, added one, or rewrote a value.
 ///
-/// A transport adapter calls this after translating a [`ProtoRequest`] into its client's
-/// representation and reading the headers back, to catch a translation that reordered them, dropped
-/// one, or let the client's own representation regroup them. It returns an error rather than
-/// asserting, so the guard runs in every build profile: a request whose header set is not the one this
-/// crate specified is a request that must not be sent, not a debug-only warning.
+/// A transport adapter calls this after translating `req` into its client's own request
+/// representation and reading the headers back out of it, so the guard runs in every build profile
+/// rather than only under `debug_assert!`. Headers named in [`NEGOTIATED_HEADERS`] are ignored on
+/// both sides. This does not catch whatever a client merges into a request *after* it is assembled
+/// (a default `Accept`, content negotiation): that is below any API an adapter can read back from,
+/// so an adapter owes a separate wire-level test for it (the composition root's adapter has one).
 ///
-/// What it does not reach is whatever a client merges *after* a request is assembled, which is where
-/// clients typically apply configured defaults and content negotiation and is below any API an adapter
-/// can read. That half is checkable only from a socket, so an adapter owes a test that reads its own
-/// request head off one; the core's adapter has it.
+/// # Errors
 ///
-/// The message names headers and never their values: a referer carries a URL and a cookie carries
-/// whatever SE set, and neither is worth putting in an error to diagnose an ordering bug.
+/// Returns a [`TransportError`] naming the declared and emitted header sets if they differ in
+/// length, order, or header name, or naming the one header whose value changed if only a value
+/// diverged. Returns `Ok(())` when the two header lists agree exactly, modulo
+/// [`NEGOTIATED_HEADERS`].
+///
+/// # Examples
+///
+/// ```
+/// use http::{HeaderName, HeaderValue, Method};
+/// use sqex_proto::{ProtoRequest, check_header_fidelity};
+/// use url::Url;
+///
+/// let url = Url::parse("https://example.invalid/").unwrap();
+/// let req = ProtoRequest::new(Method::GET, url)
+///     .header(
+///         HeaderName::from_static("user-agent"),
+///         HeaderValue::from_static("FFXIV PATCH CLIENT"),
+///     )
+///     .header(
+///         HeaderName::from_static("accept"),
+///         HeaderValue::from_static("*/*"),
+///     );
+///
+/// assert!(check_header_fidelity(&req, &req.headers).is_ok());
+///
+/// let reordered: Vec<_> = req.headers.iter().rev().cloned().collect();
+/// assert!(check_header_fidelity(&req, &reordered).is_err());
+/// ```
 pub fn check_header_fidelity(
     req: &ProtoRequest,
     emitted: &[(HeaderName, HeaderValue)],
@@ -327,7 +530,6 @@ mod tests {
         assert_eq!(req.headers[1].0.as_str(), "user-agent");
     }
 
-    /// A request declaring `user-agent`, `accept-encoding`, `accept`, in that order.
     fn declaring_three() -> ProtoRequest {
         let url = Url::parse("http://example.invalid/").unwrap();
         ProtoRequest::new(Method::GET, url)
@@ -383,8 +585,6 @@ mod tests {
         assert!(err.message().contains("altered the header set"), "{err}");
     }
 
-    /// A changed value is reported by name only: the values themselves are a referer's URL and a
-    /// cookie, and neither belongs in an error about ordering.
     #[test]
     fn fidelity_fires_on_a_rewritten_value_without_quoting_it() {
         let req = declaring_three();
@@ -398,9 +598,6 @@ mod tests {
         assert!(!err.message().contains("FFXIV PATCH CLIENT"), "{err}");
     }
 
-    /// The narrowing the one production adapter needs: it forwards no `accept-encoding` at all, and
-    /// the client appends its own value later. Both shapes have to pass, or the guard could not be
-    /// wired into the adapter it was written for.
     #[test]
     fn a_negotiated_header_is_exempt_in_either_direction() {
         let req = declaring_three();
@@ -420,8 +617,6 @@ mod tests {
         assert!(check_header_fidelity(&req, &substituted).is_ok());
     }
 
-    /// The exemption is for `accept-encoding` and nothing else: a client that drops any other declared
-    /// header is still altering the fingerprint.
     #[test]
     fn the_exemption_does_not_extend_to_other_headers() {
         let req = declaring_three();
@@ -434,8 +629,6 @@ mod tests {
         assert!(check_header_fidelity(&req, &dropped).is_err());
     }
 
-    /// The leak this seam actually had: a client renders a failed send as the whole URL, and the
-    /// registration POST carries the OAuth session id as its last path segment.
     #[test]
     fn a_url_in_an_error_keeps_its_host_and_loses_its_path() {
         let err = TransportError::new(
@@ -462,8 +655,6 @@ mod tests {
         );
     }
 
-    /// A query and a fragment carry credentials just as readily as a path: the Steam login puts the
-    /// session ticket in the top page's query string.
     #[test]
     fn redaction_covers_the_query_and_fragment_and_every_url_in_the_text() {
         assert_eq!(
