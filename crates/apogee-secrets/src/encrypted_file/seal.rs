@@ -3,8 +3,8 @@
 //! One key seals both. The **check** envelope has no plaintext at all and exists only so that a key
 //! can be tested against a file: it opens when the passphrase and the work parameters are the ones
 //! the file was sealed under, and fails otherwise. The **body** envelope carries the record table and
-//! is bound to the whole header, so nothing in the file can be moved, swapped, or spliced without it
-//! failing.
+//! is bound to the header fields that decide the key plus its own nonce, so it cannot be spliced onto
+//! a header sealed under other parameters.
 //!
 //! What the split buys is the one distinction a front end cannot afford to get wrong: a mistyped
 //! passphrase and a damaged file look identical to a single tag, and offering "start over" for a typo
