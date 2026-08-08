@@ -95,11 +95,30 @@ mod tests {
     };
 
     #[test]
-    fn text_survives_the_round_trip_without_a_copy_step() {
+    fn text_survives_the_round_trip() {
         let secret = Secret::from_string("correct horse".to_owned());
         assert_eq!(secret.expose(), b"correct horse");
         assert_eq!(secret.len(), 13);
         assert!(!secret.is_empty());
+    }
+
+    /// The buffer the secret holds is the caller's own, not a copy of it. A copy satisfies every
+    /// assertion above while leaving the text where it was: what drops here is erased and what the
+    /// caller handed over is not, so the value goes on sitting in freed heap for the allocator to
+    /// hand out again. `String::into_bytes` gives back the same allocation, which is what makes the
+    /// difference observable rather than merely asserted in a comment.
+    #[test]
+    fn text_moves_into_the_secret_rather_than_being_copied() {
+        let text = "correct horse".to_owned();
+        let held = text.as_ptr();
+
+        let secret = Secret::from_string(text);
+
+        assert_eq!(
+            secret.expose().as_ptr(),
+            held,
+            "the text was copied into the secret and the original was left behind"
+        );
     }
 
     #[test]
