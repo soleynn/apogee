@@ -1,5 +1,7 @@
 //! The secret-backend error taxonomy.
 
+use std::fmt;
+
 use thiserror::Error;
 
 /// Secret-backend failures.
@@ -8,11 +10,18 @@ use thiserror::Error;
 /// succeed once the user unlocks, [`NoBackend`](Self::NoBackend) never will, and
 /// [`Denied`](Self::Denied) needs the sandbox or platform rules changed.
 ///
-/// No variant carries the underlying platform error. The credential-store error types interpolate
-/// entry attributes and, in one case, the raw secret bytes into their own `Debug`/`Display`, and
-/// this enum is wrapped by the launcher's top-level error, so any of it printed anywhere would be
-/// the leak the crate exists to prevent. The backend error is matched and dropped.
-#[derive(Debug, Error)]
+/// Nothing a variant carries is rendered. The credential-store error types interpolate entry
+/// attributes and, in one case, the raw secret bytes into their own `Debug`/`Display`, and this enum
+/// is wrapped by the launcher's top-level error, so any of it printed anywhere would be the leak the
+/// crate exists to prevent. Those errors are matched and dropped.
+///
+/// [`Io`](Self::Io) is the one variant that keeps a foreign error, because a caller answers a
+/// missing file differently from a full disk and only the [`ErrorKind`](std::io::ErrorKind) says
+/// which. It is fenced rather than dropped, on all three surfaces an error is read through:
+/// `Display` renders a fixed line, the hand-written `Debug` below prints the kind alone, and no
+/// variant offers a `source()`. Reaching the payload takes a match on the variant, which is a
+/// deliberate read rather than a log line.
+#[derive(Error)]
 #[non_exhaustive]
 pub enum SecretsError {
     /// The store answered, but the collection or item is locked and the unlock prompt was not
@@ -78,8 +87,43 @@ pub enum SecretsError {
         step: &'static str,
     },
     /// A local filesystem or process failure below the store.
+    ///
+    /// The conversion is written out below rather than derived: a `#[from]` field is also a
+    /// `#[source]` field, and a source edge hands the payload to every reporter that walks a chain.
     #[error("io error")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for SecretsError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+/// The variant and the fields this crate owns, never a payload from outside it.
+///
+/// Hand-written for [`SecretsError::Io`], whose derived form prints the inner error: for one built
+/// by [`std::io::Error::other`] that is whatever string was handed in, and for one from the standard
+/// library it is an errno and a C library message. The kind is what a caller triages on and it is a
+/// closed set, so it is the only part kept.
+///
+/// Exhaustive with no wildcard, so a variant added later has to say here what it shows.
+impl fmt::Debug for SecretsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Locked => f.write_str("Locked"),
+            Self::NoBackend => f.write_str("NoBackend"),
+            Self::Denied => f.write_str("Denied"),
+            Self::NoCollection => f.write_str("NoCollection"),
+            Self::Ambiguous => f.write_str("Ambiguous"),
+            Self::WrongPassphrase => f.write_str("WrongPassphrase"),
+            Self::Corrupt { detail } => f.debug_struct("Corrupt").field("detail", detail).finish(),
+            Self::NotStoring => f.write_str("NotStoring"),
+            Self::Empty => f.write_str("Empty"),
+            Self::Backend { step } => f.debug_struct("Backend").field("step", step).finish(),
+            Self::Io(err) => f.debug_tuple("Io").field(&err.kind()).finish(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -94,11 +138,13 @@ mod tests {
         assert_send_sync_static::<SecretsError>();
     };
 
-    /// Freeze the taxonomy: every variant as a pattern, a value built from it, and the line it
-    /// renders as. The match is exhaustive with no wildcard, so a new variant stops this compiling
-    /// until it gains an entry, and an entry is a pattern *and* a sample *and* an expected string.
-    #[test]
-    fn every_error_renders_as_recorded() {
+    /// Every variant as a pattern, a value built from it, and the line it renders as. The match is
+    /// exhaustive with no wildcard, so a new variant stops this compiling until it gains an entry,
+    /// and an entry is a pattern *and* a sample *and* an expected string.
+    ///
+    /// Shared by the two tests below so a new variant reaches both: the freeze checks what it says,
+    /// the leak guard checks what else it exposes.
+    fn every_variant() -> Vec<(SecretsError, &'static str)> {
         #[allow(dead_code)]
         fn every_variant_has_an_entry(value: &SecretsError) {
             match value {
@@ -116,7 +162,7 @@ mod tests {
             }
         }
 
-        let cases: Vec<(SecretsError, &str)> = vec![
+        vec![
             (SecretsError::Locked, "the secret store is locked"),
             (SecretsError::NoBackend, "no secret backend is available"),
             (SecretsError::Denied, "the secret backend denied access"),
@@ -145,17 +191,46 @@ mod tests {
                 "the secret backend failed to read",
             ),
             (SecretsError::Io(std::io::Error::other("disk")), "io error"),
-        ];
-        for (err, expected) in cases {
+        ]
+    }
+
+    /// Freeze what each variant says.
+    #[test]
+    fn every_error_renders_as_recorded() {
+        for (err, expected) in every_variant() {
             assert_eq!(err.to_string(), expected);
         }
     }
 
-    /// The rendered strings are the whole public surface of these errors, so none of them may echo
-    /// a value a caller passed in. A regression here is a leak, not a wording change.
+    /// An error is read through three surfaces, so a value hidden from one of them is not hidden. A
+    /// caller that writes `{err:?}` in a log line gets `Debug`, and anything that walks a chain, the
+    /// launcher's own reporting included, gets `source()`. Only [`SecretsError::Io`] holds an error
+    /// from outside this crate, so it is the one poisoned here.
+    ///
+    /// The `source()` half runs over every variant rather than that one: the edge a chain walker
+    /// follows is opened by an attribute, so the variant that opens it next is by definition not
+    /// this one. Deleting either the hand-written `Debug` or the hand-written `From` turns this red.
+    ///
+    /// A regression here is a leak, not a wording change.
     #[test]
-    fn no_error_renders_a_caller_supplied_value() {
-        let rendered = SecretsError::Io(std::io::Error::other("hunter2")).to_string();
-        assert!(!rendered.contains("hunter2"), "{rendered}");
+    fn no_error_exposes_a_caller_supplied_value() {
+        const PAYLOAD: &str = "hunter2";
+
+        let poisoned = SecretsError::Io(std::io::Error::other(PAYLOAD));
+        let display = poisoned.to_string();
+        let debug = format!("{poisoned:?}");
+        assert!(!display.contains(PAYLOAD), "Display: {display}");
+        assert!(!debug.contains(PAYLOAD), "Debug: {debug}");
+
+        for (err, _) in every_variant() {
+            assert!(
+                std::error::Error::source(&err).is_none(),
+                "{err:?} offers a source to walk"
+            );
+        }
+        assert!(
+            std::error::Error::source(&poisoned).is_none(),
+            "{debug} offers a source to walk"
+        );
     }
 }
