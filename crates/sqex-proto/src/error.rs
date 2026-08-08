@@ -35,7 +35,8 @@ pub enum Step {
     OauthLogin,
     /// The session-registration version report.
     Register,
-    /// The dormant [`gen_token`](crate::gen_token) patch-URL tokenization request.
+    /// The dormant `gen_token` (behind the `gen-token` feature) patch-URL tokenization request.
+    #[cfg(feature = "gen-token")]
     GenToken,
 }
 
