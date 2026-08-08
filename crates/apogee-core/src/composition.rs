@@ -156,6 +156,32 @@ fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf, CoreError> {
     Ok(resolved)
 }
 
+/// What a sweep of an account's stored secrets actually did.
+///
+/// Three answers rather than two, because a sweep that did not clear the store covers two conditions
+/// a caller has to word differently. One is a store that never answered, where residue is *possible*;
+/// the other is a store that answered and deleted nothing, where residue is *certain* and the user
+/// has to go and remove it with the platform's own tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SecretSweep {
+    /// Every secret stored for the account was deleted.
+    Swept,
+    /// No store answered, so nothing was deleted.
+    ///
+    /// Not proof that nothing is stored: a password saved on a desktop session is still in the
+    /// keyring when the same account is removed from a TTY with no bus. Whatever a store holds for
+    /// this account has outlived the record naming it.
+    Unanswered,
+    /// A store answered and deleted nothing, so what it holds is certainly still there.
+    ///
+    /// What another program's credential-store item produces when it carries this launcher's exact
+    /// attribute set: the store cannot tell the two apart, so it refuses to delete either. Nothing
+    /// here forces it, because the only call that would unlocks every matching item, which can raise
+    /// a prompt per item, and deletes the other program's item along with ours.
+    LeftBehind,
+}
+
 /// What deleting a profile took with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -163,12 +189,10 @@ pub struct ProfileRemoval {
     /// The account that went too, when the profile removed was the last one using it. `None` means
     /// another profile still signs in as that account, so it was left alone.
     pub account_removed: Option<Uuid>,
-    /// Whether the account's secrets were actually swept.
-    ///
-    /// `false` when no store answered at all. Nothing was deleted, and whatever that store holds
-    /// for this account has outlived the record naming it, so a caller has to say so rather than
-    /// report a clean removal.
-    pub secrets_swept: bool,
+    /// What became of that account's secrets. `None` when no sweep ran at all, which is exactly when
+    /// [`account_removed`](Self::account_removed) is `None`: the account stays, and so does what it
+    /// has stored.
+    pub secret_sweep: Option<SecretSweep>,
 }
 
 /// What importing another launcher's password did.
@@ -188,27 +212,35 @@ pub enum ImportOutcome {
     Unsupported,
 }
 
-/// Whether a store that failed this way may still be holding the secret.
+/// What a sweep that failed this way left behind, and `None` if the failure blocks the deletion.
 ///
-/// The question is not whether the call succeeded but whether anything could be left behind, because
-/// the answer decides whether an account may be deleted on top of it. Everything that reached a
-/// store and was refused counts as dangerous.
+/// The question is not whether the call succeeded but whether an account may be deleted on top of
+/// it, because the store is keyed by the account's id: a secret that outlives the record naming it
+/// is unreachable and permanent. So a failure a user can act on blocks, and nothing is removed,
+/// which is what makes the command retryable once they have unlocked the store or granted the
+/// permission.
 ///
-/// What is left is the conditions where no store answered at all. Those are *not* proof that nothing
-/// is stored: a password saved on a desktop session is still in the keyring when the same account is
-/// removed from a TTY with no bus. They are treated as non-blocking anyway, because the alternative
-/// is that a user with no keyring can never delete a profile, and the residue is reported instead of
-/// assumed away (see [`ProfileRemoval::secrets_swept`]).
+/// Neither of the two answers that do not block is a clean sweep, and neither is reported as one.
+/// [`SecretSweep::Unanswered`] is the conditions where no store answered at all: non-blocking because
+/// the alternative is that a user with no keyring can never delete a profile.
+/// [`SecretSweep::LeftBehind`] is a store that answered and could not act, which is worse and still
+/// must not block, because no retry ever resolves it: the deletion would be refused for as long as
+/// the other program's item exists, and the account could never be removed from inside the launcher
+/// at all. It is reported rather than assumed away, so the user is sent to the tool that can remove
+/// what is left.
 ///
-/// The enum belongs to another crate and is `#[non_exhaustive]`, so an unrecognized condition is
-/// assumed to be the dangerous kind. That default is what covers the sealed-file store's two
-/// conditions, and it is right for both: a passphrase that did not open the file and a file that will
-/// not open at all each leave every secret in it exactly where it was.
-fn could_hold_secrets(err: &SecretsError) -> bool {
-    !matches!(
-        err,
-        SecretsError::NoBackend | SecretsError::NoCollection | SecretsError::NotStoring
-    )
+/// The enum belongs to another crate and is `#[non_exhaustive]`, so an unrecognized condition blocks.
+/// That default is what covers the sealed-file store's two conditions, and it is right for both: a
+/// passphrase that did not open the file and a file that will not open at all each leave every secret
+/// in it exactly where it was, and each is answered by fixing the file and running the command again.
+fn sweep_outcome(err: &SecretsError) -> Option<SecretSweep> {
+    match err {
+        SecretsError::NoBackend | SecretsError::NoCollection | SecretsError::NotStoring => {
+            Some(SecretSweep::Unanswered)
+        }
+        SecretsError::Ambiguous => Some(SecretSweep::LeftBehind),
+        _ => None,
+    }
 }
 
 /// The launcher core: every subsystem, constructed once and injected.
@@ -541,23 +573,23 @@ impl Core {
             self.delete_profile(id)?;
             return Ok(ProfileRemoval {
                 account_removed: None,
-                secrets_swept: false,
+                secret_sweep: None,
             });
         }
 
-        let secrets_swept = self.forget_secrets(account)?;
+        let secret_sweep = Some(self.forget_secrets(account)?);
         self.delete_profile(id)?;
         self.store.clear_uid_cache(account)?;
         self.delete_account(account)?;
         Ok(ProfileRemoval {
             account_removed: Some(account),
-            secrets_swept,
+            secret_sweep,
         })
     }
 
     /// Delete the account with `id`, every secret stored for it, and its cached session.
     ///
-    /// Answers whether the secrets were actually swept; see [`Core::forget_secrets`].
+    /// Answers what became of the secrets; see [`Core::forget_secrets`].
     ///
     /// The order is the point. Secrets go first, because they are the only part that cannot be found
     /// again once the record naming them is gone: the store is keyed by the account's id, so an
@@ -569,11 +601,11 @@ impl Core {
     /// Returns [`CoreError::Secrets`] if a sweep failed in a way that could have left a secret,
     /// [`CoreError::NoAccount`] if there is no such account, or a [`CoreError::Store`] on an IO
     /// failure.
-    pub fn forget_account(&self, id: Uuid) -> Result<bool, CoreError> {
-        let swept = self.forget_secrets(id)?;
+    pub fn forget_account(&self, id: Uuid) -> Result<SecretSweep, CoreError> {
+        let sweep = self.forget_secrets(id)?;
         self.store.clear_uid_cache(id)?;
         self.delete_account(id)?;
-        Ok(swept)
+        Ok(sweep)
     }
 
     /// Delete every secret stored for `account`, leaving the account itself.
@@ -581,10 +613,10 @@ impl Core {
     /// What a user asks for when they want to stop the launcher remembering a password without
     /// giving up the login it belongs to.
     ///
-    /// Answers `false` when no store answered at all: nothing was deleted, and anything a store
-    /// holds for this account is still there. That is not an error, because a machine with no
-    /// keyring must still be able to delete its accounts, but it is not a clean sweep either and a
-    /// caller has to be able to say which happened.
+    /// Answers a [`SecretSweep`] rather than succeeding quietly, because two conditions delete
+    /// nothing and are still not errors: a machine with no keyring must be able to delete its
+    /// accounts, and so must one whose credential store holds an item it cannot tell from this
+    /// launcher's. Neither is a clean sweep, and a caller has to be able to say which happened.
     ///
     /// The one-time password stays on, and goes back to being typed. A sweep takes the secret a code
     /// was derived from, so an account left pointing at one would be gated on a code nothing can
@@ -593,7 +625,7 @@ impl Core {
     /// # Errors
     /// Returns [`CoreError::Secrets`] if the sweep failed in a way that could have left a secret
     /// behind, or a [`CoreError::Store`] if the account record could not be rewritten.
-    pub fn forget_secrets(&self, account: Uuid) -> Result<bool, CoreError> {
+    pub fn forget_secrets(&self, account: Uuid) -> Result<SecretSweep, CoreError> {
         // Whatever the store answers, this process stops remembering which code the account last
         // submitted: the secret those digits came from is on its way out, and a record kept past it
         // would delay the first code a re-imported secret produces.
@@ -603,9 +635,11 @@ impl Core {
         // deleted cannot log in at all, so the flag moves first and the deletion follows it.
         self.ask_for_typed_codes(account)?;
         match self.secrets.store().forget_account(account) {
-            Ok(()) => Ok(true),
-            Err(err) if could_hold_secrets(&err) => Err(err.into()),
-            Err(_) => Ok(false),
+            Ok(()) => Ok(SecretSweep::Swept),
+            Err(err) => match sweep_outcome(&err) {
+                Some(sweep) => Ok(sweep),
+                None => Err(err.into()),
+            },
         }
     }
 
@@ -973,7 +1007,7 @@ impl Core {
 mod tests {
     use tempfile::TempDir;
 
-    use super::{Core, CoreConfig};
+    use super::{Core, CoreConfig, SecretSweep};
     use crate::error::CoreError;
     use crate::model::{Account, AccountKind, Profile};
 
@@ -1100,19 +1134,35 @@ mod tests {
         );
     }
 
-    /// Deleting an account stops when a sweep might have left something. Both of the sealed store's
-    /// own conditions have to count as "might", because a file that would not open still holds every
-    /// secret that was in it, and an account deleted over one leaves them unreachable forever.
+    /// Deleting an account stops when a sweep might have left something *and* the user can do
+    /// something about it. Both of the sealed store's own conditions qualify, because a file that
+    /// would not open still holds every secret that was in it, an account deleted over one leaves
+    /// them unreachable forever, and the file can be fixed and the command run again.
+    ///
+    /// The two answers that do not block are not the same answer, and the difference is the point of
+    /// the enum: one store never spoke, the other spoke and deleted nothing.
     #[test]
     fn a_store_that_would_not_open_blocks_an_account_deletion() {
         use apogee_secrets::SecretsError;
 
-        assert!(super::could_hold_secrets(&SecretsError::WrongPassphrase));
-        assert!(super::could_hold_secrets(&SecretsError::Corrupt {
-            detail: "authentication tag"
-        }));
-        assert!(super::could_hold_secrets(&SecretsError::Locked));
-        assert!(!super::could_hold_secrets(&SecretsError::NoCollection));
+        use super::sweep_outcome;
+
+        assert_eq!(sweep_outcome(&SecretsError::WrongPassphrase), None);
+        assert_eq!(
+            sweep_outcome(&SecretsError::Corrupt {
+                detail: "authentication tag"
+            }),
+            None
+        );
+        assert_eq!(sweep_outcome(&SecretsError::Locked), None);
+        assert_eq!(
+            sweep_outcome(&SecretsError::NoCollection),
+            Some(SecretSweep::Unanswered)
+        );
+        assert_eq!(
+            sweep_outcome(&SecretsError::Ambiguous),
+            Some(SecretSweep::LeftBehind)
+        );
     }
 
     #[test]
@@ -1315,7 +1365,7 @@ mod tests {
             let removal = core.remove_profile(profile.id).unwrap();
 
             assert_eq!(removal.account_removed, Some(account.id));
-            assert!(removal.secrets_swept);
+            assert_eq!(removal.secret_sweep, Some(SecretSweep::Swept));
         }
 
         /// A store that answered nothing is reported rather than assumed empty. Its deletes did not
@@ -1335,10 +1385,44 @@ mod tests {
             let removal = core.remove_profile(profile.id).unwrap();
 
             assert_eq!(removal.account_removed, Some(account.id));
-            assert!(
-                !removal.secrets_swept,
+            assert_eq!(
+                removal.secret_sweep,
+                Some(SecretSweep::Unanswered),
                 "an unreachable store was reported as a clean sweep"
             );
+        }
+
+        /// A store that answered and deleted nothing is the other dead end, and it used to be
+        /// permanent: one foreign credential-store item carrying this launcher's exact attribute set
+        /// makes every delete for that account ambiguous, no retry ever resolves it, and the account
+        /// could not be removed from inside the launcher at all.
+        ///
+        /// It is separated from the unreachable store rather than folded in with it. There the
+        /// residue is possible; here the store answered, so it is certain, and only one of the two
+        /// sends the user off to the platform's own tool.
+        #[test]
+        fn a_removal_over_an_ambiguous_store_proceeds_and_reports_certain_residue() {
+            let store = Arc::new(
+                MemoryStore::new().failing_with(FailAt::Everything, || SecretsError::Ambiguous),
+            );
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+            core.save_account(&account).unwrap();
+            core.save_profile(&profile).unwrap();
+
+            let removal = core.remove_profile(profile.id).unwrap();
+
+            assert_eq!(removal.account_removed, Some(account.id));
+            assert_eq!(
+                removal.secret_sweep,
+                Some(SecretSweep::LeftBehind),
+                "certain residue was reported as the possible kind"
+            );
+            // The whole point of unblocking it: the records are gone, so the user is not stuck with
+            // an account they can see and cannot delete.
+            assert!(core.profile(profile.id).is_err());
+            assert!(core.account(account.id).is_err());
         }
 
         /// Which conditions block a deletion and which do not, asserted one variant at a time.
@@ -1348,12 +1432,23 @@ mod tests {
         /// wrongly treated as harmless deletes the account on top of a secret the store still holds.
         #[test]
         fn only_a_store_that_answered_blocks_a_deletion() {
-            let cases: [(fn() -> SecretsError, bool); 5] = [
+            let cases: [(fn() -> SecretsError, bool); 8] = [
                 (|| SecretsError::NoBackend, false),
                 (|| SecretsError::NoCollection, false),
                 (|| SecretsError::NotStoring, false),
+                // Answered, and still not blocking: nothing a user does makes the store able to tell
+                // our item from the other program's, so blocking would be forever.
+                (|| SecretsError::Ambiguous, false),
                 (|| SecretsError::Locked, true),
                 (|| SecretsError::Denied, true),
+                // The sealed-file store's two conditions, which reach here through the catch-all.
+                (|| SecretsError::WrongPassphrase, true),
+                (
+                    || SecretsError::Corrupt {
+                        detail: "file magic",
+                    },
+                    true,
+                ),
             ];
 
             for (error, blocks) in cases {
@@ -1670,7 +1765,7 @@ mod tests {
             core.import_totp_secret(account.id, offered_secret())
                 .unwrap();
 
-            assert!(core.forget_secrets(account.id).unwrap());
+            assert_eq!(core.forget_secrets(account.id).unwrap(), SecretSweep::Swept);
 
             let saved = core.account(account.id).unwrap();
             assert!(
@@ -1704,7 +1799,7 @@ mod tests {
             core.use_pushed_codes(account.id, ListenerConsent::granted())
                 .unwrap();
 
-            assert!(core.forget_secrets(account.id).unwrap());
+            assert_eq!(core.forget_secrets(account.id).unwrap(), SecretSweep::Swept);
 
             let saved = core.account(account.id).unwrap();
             assert!(saved.use_otp, "the account stopped owing a code");
@@ -1794,11 +1889,14 @@ mod tests {
         fn forgetting_the_secrets_of_an_account_with_no_record_still_sweeps() {
             let store = Arc::new(MemoryStore::new());
             let (_dir, core) = core_with(Arc::clone(&store));
-            assert!(core.forget_secrets(Uuid::from_u128(0x9e4e4)).unwrap());
+            assert_eq!(
+                core.forget_secrets(Uuid::from_u128(0x9e4e4)).unwrap(),
+                SecretSweep::Swept
+            );
 
             let account = Account::new("me@example.invalid", AccountKind::Standard);
             core.save_account(&account).unwrap();
-            assert!(core.forget_secrets(account.id).unwrap());
+            assert_eq!(core.forget_secrets(account.id).unwrap(), SecretSweep::Swept);
             assert_eq!(
                 core.account(account.id).unwrap(),
                 account,
