@@ -271,6 +271,46 @@ pub async fn check_gate_status(
 /// Returns [`ProtoError::Transport`] if the request could not be sent, or
 /// [`ProtoError::InvalidResponse`] if SE answers with a non-`200` status or a body that does not
 /// deserialize as a [`GateStatus`].
+///
+/// # Examples
+///
+/// ```
+/// # fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+/// #     let mut fut = std::pin::pin!(fut);
+/// #     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+/// #     loop {
+/// #         if let std::task::Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+/// #             return val;
+/// #         }
+/// #     }
+/// # }
+/// use sqex_proto::{
+///     ClientContext, ComputerId, FrontierContext, LauncherTime, ProtoRequest, ProtoResponse,
+///     Transport, TransportError, check_login_status,
+/// };
+///
+/// struct DownLogin;
+///
+/// #[async_trait::async_trait]
+/// impl Transport for DownLogin {
+///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+///         Ok(ProtoResponse::new(200, br#"{"status":0}"#.to_vec()))
+///     }
+/// }
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = FrontierContext {
+///     client: ClientContext {
+///         computer_id: &id,
+///         language: "en-us",
+///         accept_language: "en-us,en;q=0.9",
+///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     },
+/// };
+/// let now = LauncherTime::from_parts(2024, 1, 2, 3, 47, 0);
+/// let status = block_on(check_login_status(&DownLogin, &context, &now)).unwrap();
+/// assert!(!status.status);
+/// ```
 pub async fn check_login_status(
     transport: &dyn Transport,
     context: &FrontierContext<'_>,
