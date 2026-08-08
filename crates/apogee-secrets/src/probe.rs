@@ -43,16 +43,29 @@ pub(crate) enum BusFailure {
 const BUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(crate) fn probe() -> BackendReport {
-    let sandbox = detect_sandbox();
-    let asked = sandbox.clone();
-    let state = within(BUS_DEADLINE, BackendState::Unreachable, move || {
-        probe_state(asked.as_ref())
-    });
+    let (state, sandbox) = probe_within(BUS_DEADLINE);
     BackendReport {
         backend: BACKEND,
         state,
         sandbox,
     }
+}
+
+/// Sample the store and the sandbox it is being reached from, giving up on both after `deadline`.
+///
+/// Separate from [`probe`] so the wiring is provable rather than merely written down. A deadline
+/// that is declared and then not applied leaves this function looking exactly as it does with
+/// `within` taken back out of it, and the call it wraps is the one that never returns.
+///
+/// The sandbox is sampled inside the deadline rather than beside it, so what the deadline bounds is
+/// the whole call rather than most of it: reading `/.flatpak-info` blocks as thoroughly as a bus
+/// handshake when whatever is behind that name does not answer. The cost is that a probe that runs
+/// out of time reports no sandbox, which is the honest answer for a sample that never finished.
+fn probe_within(deadline: std::time::Duration) -> (BackendState, Option<Sandbox>) {
+    within(deadline, (BackendState::Unreachable, None), || {
+        let sandbox = detect_sandbox();
+        (probe_state(sandbox.as_ref()), sandbox)
+    })
 }
 
 /// Run `work` on a worker thread and answer `on_timeout` if it has not finished within `deadline`.
@@ -530,6 +543,22 @@ mod tests {
             || BackendState::Ready,
         );
         assert_eq!(prompt, BackendState::Ready);
+    }
+
+    /// The deadline is wired to the sample rather than declared beside it. `within` answering for
+    /// work that outruns it is one property and the probe actually going through `within` is
+    /// another: with the wrapper taken back out, this function answers whatever the bus says,
+    /// however long that takes, which is the state the deadline exists to replace.
+    ///
+    /// A deadline of no time at all is what decides it without a wedged bus to hang on: the sample
+    /// runs on a thread that has not been scheduled yet, and it has a file to read before it even
+    /// reaches the socket, so the only answer available to the caller is the fallback.
+    #[test]
+    fn the_sample_runs_under_the_deadline() {
+        assert_eq!(
+            probe_within(std::time::Duration::ZERO),
+            (BackendState::Unreachable, None)
+        );
     }
 
     #[test]
