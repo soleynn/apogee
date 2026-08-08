@@ -83,6 +83,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### workspace
 - Unblock the two permanent deletion dead ends in the secrets lifecycle (#153) _(fixed)_
+- Require the Secret Service job, widen the unsafe gate to examples (#157) _(ci)_
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
