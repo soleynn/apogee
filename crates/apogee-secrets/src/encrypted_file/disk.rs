@@ -171,10 +171,11 @@ impl Lock {
 /// could not even be deleted to recover; a symlink moved the lock to a file the other writer would
 /// never open, leaving the mutual exclusion protecting nothing.
 ///
-/// Creating it exclusively first is what makes the common case safe without a check at all. The
-/// fallback check is not a guarantee, for the same reason it is not one on the read path: without a
-/// platform crate there is no way to open a path and refuse a symlink in one syscall, so a swap
-/// between the check and the open is uncovered. Stated rather than implied.
+/// Creating it exclusively first is what makes the common case safe without a check at all. When
+/// something is already at the name, what settles it is the open and then the handle rather than the
+/// name: the flags below make the kernel refuse the two shapes that do the damage, and the check
+/// here is on the descriptor that came back, so there is no window between the two for a swap. The
+/// arm for the platforms that have no such flags says what it rests on instead.
 fn open_sidecar(sidecar: &Path) -> Result<File, SecretsError> {
     let mut fresh = OpenOptions::new();
     fresh.write(true).create_new(true);
@@ -185,8 +186,51 @@ fn open_sidecar(sidecar: &Path) -> Result<File, SecretsError> {
         Err(err) => return Err(map_io(err)),
     }
 
-    let meta = std::fs::symlink_metadata(sidecar).map_err(map_io)?;
-    if !meta.is_file() {
+    let existing = reopen_sidecar(sidecar)?;
+    if !existing.metadata().map_err(map_io)?.is_file() {
+        return Err(corrupt("store lock"));
+    }
+    Ok(existing)
+}
+
+/// Re-open a sidecar that is already there, refusing a symlink and never parking on a FIFO.
+///
+/// `NOFOLLOW` is the symlink half: the open fails rather than landing on a file the other writer
+/// would never lock. `NONBLOCK` is the FIFO half: a pipe with nobody at the other end answers
+/// straight away instead of holding the process inside `open(2)`, which is what left every write
+/// parked while the process-wide key lock was held, so the store could not even be deleted to
+/// recover. Both answers mean the same thing to the caller as the shape check does, so both take
+/// the same error.
+#[cfg(unix)]
+fn reopen_sidecar(sidecar: &Path) -> Result<File, SecretsError> {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::io::Errno;
+
+    match rustix::fs::open(
+        sidecar,
+        OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(File::from(fd)),
+        Err(err) if err == Errno::LOOP || err == Errno::NXIO || err == Errno::ISDIR => {
+            Err(corrupt("store lock"))
+        }
+        Err(err) => Err(map_io(err.into())),
+    }
+}
+
+/// Windows has neither flag, and one of the two hazards does not reach it: there are no FIFOs in its
+/// filesystem namespace to park an open on. A link does reach it, as a reparse point, so this arm
+/// keeps the check ahead of the open that it has always had. That check is on the name and the open
+/// that follows is on the name again, which is the window unix no longer has; it is left rather than
+/// closed because closing it needs a reparse-point open this crate cannot make without leaving safe
+/// Rust, and creating a link at all needs a privilege an ordinary account does not hold there.
+#[cfg(not(unix))]
+fn reopen_sidecar(sidecar: &Path) -> Result<File, SecretsError> {
+    if !std::fs::symlink_metadata(sidecar)
+        .map_err(map_io)?
+        .is_file()
+    {
         return Err(corrupt("store lock"));
     }
     let mut existing = OpenOptions::new();
@@ -267,11 +311,23 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), SecretsError> {
     // settings and the account records live in too. An exotic umask at first create reaches it, and
     // so does a restore tool.
     //
-    // On the handle rather than on the path: the mode that gets set then belongs to the directory
-    // that was just examined, instead of to whatever the name resolves to a moment later. Opening
-    // still follows a symlink at the name, which is a smaller gap than the one it closes and is the
-    // same one the read path documents.
-    let Ok(dir) = File::open(parent) else {
+    // On the handle rather than on the path, and on a handle the kernel is told what to refuse: the
+    // mode that gets set belongs to the directory that was just examined, instead of to whatever the
+    // name resolves to a moment later, and `NOFOLLOW` is what keeps that from being a directory
+    // somewhere else entirely. Opening by name used to follow a symlink at the last component, so a
+    // store path whose directory was a link to a shared `0755` directory had *that* directory, and
+    // everything else its owner kept in it, narrowed to `0700` on the first write.
+    //
+    // A link there is left alone rather than refused, for the reason the file's mode is repaired
+    // rather than refused: the store is still written, still sealed and still created `0600`, and
+    // refusing over a directory the caller pointed at would strand them to no end. `DIRECTORY` is
+    // there so the same holds for anything else at the name that is not a directory at all.
+    let Ok(dir) = rustix::fs::open(
+        parent,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from) else {
         return Ok(());
     };
     let Ok(meta) = dir.metadata() else {

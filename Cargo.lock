@@ -270,6 +270,7 @@ dependencies = [
  "getrandom 0.4.3",
  "keyring",
  "proptest",
+ "rustix",
  "secret-service",
  "security-framework 3.7.0",
  "serde",
