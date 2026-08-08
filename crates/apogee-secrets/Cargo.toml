@@ -19,6 +19,13 @@ getrandom.workspace = true
 # crate exists to prevent.
 serde_json.workspace = true
 
+# The open flags the fallback store's directory and lock handling needs and the standard library does
+# not expose: `O_NOFOLLOW` and `O_NONBLOCK`, so a path is opened and what it may resolve to is refused
+# in the same syscall rather than in a check the open cannot be held to. A safe wrapper, so the
+# crate's `deny(unsafe_code)` is untouched. Windows has neither flag and takes a different arm.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 # The Secret Service backend speaks D-Bus through zbus rather than libdbus: the pure-Rust path needs
 # no C system library at build time, and its error type is the one that separates "nothing owns the
 # name" from "collection locked", which is what the backend report has to say.

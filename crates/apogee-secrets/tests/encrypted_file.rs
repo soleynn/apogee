@@ -1054,6 +1054,12 @@ mod permissions {
     /// to recover. A symlink took the lock on some other file, leaving two writers excluding
     /// nobody. Both run under a deadline, because the failure being guarded against is a hang: a
     /// regression here would otherwise stall the suite rather than fail it.
+    ///
+    /// The link points at a real file, so following it would succeed rather than fail on its own,
+    /// and both shapes are held to the answer the open itself gives rather than merely to some
+    /// error. An open that followed the link would land on that file and be refused several
+    /// attempts later, by the check that the lock is still on the name it was taken for, and would
+    /// say so with a different error.
     #[test]
     fn a_lock_sidecar_that_is_not_a_regular_file_is_refused_rather_than_waited_on() {
         for planted in ["fifo", "symlink"] {
@@ -1072,8 +1078,9 @@ mod permissions {
                     .expect("mkfifo");
                 assert!(made.success());
             } else {
-                std::os::unix::fs::symlink(dir.path().join("elsewhere"), &sidecar)
-                    .expect("symlink");
+                let elsewhere = dir.path().join("elsewhere");
+                std::fs::write(&elsewhere, b"a lock on this excludes nobody").expect("write");
+                std::os::unix::fs::symlink(&elsewhere, &sidecar).expect("symlink");
             }
 
             let (done, waiting) = std::sync::mpsc::channel();
@@ -1084,8 +1091,13 @@ mod permissions {
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|_| panic!("{planted}: the write is still parked on the sidecar"));
             assert!(
-                answered.is_err(),
-                "{planted}: the write took a lock that excludes nobody"
+                matches!(
+                    answered,
+                    Err(SecretsError::Corrupt {
+                        detail: "store lock"
+                    })
+                ),
+                "{planted}: the open did not refuse what was planted: {answered:?}"
             );
         }
     }
@@ -1205,6 +1217,49 @@ mod permissions {
             .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
             .expect("write");
         assert_eq!(mode(&path).expect("stat"), 0o600);
+    }
+
+    /// A store directory that is a symlink narrows nothing, rather than narrowing what it points at.
+    ///
+    /// The repair above sets the mode on a handle, and a handle opened by name used to be a handle
+    /// to the link's target: a path whose last component was a symlink to a shared `0755` directory
+    /// had that directory, and everything else its owner kept in it, chmodded to `0700` on the first
+    /// write. The link is not followed now. The store is still written and still sealed at `0600`,
+    /// because refusing over a directory the caller chose would strand them for no gain: what keeps
+    /// the contents private is the file's own mode and the seal, not the directory's.
+    #[test]
+    fn a_symlinked_store_directory_leaves_its_target_alone() {
+        let (dir, _unused) = scratch().expect("scratch");
+        let target = dir.path().join("shared");
+        std::fs::create_dir(&target).expect("mkdir");
+        let unrelated = target.join("someone-elses-notes");
+        std::fs::write(&unrelated, b"not this crate's").expect("write");
+        std::fs::set_permissions(&target, PermissionsExt::from_mode(0o755)).expect("chmod");
+
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&target, &linked).expect("symlink");
+        let path = linked.join(EncryptedFile::FILE_NAME);
+
+        let store = created(&path, Scripted::new(b"pp")).expect("create");
+        store
+            .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+            .expect("write");
+
+        assert_eq!(
+            mode(&target).expect("stat"),
+            0o755,
+            "the link's target was narrowed"
+        );
+        assert_eq!(mode(&path).expect("stat"), 0o600);
+        assert!(unrelated.exists());
+        assert_eq!(
+            store
+                .get(ACCOUNT, SecretKind::Password)
+                .expect("read")
+                .expect("present")
+                .expose(),
+            b"hunter2"
+        );
     }
 
     /// A read redirected through a symlink would hand back whatever the link points at, and the next
