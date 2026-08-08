@@ -669,6 +669,10 @@ fn unseal(bytes: &[u8], header: &Header, key: &[u8; KEY_LEN]) -> Result<Table, S
         // tell a wrong key from a wrong nonce. The body is the tiebreak, because it is not bound to
         // either of those fields. If it opens, the key is the file's own and the damage is confined
         // to the check envelope; if it does not, the key really is wrong.
+        //
+        // Accepted gap: no test observes that this copy was erased before it was freed. Seeing that
+        // needs a dealloc-scanning `#[global_allocator]`, which takes `unsafe`, and this crate keeps
+        // its one `unsafe` module for the Windows permission arm.
         let mut probe = Zeroizing::new(cipher.to_vec());
         return Err(
             match seal::open_body(key, &header.body_nonce, &body_aad, &mut probe, &tag) {
@@ -678,6 +682,8 @@ fn unseal(bytes: &[u8], header: &Header, key: &[u8; KEY_LEN]) -> Result<Table, S
         );
     }
 
+    // Accepted gap, as for the probe copy above: the erase this wrapper performs is not observed by
+    // any test, because observing it takes an `unsafe` allocator this crate does not have.
     let mut body = Zeroizing::new(cipher.to_vec());
     seal::open_body(key, &header.body_nonce, &body_aad, &mut body, &tag)?;
     items::decode(&body)
@@ -927,7 +933,7 @@ mod tests {
         let mut body = bytes[HEADER_LEN..split].to_vec();
         assert!(
             seal::open_body(&key, &header.body_nonce, &head, &mut body, &tag).is_err(),
-            "the body is still bound to the whole header"
+            "the body is not bound to the whole header"
         );
 
         // The property the damage-versus-typo classification rests on, in both directions. An edit

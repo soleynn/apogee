@@ -328,7 +328,7 @@ fn a_file_of_the_wrong_length_is_refused_before_the_cipher() {
 }
 
 /// Two stores under the same passphrase still have different salts, so neither's body opens under
-/// the other's header. Without the body being bound to the whole header this would be a way to swap
+/// the other's header. Without the salt in the body's associated data this would be a way to swap
 /// one user's secrets for another's without either noticing.
 #[test]
 fn one_store_s_body_will_not_open_under_another_s_header() {

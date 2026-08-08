@@ -12,7 +12,7 @@ fn a_body_round_trips_under_its_own_associated_data() {
     assert_eq!(&buf, b"the record table");
 }
 
-/// The body is bound to the whole header, which is what stops one file's body being spliced onto
+/// The body is bound to its associated data, which is what stops one file's body being spliced onto
 /// another's header. Without the binding, two stores under one passphrase would be swappable.
 #[test]
 fn a_body_sealed_under_one_header_will_not_open_under_another() {
