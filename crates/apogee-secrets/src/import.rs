@@ -402,6 +402,10 @@ impl ImportSource for ForeignSecretsFile {
         let found = entries.remove(key.name());
         // Every other account's password was parsed out of the file too, and dropping the map would
         // leave all of them on the heap.
+        //
+        // Accepted gap: no test observes that the buffer was erased before it was freed. Seeing that
+        // needs a dealloc-scanning `#[global_allocator]`, which takes `unsafe`, and this crate keeps
+        // its one `unsafe` module for the Windows permission arm.
         for (_, mut password) in entries {
             password.zeroize();
         }

@@ -53,8 +53,12 @@ pub trait SecretStore {
     /// As [`SecretStore::get`].
     fn delete(&self, account: Uuid, kind: SecretKind) -> Result<(), SecretsError>;
 
-    /// Report which store this is and what condition it is in, without reading, writing, or raising
-    /// an unlock prompt.
+    /// Report which store this is and what condition it is in.
+    ///
+    /// Answering costs I/O, and how much varies by backend: a bus call and a lock-state read, a read
+    /// of a credential key nothing ever writes, a read of the sealed file's header. What holds
+    /// everywhere is that no stored secret is read, nothing is written, and no unlock prompt is
+    /// raised, so this is safe to call on every launch.
     fn probe(&self) -> BackendReport;
 
     /// Erase whatever this store is holding so it does not have to ask again, at the cost of asking
