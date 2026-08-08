@@ -439,6 +439,60 @@ fn writing_to_a_store_that_was_never_created_refuses_and_makes_no_file() {
     assert_eq!(source.asked(), 0, "a refused write must not prompt");
 }
 
+/// Whether there is a store at all is settled before anything is created, and the directory is the
+/// half of that a caller sees from outside. With the two put back the other way round, a write
+/// against a path under a directory that has never existed answers that there is nothing to write
+/// into and leaves the directory sitting there, so a launcher that was never configured looks from
+/// the filesystem like one that was.
+#[test]
+fn a_write_to_a_store_that_is_not_there_creates_no_directory_for_it() {
+    let dir = tempfile::tempdir().expect("scratch");
+    let absent = dir.path().join("apogee");
+    let path = absent.join(EncryptedFile::FILE_NAME);
+    let store = EncryptedFile::open(&path, Scripted::new(b"pp"));
+
+    let err = store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect_err("there is no store under that directory");
+    assert!(matches!(err, SecretsError::NoCollection), "{err:?}");
+    store
+        .delete(ACCOUNT, SecretKind::Password)
+        .expect("deleting from a store that is not there has nothing to do");
+
+    assert!(
+        !absent.exists(),
+        "a call against a store that is not there created the directory for one"
+    );
+}
+
+/// The other half of the same order. The lock is taken on a sidecar the store's own path names, so
+/// taking it before settling that the store exists leaves a zero-byte file beside a store that was
+/// never created, in a directory a user can see, and nothing ever cleans it up: the sidecar is
+/// deliberately never deleted, because removing it would race the next process to acquire.
+#[test]
+fn a_write_to_a_store_that_is_not_there_takes_no_lock_beside_it() {
+    let (dir, path) = scratch().expect("scratch");
+    let store = EncryptedFile::open(&path, Scripted::new(b"pp"));
+
+    let err = store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect_err("there is no store at that path");
+    assert!(matches!(err, SecretsError::NoCollection), "{err:?}");
+    store
+        .delete(ACCOUNT, SecretKind::Password)
+        .expect("deleting from a store that is not there has nothing to do");
+
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read the directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "a call against a store that is not there left {left:?} behind"
+    );
+}
+
 /// A read and a delete against a store that was never created are true statements about an empty
 /// store, and neither is worth making a user type a passphrase for.
 #[test]
