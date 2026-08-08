@@ -69,6 +69,7 @@ is tagged with its change type. Versioning aims to follow
 - Exclude the remaining 25 over-matching code points from account-id fold (#145) _(fixed)_
 - Bound the login callback's total content length (#147) _(fixed)_
 - Full rustdoc pass ahead of 1.0 (#148) _(documentation)_
+- Gate gen_token behind a non-default feature (#149) _(added)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
