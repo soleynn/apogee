@@ -225,10 +225,17 @@ done
 #    here rather than left to the lint. Crate roots still carry their own attribute, which is the
 #    line the `unsafe_code` filter drops; a comment that merely says the word is dropped separately.
 unsafe_home='crates/apogee-secrets/src/encrypted_file/disk.rs'
-# `tests` as well as `src`. `deny` reaches every test target too, and an integration test is exactly
-# where an `unsafe` block would be waved through as scaffolding, so scanning only the sources left
-# the half of the relaxation this check was written to cover unguarded.
-hits=$(grep -rnE '\bunsafe\b' crates/*/src apps/*/src crates/*/tests apps/*/tests --include='*.rs' \
+# Every target `[lints] workspace = true` reaches, not just `src`. An integration test, an example or
+# a bench is exactly where an `unsafe` block would be waved through as scaffolding, so scanning only
+# the sources left the half of the relaxation this check was written to cover unguarded. A pattern
+# matching no directory is dropped instead of passed on: bash leaves it unexpanded and `grep` would
+# take the literal glob for a path and fail on it.
+scan=()
+for d in crates/*/src apps/*/src crates/*/tests apps/*/tests \
+         crates/*/examples apps/*/examples crates/*/benches apps/*/benches; do
+  if [ -d "$d" ]; then scan+=("$d"); fi
+done
+hits=$(grep -rnE '\bunsafe\b' "${scan[@]}" --include='*.rs' \
   | grep -v "^$unsafe_home:" | grep -v 'unsafe_code' \
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)' || true)
 [ -z "$hits" ] || report "unsafe outside the secret store's Windows permission arm" "$hits"
