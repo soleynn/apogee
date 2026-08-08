@@ -61,6 +61,17 @@ jobs:
         with:
           workspaces: fuzz
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The corpus this target has accumulated across prior nightly runs, so each run seeds libFuzzer
+      # with what earlier ones already found instead of starting from empty every time. Keyed on the
+      # run id so every run saves a (grown) corpus under a new key; restore-keys falls back to the
+      # most recent prior one by prefix match. fuzz/corpus/<target> is cargo-fuzz's own corpus
+      # directory for this target and is gitignored, so this cache is its only persistence.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-fuzz
