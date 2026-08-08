@@ -217,17 +217,25 @@ fn detect_sandbox() -> Option<Sandbox> {
     None
 }
 
-/// Read the sandbox's own description of itself, lossily.
-///
-/// Lossily because the alternative was worse than a mangled value. `read_to_string` fails on a
-/// single byte that is not UTF-8 anywhere in the file, a `filesystems=` entry naming a path in some
-/// other encoding for instance, and the failure erased the whole sandbox: `detect_sandbox` fell
-/// through to `None` and a confined process was reported as unconfined with no keyring installed.
-/// Every section that decides the answer here is ASCII, so a replacement character in an unrelated
-/// value costs nothing.
+/// Read the sandbox's own description of itself.
 fn read_flatpak_info() -> Option<String> {
     let bytes = std::fs::read("/.flatpak-info").ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(decode_flatpak_info(&bytes))
+}
+
+/// Decode a `/.flatpak-info` body, lossily.
+///
+/// Lossily, and infallibly, because the alternative was worse than a mangled value. `read_to_string`
+/// fails on a single byte that is not UTF-8 anywhere in the file, a `filesystems=` entry naming a
+/// path in some other encoding for instance, and the failure erased the whole sandbox:
+/// `detect_sandbox` fell through to `None` and a confined process was reported as unconfined with no
+/// keyring installed. Every section that decides the answer here is ASCII, so a replacement
+/// character in an unrelated value costs nothing.
+///
+/// Split from the read so that property is testable at all: the path above it is fixed, and the one
+/// machine that can supply the body is the one already running inside the sandbox.
+fn decode_flatpak_info(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn flatpak_sandbox(info: &str) -> Sandbox {
@@ -559,6 +567,28 @@ mod tests {
             probe_within(std::time::Duration::ZERO),
             (BackendState::Unreachable, None)
         );
+    }
+
+    /// One byte that is not UTF-8 anywhere in the file used to erase the whole sandbox: the read
+    /// failed, `detect_sandbox` fell through to `None`, and a confined process was reported as an
+    /// ordinary desktop with no keyring installed. Here the byte sits in a value nothing reads,
+    /// which is where a path in some other encoding lands, and the grant two sections away still has
+    /// to survive it.
+    #[test]
+    fn a_body_that_is_not_utf8_still_yields_its_grant() {
+        let mut body = b"[Context]\nfilesystems=/media/".to_vec();
+        body.push(0xff);
+        body.extend_from_slice(b";\n\n[Session Bus Policy]\norg.freedesktop.secrets=talk\n");
+
+        let info = decode_flatpak_info(&body);
+        assert!(flatpak_can_talk_to_secrets(&info));
+        assert!(matches!(
+            flatpak_sandbox(&info),
+            Sandbox::Flatpak {
+                bus_filtered: false,
+                ..
+            }
+        ));
     }
 
     #[test]
