@@ -1302,11 +1302,23 @@ fn oauth_region(_region: Region) -> u16 {
     3
 }
 
+/// Builds the per-request client identity. `accept_language` is not derived from the client's
+/// configured game language: XIVLauncher's own generator, `ApiHelpers.GenerateAcceptLanguage`
+/// (`src/XIVLauncher.Common/Util/ApiHelpers.cs:14-41`), picks from a small pool of unrelated locale
+/// strings using `new Random(asdf)`, and its one call site (`src/XIVLauncher/App.xaml.cs:133-135`)
+/// never passes `asdf`, so every fresh install draws from the default seed, `0`. .NET keeps the
+/// pre-.NET-6 seeded `Random(int)` algorithm stable for backward compatibility (only the
+/// parameterless constructor's algorithm changed in .NET 6+), so that seed-0 draw is the same for
+/// every install regardless of .NET version or OS locale: running `GenerateAcceptLanguage()`
+/// unmodified returns the bare `"ja"` entry from its `codes` array, independent of language.
+/// Confirmed two ways: running the method itself via a project reference to `XIVLauncher.Common`,
+/// and independently reimplementing .NET's legacy subtractive `Random` algorithm from scratch and
+/// reproducing the identical sequence for seeds 0-19.
 fn client_context(ctx: &FlowContext) -> ClientContext<'_> {
     ClientContext {
         computer_id: &ctx.computer_id,
         language: "en-us",
-        accept_language: "en-US,en;q=0.9",
+        accept_language: "ja",
         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
     }
 }
