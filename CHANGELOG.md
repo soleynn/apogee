@@ -68,6 +68,7 @@ is tagged with its change type. Versioning aims to follow
 - Close the frontier header-fidelity gap PR #137 missed (#144) _(fixed)_
 - Exclude the remaining 25 over-matching code points from account-id fold (#145) _(fixed)_
 - Bound the login callback's total content length (#147) _(fixed)_
+- Full rustdoc pass ahead of 1.0 (#148) _(documentation)_
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
