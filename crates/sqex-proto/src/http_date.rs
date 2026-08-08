@@ -1,13 +1,16 @@
-// The Date response header, read back into the instant it names. Fixed-position matching over the
-// two forms whose meaning is settled by their own text: the IMF-fixdate every current server sends
-// (the login server among them) and the obsolete asctime form. The third form HTTP lists carries a
-// two-digit year, which names an instant only against a clock, and this crate holds none; it is
-// refused rather than resolved against a guess. A refusal costs a caller the reading and never the
-// request, because an unreadable stamp answers the same as an absent one.
-//
-// Each field is range-checked before the calendar arithmetic runs. The civil-to-days map normalises
-// instead of validating, so `31 Feb` reaches it as a well-formed date and comes back out as `3 Mar`
-// with nothing to say it was never a day -- the range check in front is what actually refuses it.
+//! Parsing the HTTP `Date` response header back into the instant it names.
+//!
+//! [`parse_http_date`] matches by fixed position over the two forms whose meaning is settled by
+//! their own text: the IMF-fixdate every current server sends (the login server among them) and the
+//! obsolete asctime form. The third form HTTP lists carries a two-digit year, which names an
+//! instant only against a clock, and this crate holds none; it is refused rather than resolved
+//! against a guess. A refusal costs a caller the reading and never the request, because an
+//! unreadable stamp answers the same as an absent one.
+//!
+//! Internally, each field is range-checked before the calendar arithmetic runs: the civil-to-days
+//! conversion normalises instead of validating, so `31 Feb` reaches it as a well-formed date and
+//! comes back out as `3 Mar` with nothing to say it was never a day. The range check in front is
+//! what actually refuses it.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +20,36 @@ const MONTHS: [&[u8; 3]; 12] = [
 
 const DAY_NAMES: [&[u8; 3]; 7] = [b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat", b"Sun"];
 
+/// Parse an HTTP `Date` header value into the instant it names.
+///
+/// Accepts the IMF-fixdate form (`Sun, 06 Nov 1994 08:49:37 GMT`) and the obsolete asctime form
+/// (`Sun Nov  6 08:49:37 1994`), each matched only in that exact shape: fixed field positions, `GMT`
+/// as the only accepted zone, and a real calendar date (`31 Feb` and similar are refused, not
+/// normalized to the following day). Leading and trailing ASCII whitespace around `value` is
+/// ignored. A leap second (`:60`) reads as the second before it. Anything else, including the
+/// obsolete two-digit-year form (which names an instant only against a clock this crate does not
+/// hold), returns [`None`]: an unreadable stamp answers the same as an absent one, so a caller loses
+/// only the reading, never the request.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::{Duration, UNIX_EPOCH};
+///
+/// use sqex_proto::parse_http_date;
+///
+/// let parsed = parse_http_date("Thu, 01 Jan 1970 00:00:01 GMT").unwrap();
+/// assert_eq!(parsed, UNIX_EPOCH + Duration::from_secs(1));
+///
+/// // The asctime form is accepted too.
+/// assert_eq!(
+///     parse_http_date("Thu Jan  1 00:00:01 1970"),
+///     Some(UNIX_EPOCH + Duration::from_secs(1))
+/// );
+///
+/// // The obsolete two-digit-year form is refused rather than guessed at.
+/// assert_eq!(parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT"), None);
+/// ```
 #[must_use]
 pub fn parse_http_date(value: &str) -> Option<SystemTime> {
     let text = value.as_bytes().trim_ascii();

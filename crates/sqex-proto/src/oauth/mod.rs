@@ -1,13 +1,16 @@
-// The OAuth login flow. Login is two coupled requests. The top page (begin_login) yields an opaque
-// _STORED_ blob and the server Date; the submit (LoginFlow::submit) echoes _STORED_ back with the
-// credentials and returns the launchParams callback, parsed into a typed Authenticated. Because step
-// two needs state from step one, the two live behind a flow object that borrows the transport rather
-// than two free functions the caller would have to thread state between.
-//
-// Credentials pass through borrowed memory only (Credentials), are written once into a zeroizing
-// request body, and never land in an owned struct or an error excerpt. The session id is redacted in
-// Debug and never serialized. Expected dispositions (no service, terms not yet accepted) are booleans
-// on Authenticated, not errors.
+//! The OAuth login flow.
+//!
+//! Login is two coupled requests. The top page ([`begin_login`]) yields an opaque `_STORED_` blob
+//! and the server `Date`; the submission ([`LoginFlow::submit`]) echoes `_STORED_` back with the
+//! credentials and returns the `launchParams` callback, parsed into a typed [`Authenticated`].
+//! Because the submission needs state from the top page, the two live behind a [`LoginFlow`] that
+//! borrows the transport, rather than two free functions a caller would have to thread state
+//! between.
+//!
+//! Credentials pass through borrowed memory only ([`Credentials`]), are written once into a
+//! zeroizing request body, and never land in an owned struct or an error excerpt. The session id is
+//! redacted in `Debug` (see [`SessionId`]) and never serialized. Expected dispositions (no service,
+//! terms not yet accepted) are booleans on [`Authenticated`], not errors.
 
 use std::fmt;
 use std::time::SystemTime;
@@ -51,19 +54,57 @@ const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
+/// The per-install, per-locale values an OAuth login request carries.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::{ClientContext, ComputerId, OauthContext};
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = OauthContext {
+///     client: ClientContext {
+///         computer_id: &id,
+///         language: "en-us",
+///         accept_language: "en-us,en;q=0.9",
+///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     },
+///     lng: "en",
+///     region: 3,
+/// };
+/// assert_eq!(context.region, 3);
+/// ```
 pub struct OauthContext<'a> {
+    /// The shared client identity and locale plumbing.
     pub client: ClientContext<'a>,
+    /// The login page language code (e.g. `en`).
     pub lng: &'a str,
+    /// The account region.
     pub region: u16,
 }
 
+/// Which credential a login submits: a standard SE account, or a Steam authentication ticket.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::LoginKind;
+///
+/// let kind = LoginKind::Standard { free_trial: false };
+/// assert!(matches!(kind, LoginKind::Standard { .. }));
+/// ```
 #[non_exhaustive]
 pub enum LoginKind {
+    /// A standard `sqexid`/password login.
     Standard {
+        /// Whether to request a free-trial login.
         free_trial: bool,
     },
+    /// A Steam login, carrying the obfuscated ticket the top-page request authenticates with.
     Steam {
+        /// The obfuscated Steam authentication ticket.
         ticket: ObfuscatedTicket,
+        /// Whether to request a free-trial login.
         free_trial: bool,
     },
 }
@@ -83,15 +124,47 @@ impl LoginKind {
     }
 }
 
+/// Credentials for [`LoginFlow::submit`], borrowed rather than owned so they never outlive the
+/// caller's own copy.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::Credentials;
+///
+/// let creds = Credentials {
+///     sqexid: "player1",
+///     password: "hunter2",
+///     otp: None,
+/// };
+/// assert_eq!(creds.sqexid, "player1");
+/// ```
 pub struct Credentials<'a> {
+    /// The SE account id.
     pub sqexid: &'a str,
+    /// The account password.
     pub password: &'a str,
+    /// The one-time password, if the account has one configured. Submitted as empty when absent.
     pub otp: Option<&'a str>,
 }
 
+/// A login session id, redacted in [`Debug`](fmt::Debug) and held zeroizing so it scrubs on drop.
+///
+/// The only way to obtain one is a successful [`LoginFlow::submit`], via
+/// [`Authenticated::session_id`].
+///
+/// # Examples
+///
+/// See [`LoginFlow::submit`]'s example, which drives a login to completion and reads the resulting
+/// session id back out with [`SessionId::expose`].
 pub struct SessionId(Zeroizing<String>);
 
 impl SessionId {
+    /// The session id's text, for use in a request that must carry it (e.g. session registration).
+    ///
+    /// # Examples
+    ///
+    /// See [`LoginFlow::submit`]'s example.
     #[must_use]
     pub fn expose(&self) -> &str {
         self.0.as_str()
@@ -104,22 +177,46 @@ impl fmt::Debug for SessionId {
     }
 }
 
+/// The result of a successful [`LoginFlow::submit`]: an authenticated session and the account facts
+/// its callback carried.
+///
+/// # Examples
+///
+/// See [`LoginFlow::submit`]'s example.
 #[derive(Debug)]
 pub struct Authenticated {
     session_id: SessionId,
+    /// The account's region.
     pub region: u16,
+    /// The highest expansion index the account owns.
     pub max_expansion: u8,
+    /// Whether the account is playable (has an active subscription or trial). An expected
+    /// disposition, not an error: a caller checks this rather than treating an unplayable account
+    /// as a protocol failure.
     pub playable: bool,
+    /// Whether the account has accepted the current terms of service. An expected disposition, not
+    /// an error, for the same reason as [`Authenticated::playable`].
     pub terms_accepted: bool,
 }
 
 impl Authenticated {
+    /// The session id authorizing the next stage (session registration).
+    ///
+    /// # Examples
+    ///
+    /// See [`LoginFlow::submit`]'s example.
     #[must_use]
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
 }
 
+/// The state of an in-progress OAuth login, between [`begin_login`]'s top-page request and
+/// [`LoginFlow::submit`]'s credential submission.
+///
+/// # Examples
+///
+/// See [`begin_login`]'s example.
 pub struct LoginFlow<'t> {
     transport: &'t dyn Transport,
     top_url: Url,
@@ -140,21 +237,118 @@ impl fmt::Debug for LoginFlow<'_> {
 }
 
 impl LoginFlow<'_> {
+    /// The `Date` header the top-page response carried, verbatim, if present.
+    ///
+    /// # Examples
+    ///
+    /// See [`begin_login`]'s example.
     #[must_use]
     pub fn server_date(&self) -> Option<&str> {
         self.server_date.as_deref()
     }
 
+    /// The top-page response's `Date` header, parsed into an instant. `None` if the header was
+    /// absent or unparseable (see [`parse_http_date`]).
+    ///
+    /// # Examples
+    ///
+    /// See [`begin_login`]'s example.
     #[must_use]
     pub fn server_time(&self) -> Option<SystemTime> {
         parse_http_date(self.server_date.as_deref()?)
     }
 
+    /// For a Steam login, the SE account id the top page reported the ticket is linked to. `None`
+    /// for a standard login.
+    ///
+    /// # Examples
+    ///
+    /// See [`begin_login`]'s example.
     #[must_use]
     pub fn steam_linked_id(&self) -> Option<&str> {
         self.steam_linked_id.as_deref()
     }
 
+    /// Submit `creds`, completing the login.
+    ///
+    /// For a Steam login, `creds.sqexid` is checked against
+    /// [`steam_linked_id`](LoginFlow::steam_linked_id) (case-insensitively) before submission: the
+    /// ticket already decides which SE account the login lands on, so the flow submits the linked
+    /// id rather than trusting a mismatched one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::SteamWrongAccount`] if `creds.sqexid` names a different account than
+    /// the one the Steam ticket is linked to. Returns [`ProtoError::Transport`] if the request
+    /// could not be sent. Returns [`ProtoError::OauthFailed`] if SE rejects the credentials.
+    /// Returns [`ProtoError::LaunchParamsUnparseable`] if SE reports success but its callback's
+    /// parameter list could not be read. Returns [`ProtoError::InvalidResponse`] for any other
+    /// non-`200` status.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    /// #     let mut fut = std::pin::pin!(fut);
+    /// #     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    /// #     loop {
+    /// #         if let std::task::Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+    /// #             return val;
+    /// #         }
+    /// #     }
+    /// # }
+    /// use std::sync::atomic::{AtomicU32, Ordering};
+    ///
+    /// use sqex_proto::{
+    ///     ClientContext, ComputerId, Credentials, LauncherTime, LoginKind, OauthContext,
+    ///     ProtoRequest, ProtoResponse, Transport, TransportError, begin_login,
+    /// };
+    ///
+    /// // A scripted transport: the top page on the first call, the success callback on the second.
+    /// struct ScriptedLogin(AtomicU32);
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Transport for ScriptedLogin {
+    ///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+    ///         let body = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+    ///             r#"<input type="hidden" name="_STORED_" value="opaqueblob">"#.to_owned()
+    ///         } else {
+    ///             "window.external.user(\"login=auth,ok,sid,abc123,terms,1,region,2,x,x,\
+    ///              playable,1,x,x,maxex,3\")"
+    ///                 .to_owned()
+    ///         };
+    ///         Ok(ProtoResponse::new(200, body.into_bytes()))
+    ///     }
+    /// }
+    ///
+    /// let transport = ScriptedLogin(AtomicU32::new(0));
+    /// let id = ComputerId::from_facts("host", "user", "os", 4);
+    /// let context = OauthContext {
+    ///     client: ClientContext {
+    ///         computer_id: &id,
+    ///         language: "en-us",
+    ///         accept_language: "en-us,en;q=0.9",
+    ///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+    ///     },
+    ///     lng: "en",
+    ///     region: 3,
+    /// };
+    /// let now = LauncherTime::from_parts(2024, 1, 2, 3, 47, 0);
+    /// let kind = LoginKind::Standard { free_trial: false };
+    ///
+    /// let flow = block_on(begin_login(&transport, &context, &now, kind)).unwrap();
+    /// let creds = Credentials {
+    ///     sqexid: "player1",
+    ///     password: "hunter2",
+    ///     otp: None,
+    /// };
+    /// let authenticated = block_on(flow.submit(creds)).unwrap();
+    /// assert_eq!(authenticated.session_id().expose(), "abc123");
+    /// assert_eq!(authenticated.region, 2);
+    /// assert_eq!(authenticated.max_expansion, 3);
+    /// assert!(authenticated.playable);
+    /// assert!(authenticated.terms_accepted);
+    /// ```
     pub async fn submit(&self, creds: Credentials<'_>) -> Result<Authenticated, ProtoError> {
         let otp = creds.otp.unwrap_or("");
         let sqexid = self.submitted_username(creds.sqexid)?;
@@ -293,6 +487,63 @@ impl LoginFlow<'_> {
     }
 }
 
+/// Fetch the login top page, starting a [`LoginFlow`] of `kind`.
+///
+/// # Errors
+///
+/// Returns [`ProtoError::Transport`] if the request could not be sent. Returns
+/// [`ProtoError::SteamLinkNeeded`] if a Steam ticket has no SE account linked to it. Returns
+/// [`ProtoError::StoredNotFound`] if the page carries no `_STORED_` blob to echo back on
+/// submission. Returns [`ProtoError::InvalidResponse`] for a non-`200` status, or, for a Steam
+/// login, if the page does not report the linked account id.
+///
+/// # Examples
+///
+/// ```
+/// # fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+/// #     let mut fut = std::pin::pin!(fut);
+/// #     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+/// #     loop {
+/// #         if let std::task::Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+/// #             return val;
+/// #         }
+/// #     }
+/// # }
+/// use sqex_proto::{
+///     ClientContext, ComputerId, LauncherTime, LoginKind, OauthContext, ProtoRequest,
+///     ProtoResponse, Transport, TransportError, begin_login,
+/// };
+///
+/// struct TopPage;
+///
+/// #[async_trait::async_trait]
+/// impl Transport for TopPage {
+///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+///         let body = r#"<input type="hidden" name="_STORED_" value="opaqueblob">"#;
+///         Ok(ProtoResponse::new(200, body.as_bytes().to_vec())
+///             .with_header(http::header::DATE, "Thu, 01 Jan 2026 00:00:00 GMT".parse().unwrap()))
+///     }
+/// }
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = OauthContext {
+///     client: ClientContext {
+///         computer_id: &id,
+///         language: "en-us",
+///         accept_language: "en-us,en;q=0.9",
+///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     },
+///     lng: "en",
+///     region: 3,
+/// };
+/// let now = LauncherTime::from_parts(2024, 1, 2, 3, 47, 0);
+/// let kind = LoginKind::Standard { free_trial: false };
+///
+/// let flow = block_on(begin_login(&TopPage, &context, &now, kind)).unwrap();
+/// assert_eq!(flow.server_date(), Some("Thu, 01 Jan 2026 00:00:00 GMT"));
+/// assert!(flow.server_time().is_some());
+/// assert_eq!(flow.steam_linked_id(), None);
+/// ```
 pub async fn begin_login<'t>(
     transport: &'t dyn Transport,
     context: &OauthContext<'_>,

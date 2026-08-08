@@ -1,9 +1,12 @@
-// The OAuth page scanners. Hand-written, anchored scanners read the SE login pages: two lift attribute
-// values out of the top page (the opaque _STORED_ blob, and on a Steam login the linked account id),
-// the third reads the launchParams list out of the success callback. All see hostile input over the
-// wire, so they follow the patchlist parser's discipline: fixed ASCII anchors, bounded search windows,
-// length-capped captures, and no panics on any byte sequence. Their errors carry a count or a
-// length-capped page excerpt, never the submitted secrets or the session id.
+//! The OAuth page scanners.
+//!
+//! Hand-written, anchored scanners read the SE login pages: two lift attribute values out of the
+//! top page ([`scrape_stored`]'s opaque `_STORED_` blob, and on a Steam login the linked account
+//! id), the third ([`parse_launch_params`]) reads the launch parameter list out of the success
+//! callback. All see hostile input over the wire, so they follow the patchlist parser's discipline:
+//! fixed ASCII anchors, bounded search windows, length-capped captures, and no panics on any byte
+//! sequence. Their errors carry a count or a length-capped page excerpt, never the submitted
+//! secrets or the session id.
 
 use zeroize::Zeroizing;
 
@@ -26,15 +29,23 @@ const RESTARTUP_MARKER: &str = "window.external.user(\"restartup\")";
 // failure message. A real callback runs under 150 bytes.
 const MAX_CALLBACK: usize = 1024;
 
-// The launch parameters SE returns on a successful login. `session_id` authorizes the next stage, so
-// this type deliberately implements no Debug/Display/Serialize: it is a transient parse result,
-// consumed immediately into the redacted session-id type, and never logged. The id is held zeroizing
-// so it scrubs on drop.
+/// The launch parameters SE returns on a successful login, read out of the success callback by
+/// [`parse_launch_params`].
+///
+/// `session_id` authorizes the next stage (session registration), so this type deliberately
+/// implements no `Debug`/`Display`/`Serialize`: it is meant to be a transient parse result,
+/// consumed immediately into the redacted session-id type and never logged. The id is held
+/// zeroizing so it scrubs on drop.
 pub struct LaunchParams {
+    /// The session id authorizing the next stage (session registration).
     pub session_id: Zeroizing<String>,
+    /// Whether the account has accepted the current terms of service.
     pub terms_accepted: bool,
+    /// The account's region.
     pub region: u16,
+    /// Whether the account is playable (has an active subscription or trial).
     pub playable: bool,
+    /// The highest expansion index the account owns.
     pub max_expansion: u8,
 }
 
@@ -49,6 +60,26 @@ pub(crate) enum CallbackReject<'a> {
     Unparseable { got_fields: usize },
 }
 
+/// Lift the `_STORED_` hidden-input value out of the login top page's HTML.
+///
+/// `secrets` is scrubbed into the error excerpt when the blob cannot be found, so a Steam login can
+/// pass its bearer ticket text and keep it out of the reported page fragment.
+///
+/// # Errors
+///
+/// Returns [`ProtoError::StoredNotFound`] if `html` carries no `_STORED_` attribute, or the
+/// attribute's value is empty.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::scrape_stored;
+///
+/// let html = r#"<input type="hidden" name="_STORED_" value="opaque-blob">"#;
+/// assert_eq!(scrape_stored(html, &[]).unwrap(), "opaque-blob");
+///
+/// assert!(scrape_stored("<html></html>", &[]).is_err());
+/// ```
 pub fn scrape_stored<'h>(html: &'h str, secrets: &[&str]) -> Result<&'h str, ProtoError> {
     attribute_value(html, STORED_ANCHOR, MAX_STORED)
         .filter(|stored| !stored.is_empty())
@@ -128,13 +159,40 @@ fn by_key<'a>(fields: &[&'a str], key: &str) -> KeyLookup<'a> {
         .map_or(KeyLookup::Absent, |value| KeyLookup::Found(value))
 }
 
-// The list is `key,value,key,value,...`; XL reads the values positionally (idx 1 sid, 3 terms, 5
-// region, 9 playable, 13 maxex), never looking at the key names. This reads each field in a fixed
-// precedence: (1) the documented position, when the key sits beside it (the canonical shape, and the
-// same bytes XL reads); (2) otherwise the pair carrying that key, wherever it moved to, so a reorder
-// or a trimmed field still parses; (3) otherwise, with the key nowhere in the list, the documented
-// position anyway, so a renamed key still parses. A key appearing more than once away from its
-// documented position resolves to no value at all, rather than a first-match-wins guess.
+/// Parse the comma-separated `key,value,key,value,...` launch parameter list from a login success
+/// callback.
+///
+/// The reference launcher reads the values positionally (index 1 `sid`, 3 `terms`, 5 `region`, 9
+/// `playable`, 13 `maxex`) and never looks at the key names. This reads each field in a fixed
+/// precedence instead: (1) the documented position, when the key sits beside it (the canonical
+/// shape, and the same bytes the reference reads); (2) otherwise the pair carrying that key,
+/// wherever it moved to, so a reorder or a trimmed field still parses; (3) otherwise, with the key
+/// nowhere in the list, the documented position anyway, so a renamed key still parses. A key
+/// appearing more than once away from its documented position resolves to no value at all, rather
+/// than a first-match-wins guess.
+///
+/// # Errors
+///
+/// Returns `Err` with the number of fields `params` actually split into if the session id is
+/// absent or empty, or if the terms, region, playable, or max-expansion field is absent or does
+/// not parse (region and max-expansion are read as integers).
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::parse_launch_params;
+///
+/// let params = "sid,abc123,terms,1,region,2,unused,unused_value,playable,1,unused2,unused2_value,maxex,3";
+/// let parsed = parse_launch_params(params).unwrap();
+/// assert_eq!(parsed.session_id.as_str(), "abc123");
+/// assert!(parsed.terms_accepted);
+/// assert_eq!(parsed.region, 2);
+/// assert!(parsed.playable);
+/// assert_eq!(parsed.max_expansion, 3);
+///
+/// // Too few fields: the error carries the count actually seen.
+/// assert_eq!(parse_launch_params("sid,abc123").err(), Some(2));
+/// ```
 pub fn parse_launch_params(params: &str) -> Result<LaunchParams, usize> {
     let fields: Vec<&str> = params.split(',').collect();
     let got = fields.len();

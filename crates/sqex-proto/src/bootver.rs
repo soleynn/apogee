@@ -1,5 +1,9 @@
-// The unauthenticated boot-version check. This is the one endpoint CI is allowed to call live, to
-// keep the patchlist parser honest against genuinely-current SE output.
+//! The unauthenticated boot-version check.
+//!
+//! A plain-HTTP GET asking whether the boot component is current. A current boot answers `204 No
+//! Content`; a pending one a `200` whose body is a boot patchlist naming the patches in order. This
+//! is the one endpoint CI is allowed to call live, to keep the patchlist parser honest against
+//! genuinely-current SE output.
 
 use http::{HeaderName, HeaderValue, Method};
 
@@ -12,6 +16,51 @@ use crate::transport::{ProtoRequest, Transport, TransportError, parse_base};
 const BOOT_VERSION_BASE: &str = "http://patch-bootver.ffxiv.com/http/win32/ffxivneo_release_boot";
 const BOOT_VERSION_HOST: &str = "patch-bootver.ffxiv.com";
 
+/// Ask whether the boot component named by `boot_version` is current.
+///
+/// Returns the pending boot patches in list order, or an empty vector when boot is current. Current
+/// is signaled two ways, both observed against the live service: a `204 No Content` with no body
+/// (the same shape [`register_session`](crate::register_session) documents for a current game), or
+/// a `200` whose body is empty or whitespace-only, including one stamped with a leading UTF-8 BOM
+/// (stripped before both the emptiness check and the parse, matching [`decode_ver`](crate::decode_ver)'s
+/// handling of the `.ver` files SE stamps the same way — a BOM is not itself whitespace, so an
+/// un-stripped one would fall through to the parser and report a patch that does not exist).
+///
+/// # Errors
+///
+/// Returns [`ProtoError::Transport`] if the request could not be sent, [`ProtoError::InvalidResponse`]
+/// if SE answers with a status other than `200` or `204`, or [`ProtoError::PatchListParse`] if a
+/// `200` body is non-empty but not a well-formed patchlist.
+///
+/// # Examples
+///
+/// ```
+/// # fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+/// #     let mut fut = std::pin::pin!(fut);
+/// #     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+/// #     loop {
+/// #         if let std::task::Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+/// #             return val;
+/// #         }
+/// #     }
+/// # }
+/// use sqex_proto::{
+///     LauncherTime, ProtoRequest, ProtoResponse, Transport, TransportError, check_boot_version,
+/// };
+///
+/// struct CurrentBoot;
+///
+/// #[async_trait::async_trait]
+/// impl Transport for CurrentBoot {
+///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+///         Ok(ProtoResponse::new(204, Vec::new()))
+///     }
+/// }
+///
+/// let now = LauncherTime::from_parts(2024, 1, 2, 3, 47, 0);
+/// let patches = block_on(check_boot_version(&CurrentBoot, "2024.01.01.0000.0000", &now)).unwrap();
+/// assert!(patches.is_empty());
+/// ```
 pub async fn check_boot_version(
     transport: &dyn Transport,
     boot_version: &str,
@@ -20,9 +69,6 @@ pub async fn check_boot_version(
     let request = build_request(boot_version, now)?;
     let response = transport.execute(request).await?;
 
-    // A current boot answers `204 No Content` with no body, which is an ordinary disposition rather
-    // than a fault, so it is matched before the 200-only gate below (observed against the live
-    // service; the same shape `register_session` documents for a current game).
     if response.status == 204 {
         return Ok(Vec::new());
     }
@@ -37,10 +83,6 @@ pub async fn check_boot_version(
         ));
     }
 
-    // `str::trim` follows `char::is_whitespace`, which does not classify U+FEFF, so a body carrying a
-    // byte-order mark reads as non-empty and falls through to the parser: a BOM-stamped current boot
-    // would report a patch that does not exist. Strip one leading mark before both the emptiness gate
-    // and the parse, the way `decode_ver` does for the version files SE stamps the same way.
     let decoded = String::from_utf8_lossy(&response.body);
     let body = decoded.strip_prefix('\u{feff}').unwrap_or(&decoded);
     if body.trim().is_empty() {

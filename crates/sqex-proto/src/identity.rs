@@ -1,11 +1,15 @@
-// Client identities: the user-agent strings, the machine computer-id, and the frontier referer. SE
-// fingerprints these, so each is reproduced exactly. The launcher user agent embeds a computer-id
-// whose derivation (SHA1 over the UTF-16LE encoding of caller-supplied facts, with a checksum byte
-// prepended) is an easy thing to port wrong, so it is golden-tested (Launcher.cs:657-673). The facts
-// are caller-supplied rather than read here on purpose: apogee-core's production caller deliberately
-// feeds it a random per-install id instead of the host's real machine name and username, so the value
-// carries no link back to the host. Do not wire this to real host facts without re-checking that
-// contract in apogee-core.
+//! Client identities: the user-agent strings, the machine computer-id, and the frontier referer.
+//!
+//! SE fingerprints these, so each is reproduced exactly. The launcher user agent
+//! ([`launcher_user_agent`]) embeds a [`ComputerId`] whose derivation (SHA1 over the UTF-16LE
+//! encoding of caller-supplied facts, with a checksum byte prepended) is an easy thing to port
+//! wrong, so it is golden-tested against `Launcher.cs:657-673`.
+//!
+//! The facts a `ComputerId` is derived from are caller-supplied rather than read from the host by
+//! this crate on purpose: `apogee-core`'s production caller deliberately feeds it a random
+//! per-install id instead of the host's real machine name and username, so the value on the wire
+//! carries no link back to the host. **Do not wire this to real host facts without re-checking that
+//! contract in `apogee-core`.**
 
 use std::fmt;
 
@@ -14,6 +18,18 @@ use sha1::{Digest, Sha1};
 
 use crate::time::LauncherTime;
 
+/// The patcher user agent, sent on the boot- and game-version checks.
+///
+/// SE also defines a `-MAC` variant for the Mac service; a Linux-first launcher presents as the
+/// Windows client.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::PATCHER_USER_AGENT;
+///
+/// assert_eq!(PATCHER_USER_AGENT, "FFXIV PATCH CLIENT");
+/// ```
 pub const PATCHER_USER_AGENT: &str = "FFXIV PATCH CLIENT";
 
 const COMPUTER_ID_LEN: usize = 5;
@@ -24,10 +40,41 @@ const REFERER_LANG: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
+/// A machine identifier SE's launcher sends on frontier and OAuth requests, displayed as ten
+/// lowercase hex characters (see the [`Display`](fmt::Display) impl).
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::ComputerId;
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// assert_eq!(id.to_string().len(), 10);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComputerId([u8; COMPUTER_ID_LEN]);
 
 impl ComputerId {
+    /// Derive a computer-id from `machine_name`, `user_name`, `os_version`, and
+    /// `processor_count`: SHA1 over the UTF-16LE encoding of their concatenation, with the
+    /// digest's first four bytes at positions 1-4 and a checksum (the two's-complement negation of
+    /// their sum) at position 0.
+    ///
+    /// Pure and general on purpose, matching `Launcher.cs:657-673` exactly: it does not choose what
+    /// the facts are, so a caller that wants the value to carry no link back to the host (as
+    /// `apogee-core`'s production caller does, by feeding it a random per-install id as
+    /// `machine_name` and leaving the other three fields empty) is free to do so, and a caller that
+    /// wires it to real host facts must accept that fingerprinting risk knowingly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqex_proto::ComputerId;
+    ///
+    /// let id = ComputerId::from_facts("host", "user", "os", 4);
+    /// let other = ComputerId::from_facts("other-host", "user", "os", 4);
+    /// assert_ne!(id, other);
+    /// ```
     #[must_use]
     pub fn from_facts(
         machine_name: &str,
@@ -58,16 +105,48 @@ impl fmt::Display for ComputerId {
     }
 }
 
+/// The launcher user agent for OAuth pages and frontier requests, embedding `computer_id`.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::{ComputerId, launcher_user_agent};
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// assert!(launcher_user_agent(&id).starts_with("SQEXAuthor/2.0.0(Windows 6.2; ja-jp; "));
+/// ```
 #[must_use]
 pub fn launcher_user_agent(computer_id: &ComputerId) -> String {
     format!("SQEXAuthor/2.0.0(Windows 6.2; ja-jp; {computer_id})")
 }
 
+/// Fill a frontier referer `template`: `{lang}` becomes `language` with dashes turned to
+/// underscores (`en-us` -> `en_us`) and percent-encoded, `{time}` becomes `timestamp` verbatim (it
+/// needs no escaping: it comes from [`LauncherTime`]'s renderers, whose output is digits and dashes
+/// by construction, unlike `language`, which is a free-form locale string).
+///
+/// The template is scanned once, left to right, and substituted text is never re-examined: a
+/// language code that itself contains `{time}` fills the language slot literally instead of being
+/// overwritten by the timestamp.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::frontier_referer;
+///
+/// let referer = frontier_referer(
+///     "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     "en-us",
+///     "2024-01-02-03-40",
+/// );
+/// assert_eq!(
+///     referer,
+///     "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us&time=2024-01-02-03-40"
+/// );
+/// ```
 #[must_use]
 pub fn frontier_referer(template: &str, language: &str, timestamp: &str) -> String {
     let language = language.replace('-', "_");
-    // The timestamp needs no escaping: it comes from `LauncherTime`'s renderers, whose output is digits
-    // and dashes by construction. Unlike `language` it is not a free-form locale string.
     fill_template(
         template,
         &utf8_percent_encode(&language, REFERER_LANG).to_string(),
@@ -96,10 +175,34 @@ fn fill_template(template: &str, language: &str, timestamp: &str) -> String {
     out
 }
 
+/// The per-install, per-locale client values every launcher request carries.
+///
+/// Both [`FrontierContext`](crate::FrontierContext) and [`OauthContext`](crate::OauthContext) embed
+/// this so the shared user-agent and referer plumbing lives in one place.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::{ClientContext, ComputerId};
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = ClientContext {
+///     computer_id: &id,
+///     language: "en-us",
+///     accept_language: "en-us,en;q=0.9",
+///     referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+/// };
+/// assert_eq!(context.language, "en-us");
+/// ```
 pub struct ClientContext<'a> {
+    /// The launcher computer-id, embedded in the user agent.
     pub computer_id: &'a ComputerId,
+    /// The client language code (e.g. `en-us`), used for the referer and the gate-status query.
     pub language: &'a str,
+    /// The `Accept-Language` header value.
     pub accept_language: &'a str,
+    /// The referer URL template, with `{lang}` and `{time}` placeholders (see
+    /// [`frontier_referer`]).
     pub referer_template: &'a str,
 }
 

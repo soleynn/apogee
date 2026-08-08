@@ -1,76 +1,148 @@
+//! The protocol's error taxonomy.
+//!
+//! [`ProtoError`] is the single error type every fallible surface in this crate returns. Expected
+//! dispositions the UI narrates (no service, terms not yet accepted, a boot patch pending) are
+//! *values* in the relevant result types, not errors; the variants here are genuine protocol
+//! failures a caller cannot proceed past. Both [`Step`] and [`ProtoError`] are `#[non_exhaustive]`:
+//! new surfaces add new steps and, occasionally, new failure variants.
 
 use std::fmt;
 
 use crate::transport::{ProtoResponse, TransportError};
 use crate::version::{SanityKind, VersionRepo};
 
+/// The protocol step a [`ProtoError`] occurred in, carried for triage.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::Step;
+///
+/// assert_eq!(format!("{:?}", Step::Register), "Register");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Step {
+    /// The unauthenticated boot-version check.
     BootVersion,
+    /// The frontier gate-status fetch.
     GateStatus,
+    /// The frontier login-status fetch.
     LoginStatus,
+    /// The OAuth login top page.
     OauthTop,
+    /// The OAuth credential submission.
     OauthLogin,
+    /// The session-registration version report.
     Register,
+    /// The dormant [`gen_token`](crate::gen_token) patch-URL tokenization request.
     GenToken,
 }
 
+/// A protocol failure.
+///
+/// Every excerpt-carrying variant holds a redacted, length-capped slice of the response body
+/// rather than the response itself. An excerpt is attacker-influenced text that can reflect what
+/// the request put on the wire (a URL bearing the session id, a form bearing the credentials); the
+/// construction site scrubs what it knows about, but the scrub is verbatim and best-effort, so
+/// nothing downstream should inherit an excerpt by accident and callers should surface one
+/// sparingly (a log line, not a user-facing message verbatim). `Debug` is hand-written rather than
+/// derived for exactly this reason: every excerpt field prints only its length under `{:?}`, so a
+/// `{err:?}` in a panic message or a logger cannot leak one by accident. `Display` never carries an
+/// excerpt; a caller that means to present one reads the field directly.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::{ProtoError, Step};
+///
+/// let err = ProtoError::LaunchParamsUnparseable { got_fields: 3 };
+/// assert_eq!(err.to_string(), "launchParams unparseable (3 fields)");
+///
+/// // Debug never leaks a triage-only field like an excerpt.
+/// let leaky = ProtoError::OauthFailed {
+///     excerpt: "SESSIONSECRET".to_owned(),
+/// };
+/// assert!(!format!("{leaky:?}").contains("SESSIONSECRET"));
+/// # let _ = Step::Register;
+/// ```
 #[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum ProtoError {
+    /// The transport could not complete the request.
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
 
+    /// SE returned a response the step could not accept: an unexpected status or an unparseable
+    /// body.
     #[error("unexpected response at {step:?}: status {status}")]
     InvalidResponse {
+        /// Which protocol step the response was for.
         step: Step,
+        /// The HTTP status SE answered with.
         status: u16,
+        /// A redacted, length-capped slice of the response body.
         excerpt: String,
     },
 
+    /// A patchlist line could not be parsed.
     #[error("patchlist parse error at line {line}: {reason}")]
     PatchListParse {
+        /// The 1-based line number of the offending entry.
         line: u32,
+        /// A stable, static tag identifying what about the line was wrong, never the line's own
+        /// bytes.
         reason: &'static str,
     },
 
+    /// The OAuth submission did not return the success callback.
     #[error("oauth login rejected")]
     OauthFailed {
+        /// A scrubbed, length-capped slice of SE's rejection message.
         excerpt: String,
     },
 
+    /// The top page asked the client to relink a Steam account
+    /// (`window.external.user("restartup")`). Only reachable from the Steam login variant; a
+    /// standard login never returns this.
     #[error("steam account not linked")]
     SteamLinkNeeded,
 
+    /// The Steam ticket submitted is linked to a different SE account than the one offered as
+    /// [`Credentials`](crate::Credentials).
     #[error("steam ticket is linked to a different account")]
     SteamWrongAccount {
+        /// A masked hint of the account the ticket is actually linked to (e.g. `a***z`), not the
+        /// full id.
         expected_hint: String,
     },
 
+    /// The login top page carried no `_STORED_` blob to echo back on submission.
     #[error("_STORED_ not found on the login top page")]
     StoredNotFound {
+        /// A redacted, length-capped slice of the page that should have carried `_STORED_`.
         excerpt: String,
     },
 
+    /// The login success callback's `launchParams` list was too short or malformed to read the
+    /// fields a login needs.
     #[error("launchParams unparseable ({got_fields} fields)")]
     LaunchParamsUnparseable {
+        /// How many comma-separated fields the callback actually carried.
         got_fields: usize,
     },
 
+    /// A version file failed the sanity gate before session registration, so no request was made.
+    /// The install is corrupt but repairable.
     #[error("version file for {repo:?} failed the sanity check: {kind:?}")]
     InvalidVersionFiles {
+        /// Which repository's version file (or boot EXE backup) failed.
         repo: VersionRepo,
+        /// What about it failed.
         kind: SanityKind,
     },
 }
 
-// Excerpts are kept out of Debug, which is what a logger, a panic message, or a `{err:?}` in a
-// caller reaches for. Every excerpt is attacker-influenced text that can reflect what the request put
-// on the wire (a URL bearing the session id, a form bearing the credentials); the construction sites
-// scrub what they know about, but scrubbing is verbatim and best-effort, so nothing downstream should
-// inherit an excerpt by accident. Display never carries one, and a shell that means to present one
-// reads the field.
 impl fmt::Debug for ProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

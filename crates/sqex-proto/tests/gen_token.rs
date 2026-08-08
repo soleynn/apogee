@@ -1,4 +1,3 @@
-
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use http::{HeaderName, HeaderValue};

@@ -1,4 +1,3 @@
-
 use proptest::prelude::*;
 
 use super::scan::{

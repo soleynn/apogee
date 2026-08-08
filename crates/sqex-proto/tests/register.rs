@@ -1,4 +1,3 @@
-
 use apogee_test_support::golden::assert_golden_bytes;
 use apogee_test_support::rt::block_on;
 use apogee_test_support::sandbox::build_game_install;
