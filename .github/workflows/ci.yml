@@ -202,6 +202,9 @@ jobs:
   # actually crosses the socket. The classification is unit-tested hermetically in test-linux, but
   # only a real provider produces the errors it classifies, and only a real socket shows whether the
   # secret crossed it in the clear.
+  #
+  # Required by the branch ruleset, unlike the other store jobs: this one reads no secret of the
+  # repository's and installs its provider from apt, so gating merges on it costs nothing.
   test-linux-secret-service:
     name: test-linux-secret-service
     runs-on: ubuntu-latest
