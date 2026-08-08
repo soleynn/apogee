@@ -17,8 +17,8 @@ use apogee_core::{
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
     KdfCost, ListenerConsent, ListenerSettings, ListenerSources, Notice, OtpDelivery, OtpSource,
     Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretsError,
-    SetupEvent, SyncChoice, Trigger, Uuid,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
+    SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -619,6 +619,30 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     }
 }
 
+/// What a sweep of an account's secrets left in the store, when it left something. `None` is a clean
+/// sweep, which each caller words for itself.
+///
+/// The two lines say different things on purpose. One reports a sweep that reached nothing, where
+/// there may or may not be a secret somewhere the launcher could not see; the other reports a store
+/// that answered and deleted nothing, where there certainly is one and only the platform's own
+/// keyring tool can remove it. Printing the first line for the second case tells a user their
+/// password is probably gone when it is definitely not.
+fn secrets_left_behind(sweep: SecretSweep) -> Option<&'static str> {
+    match sweep {
+        SecretSweep::Swept => None,
+        SecretSweep::Unanswered => {
+            Some("no secret store answered, so anything it holds for that account is still there")
+        }
+        SecretSweep::LeftBehind => Some(concat!(
+            "the credential store holds more than one item matching that account, so it deleted ",
+            "none of them and the secret is still in it; remove it with the system keyring tool",
+        )),
+        // The set is `#[non_exhaustive]`, and a condition this build cannot name must not be
+        // rendered as the clean sweep it is not.
+        _ => Some("the sweep did not finish, so the account's secrets may still be stored"),
+    }
+}
+
 /// The secrets the launcher keeps, and where they come from.
 ///
 /// There is no verb that prints one. A saved secret is read inside the login flow and nowhere else,
@@ -666,10 +690,9 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
         }
         SecretsCommand::Forget(args) => {
             let account = resolve_profile(core, &args.profile)?.account;
-            if core.forget_secrets(account)? {
-                println!("forgot every secret stored for account {account}");
-            } else {
-                println!("no secret store answered, so nothing was deleted for account {account}");
+            match secrets_left_behind(core.forget_secrets(account)?) {
+                None => println!("forgot every secret stored for account {account}"),
+                Some(left) => println!("{left}"),
             }
             Ok(())
         }
@@ -678,8 +701,10 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             // Sweep before recording the choice. A user who asks the launcher to stop keeping a
             // password means the one it already has, and a run that saved the flag and then failed
             // to sweep would report success over a password still in the store.
-            if args.on && !core.forget_secrets(id)? {
-                println!("no secret store answered, so nothing already saved was deleted");
+            if args.on
+                && let Some(left) = secrets_left_behind(core.forget_secrets(id)?)
+            {
+                println!("{left}");
             }
             // Read after the sweep. A sweep rewrites the record itself (an account deriving its own
             // codes goes back to being asked for one), so a copy taken beforehand would put that
@@ -1579,12 +1604,13 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
             println!("removed profile {}", profile.id);
             if let Some(account) = removal.account_removed {
                 println!("removed account {account}");
-                if removal.secrets_swept {
-                    println!("deleted every secret stored for it");
-                } else {
-                    println!(
-                        "no secret store answered, so anything it holds for that account is still there"
-                    );
+            }
+            // `Some` exactly when an account went, so this says nothing about a profile whose
+            // account another profile still signs in as.
+            if let Some(sweep) = removal.secret_sweep {
+                match secrets_left_behind(sweep) {
+                    None => println!("deleted every secret stored for it"),
+                    Some(left) => println!("{left}"),
                 }
             }
             Ok(())
