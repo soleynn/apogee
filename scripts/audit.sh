@@ -218,6 +218,30 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios; do
   fi
 done
 
+# 9a. The same trap one layer up, in this repository's own code. `apogee-secrets/mock` compiles an
+#    in-process map that answers every call, and it exists for other crates' tests. Two dev-dependency
+#    edges turn it on, and a dev edge is invisible to a release; but Cargo unifies features across
+#    everything one invocation builds, so any `--workspace --all-targets` run resolves a single
+#    apogee-secrets lib carrying `mock` and links the shipping binary against it. That is what every
+#    required test job already builds, which means the only thing keeping the fake store out of a
+#    release is that no *normal* edge selects the feature. Nothing else says so, and a dependency line
+#    is one edit away from saying otherwise, so it is asserted here off the resolver.
+#
+#    `cargo tree -p` resolves as if building that package alone, which is the shipping selection; the
+#    dev edges elsewhere in the workspace do not fold in and cannot produce a false positive. `-e
+#    normal` drops the dev edges the package declares itself for the same reason. Features are printed
+#    ahead of `{p}` because they are a comma-separated list with no spaces, so reading them from the
+#    first field survives a checkout path that has one.
+selection=$(cargo tree -p apogee-cli -e normal --prefix none -f '{f} {p}' \
+  | awk '$2 == "apogee-secrets" { print $1 }' | sort -u)
+if tr ',' '\n' <<<"$selection" | grep -qx mock; then
+  report "the shipping launcher links the in-memory test secret store" \
+    "$(printf '%s\n%s\n%s' \
+      'a normal dependency edge selects apogee-secrets/mock, so a release keeps every' \
+      'secret in a process-lifetime map and still reports a healthy store.' \
+      "apogee-cli resolves apogee-secrets with: $selection")"
+fi
+
 # 10. Unsafe code has exactly one home. The workspace lint is `deny` rather than `forbid` so that the
 #    Windows arm of the fallback secret store can set an owner-only access list through advapi32,
 #    which the standard library has no API for. `deny` is overridable where `forbid` was not, and the
