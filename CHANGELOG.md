@@ -78,6 +78,9 @@ is tagged with its change type. Versioning aims to follow
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
+
+### workspace
+- Unblock the two permanent deletion dead ends in the secrets lifecycle (#153) _(fixed)_
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
