@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use apogee_secrets::{BackendState, OsKeyring, Secret, SecretKind, SecretStore};
+use apogee_secrets::{BackendState, OsKeyring, Secret, SecretKind, SecretStore, SecretsError};
 use secret_service::EncryptionType;
 use secret_service::blocking::SecretService;
 use uuid::Uuid;
@@ -78,6 +78,40 @@ fn the_secret_reaches_the_bus_and_not_a_process_local_store() {
 
     store
         .delete(account, SecretKind::TotpSecret)
+        .expect("delete the secret");
+}
+
+/// A value with no bytes in it is refused here too.
+///
+/// The refusal is written into each backend's own `set` rather than wrapped around the seam, because
+/// a caller holds a `&dyn SecretStore` and would walk straight past a wrapper. That is what makes it
+/// three separate rules to keep rather than one, and this is the arm a real provider covers: an
+/// empty item goes onto the bus and comes back off it perfectly well, so nothing downstream notices
+/// that a front end has rendered the account as saved and stopped asking.
+#[test]
+fn a_secret_with_no_bytes_in_it_is_refused_rather_than_saved() {
+    let store = store();
+    let account = account();
+
+    let err = store
+        .set(account, SecretKind::Password, Secret::new(Vec::new()))
+        .expect_err("an empty value must be refused");
+    assert!(matches!(err, SecretsError::Empty), "{err:?}");
+
+    assert!(
+        store
+            .get(account, SecretKind::Password)
+            .expect("read after the refused write")
+            .is_none(),
+        "the refused write reached the store anyway"
+    );
+
+    // One byte is a bad password and a real one. Which is not this crate's call to make.
+    store
+        .set(account, SecretKind::Password, Secret::new(b"x".to_vec()))
+        .expect("a one-byte secret is a secret");
+    store
+        .delete(account, SecretKind::Password)
         .expect("delete the secret");
 }
 
