@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use apogee_patcher::{PatchProgress, Repo};
 
-use super::{FlowContext, drive, language_id, launch_arguments, read_repo_ver};
+use super::{FlowContext, client_context, drive, language_id, launch_arguments, read_repo_ver};
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
 use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
@@ -1982,6 +1982,22 @@ fn language_id_maps_client_languages() {
         1,
         "an unknown language defaults to English"
     );
+}
+
+#[test]
+fn client_context_pins_the_reference_launchers_seed_zero_accept_language() {
+    // `ApiHelpers.GenerateAcceptLanguage()` (ApiHelpers.cs:14-41) is unrelated to the client's
+    // configured game language; its one call site (App.xaml.cs:135) always draws seed 0, and
+    // .NET's seeded `Random(int)` is stable across .NET versions, so every fresh XIVLauncher
+    // install lands on the same value: the bare `"ja"` entry from its `codes` pool.
+    let h = harness(false);
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+    assert_eq!(client_context(&ctx).accept_language, "ja");
 }
 
 #[tokio::test]
