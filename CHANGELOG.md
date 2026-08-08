@@ -42,6 +42,7 @@ is tagged with its change type. Versioning aims to follow
 - Give the Windows secret store an owner-only access list (#120) _(fixed)_
 - Pin five hardening fixes that reverted green (#154) _(testing)_
 - Fence the Io payload on Debug and the source chain, not just Display (#155) _(fixed)_
+- Stop the store directory repair following a symlink (#156) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
