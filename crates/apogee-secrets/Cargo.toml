@@ -65,6 +65,14 @@ encrypted-session = ["keyring/crypto-rust"]
 testing = []
 # The in-memory store, for other crates' tests. Deliberately separate from `testing`: a dev-dependency
 # that turned that one on would drag the live-bus tests into every workspace run.
+#
+# Reachable only through dev-dependency edges, and it has to stay that way. Cargo unifies features
+# across everything one invocation builds, so a `--workspace --all-targets` run already resolves a
+# single apogee-secrets lib with `mock` on and links the launcher binary against it. What keeps the
+# fake store out of a release is not that dev edges are special, it is that no normal edge anywhere
+# selects the feature. Adding one to a shipping crate substitutes a process-lifetime map for the
+# user's keyring, with a probe that still reports the store healthy. `scripts/audit.sh` asserts the
+# absence off the resolved graph.
 mock = []
 # The fallback store's two decoders, reachable from the fuzz workspace and from nothing else. Off in
 # every shipping build, so a parser entry point that takes hostile bytes is never public API.
