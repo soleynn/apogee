@@ -1,11 +1,11 @@
-//! OAuth login integration tests: the top-page and submit requests are asserted byte-for-byte through
-//! the fixture transport (the drift alarm), the flow's dispositions are checked, and the failure paths
-//! are proven to keep the submitted credentials out of the error excerpt.
-//!
-//! The request-byte goldens use synthetic bodies (the request is ours regardless). The parser is also
-//! run against committed fixtures under `fixtures/oauth_*.html`: sanitized captures of a real login
-//! (credentials removed, the session id and `_STORED_` blob replaced with same-shape fakes), which pin
-//! the scanners against genuine Square Enix page markup.
+// OAuth login integration tests: the top-page and submit requests are asserted byte-for-byte through
+// the fixture transport (the drift alarm), the flow's dispositions are checked, and the failure paths
+// are proven to keep the submitted credentials out of the error excerpt.
+//
+// The request-byte goldens use synthetic bodies (the request is ours regardless). The parser is also
+// run against committed fixtures under fixtures/oauth_*.html: sanitized captures of a real login
+// (credentials removed, the session id and _STORED_ blob replaced with same-shape fakes), which pin
+// the scanners against genuine Square Enix page markup.
 
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
@@ -24,13 +24,8 @@ const UA: &str = "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)";
 const TOP_URL: &str = "https://ffxiv-login.square-enix.com/oauth/ffxivarr/login/top\
     ?lng=en&rgn=3&isft=0&cssmode=1&isnew=1&launchver=3";
 const SERVER_DATE: &str = "Wed, 09 Jul 2025 12:00:00 GMT";
-/// [`SERVER_DATE`] as the instant a consumer reads back off the page.
-///
-/// Written out rather than derived from the header above, so what pins the reader is a value worked
-/// out somewhere other than the code being tested.
 const SERVER_UNIX_SECS: u64 = 1_752_062_400;
 
-/// [`SERVER_DATE`] as an instant.
 fn server_instant() -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_secs(SERVER_UNIX_SECS)
 }
@@ -73,10 +68,8 @@ fn top_response(stored: &str) -> ProtoResponse {
         .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE))
 }
 
-/// The SE account the fixture Steam pages report the ticket is linked to.
 const LINKED_ID: &str = "linked-account";
 
-/// A Steam top page: the standard one plus the hidden input naming the linked account.
 fn steam_top_response(stored: &str, linked: &str) -> ProtoResponse {
     let body = format!(
         r#"<html><body><form><input class="item-input" name="sqexid" id="sqexid" type="text" value="">
@@ -87,32 +80,20 @@ fn steam_top_response(stored: &str, linked: &str) -> ProtoResponse {
         .with_header(http::header::DATE, HeaderValue::from_static(SERVER_DATE))
 }
 
-/// A ticket long enough to carry both characters the query must not escape: 204 raw bytes expand to a
-/// 416-byte block, which base64 pads (a `*`) and overruns the 300-character chunk (a `,`).
 fn long_ticket() -> Result<ObfuscatedTicket, CryptoError> {
     let raw: Vec<u8> = (0..204u32).map(|i| (i % 251) as u8).collect();
     ObfuscatedTicket::from_auth_ticket(&raw, ServerTime(1_700_000_000))
 }
 
-/// A secret-shaped string of exactly `len` characters. Cycling the alphabet rather than repeating one
-/// character means an arbitrary fragment of it (as [`assert_no_partial_leak`] checks for) is still
-/// recognizably a piece of *this* string, not a coincidental match against filler. Mirrors
-/// `error.rs`'s private `secret_of_len`, duplicated here because this is a separate integration-test
-/// binary and these end-to-end tests must drive the real public API, not call the redactor directly.
 fn secret_of_len(len: usize) -> String {
     (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
 }
 
-/// The shortest fragment of a secret this treats as a meaningful leak, not a coincidence. See
-/// `error.rs`'s `LEAK_FRAGMENT_LEN`: a flat cap rather than a fraction of the secret's length, because
-/// none of the three redaction bugs found across PRs #131/#135/#138 leaked a fixed proportion of the
-/// secret.
+// Mirrors error.rs's private LEAK_FRAGMENT_LEN: a flat cap rather than a fraction of the secret's
+// length, because none of the three redaction bugs found across PRs #131/#135/#138 leaked a fixed
+// proportion of the secret.
 const LEAK_FRAGMENT_LEN: usize = 16;
 
-/// Fails if a fragment of `secret` at least [`LEAK_FRAGMENT_LEN`] characters long (or the whole secret,
-/// if it is shorter than that) survives anywhere in `text`. `!text.contains(secret)` alone would miss a
-/// partial leak, where the excerpt holds neither the whole secret nor nothing of it but a long exact
-/// fragment.
 fn assert_no_partial_leak(text: &str, secret: &str) {
     let chars: Vec<char> = secret.chars().collect();
     let threshold = chars.len().clamp(1, LEAK_FRAGMENT_LEN);
@@ -197,13 +178,6 @@ fn a_standard_login_builds_both_fingerprinted_requests() {
     );
 }
 
-/// The two headers the reference launcher sends on this flow that were missing here.
-///
-/// Stated separately from the byte goldens above on purpose: a golden records what this crate emits,
-/// so it agreed with the code the whole time the headers were absent. This one records what the
-/// oracle emits (`Launcher.cs:475` for the top page, `:566-567` for the submit), which is the thing
-/// the goldens are supposed to be checked against. Header fidelity on the login path is bit-exact
-/// where SE plausibly sniffs, and a missing header is as visible as a wrong one.
 #[test]
 fn both_oauth_requests_keep_the_connection_and_the_submit_refuses_a_cache() {
     let id = computer_id();
@@ -314,7 +288,6 @@ fn a_steam_login_carries_the_ticket_unescaped_and_submits_the_linked_id() {
     );
 }
 
-/// A linked id whose case difference is invisible to an ASCII-only fold.
 const LINKED_ID_NON_ASCII: &str = "café-account";
 
 #[test]

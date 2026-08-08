@@ -1,13 +1,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! SE launcher network protocol: OAuth login, version and boot checks, patchlist parsing.
-//!
-//! The crate is transport-free: it takes an injected [`Transport`] and names neither `reqwest` nor
-//! `tokio`. It implements the unauthenticated surfaces (identities, the boot-version check, the
-//! patchlist parser, and the frontier gate/login status endpoints), the OAuth login flow, and session
-//! registration (the version report and the UID handshake). Reading an install's `.ver` files for the
-//! version report is the crate's only filesystem access. [`gen_token`] is a dormant, opt-in surface: SE
-//! disables the code path it exercises on the live service, so nothing calls it by default.
+// SE launcher network protocol: OAuth login, version and boot checks, patchlist parsing.
+// Transport-free: takes an injected Transport, names neither reqwest nor tokio. Implements the
+// unauthenticated surfaces (identities, boot-version check, patchlist parser, frontier gate/login
+// status), the OAuth login flow, and session registration (version report + UID handshake). Reading
+// an install's .ver files for the version report is the crate's only filesystem access. gen_token is
+// a dormant, opt-in surface: SE disables the code path it exercises on the live service, so nothing
+// calls it by default.
 
 mod bootver;
 mod error;

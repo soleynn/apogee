@@ -1,11 +1,8 @@
-//! The launcher's notion of "now", injected rather than read from an ambient clock.
-//!
-//! SE stamps version checks and frontier requests with UTC timestamps that double as CDN cache keys.
-//! Keeping the clock out of this crate makes the formatting deterministic and golden-testable: a caller
-//! supplies the broken-down UTC fields and a Unix-millisecond value, and the live reader is a seam
-//! filled in by the composition root.
-
-/// A UTC instant the launcher stamps onto requests.
+// The launcher's notion of "now", injected rather than read from an ambient clock. SE stamps version
+// checks and frontier requests with UTC timestamps that double as CDN cache keys. Keeping the clock
+// out of this crate makes the formatting deterministic and golden-testable: a caller supplies the
+// broken-down UTC fields and a Unix-millisecond value, and the live reader is a seam filled in by the
+// composition root.
 #[derive(Debug, Clone, Copy)]
 pub struct LauncherTime {
     year: u16,
@@ -17,15 +14,6 @@ pub struct LauncherTime {
 }
 
 impl LauncherTime {
-    /// Construct from fixed parts. Deterministic; the entry point for tests and goldens.
-    ///
-    /// The fields must be a real UTC instant: `year` 0-9999, `month` 1-12, `day` 1-31, `hour` 0-23,
-    /// `minute` 0-59. That is the type's invariant, not advice: the `{:02}` renderers below set a
-    /// minimum field width, not a fixed one, so a field past its range widens the timestamp and silently
-    /// breaks the fixed-width `yyyy-MM-dd-HH-mm` shape SE keys its CDN cache on. Callers derive these by
-    /// decomposing a Unix timestamp, which cannot go out of range, so this is a `debug_assert`: it fires
-    /// in every test, fuzz, and development build rather than costing a `Result` at three call sites
-    /// that provably cannot fail.
     #[must_use]
     pub fn from_parts(
         year: u16,
@@ -53,8 +41,7 @@ impl LauncherTime {
         }
     }
 
-    /// The boot-version check timestamp `yyyy-MM-dd-HH-mm` with the minute floored to the ten: SE
-    /// overwrites the minute's ones-digit with `0` to coarsen the CDN cache key.
+    // SE overwrites the minute's ones-digit with 0 to coarsen the CDN cache key.
     #[must_use]
     pub fn boot_check_timestamp(&self) -> String {
         let floored = self.minute - self.minute % 10;
@@ -64,7 +51,6 @@ impl LauncherTime {
         )
     }
 
-    /// The full-minute timestamp `yyyy-MM-dd-HH-mm` used in the frontier referer.
     #[must_use]
     pub fn referer_timestamp(&self) -> String {
         format!(
@@ -73,7 +59,6 @@ impl LauncherTime {
         )
     }
 
-    /// The Unix-millisecond cache-buster sent as `_=` on frontier requests.
     #[must_use]
     pub fn cache_buster(&self) -> u64 {
         self.unix_millis

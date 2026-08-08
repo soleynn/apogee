@@ -1,14 +1,11 @@
-//! `gen_token`: tokenize a patch URL for download.
-//!
-//! Dormant on the live service: the reference launcher ships this request path disabled ("waiting on
-//! SE to patch this"), so nothing has ever observed a real response from it. The request shape below
-//! (`POST http://patch-gamever.ffxiv.com/gen_token`, the patcher identity, the session's
-//! `X-Patch-Unique-Id` as a header, the patch URL as the body) is transcribed from the reference
-//! source and nothing more; no disposition beyond "the body is a tokenized URL string" is invented.
-//!
-//! [`gen_token`] is not called from [`register_session`](crate::register_session) or any other surface
-//! in this crate: reaching it is an explicit, opt-in call, and it stays that way until a live response
-//! has actually been observed and can be pinned against a fixture the way every other endpoint here is.
+// `gen_token`: tokenize a patch URL for download. Dormant on the live service: the reference launcher
+// ships this request path disabled ("waiting on SE to patch this"), so nothing has ever observed a
+// real response from it. The request shape below is transcribed from the reference source and nothing
+// more; no disposition beyond "the body is a tokenized URL string" is invented.
+//
+// Not called from register_session or any other surface in this crate: reaching it is an explicit,
+// opt-in call, and it stays that way until a live response has actually been observed and can be
+// pinned against a fixture the way every other endpoint here is.
 
 use http::{HeaderName, HeaderValue, Method};
 
@@ -19,20 +16,10 @@ use crate::transport::{
     ProtoRequest, RequestBody, Transport, TransportError, dynamic_header, parse_base,
 };
 
-/// The `gen_token` endpoint. Plain HTTP per the reference launcher, unlike the HTTPS `patch-gamever`
-/// version-report endpoint it shares a host with.
 const GEN_TOKEN_URL: &str = "http://patch-gamever.ffxiv.com/gen_token";
 
-/// The request header carrying the patch-download credential `register_session` issued.
 const UNIQUE_ID_HEADER: &str = "x-patch-unique-id";
 
-/// Ask SE to tokenize `patch_url`, presenting `unique_id` as the authorizing credential.
-///
-/// On success, the response body is returned verbatim (lossily decoded) as the tokenized URL; nothing
-/// about its shape is validated beyond that, since no real response has ever been captured to validate
-/// against. Any status other than `200 OK` is a [`ProtoError::InvalidResponse`]; the excerpt is scrubbed
-/// of `unique_id`, the one secret-adjacent value this step puts on the wire, in case a reflected error
-/// page echoes the request headers back.
 pub async fn gen_token(
     transport: &dyn Transport,
     unique_id: &UniqueId,
@@ -52,7 +39,6 @@ pub async fn gen_token(
     Ok(String::from_utf8_lossy(&response.body).into_owned())
 }
 
-/// Build the `gen_token` POST: the patcher identity, the UID header, and `patch_url` as the body.
 fn build_request(unique_id: &UniqueId, patch_url: &str) -> Result<ProtoRequest, TransportError> {
     let url = parse_base(GEN_TOKEN_URL, "invalid gen_token URL")?;
 

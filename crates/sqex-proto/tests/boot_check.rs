@@ -1,8 +1,3 @@
-//! Boot-check integration tests, driven through the fixture transport.
-//!
-//! These live outside the crate (not a `cfg(test)` module) so the `Transport` the fixture implements
-//! and the one the surface consumes are the same compiled trait. The request is asserted byte-for-byte
-//! (the drift alarm), and each response shape is exercised.
 
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
@@ -17,7 +12,6 @@ fn fixed_time() -> LauncherTime {
     LauncherTime::from_parts(2024, 1, 2, 3, 47, 0)
 }
 
-/// Wrap synthetic six-field boot entries in the multipart envelope.
 fn boot_patchlist(entries: &[&str]) -> Vec<u8> {
     let boundary = "--SYNTHETIC_BOUNDARY_APOGEE";
     let mut body = String::new();
@@ -57,7 +51,6 @@ fn builds_the_fingerprinted_request() {
     );
 }
 
-/// The shape the live service sends for a current boot, and the one a 200-only gate rejected.
 #[test]
 fn no_content_means_boot_is_current() {
     let transport = FixtureTransport::once(ProtoResponse::new(204, Vec::new()));
@@ -79,9 +72,6 @@ fn whitespace_body_means_boot_is_current() {
     assert!(entries.is_empty());
 }
 
-/// U+FEFF is not whitespace to `char::is_whitespace`, so a BOM-stamped empty body has to be stripped
-/// rather than trimmed. Left unstripped it falls through to the parser and reports a boot patch that
-/// does not exist, which aborts the flow one layer up.
 #[test]
 fn a_bom_only_body_means_boot_is_current() {
     let transport = FixtureTransport::once(ProtoResponse::new(200, b"\xef\xbb\xbf".to_vec()));
@@ -97,8 +87,6 @@ fn a_bom_and_whitespace_body_means_boot_is_current() {
     assert!(entries.is_empty());
 }
 
-/// The same stamp on a body that does carry patches: stripping before the parse keeps the mark out of
-/// the opening boundary, which the envelope check would otherwise reject.
 #[test]
 fn a_bom_prefixed_patchlist_still_parses() {
     let entry = "900\t0\t0\t0\tD2024.01.01.0000.0000\t\

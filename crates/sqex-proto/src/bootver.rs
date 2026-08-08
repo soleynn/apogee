@@ -1,10 +1,5 @@
-//! The unauthenticated boot-version check.
-//!
-//! A plain-HTTP GET asking whether the boot component is current. A current boot answers `204 No
-//! Content`; a pending one a `200` whose body is a boot patchlist naming the patches in order. An
-//! empty or whitespace `200` body is also read as current, including one stamped with a byte-order
-//! mark. This is also the one endpoint CI is allowed to call live, to keep the patchlist parser honest
-//! against genuinely-current SE output.
+// The unauthenticated boot-version check. This is the one endpoint CI is allowed to call live, to
+// keep the patchlist parser honest against genuinely-current SE output.
 
 use http::{HeaderName, HeaderValue, Method};
 
@@ -14,14 +9,9 @@ use crate::patchlist::{PatchListEntry, parse_patch_list};
 use crate::time::LauncherTime;
 use crate::transport::{ProtoRequest, Transport, TransportError, parse_base};
 
-/// Base of the boot-version endpoint; the boot version and `time` query are appended.
 const BOOT_VERSION_BASE: &str = "http://patch-bootver.ffxiv.com/http/win32/ffxivneo_release_boot";
-/// The `Host` the boot check addresses.
 const BOOT_VERSION_HOST: &str = "patch-bootver.ffxiv.com";
 
-/// Ask whether the boot component named by `boot_version` is current.
-///
-/// Returns the pending boot patches in list order, or an empty vector when boot is current.
 pub async fn check_boot_version(
     transport: &dyn Transport,
     boot_version: &str,
@@ -59,16 +49,11 @@ pub async fn check_boot_version(
     parse_patch_list(body)
 }
 
-/// Build the boot-check request. The dynamic path and query segments are percent-encoded through the
-/// URL builder, so a malformed input yields a valid-but-wrong URL rather than an injection; the error
-/// arms exist only to keep the build panic-free and are unreachable for the constant base.
-///
-/// `accept` and `accept-encoding` are declared even though the reference launcher sends neither: a
-/// reqwest client merges its own default `Accept: */*` and negotiated encoding into any request that
-/// omits them, and it does that after the point the fidelity check reads the built request back, so an
-/// undeclared default is invisible to it. Declaring the identical `*/*` here keeps the wire byte
-/// unchanged while bringing the header inside the check; `accept-encoding`'s value is exempt from the
-/// comparison (see [`crate::NEGOTIATED_HEADERS`]).
+// `accept`/`accept-encoding` are declared even though the reference launcher sends neither: a reqwest
+// client merges its own default `Accept: */*` and negotiated encoding into any request that omits
+// them, after the point the fidelity check reads the built request back, so an undeclared default is
+// invisible to it. Declaring the identical `*/*` here keeps the wire byte unchanged while bringing the
+// header inside the check; see `crate::NEGOTIATED_HEADERS` for the `accept-encoding` exemption.
 fn build_request(boot_version: &str, now: &LauncherTime) -> Result<ProtoRequest, TransportError> {
     let mut url = parse_base(BOOT_VERSION_BASE, "invalid boot-version base URL")?;
     url.path_segments_mut()

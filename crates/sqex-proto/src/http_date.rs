@@ -1,43 +1,22 @@
-//! The `Date` response header, read back into the instant it names.
-//!
-//! Fixed-position matching over the two forms whose meaning is settled by their own text: the
-//! `IMF-fixdate` every current server sends (the login server among them) and the obsolete `asctime`
-//! form. The third form HTTP lists carries a two-digit year, which names an instant only against a
-//! clock, and this crate holds none; it is refused rather than resolved against a guess. A refusal
-//! costs a caller the reading and never the request, because an unreadable stamp answers the same as
-//! an absent one.
-//!
-//! Each field is range-checked before the calendar arithmetic runs. The civil-to-days map normalises
-//! instead of validating, so `31 Feb` reaches it as a well-formed date and comes back out as `3 Mar`
-//! with nothing to say it was never a day.
+// The Date response header, read back into the instant it names. Fixed-position matching over the
+// two forms whose meaning is settled by their own text: the IMF-fixdate every current server sends
+// (the login server among them) and the obsolete asctime form. The third form HTTP lists carries a
+// two-digit year, which names an instant only against a clock, and this crate holds none; it is
+// refused rather than resolved against a guess. A refusal costs a caller the reading and never the
+// request, because an unreadable stamp answers the same as an absent one.
+//
+// Each field is range-checked before the calendar arithmetic runs. The civil-to-days map normalises
+// instead of validating, so `31 Feb` reaches it as a well-formed date and comes back out as `3 Mar`
+// with nothing to say it was never a day -- the range check in front is what actually refuses it.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Month names in order, matched byte for byte. The grammar spells them case-sensitively, so `jan`
-/// is not `Jan` and is not accepted as one.
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
 
-/// The seven abbreviated day names. Checked for membership only: the day name is derivable from the
-/// date and servers get it wrong, so it is not read for meaning, but a token that is not one of these
-/// is text in some other shape and is refused with the rest of it.
 const DAY_NAMES: [&[u8; 3]; 7] = [b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat", b"Sun"];
 
-/// The instant an HTTP `Date` header names, or `None` when the text is not a form this reads.
-///
-/// Accepts `Sun, 06 Nov 1994 08:49:37 GMT` and `Sun Nov  6 08:49:37 1994`. The zone token must be the
-/// literal `GMT`, which is the only one either grammar can spell, so anything else is a value with a
-/// meaning this cannot recover. A leap second reads as the fifty-ninth: Unix time has no sixtieth,
-/// and the second before it is the nearest instant that exists.
-///
-/// ```
-/// use std::time::{Duration, UNIX_EPOCH};
-///
-/// let stamped = sqex_proto::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT");
-/// assert_eq!(stamped, Some(UNIX_EPOCH + Duration::from_secs(784_111_777)));
-/// assert_eq!(sqex_proto::parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT"), None);
-/// ```
 #[must_use]
 pub fn parse_http_date(value: &str) -> Option<SystemTime> {
     let text = value.as_bytes().trim_ascii();
@@ -49,7 +28,6 @@ pub fn parse_http_date(value: &str) -> Option<SystemTime> {
     civil.instant()
 }
 
-/// A broken-down UTC date, before it is known to be a real one.
 struct Civil {
     year: i64,
     month: u32,
@@ -60,7 +38,6 @@ struct Civil {
 }
 
 impl Civil {
-    /// The instant these fields name, or `None` if they name no day or no time of one.
     fn instant(self) -> Option<SystemTime> {
         if self.day < 1 || self.day > days_in_month(self.year, self.month) {
             return None;
@@ -82,11 +59,6 @@ impl Civil {
     }
 }
 
-/// `Sun, 06 Nov 1994 08:49:37 GMT`, the form the login server sends.
-///
-/// Every field sits at a fixed offset, so the length is checked once by converting to an array of
-/// exactly it and each field is then read from a position that cannot be out of range. The
-/// separators and the zone token are compared as a set, before any of them is read as a value.
 fn imf_fixdate(text: &[u8]) -> Option<Civil> {
     //                     0         1         2
     //                     0123456789012345678901234567 8
@@ -108,8 +80,6 @@ fn imf_fixdate(text: &[u8]) -> Option<Civil> {
     })
 }
 
-/// `Sun Nov  6 08:49:37 1994`, the C library's form: no comma, no zone token, the year last, and a
-/// day padded with a space rather than a zero.
 fn asctime(text: &[u8]) -> Option<Civil> {
     //                     0         1         2
     //                     012345678901234567890123
@@ -135,33 +105,23 @@ fn asctime(text: &[u8]) -> Option<Civil> {
     })
 }
 
-/// The month number for an abbreviated name, one-based.
 fn month(name: &[u8; 3]) -> Option<u32> {
     let index = MONTHS.iter().position(|known| *known == name)?;
     u32::try_from(index + 1).ok()
 }
 
-/// Whether `name` is one of the seven day names. The value is discarded; only the membership matters.
 fn day_name(name: &[u8; 3]) -> Option<()> {
     DAY_NAMES.contains(&name).then_some(())
 }
 
-/// A two-digit decimal field.
 fn two(hi: u8, lo: u8) -> Option<u32> {
     Some(u32::from(digit(hi)?) * 10 + u32::from(digit(lo)?))
 }
 
-/// One ASCII digit as its value.
-///
-/// The subtraction is checked and comes first. Testing `is_ascii_digit` and handing the difference to
-/// `then_some` reads as a guard and is not one: the argument is evaluated whatever the test says, so
-/// any byte below `0` underflows before the guard is consulted.
 fn digit(byte: u8) -> Option<u8> {
     byte.checked_sub(b'0').filter(|value| *value <= 9)
 }
 
-/// How many days `month` has in `year`. Zero for a month number that is not one, which refuses every
-/// day of it.
 fn days_in_month(year: i64, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -172,17 +132,10 @@ fn days_in_month(year: i64, month: u32) -> u32 {
     }
 }
 
-/// The proleptic Gregorian leap rule.
 fn is_leap(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-/// Days between the epoch and a civil date, negative before it (Howard Hinnant's `days_from_civil`).
-///
-/// The year is shifted back for January and February so a leap day lands at the end of the shifted
-/// year, which is what lets the four-hundred-year era arithmetic run with no branch on leap years.
-/// The two corrections for a negative operand are load-bearing: they turn Rust's truncating division
-/// into the flooring one the algorithm is written against.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
@@ -201,7 +154,6 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 mod tests {
     use super::*;
 
-    /// Seconds since the epoch for a parse that succeeded, for assertions that read as timestamps.
     fn unix(value: &str) -> Option<i64> {
         let parsed = parse_http_date(value)?;
         Some(match parsed.duration_since(UNIX_EPOCH) {
@@ -210,32 +162,24 @@ mod tests {
         })
     }
 
-    /// The header the login server actually sends, read off a live response, and the specification's
-    /// own example. Both are the same form; the first is the one this exists for.
     #[test]
     fn the_form_the_login_server_sends_reads_back() {
         assert_eq!(unix("Thu, 06 Aug 2026 21:15:56 GMT"), Some(1_786_050_956));
         assert_eq!(unix("Sun, 06 Nov 1994 08:49:37 GMT"), Some(784_111_777));
     }
 
-    /// The C library's form, including the space-padded single-digit day that a parser splitting on
-    /// single spaces reads as an empty field.
     #[test]
     fn the_asctime_form_reads_back_including_its_padded_day() {
         assert_eq!(unix("Sun Nov  6 08:49:37 1994"), Some(784_111_777));
         assert_eq!(unix("Sat Nov 26 08:49:37 1994"), Some(785_839_777));
     }
 
-    /// The two-digit-year form is refused rather than resolved against a century this crate would
-    /// have to invent. It is the one form whose text does not say which instant it means.
     #[test]
     fn the_two_digit_year_form_is_refused() {
         assert_eq!(parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT"), None);
         assert_eq!(parse_http_date("Sun, 06-Nov-94 08:49:37 GMT"), None);
     }
 
-    /// A day the calendar does not have. The arithmetic underneath would answer for it, so the range
-    /// check in front is the only thing that refuses it.
     #[test]
     fn a_day_its_month_does_not_have_is_refused() {
         assert_eq!(parse_http_date("Fri, 31 Feb 2025 12:00:00 GMT"), None);
@@ -245,14 +189,12 @@ mod tests {
         assert_eq!(parse_http_date("Sat, 29 Feb 2025 00:00:00 GMT"), None);
     }
 
-    /// The century rule the naive leap test gets wrong in both directions.
     #[test]
     fn the_century_leap_rule_holds_both_ways() {
         assert!(parse_http_date("Tue, 29 Feb 2000 00:00:00 GMT").is_some());
         assert_eq!(parse_http_date("Wed, 29 Feb 1900 00:00:00 GMT"), None);
     }
 
-    /// A time of day no clock reaches.
     #[test]
     fn an_impossible_time_of_day_is_refused() {
         assert_eq!(parse_http_date("Sun, 06 Nov 1994 24:00:00 GMT"), None);
@@ -260,8 +202,6 @@ mod tests {
         assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:61 GMT"), None);
     }
 
-    /// The sixtieth second is legal to announce and impossible to hold, so it reads as the one
-    /// before it rather than rolling the minute over into a time the header did not name.
     #[test]
     fn a_leap_second_reads_as_the_second_before_it() {
         assert_eq!(
@@ -270,9 +210,6 @@ mod tests {
         );
     }
 
-    /// The zone is the only one either grammar spells. A different one names an instant this would
-    /// have to shift to read, and shifting by a zone it does not understand is how it would read the
-    /// wrong one.
     #[test]
     fn a_zone_that_is_not_gmt_is_refused() {
         assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37 UTC"), None);
@@ -280,8 +217,6 @@ mod tests {
         assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37 +02"), None);
     }
 
-    /// The grammar spells its names case-sensitively, and a parser that lowercases first accepts a
-    /// month name no server sends and would then have to guess at the rest of the shape too.
     #[test]
     fn the_names_are_matched_case_sensitively() {
         assert_eq!(parse_http_date("Sun, 06 nov 1994 08:49:37 GMT"), None);
@@ -289,12 +224,6 @@ mod tests {
         assert_eq!(parse_http_date("Sun, 06 NOV 1994 08:49:37 gmt"), None);
     }
 
-    /// A digit position holding something that is not one, on both sides of `0`.
-    ///
-    /// Both sides deliberately: reading the byte as a digit before checking that it is one underflows
-    /// only downward, so a test that reaches for a letter every time proves the half that cannot
-    /// fail. The punctuation, the zone and the day name are all correct here, so nothing refuses
-    /// these before the field itself is read.
     #[test]
     fn a_digit_position_holding_something_else_is_refused() {
         for hostile in [
@@ -310,9 +239,6 @@ mod tests {
         }
     }
 
-    /// Every byte, at every field position, in both grammars. The parser answers or refuses; it never
-    /// takes the process down, which is the property the fuzz target exists for and the one a
-    /// hand-written case list cannot cover.
     #[test]
     fn no_byte_at_any_position_takes_the_parser_down() {
         for well_formed in ["Sun, 06 Nov 1994 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"] {
@@ -326,23 +252,18 @@ mod tests {
         }
     }
 
-    /// A name in neither table, at the right width, so only the table lookup refuses it.
     #[test]
     fn a_name_outside_the_tables_is_refused() {
         assert_eq!(parse_http_date("Xyz, 06 Nov 1994 08:49:37 GMT"), None);
         assert_eq!(parse_http_date("Sun, 06 Foo 1994 08:49:37 GMT"), None);
     }
 
-    /// Optional whitespace either side of the field value, which is the framing's and not part of
-    /// the date. Anything inside the text is a shape this does not read.
     #[test]
     fn surrounding_whitespace_is_not_part_of_the_value() {
         assert_eq!(unix("  Sun, 06 Nov 1994 08:49:37 GMT\t"), Some(784_111_777));
         assert_eq!(parse_http_date("Sun,  06 Nov 1994 08:49:37 GMT"), None);
     }
 
-    /// Text of the right length in the wrong shape, which is what a length check alone would let
-    /// through.
     #[test]
     fn text_of_the_right_length_in_the_wrong_shape_is_refused() {
         assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37 GM7"), None);
@@ -353,9 +274,6 @@ mod tests {
         assert_eq!(parse_http_date(""), None);
     }
 
-    /// The epoch itself, and an instant before it. A date this old is a broken clock rather than a
-    /// stamp, but it is well-formed text and reading it as a far-future instant is how an unchecked
-    /// cast would answer.
     #[test]
     fn an_instant_before_the_epoch_keeps_its_sign() {
         assert_eq!(unix("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
@@ -363,8 +281,6 @@ mod tests {
         assert_eq!(unix("Fri, 06 May 1995 12:00:00 GMT"), Some(799_761_600));
     }
 
-    /// Every day of a four-hundred-year era round-trips through the calendar arithmetic: each day is
-    /// exactly one after the last, and the era's length is what the leap rules make it.
     #[test]
     fn the_calendar_arithmetic_walks_an_era_one_day_at_a_time() {
         let mut expected = days_from_civil(1600, 1, 1);

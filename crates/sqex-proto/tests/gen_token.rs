@@ -1,8 +1,3 @@
-//! `gen_token` integration tests, driven through the fixture transport.
-//!
-//! `gen_token` is dormant (SE disables the code path on the live service) and reachable only by an
-//! explicit call: these tests exercise the request shape and response handling without any other
-//! surface in the crate wiring into it.
 
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
@@ -49,9 +44,6 @@ fn success_body(session_id: &str) -> String {
     )
 }
 
-/// Drive a full login and registration through a scripted transport that answers with [`UID`],
-/// returning the [`Registration`] outcome. `?`-based (no unwrap/panic) so it satisfies the
-/// integration-test helper lint; each `#[test]` unpacks the [`Registration::Registered`] UID itself.
 async fn register() -> Result<Registration, ProtoError> {
     let id = computer_id();
     let transport = FixtureTransport::new([

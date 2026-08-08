@@ -1,10 +1,9 @@
-//! Session registration: the version-report POST and the UID handshake.
-//!
-//! After login, the client reports its installed version to `patch-gamever` and, if the game is
-//! current, receives an `X-Patch-Unique-Id` that authorizes patch downloads. The dispositions SE can
-//! answer with are modeled as [`Registration`] values (a boot patch is pending, the version is no
-//! longer serviced, or the session is registered with any pending game patches); only a response that
-//! fits none of them is a [`ProtoError`].
+// Session registration: the version-report POST and the UID handshake. After login, the client
+// reports its installed version to patch-gamever and, if the game is current, receives an
+// X-Patch-Unique-Id that authorizes patch downloads. The dispositions SE can answer with are modeled
+// as Registration values (a boot patch is pending, the version is no longer serviced, or the session
+// is registered with any pending game patches); only a response that fits none of them is a
+// ProtoError.
 
 use std::fmt;
 
@@ -20,20 +19,13 @@ use crate::transport::{
 };
 use crate::version::VersionReport;
 
-/// Base of the session-registration endpoint; the game version and session id are appended as path
-/// segments. HTTPS: the report and the issued UID authorize patch downloads.
 const GAME_VERSION_BASE: &str = "https://patch-gamever.ffxiv.com/http/win32/ffxivneo_release_game";
 
-/// The response header carrying the patch-download credential.
 const UNIQUE_ID_HEADER: &str = "x-patch-unique-id";
 
-/// The patch-download credential issued at registration. Zeroized on drop, redacted in `Debug`, and
-/// never serialized; downstream reads it into patch requests via [`UniqueId::expose`].
 pub struct UniqueId(Zeroizing<String>);
 
 impl UniqueId {
-    /// The raw unique id. Secret-adjacent (it authorizes patch downloads), so callers must not persist
-    /// or log it.
     #[must_use]
     pub fn expose(&self) -> &str {
         self.0.as_str()
@@ -46,34 +38,21 @@ impl fmt::Debug for UniqueId {
     }
 }
 
-/// The outcome of session registration. Each arm is an expected disposition the caller narrates, not a
-/// failure: [`Registration::Registered`] carries the UID and any pending game patches (empty when the
-/// game is current); [`Registration::NeedsBootPatch`] and [`Registration::VersionNotServiced`] end the
-/// flow with no UID.
 #[derive(Debug)]
 pub enum Registration {
-    /// The session is registered. `pending_patches` is empty when the game is current, else the game
-    /// patches to apply, in list order.
     Registered {
-        /// The patch-download credential.
         unique_id: UniqueId,
-        /// Pending game patches, in list order; empty when the game is current.
         pending_patches: Vec<PatchListEntry>,
     },
-    /// Boot needs patching (or the boot EXEs were tampered with); no UID is issued.
     NeedsBootPatch,
-    /// This game version is no longer serviced; terminal.
     VersionNotServiced,
 }
 
-/// Register the session with a version report, returning SE's disposition.
-///
-/// Posts `report` to `patch-gamever` under the login's session id and classifies the response by the
-/// reference launcher's branch order: `409` is a pending boot patch, `410` an unserviced version, an
-/// `X-Patch-Unique-Id` header a registration (with any pending game patches parsed from the body), and
-/// anything else a [`ProtoError::InvalidResponse`]. The status is not otherwise gated: a current game
-/// answers `204 No Content` and a pending one a `200` with a patchlist (both observed against the live
-/// service), so the UID header, not a specific status, marks success.
+// Classifies the response by the reference launcher's branch order: 409 is a pending boot patch, 410
+// an unserviced version, an X-Patch-Unique-Id header a registration (with any pending game patches
+// parsed from the body), and anything else a ProtoError::InvalidResponse. The status is not otherwise
+// gated: a current game answers 204 No Content and a pending one a 200 with a patchlist (both observed
+// against the live service), so the UID header, not a specific status, marks success.
 pub async fn register_session(
     transport: &dyn Transport,
     auth: &Authenticated,
@@ -117,11 +96,6 @@ pub async fn register_session(
     }
 }
 
-/// Read the `X-Patch-Unique-Id` header into a redacted newtype. A header value that is not visible
-/// ASCII, or that carries no non-whitespace character, is treated as absent (defensive: a real UID is
-/// hex). Blank counts as absent because the alternative is registering with a credential that
-/// authorizes nothing: it would be sent as an empty header on every patch request and as an empty
-/// `DEV.TestSID` at launch, failing at the next hop with none of this step's context.
 fn unique_id(response: &ProtoResponse) -> Option<UniqueId> {
     let header = HeaderName::from_static(UNIQUE_ID_HEADER);
     let value = response.header(&header)?;
@@ -129,16 +103,10 @@ fn unique_id(response: &ProtoResponse) -> Option<UniqueId> {
     Some(UniqueId(Zeroizing::new(text.to_owned())))
 }
 
-/// Build the registration POST: `{base}/{gamever}/{sessionId}` with the patcher identity and the
-/// report body. Headers otherwise match the exact set and order the reference launcher sends: no
-/// `Host` (the transport supplies it) and no `Content-Type`.
-///
-/// `accept`/`accept-encoding` are the one exception: the reference launcher sends neither, but a
-/// reqwest client merges its own default `Accept: */*` and negotiated encoding into any request that
-/// omits them, and it does that after the point the fidelity check reads the built request back, so an
-/// undeclared default is invisible to it. Declaring the identical `*/*` here keeps the wire byte
-/// unchanged while bringing the header inside the check; `accept-encoding`'s value is exempt from the
-/// comparison (see [`crate::NEGOTIATED_HEADERS`]).
+// Headers match the exact set and order the reference launcher sends: no Host (the transport supplies
+// it) and no Content-Type. `accept`/`accept-encoding` are the one exception: see bootver.rs's
+// build_request and crate::NEGOTIATED_HEADERS for why the identical `*/*` is declared despite the
+// reference sending neither.
 fn build_request(
     auth: &Authenticated,
     report: &VersionReport,

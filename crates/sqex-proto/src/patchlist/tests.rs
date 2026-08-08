@@ -1,16 +1,11 @@
-//! Patchlist parser tests over synthetic bodies (no SE bytes): both entry shapes, the multipart-frame
-//! validation, line-numbered errors, line-ending equivalence, the input bounds, and a panic-freedom
-//! property.
 
 use proptest::prelude::*;
 
 use super::{MAX_BODY_BYTES, MAX_ENTRIES, parse_patch_list};
 use crate::ProtoError;
 
-/// An obviously-synthetic multipart boundary. The parser only requires it to open with `--`.
 const BOUNDARY: &str = "--SYNTHETIC_BOUNDARY_APOGEE";
 
-/// Wrap synthetic entry lines in the five-line preamble and two-line trailer, CRLF-joined.
 fn envelope(entries: &[&str]) -> String {
     let mut body = String::new();
     for header in [
@@ -32,12 +27,10 @@ fn envelope(entries: &[&str]) -> String {
     body
 }
 
-/// A nine-field game entry line. Fields 1-3 are filler (their meaning is unpinned).
 fn game_entry(length: u64, version: &str, block_size: u64, hashes: &str, url: &str) -> String {
     format!("{length}\t0\t0\t0\t{version}\tsha1\t{block_size}\t{hashes}\t{url}")
 }
 
-/// A six-field boot entry line: no hashes, URL in field 5.
 fn boot_entry(length: u64, version: &str, url: &str) -> String {
     format!("{length}\t0\t0\t0\t{version}\t{url}")
 }
@@ -217,7 +210,6 @@ fn full_parse_is_pinned() {
     insta::assert_debug_snapshot!("patchlist_game_and_boot", entries);
 }
 
-/// The `reason` tag of a parse error, for tests that only care which guard fired.
 fn reason_of(err: ProtoError) -> &'static str {
     match err {
         ProtoError::PatchListParse { reason, .. } => reason,
@@ -372,8 +364,6 @@ fn repo_resolution_is_deliberately_left_to_the_consumer() {
 }
 
 proptest! {
-    /// Structural fuzz over the characters a patchlist is built from: never panics, always a clean
-    /// `Ok`/`Err`.
     #[test]
     fn parse_never_panics(input in "[0-9a-zA-Z\\t\\r\\n:/., -]{0,300}") {
         let _ = parse_patch_list(&input);

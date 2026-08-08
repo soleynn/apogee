@@ -1,119 +1,76 @@
-//! The protocol error taxonomy.
-//!
-//! Expected dispositions the UI narrates (no service, terms not yet accepted, a boot patch pending)
-//! are *values* in the result types, not errors; the variants here are genuine protocol failures.
-//! `#[non_exhaustive]`: further failures join as new surfaces land.
 
 use std::fmt;
 
 use crate::transport::{ProtoResponse, TransportError};
 use crate::version::{SanityKind, VersionRepo};
 
-/// The protocol step a failure occurred in, for triage. `#[non_exhaustive]`: grows with the surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Step {
-    /// The unauthenticated boot-version check.
     BootVersion,
-    /// The frontier gate-status fetch.
     GateStatus,
-    /// The frontier login-status fetch.
     LoginStatus,
-    /// The OAuth login top page.
     OauthTop,
-    /// The OAuth credential submission.
     OauthLogin,
-    /// The session-registration version report.
     Register,
-    /// The dormant `gen_token` patch-URL tokenization request.
     GenToken,
 }
 
-/// A protocol failure.
-///
-/// `Debug` is hand-written (see below) so an excerpt cannot reach a log through `{:?}`.
 #[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum ProtoError {
-    /// The transport could not complete the request.
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
 
-    /// SE returned a response the step could not accept: an unexpected status or an unparseable body.
-    /// The excerpt is redacted and length-capped at the construction site.
     #[error("unexpected response at {step:?}: status {status}")]
     InvalidResponse {
-        /// Which protocol step the response was for.
         step: Step,
-        /// The HTTP status SE answered with.
         status: u16,
-        /// A redacted, length-capped slice of the response body.
         excerpt: String,
     },
 
-    /// A patchlist line could not be parsed. `line` is 1-based; `reason` is a stable, static tag.
     #[error("patchlist parse error at line {line}: {reason}")]
     PatchListParse {
-        /// The 1-based line number of the offending entry.
         line: u32,
-        /// A stable, static tag identifying what about the line was wrong. Never the line's own bytes.
         reason: &'static str,
     },
 
-    /// The OAuth submission did not return the success callback. The excerpt is scrubbed of the
-    /// submitted credentials and length-capped at the construction site.
     #[error("oauth login rejected")]
     OauthFailed {
-        /// A scrubbed, length-capped slice of SE's rejection page or message.
         excerpt: String,
     },
 
-    /// The top page asked the client to relink a Steam account (`window.external.user("restartup")`).
-    /// Wired for the Steam variant; a standard login never reaches it.
     #[error("steam account not linked")]
     SteamLinkNeeded,
 
-    /// The Steam ticket is linked to a different SE account than the one submitted. `expected_hint` is
-    /// a masked form of the linked id, never the full value.
     #[error("steam ticket is linked to a different account")]
     SteamWrongAccount {
-        /// A masked hint of the account the ticket is actually linked to (e.g. `a***z`).
         expected_hint: String,
     },
 
-    /// The top page carried no `_STORED_` blob. The excerpt is length-capped and redacted of a
-    /// reflected `session_ticket`; the top page carries no submitted credentials.
     #[error("_STORED_ not found on the login top page")]
     StoredNotFound {
-        /// A redacted, length-capped slice of the page that should have carried `_STORED_`.
         excerpt: String,
     },
 
-    /// The `launchParams` list was too short or malformed to read the fields a login needs. `got_fields`
-    /// is a count only, never the field contents (which include the session id).
     #[error("launchParams unparseable ({got_fields} fields)")]
     LaunchParamsUnparseable {
-        /// How many comma-separated fields the callback actually carried.
         got_fields: usize,
     },
 
-    /// A version file failed the sanity gate before session registration, so no request was made. The
-    /// install is corrupt but repairable; `repo` and `kind` locate the fault without carrying a path.
     #[error("version file for {repo:?} failed the sanity check: {kind:?}")]
     InvalidVersionFiles {
-        /// Which repository's version file (or boot EXE backup) failed.
         repo: VersionRepo,
-        /// What about it failed.
         kind: SanityKind,
     },
 }
 
-/// Excerpts are kept out of `Debug`, which is what a logger, a panic message, or a `{err:?}` in a
-/// caller reaches for. Every excerpt is attacker-influenced text that can reflect what the request put
-/// on the wire (a URL bearing the session id, a form bearing the credentials); the construction sites
-/// scrub what they know about, but scrubbing is verbatim and best-effort, so nothing downstream should
-/// inherit an excerpt by accident. `Display` never carried one, and a shell that means to present one
-/// reads the field.
+// Excerpts are kept out of Debug, which is what a logger, a panic message, or a `{err:?}` in a
+// caller reaches for. Every excerpt is attacker-influenced text that can reflect what the request put
+// on the wire (a URL bearing the session id, a form bearing the credentials); the construction sites
+// scrub what they know about, but scrubbing is verbatim and best-effort, so nothing downstream should
+// inherit an excerpt by accident. Display never carries one, and a shell that means to present one
+// reads the field.
 impl fmt::Debug for ProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -167,8 +124,6 @@ impl fmt::Debug for ProtoError {
     }
 }
 
-/// An excerpt rendered as its size alone: enough to tell an empty body from a full one in a debug
-/// dump, none of the text.
 struct Withheld<'a>(&'a str);
 
 impl fmt::Debug for Withheld<'_> {
@@ -178,12 +133,9 @@ impl fmt::Debug for Withheld<'_> {
 }
 
 impl ProtoError {
-    /// Build an [`InvalidResponse`](ProtoError::InvalidResponse) for `step` from a response, capturing
-    /// the status and a redacted, length-capped body excerpt at this single construction site.
-    ///
-    /// `secrets` are the values this step put on the wire that the response can reflect back: the
-    /// session id registration writes into its URL path, the bearer ticket a Steam login writes into
-    /// its query. A step that sent none passes an empty slice.
+    // `secrets` are the values this step put on the wire that the response can reflect back: the
+    // session id registration writes into its URL path, the bearer ticket a Steam login writes into
+    // its query. A step that sent none passes an empty slice.
     pub(crate) fn invalid_response(step: Step, response: &ProtoResponse, secrets: &[&str]) -> Self {
         Self::InvalidResponse {
             step,
@@ -193,53 +145,37 @@ impl ProtoError {
     }
 }
 
-/// The most characters an excerpt keeps: enough to triage, small enough that a large or binary body
-/// cannot bloat the error.
 const EXCERPT_MAX_CHARS: usize = 200;
 
-/// The most bytes one UTF-8 character encodes to: the factor between a character budget and the bytes
-/// that are certain to hold it.
 const MAX_UTF8_BYTES: usize = 4;
 
-/// What a redaction leaves in place of the text it removed.
 const REDACTED: &str = "[redacted]";
 
-/// Query parameters whose value is a credential, redacted wherever an excerpt carries the shape.
-///
-/// The Steam ticket rides in the top-page query, so any page that echoes the request URL back (an
-/// error page, a WAF block) reflects it. Redacting by shape rather than only by value covers the
-/// reflections that re-encode it, which a verbatim scrub of the ticket text misses, and stands in for
-/// any call site that omits the ticket from its own scrub list.
+// Query parameters whose value is a credential, redacted wherever an excerpt carries the shape. The
+// Steam ticket rides in the top-page query, so any page that echoes the request URL back (an error
+// page, a WAF block) reflects it. Redacting by shape rather than only by value covers the reflections
+// that re-encode it, and stands in for any call site that omits the ticket from its own scrub list.
 const SECRET_QUERY_PARAMS: [&str; 1] = ["session_ticket="];
 
-/// What ends a query parameter's value in reflected text: the query and fragment separators, plus the
-/// delimiters a page embedding a URL in markup breaks on. Every other character reads as part of the
-/// value, so an unfamiliar reflection over-redacts rather than under-redacts.
+// What ends a query parameter's value in reflected text: the query and fragment separators, plus the
+// delimiters a page embedding a URL in markup breaks on. Every other character reads as part of the
+// value, so an unfamiliar reflection over-redacts rather than under-redacts.
 const VALUE_END: [char; 10] = ['&', '#', '"', '\'', '<', '>', ' ', '\t', '\r', '\n'];
 
-/// [`scrubbed_excerpt`] with no secrets to scrub verbatim, kept for tests that only exercise the
-/// [`SECRET_QUERY_PARAMS`] shape-based redaction. Every production call site now has a scrub list of
-/// its own, even if empty, so this has no caller outside `#[cfg(test)]`.
 #[cfg(test)]
 fn excerpt(body: &[u8]) -> String {
     scrubbed_excerpt(body, &[])
 }
 
-/// Like [`excerpt`], but also removes any of `secrets` from the body so a page that echoes the
-/// submitted credentials cannot leak them into an error. Matching is verbatim and best-effort: a
-/// secret the page re-encodes (HTML-escaped, percent-encoded) is not caught, so callers surface
-/// attacker-influenced text sparingly rather than relying on this alone. Scrubbing happens before the
-/// length cap, so a secret near the boundary cannot survive by being split.
-///
-/// `body` must be the full, untruncated text a step read off the wire: this function does its own
-/// bounded-window decode (see below) and length cap, cheaply, regardless of how large `body` is, so a
-/// caller has no performance reason to pre-truncate before calling this. It also has no correctness
-/// license to: the ambiguity guard below decides whether a secret could be waiting past what it saw by
-/// checking whether *this function's own* window filled, so a body a caller already cut down elsewhere
-/// looks identical to one that legitimately ended there, and the guard silently never engages. This bug
-/// shipped once already (a `MAX_MESSAGE`-capped OAuth failure message handed here pre-truncated, which
-/// hid a straddling secret from the guard) — see `oauth::scan::parse_login_callback`, which now borrows
-/// the message uncapped for exactly this reason.
+// `body` must be the full, untruncated text a step read off the wire: this function does its own
+// bounded-window decode and length cap, cheaply, regardless of how large `body` is, so a caller has
+// no performance reason to pre-truncate before calling this. It also has no correctness license to:
+// the ambiguity guard below decides whether a secret could be waiting past what it saw by checking
+// whether *this function's own* window filled, so a body a caller already cut down elsewhere looks
+// identical to one that legitimately ended there, and the guard silently never engages. This bug
+// shipped once already (a MAX_MESSAGE-capped OAuth failure message handed here pre-truncated, which
+// hid a straddling secret from the guard) -- see oauth::scan::parse_login_callback, which now borrows
+// the message uncapped for exactly this reason.
 pub(crate) fn scrubbed_excerpt(body: &[u8], secrets: &[&str]) -> String {
     // Scrub a bounded window, not the whole body: keep EXCERPT_MAX_CHARS plus the longest secret
     // (minus one) so any secret with a char in the final excerpt is fully present here and is redacted
@@ -261,11 +197,6 @@ pub(crate) fn scrubbed_excerpt(body: &[u8], secrets: &[&str]) -> String {
         .collect()
 }
 
-/// Decode at most `max_chars` characters from the head of `body`.
-///
-/// The bytes are cut before the decode, not after: `from_utf8_lossy` validates every byte it is handed
-/// and reallocates the lot when it finds an invalid one, so decoding a whole body to keep 200
-/// characters of it makes an error construction cost as much as the body an attacker chose to send.
 fn lossy_head(body: &[u8], max_chars: usize) -> String {
     String::from_utf8_lossy(excerpt_bytes(body, max_chars))
         .chars()
@@ -273,12 +204,6 @@ fn lossy_head(body: &[u8], max_chars: usize) -> String {
         .collect()
 }
 
-/// The head of `body` that is certain to hold `max_chars` characters.
-///
-/// A character encodes to at most [`MAX_UTF8_BYTES`], so that many times the budget always covers it,
-/// and the cut walks back off a continuation byte so a character split by the cut does not decode to a
-/// replacement one. The walk-back is bounded: a run of stray continuation bytes is invalid UTF-8 that
-/// decodes to one replacement character each, so it must not eat the window.
 fn excerpt_bytes(body: &[u8], max_chars: usize) -> &[u8] {
     let limit = max_chars.saturating_mul(MAX_UTF8_BYTES);
     if limit >= body.len() {
@@ -292,22 +217,16 @@ fn excerpt_bytes(body: &[u8], max_chars: usize) -> &[u8] {
     &body[..cut]
 }
 
-/// Replace every occurrence of any of `secrets` in `text` with [`REDACTED`].
-///
-/// One left-to-right pass taking the longest match at each position, not one whole-buffer `replace`
-/// per secret: sequential replaces share a buffer, so a secret that is a literal prefix of a longer one
-/// (a username and a password that starts with it, a username and the `_STORED_` blob that embeds it)
-/// consumes the shared span first and leaves the longer secret's tail behind in plaintext. Matching
-/// once over disjoint ranges redacts each occurrence exactly once and never re-reads a placeholder it
-/// just wrote.
-///
-/// `tail_guard` is the length of the longest secret that could still be waiting past `text`'s end (0
-/// when it cannot be: the caller already held the whole body, so there is nothing more to reveal).
-/// Once fewer than `tail_guard` characters remain unmatched, a real occurrence could have started
-/// there and had its close cut off by the caller's decode window: `rest.starts_with(secret)` can only
-/// prove a *complete* string absent, never a partial one, so continuing would risk copying an
-/// unredacted fragment. Stopping there instead trades a few characters of excerpt for the guarantee
-/// that nothing this function did not fully see ever reaches the output.
+// One left-to-right pass taking the longest match at each position, not one whole-buffer `replace`
+// per secret: sequential replaces share a buffer, so a secret that is a literal prefix of a longer one
+// (a username and a password that starts with it, a username and the _STORED_ blob that embeds it)
+// consumes the shared span first and leaves the longer secret's tail behind in plaintext.
+//
+// `tail_guard` is the length of the longest secret that could still be waiting past `text`'s end (0
+// when it cannot be: the caller already held the whole body). Once fewer than `tail_guard` characters
+// remain unmatched, a real occurrence could have started there and had its close cut off by the
+// caller's decode window: `rest.starts_with(secret)` can only prove a *complete* string absent, never
+// a partial one, so continuing would risk copying an unredacted fragment.
 fn redact_secrets(text: &str, secrets: &[&str], tail_guard: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -329,9 +248,6 @@ fn redact_secrets(text: &str, secrets: &[&str], tail_guard: usize) -> String {
     out
 }
 
-/// Replace the value of any [`SECRET_QUERY_PARAMS`] parameter in `text` with [`REDACTED`], keeping the
-/// parameter name so the excerpt still says what was there. A value with no terminator left (the cut
-/// took it) is redacted to the end of the text.
 fn redact_secret_params(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -351,8 +267,6 @@ fn redact_secret_params(text: &str) -> String {
     out
 }
 
-/// Move the first character of `rest` onto `out`, returning what is left. Character-wise, so no cut
-/// can land inside a multi-byte character.
 fn push_one_char<'t>(out: &mut String, rest: &'t str) -> &'t str {
     let mut chars = rest.chars();
     if let Some(ch) = chars.next() {
@@ -500,27 +414,15 @@ mod tests {
         );
     }
 
-    /// A secret-shaped string of exactly `len` characters. Cycling the alphabet rather than repeating
-    /// one character means an arbitrary fragment of it (as [`assert_no_partial_leak`] checks for) is
-    /// still recognizably a piece of *this* string, not a coincidental match against filler.
     fn secret_of_len(len: usize) -> String {
         (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
     }
 
-    /// The shortest fragment of a secret this module treats as a meaningful leak, not a coincidence.
-    /// A flat cap rather than a fraction of the secret's length: the window-straddle bug does not
-    /// leak a fixed proportion (the 720-char `_STORED_` blob repro loses only ~150 of it, one fifth),
-    /// so a "half the secret" bar misses real leaks on anything long. 16 exact characters survives
-    /// coincidentally only if a filler was engineered to produce it.
+    // A flat cap rather than a fraction of the secret's length: the window-straddle bug does not leak
+    // a fixed proportion (the 720-char _STORED_ blob repro loses only ~150 of it, one fifth), so a
+    // "half the secret" bar misses real leaks on anything long.
     const LEAK_FRAGMENT_LEN: usize = 16;
 
-    /// Fails if a fragment of `secret` at least [`LEAK_FRAGMENT_LEN`] characters long (or the whole
-    /// secret, if it is shorter than that) survives anywhere in `text`. `!text.contains(secret)` is
-    /// not enough to catch the window-truncation bug this guards: under that bug the excerpt held
-    /// neither the whole secret nor nothing of it, but a long exact fragment, which whole-string
-    /// containment is structurally blind to. Checking fixed-length fragments (rather than every
-    /// substring) is sufficient: any leaked run longer than the threshold contains one of this length
-    /// too.
     fn assert_no_partial_leak(text: &str, secret: &str) {
         let chars: Vec<char> = secret.chars().collect();
         let threshold = chars.len().clamp(1, LEAK_FRAGMENT_LEN);
@@ -575,12 +477,6 @@ mod tests {
         assert_no_partial_leak(&text, &blob);
     }
 
-    /// Reverting `lossy_head`'s bounded-byte cut back to `String::from_utf8_lossy(body)` leaves every
-    /// other test in this module green: they never hand it a body big enough to notice the cost.
-    /// A near-end invalid byte forces the whole-body path to reallocate and copy the entire buffer
-    /// (`from_utf8_lossy` only borrows when the input is entirely valid UTF-8), which the windowed
-    /// path never touches, because the window sits nowhere near the tail. 50ms is far above the
-    /// windowed path's cost (microseconds) and far below a 64MB whole-body copy even unoptimized.
     #[test]
     fn constructing_an_excerpt_never_touches_the_body_past_its_window() {
         let mut body = vec![b'x'; 64 * 1024 * 1024];
@@ -596,14 +492,6 @@ mod tests {
     }
 
     proptest! {
-        /// Secrets and filler large enough to actually cross the 200-char excerpt window (not just
-        /// short digit runs that always fit inside it), so this exercises the truncation boundary the
-        /// window-straddle bug lived at, and each secret repeats (matching the real repros, which all
-        /// needed a second reflection to trigger). `first`, `second`, and `filler` draw from disjoint
-        /// alphabets (lowercase, uppercase, digits-and-space) so no generated case, however proptest
-        /// shrinks it, can make [`assert_no_partial_leak`] see a coincidental cross-match instead of a
-        /// genuine one: a real leak is the only way a fragment of one can appear where another was
-        /// generated.
         #[test]
         fn no_secret_survives_a_scrub(
             first in "[a-m]{20,90}",
