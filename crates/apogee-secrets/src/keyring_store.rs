@@ -122,12 +122,17 @@ pub(crate) fn classify_secret_service(
     err: &secret_service::Error,
     step: &'static str,
 ) -> SecretsError {
-    use crate::probe::BusFailure;
+    use crate::probe::{BusFailure, is_dead_session_bus};
 
     match crate::probe::bus_failure(err) {
         Some(BusFailure::NoName) => SecretsError::NoBackend,
         Some(BusFailure::Denied) => SecretsError::Denied,
         Some(BusFailure::Locked) => SecretsError::Locked,
+        // A socket that is there and will not take a connection: no store answered, exactly as
+        // `Unavailable` below. The probe already names it and this path did not, so the same dead
+        // bus reported as an unclassified failure here, which reads as a store that may still be
+        // holding the secret and blocks deleting the account it belongs to.
+        None if is_dead_session_bus(err) => SecretsError::NoBackend,
         None => match err {
             secret_service::Error::Unavailable => SecretsError::NoBackend,
             secret_service::Error::Locked | secret_service::Error::Prompt => SecretsError::Locked,
@@ -323,6 +328,46 @@ mod tests {
             ));
             let outer = keyring::Error::PlatformFailure(boxed(unknown));
             assert!(matches!(map_error(&outer, "read"), SecretsError::NoBackend));
+        }
+
+        /// The store path's half of the dead-bus classification, which the probe path has always
+        /// answered. A socket that is there and refuses is no store, and while this path left it
+        /// unclassified the same session reported storage as unavailable and then refused to delete
+        /// the account, because an unclassified failure is read as a store that may still be holding
+        /// the secret. It arrives under both of keyring's wrappers depending on which call reached
+        /// it, and on every verb, so the step is the one a sweep uses.
+        #[test]
+        fn a_socket_that_will_not_take_a_connection_maps_to_no_backend() {
+            for kind in [
+                std::io::ErrorKind::NotFound,
+                std::io::ErrorKind::ConnectionRefused,
+                std::io::ErrorKind::PermissionDenied,
+            ] {
+                let dead = || {
+                    secret_service::Error::Zbus(zbus::Error::InputOutput(std::sync::Arc::new(
+                        std::io::Error::new(kind, "socket"),
+                    )))
+                };
+                for outer in [
+                    keyring::Error::NoStorageAccess(boxed(dead())),
+                    keyring::Error::PlatformFailure(boxed(dead())),
+                ] {
+                    assert!(
+                        matches!(map_error(&outer, "delete"), SecretsError::NoBackend),
+                        "{kind:?}"
+                    );
+                }
+            }
+
+            // Anything else on that socket is still an unclassified failure rather than a guess.
+            let broken =
+                secret_service::Error::Zbus(zbus::Error::InputOutput(std::sync::Arc::new(
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "socket"),
+                )));
+            assert!(matches!(
+                map_error(&keyring::Error::PlatformFailure(boxed(broken)), "delete"),
+                SecretsError::Backend { step: "delete" }
+            ));
         }
 
         /// A sandbox bus policy refusing the name is a different answer from the name not being

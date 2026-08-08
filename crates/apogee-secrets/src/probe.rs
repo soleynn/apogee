@@ -112,30 +112,40 @@ fn classify(err: &secret_service::Error, sandbox: Option<&Sandbox>) -> BackendSt
         }
         Some(BusFailure::Denied) => BackendState::SandboxDenied,
         Some(BusFailure::Locked) => BackendState::Locked,
+        None if is_dead_session_bus(err) => BackendState::NoSessionBus,
         None => match err {
             secret_service::Error::Unavailable => BackendState::NoSessionBus,
-            // The library folds only a *missing* socket into `Unavailable`
-            // (`secret-service-5.1.0/src/util.rs:149` takes `ErrorKind::NotFound` alone), so a
-            // socket that exists and will not take a connection arrives here unnamed and used to
-            // report as an unclassified store failure. From a caller's point of view it is the same
-            // condition: the address names something that is not a working bus. A `dbus-daemon`
-            // that died leaving its socket, and a stale address inherited through tmux, ssh or
-            // `sudo -E`, are the ordinary ways to arrive here.
-            secret_service::Error::Zbus(zbus::Error::InputOutput(io))
-                if matches!(
-                    io.kind(),
-                    std::io::ErrorKind::NotFound
-                        | std::io::ErrorKind::ConnectionRefused
-                        | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                BackendState::NoSessionBus
-            }
             secret_service::Error::Locked | secret_service::Error::Prompt => BackendState::Locked,
             secret_service::Error::NoResult => BackendState::NoDefaultCollection,
             _ => BackendState::Unreachable,
         },
     }
+}
+
+/// Whether the session bus address names something that is not a working bus.
+///
+/// The library folds only a *missing* socket into `Unavailable`
+/// (`secret-service-5.1.0/src/util.rs:149` takes `ErrorKind::NotFound` alone), so a socket that
+/// exists and will not take a connection arrives unnamed and used to report as an unclassified store
+/// failure. From a caller's point of view it is the same condition: the address names something that
+/// is not a working bus. A `dbus-daemon` that died leaving its socket, and a stale address inherited
+/// through tmux, ssh or `sudo -E`, are the ordinary ways to arrive here.
+///
+/// Shared with the store path rather than written twice, because the two drifted: the probe named
+/// this condition and the store did not, so a launcher told the user storage was unavailable and
+/// then refused to delete the account, on the grounds that the store it had just called dead might
+/// still be holding the secret.
+pub(crate) fn is_dead_session_bus(err: &secret_service::Error) -> bool {
+    matches!(
+        err,
+        secret_service::Error::Zbus(zbus::Error::InputOutput(io))
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::PermissionDenied
+            )
+    )
 }
 
 fn bus_is_filtered(sandbox: Option<&Sandbox>) -> bool {
