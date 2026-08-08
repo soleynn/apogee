@@ -40,6 +40,7 @@ is tagged with its change type. Versioning aims to follow
 - Keep reading credential targets past a failure, and anchor the foreign key strings (#117) _(fixed)_
 - Classify, compile and gate the Apple credential-store path (#119) _(fixed)_
 - Give the Windows secret store an owner-only access list (#120) _(fixed)_
+- Pin five hardening fixes that reverted green (#154) _(testing)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
