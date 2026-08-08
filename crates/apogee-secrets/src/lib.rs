@@ -97,7 +97,7 @@ pub use memory::{Call, FailAt, MemoryStore};
 
 /// Parse arbitrary bytes as the fallback store's file header, for the fuzz workspace.
 ///
-/// Both of these take what a fuzzer produces, which is what the file's own parser takes off a disk.
+/// Each of these takes what a fuzzer produces, which is what the file's own parser takes off a disk.
 /// They are behind a feature no shipping build enables, so a decoder fed hostile input never becomes
 /// part of this crate's API.
 #[cfg(feature = "fuzzing")]
@@ -109,4 +109,18 @@ pub fn fuzz_parse_frame(bytes: &[u8]) {
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_records(bytes: &[u8]) {
     encrypted_file::parse_records(bytes);
+}
+
+/// Parse arbitrary bytes as the table another launcher exports its passwords into, looking for
+/// `wanted`. As [`fuzz_parse_frame`], with two differences.
+///
+/// The bytes are cleartext rather than sealed, and nothing authenticates them before the decoder is
+/// handed them: the file sits on a path this launcher does not own, so its contents are a stranger's
+/// to choose rather than only the decoder's own totality.
+///
+/// And it answers a property rather than only declining to abort. `false` means the decode returned
+/// a password longer than the bytes it was decoded from, which no amount of JSON escaping can do.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_exported_file(bytes: &[u8], wanted: &str) -> bool {
+    import::fuzz_exported_password(bytes, wanted)
 }
