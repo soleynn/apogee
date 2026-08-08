@@ -43,6 +43,9 @@ is tagged with its change type. Versioning aims to follow
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
 
+### nightly
+- Cache fuzz corpus per target across nightly runs (#150) _(ci)_
+
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
 - Close the defects found by the adversarial pass (#97) _(fixed)_
