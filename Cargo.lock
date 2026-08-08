@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "sqex-proto"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "apogee-test-support",
  "async-trait",
