@@ -16,6 +16,7 @@ is tagged with its change type. Versioning aims to follow
 - Derive the computer-id from the install, not the host (#129) _(fixed)_
 - Stop the install-id store swallowing I/O errors, memoize the ephemeral fallback (#139) _(fixed)_
 - Correct the transport contract doc and add wire-level accept tests (#146) _(documentation)_
+- Pin Accept-Language to XIVLauncher's actual seed-0 draw (#151) _(fixed)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
