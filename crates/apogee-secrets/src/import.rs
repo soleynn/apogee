@@ -386,35 +386,72 @@ impl ForeignSecretsFile {
 
 impl ImportSource for ForeignSecretsFile {
     fn password(&self, key: &ForeignKey) -> Result<Import, SecretsError> {
-        let mut body = match std::fs::read_to_string(&self.path) {
+        let mut body = match std::fs::read(&self.path) {
             Ok(body) => body,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Import::Nothing),
             Err(err) => return Err(SecretsError::Io(err)),
         };
-        let parsed = serde_json::from_str::<HashMap<String, String>>(&body);
+        // Held rather than returned from inside the decode, so the buffer is erased on the failure
+        // path as well as the success one. It is every account's password.
+        let found = exported_password(&body, key.name());
         body.zeroize();
+        found
+    }
+}
 
-        // The parse error is dropped rather than carried. It quotes the input it choked on, and the
-        // input here is a file of passwords.
-        let mut entries = parsed.map_err(|_| SecretsError::Backend {
+/// Pick one account's password out of the table another launcher exported, given its bytes.
+///
+/// Split from the read so the decode is reachable from a buffer alone. It is the one parser in this
+/// crate handed a file of cleartext rather than sealed bytes, and it is handed it from a path this
+/// launcher does not own, so what it has to survive is whatever anything on the machine left there.
+///
+/// Bytes and not text. The encoding is part of what is being decoded rather than something the read
+/// may assume: a file that is not UTF-8 is a table this cannot read, which is more use to report
+/// than the I/O failure that decoding during the read produced, which says the read itself broke.
+///
+/// One entry that is not a password does not end the search, for the reason a target that will not
+/// read does not end it in `first_readable` above. Every other line belongs to an account this was
+/// not asked about, written by some version of that launcher under a name that says nothing about
+/// the one that was asked for, so the values are taken as whatever JSON holds them as and only the
+/// asked-for one has to be a string. A number, a list or an object is passed over the way an entry
+/// that is not there is.
+fn exported_password(body: &[u8], wanted: &str) -> Result<Import, SecretsError> {
+    // The parse error is dropped rather than carried. It quotes the input it choked on, and the
+    // input here is a file of passwords.
+    let mut entries: HashMap<String, serde_json::Value> =
+        serde_json::from_slice(body).map_err(|_| SecretsError::Backend {
             step: "read the exported password file",
         })?;
-        let found = entries.remove(key.name());
-        // Every other account's password was parsed out of the file too, and dropping the map would
-        // leave all of them on the heap.
-        //
-        // Accepted gap: no test observes that the buffer was erased before it was freed. Seeing that
-        // needs a dealloc-scanning `#[global_allocator]`, which takes `unsafe`, and this crate keeps
-        // its one `unsafe` module for the Windows permission arm.
-        for (_, mut password) in entries {
+    let found = entries.remove(wanted);
+    // Every other account's password was parsed out of the file too, and dropping the map would
+    // leave all of them on the heap.
+    //
+    // Accepted gap: no test observes that the buffer was erased before it was freed. Seeing that
+    // needs a dealloc-scanning `#[global_allocator]`, which takes `unsafe`, and this crate keeps
+    // its one `unsafe` module for the Windows permission arm.
+    for (_, value) in entries {
+        if let serde_json::Value::String(mut password) = value {
             password.zeroize();
         }
-        let Some(mut password) = found else {
-            return Ok(Import::Nothing);
-        };
-        let bytes = password.as_bytes().to_vec();
-        password.zeroize();
-        Ok(non_empty(bytes))
+    }
+    let Some(serde_json::Value::String(mut password)) = found else {
+        return Ok(Import::Nothing);
+    };
+    let bytes = password.as_bytes().to_vec();
+    password.zeroize();
+    Ok(non_empty(bytes))
+}
+
+/// Reach the exported-file decoder from the crate root, for the fuzz workspace and nothing else.
+///
+/// Answers a property rather than only declining to abort: a password this returns was decoded out
+/// of the bytes it was handed, so one longer than them is the decoder amplifying what it read. A
+/// refusal and an absence are clean answers and pass.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_exported_password(body: &[u8], wanted: &str) -> bool {
+    match exported_password(body, wanted) {
+        Ok(Import::Password(found)) => found.expose().len() <= body.len(),
+        Ok(Import::Nothing | Import::Unsupported) | Err(_) => true,
     }
 }
 
@@ -658,6 +695,77 @@ mod tests {
             };
             let rendered = format!("{err} {err:?}");
             assert!(!rendered.contains("hunter2"), "{rendered}");
+        }
+
+        /// The file holds every account that launcher knows about, and the entries for the others
+        /// were written by whatever version of it happened to be installed when each was saved. One
+        /// of them being something this cannot read is not a reason to tell a user their own
+        /// password is not in a file that has it, which is the same call the target sweep makes.
+        #[test]
+        fn an_entry_this_cannot_read_does_not_hide_the_one_asked_for() {
+            let (_dir, path) =
+                write(r#"{"bob":{"saved":"pw-bob"},"alice":"pw-alice","carol":42,"dave":null}"#);
+            let Import::Password(found) = ForeignSecretsFile::at(&path)
+                .password(&ForeignKey::from_stored_name("alice"))
+                .expect("read")
+            else {
+                panic!("alice is in the file and is a password");
+            };
+            assert_eq!(found.expose(), b"pw-alice");
+        }
+
+        /// The other half of that call: what is passed over for another account is passed over for
+        /// this one too. An entry that is not a string is not a password, and reporting it as one
+        /// would hand the login something that is not what the user saved.
+        #[test]
+        fn an_entry_that_is_not_a_string_is_nothing_stored() {
+            let (_dir, path) = write(r#"{"alice":{"saved":"pw-alice"}}"#);
+            assert!(matches!(
+                ForeignSecretsFile::at(&path)
+                    .password(&ForeignKey::from_stored_name("alice"))
+                    .expect("read"),
+                Import::Nothing
+            ));
+        }
+
+        /// The file is bytes on a path this launcher does not own, so its encoding is part of what
+        /// is being decoded. A file that is not text is a table that cannot be read, not a read that
+        /// failed, and the two send a caller looking in different places. Well-formed apart from the
+        /// encoding, so it is the encoding this pins and not the shape.
+        #[test]
+        fn a_file_that_is_not_text_is_a_table_that_cannot_be_read() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("secrets.json");
+            let mut body = br#"{"alice":""#.to_vec();
+            body.extend_from_slice(&[0xff, 0x22, 0x7d]);
+            std::fs::write(&path, body).expect("write the file");
+            let Err(err) =
+                ForeignSecretsFile::at(&path).password(&ForeignKey::from_stored_name("alice"))
+            else {
+                panic!("bytes that are not text are not a table");
+            };
+            assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+        }
+
+        /// What the fuzz target asserts, pinned here so it runs on every push rather than only under
+        /// the fuzzer: the decode never returns more password than it was given bytes. Escapes are
+        /// the direction that could go wrong, since each one shrinks by a different amount.
+        #[test]
+        fn a_decoded_password_is_never_longer_than_the_bytes_it_came_from() {
+            for body in [
+                r#"{"alice":"pw"}"#,
+                r#"{"alice":"\u0041\u0042"}"#,
+                r#"{"alice":"😀"}"#,
+            ] {
+                let (_dir, path) = write(body);
+                let Import::Password(found) = ForeignSecretsFile::at(&path)
+                    .password(&ForeignKey::from_stored_name("alice"))
+                    .expect("read")
+                else {
+                    panic!("alice is in the file");
+                };
+                assert!(found.expose().len() <= body.len(), "{body}");
+            }
         }
 
         #[test]

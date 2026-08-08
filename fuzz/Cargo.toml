@@ -188,6 +188,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "foreign_secrets_file"
+path = "fuzz_targets/foreign_secrets_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "otp_import"
 path = "fuzz_targets/otp_import.rs"
 test = false
