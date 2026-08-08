@@ -1,7 +1,3 @@
-//! Frontier integration tests: the gate/login requests are asserted byte-for-byte through the fixture
-//! transport, the body is parsed, and a strict-parse canary over the committed fixture guards against
-//! silent schema drift.
-
 use apogee_test_support::rt::block_on;
 use apogee_test_support::transport::{FixtureTransport, canonical_request};
 use sqex_proto::{
@@ -77,8 +73,6 @@ fn gate_status_parses_a_closed_gate() {
     assert_eq!(status.message, ["Scheduled maintenance"]);
 }
 
-/// The leniency reaches the real surface, not just `serde_json::from_str`: a payload whose flag is a
-/// float and whose display lists are `null` still answers the caller instead of failing the request.
 #[test]
 fn gate_status_degrades_a_wobbly_payload_end_to_end() {
     let id = computer_id();
@@ -92,8 +86,6 @@ fn gate_status_degrades_a_wobbly_payload_end_to_end() {
     assert_eq!(status.news, ["patch 7.1", "7"]);
 }
 
-/// The other half of the same decision: a flag with no readable open/closed meaning is reported as a
-/// failed check rather than guessed into an answer the caller would act on.
 #[test]
 fn gate_status_reports_an_unreadable_flag_rather_than_guessing() {
     let id = computer_id();
@@ -127,9 +119,6 @@ fn a_non_200_status_is_an_invalid_response() {
     ));
 }
 
-/// Mirrors the shape of `GateStatus` but rejects unknown fields; parsing the committed fixture with it
-/// is the canary that a real capture gaining a field surfaces as a test failure, prompting a model
-/// update.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StrictGateStatus {

@@ -1,22 +1,18 @@
-//! Frontier status endpoints.
+//! Frontier status endpoints: the world-gate and login-server status.
 //!
-//! The frontier serves the launcher's world-gate and login-server status. These payloads gate whether
-//! a login is even attempted, so they are typed; they parse leniently (unknown fields ignored) because
-//! SE adds fields additively, and a strict-parse canary over a committed fixture surfaces such
-//! additions as a visible-but-green diff.
+//! These payloads gate whether a login is even attempted, so they are typed as [`GateStatus`]; they
+//! parse leniently (unknown fields ignored) because SE adds fields additively, and a strict-parse
+//! canary test over a committed fixture surfaces such additions as a visible-but-green diff rather
+//! than a silent one. The frontier also serves display data (news, banners, notices, world status);
+//! those endpoints are deliberately unimplemented here, added once their payloads are captured, so
+//! their lenient schemas can be pinned from fact rather than guessed.
 //!
-//! `status` is SE's open/closed flag, sent as an integer (`0` closed, non-zero open) as the reference
-//! reads it (`status != 0`). The frontier also serves display data (news, banners, notices, world
-//! status); those endpoints are added once their payloads are captured, so their lenient schemas can be
-//! pinned from fact rather than guessed.
-//!
-//! Leniency here is bounded by the reference launcher's own deserializer rather than pushed as far as
-//! it will go, because these two endpoints decide whether the launcher believes the servers are up and
-//! an invented reading is worse than a reported failure. Every shape the reference accepts is accepted:
-//! a float or `"true"`/`"false"` open flag, a `null` display list, and a non-string scalar list element
-//! rendered as its JSON text. Every shape it rejects stays an error: a numeric or free-text `status`
-//! string, an explicit `null` `status`, and any list or object where a scalar belongs. Measured against
-//! `GateStatus.cs` through its `Newtonsoft.Json` deserializer, shape by shape.
+//! Leniency is bounded by the reference launcher's own deserializer rather than pushed as far as it
+//! will go, because these two endpoints decide whether the launcher believes the servers are up and
+//! an invented reading is worse than a reported failure: every shape the reference accepts is
+//! accepted here too (see [`GateStatus::status`]'s doc for the full list), and every shape it
+//! rejects stays an error. This was measured against the reference's `GateStatus.cs` through its
+//! `Newtonsoft.Json` deserializer, shape by shape, rather than guessed at.
 
 use std::fmt;
 
@@ -36,13 +32,31 @@ const FRONTIER_ORIGIN: &str = "https://launcher.finalfantasyxiv.com";
 const GATE_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/gate_status.json";
 const LOGIN_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/login_status.json";
 
-/// A world-gate or login-server status. `status` is open/closed; `message` and `news` are display
-/// strings. Fields SE may add are ignored.
+/// A world-gate or login-server status: whether the service is open, plus any display strings.
+///
+/// Missing fields default (an absent field reads the same as its zero value: closed, no messages,
+/// no news), and fields SE may add are ignored.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::GateStatus;
+///
+/// let status: GateStatus = serde_json::from_str(r#"{"status": 1, "news": ["patch 7.1"]}"#).unwrap();
+/// assert!(status.status);
+/// assert_eq!(status.news, ["patch 7.1"]);
+/// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct GateStatus {
-    /// Whether the service is open. SE sends this as an integer (`0` closed, non-zero open), though a
-    /// bool or `"true"`/`"false"` is also accepted (see the module docs for the full shape).
+    /// Whether the service is open.
+    ///
+    /// SE sends this as an integer (`0` closed, non-zero open) as the reference reads it (`status
+    /// != 0`), though a JSON bool, a float, or the string `"true"`/`"false"` (case-insensitive,
+    /// trimmed) is also accepted, matching every shape the reference launcher's own deserializer
+    /// takes. A numeric string, free text, and an explicit `null` are refused, also matching the
+    /// reference: none of the three carries an open/closed reading this crate could infer without
+    /// inventing one, and the caller acts on the answer.
     #[serde(deserialize_with = "deserialize_open_flag")]
     pub status: bool,
     /// Display strings shown alongside the status (e.g. a maintenance notice).
@@ -53,13 +67,6 @@ pub struct GateStatus {
     pub news: Vec<String>,
 }
 
-/// Deserialize SE's open/closed flag. The frontier sends it as an integer (`0` closed, non-zero open),
-/// matching the reference launcher's `status != 0`; a JSON bool, a float, and the strings `"true"` and
-/// `"false"` are accepted too, which is every shape the reference's own deserializer takes.
-///
-/// A numeric string, free text, and an explicit `null` are refused, also matching the reference. None
-/// of the three carries an open/closed reading this crate could infer without inventing one, and the
-/// caller acts on the answer: guessing here would tell a user the servers are down when they are up.
 fn deserialize_open_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -104,14 +111,6 @@ where
     deserializer.deserialize_any(OpenFlag)
 }
 
-/// Deserialize a list of display strings. SE sends an array; an explicit `null` reads as empty, the
-/// same as an absent field under the container's `serde(default)`, and a non-string scalar element
-/// renders as its JSON text. Both match the reference launcher, which drops a `null` list and coerces a
-/// scalar element on the way into its `List<string>`.
-///
-/// An object or array where a scalar belongs is still an error, again as the reference has it: it is a
-/// schema change rather than a type wobble, and the strict-parse canary over the committed fixture is
-/// the intended way to learn about one.
 fn deserialize_display_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -141,8 +140,6 @@ where
     deserializer.deserialize_any(DisplayList)
 }
 
-/// One element of a display list: any JSON scalar, rendered as text. A `null` element carries nothing
-/// to display and has no `String` to become, so it drops out of the list.
 struct DisplayItem(Option<String>);
 
 impl<'de> Deserialize<'de> for DisplayItem {
@@ -184,12 +181,75 @@ impl<'de> Deserialize<'de> for DisplayItem {
 }
 
 /// The per-install, per-locale values a frontier request carries.
+///
+/// # Examples
+///
+/// ```
+/// use sqex_proto::{ClientContext, ComputerId, FrontierContext};
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = FrontierContext {
+///     client: ClientContext {
+///         computer_id: &id,
+///         language: "en-us",
+///         accept_language: "en-us,en;q=0.9",
+///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     },
+/// };
+/// assert_eq!(context.client.language, "en-us");
+/// ```
 pub struct FrontierContext<'a> {
     /// The shared client identity and locale plumbing.
     pub client: ClientContext<'a>,
 }
 
 /// Fetch the world-gate status (world maintenance).
+///
+/// # Errors
+///
+/// Returns [`ProtoError::Transport`] if the request could not be sent, or
+/// [`ProtoError::InvalidResponse`] if SE answers with a non-`200` status or a body that does not
+/// deserialize as a [`GateStatus`].
+///
+/// # Examples
+///
+/// ```
+/// # fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+/// #     let mut fut = std::pin::pin!(fut);
+/// #     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+/// #     loop {
+/// #         if let std::task::Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+/// #             return val;
+/// #         }
+/// #     }
+/// # }
+/// use sqex_proto::{
+///     ClientContext, ComputerId, FrontierContext, LauncherTime, ProtoRequest, ProtoResponse,
+///     Transport, TransportError, check_gate_status,
+/// };
+///
+/// struct OpenGate;
+///
+/// #[async_trait::async_trait]
+/// impl Transport for OpenGate {
+///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+///         Ok(ProtoResponse::new(200, br#"{"status":1}"#.to_vec()))
+///     }
+/// }
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = FrontierContext {
+///     client: ClientContext {
+///         computer_id: &id,
+///         language: "en-us",
+///         accept_language: "en-us,en;q=0.9",
+///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     },
+/// };
+/// let now = LauncherTime::from_parts(2024, 1, 2, 3, 47, 0);
+/// let status = block_on(check_gate_status(&OpenGate, &context, &now)).unwrap();
+/// assert!(status.status);
+/// ```
 pub async fn check_gate_status(
     transport: &dyn Transport,
     context: &FrontierContext<'_>,
@@ -204,7 +264,53 @@ pub async fn check_gate_status(
     parse_status(&response, Step::GateStatus)
 }
 
-/// Fetch the login-server status. Unlike the gate status, this endpoint takes no `lang`.
+/// Fetch the login-server status. Unlike [`check_gate_status`], this endpoint takes no `lang`.
+///
+/// # Errors
+///
+/// Returns [`ProtoError::Transport`] if the request could not be sent, or
+/// [`ProtoError::InvalidResponse`] if SE answers with a non-`200` status or a body that does not
+/// deserialize as a [`GateStatus`].
+///
+/// # Examples
+///
+/// ```
+/// # fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+/// #     let mut fut = std::pin::pin!(fut);
+/// #     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+/// #     loop {
+/// #         if let std::task::Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+/// #             return val;
+/// #         }
+/// #     }
+/// # }
+/// use sqex_proto::{
+///     ClientContext, ComputerId, FrontierContext, LauncherTime, ProtoRequest, ProtoResponse,
+///     Transport, TransportError, check_login_status,
+/// };
+///
+/// struct DownLogin;
+///
+/// #[async_trait::async_trait]
+/// impl Transport for DownLogin {
+///     async fn execute(&self, _req: ProtoRequest) -> Result<ProtoResponse, TransportError> {
+///         Ok(ProtoResponse::new(200, br#"{"status":0}"#.to_vec()))
+///     }
+/// }
+///
+/// let id = ComputerId::from_facts("host", "user", "os", 4);
+/// let context = FrontierContext {
+///     client: ClientContext {
+///         computer_id: &id,
+///         language: "en-us",
+///         accept_language: "en-us,en;q=0.9",
+///         referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+///     },
+/// };
+/// let now = LauncherTime::from_parts(2024, 1, 2, 3, 47, 0);
+/// let status = block_on(check_login_status(&DownLogin, &context, &now)).unwrap();
+/// assert!(!status.status);
+/// ```
 pub async fn check_login_status(
     transport: &dyn Transport,
     context: &FrontierContext<'_>,
@@ -218,14 +324,9 @@ pub async fn check_login_status(
     parse_status(&response, Step::LoginStatus)
 }
 
-/// The launcher's frontier request header set, in order.
-///
-/// `accept` is declared even though the reference launcher sends neither it nor `Accept-Encoding` on
-/// `gate`/`login` (their content type is unset): a reqwest client merges its own default `Accept: */*`
-/// and negotiated encoding into any request that omits them, and it does that after the point the
-/// fidelity check reads the built request back, so an undeclared default is invisible to it. Declaring
-/// the identical `*/*` here keeps the wire byte unchanged while bringing the header inside the check;
-/// `accept-encoding`'s value is exempt from the comparison (see [`crate::NEGOTIATED_HEADERS`]).
+// `accept` is declared even though the reference launcher sends neither it nor Accept-Encoding on
+// gate/login (their content type is unset): see bootver.rs's build_request and
+// crate::NEGOTIATED_HEADERS for why the identical `*/*` is declared anyway.
 fn build_request(
     url: Url,
     context: &FrontierContext<'_>,
@@ -313,7 +414,6 @@ mod tests {
         assert!(status.news.is_empty());
     }
 
-    /// Any integer the flag can arrive as reads through `!= 0`, at both ends of the range.
     #[test]
     fn reads_the_whole_integer_range_as_an_open_flag() {
         let negative: GateStatus = serde_json::from_str(r#"{"status":-1}"#).unwrap();
@@ -322,7 +422,6 @@ mod tests {
         assert!(huge.status);
     }
 
-    /// A float flag: the reference's deserializer takes one, so this one does.
     #[test]
     fn reads_a_float_open_flag() {
         let closed: GateStatus = serde_json::from_str(r#"{"status":0.0}"#).unwrap();
@@ -331,7 +430,6 @@ mod tests {
         assert!(open.status);
     }
 
-    /// `"true"`/`"false"` are the only strings the reference reads, trimmed and case-folded.
     #[test]
     fn reads_a_boolean_string_open_flag() {
         for body in [
@@ -346,8 +444,6 @@ mod tests {
         assert!(!closed.status);
     }
 
-    /// The other string shapes stay errors. A numeral is the tempting one, and the reference refuses it
-    /// too; reading `"0"` as closed would be this crate inventing an answer the server did not give.
     #[test]
     fn refuses_a_flag_string_that_is_not_a_boolean() {
         for body in [
@@ -360,8 +456,6 @@ mod tests {
         }
     }
 
-    /// An explicit `null` flag is an error, not the closed default: absent means the server said
-    /// nothing, `null` means it said something this crate cannot read.
     #[test]
     fn refuses_a_null_or_structured_open_flag() {
         for body in [r#"{"status":null}"#, r#"{"status":{}}"#, r#"{"status":[]}"#] {
@@ -369,8 +463,6 @@ mod tests {
         }
     }
 
-    /// A `null` display list degrades to empty instead of failing the whole object, matching both the
-    /// reference and this struct's own default for an absent list.
     #[test]
     fn reads_a_null_display_list_as_empty() {
         let status: GateStatus =
@@ -380,7 +472,6 @@ mod tests {
         assert!(status.news.is_empty());
     }
 
-    /// A scalar element renders as its JSON text; a `null` element has nothing to render and drops.
     #[test]
     fn renders_non_string_display_list_elements() {
         let status: GateStatus =
@@ -388,8 +479,6 @@ mod tests {
         assert_eq!(status.message, ["maint", "5", "true", "1.5"]);
     }
 
-    /// A list that is not a list, or an element that is not a scalar, is a schema change rather than a
-    /// type wobble; the strict-parse canary over the committed fixture is how that should surface.
     #[test]
     fn refuses_a_display_list_that_is_not_a_list_of_scalars() {
         for body in [

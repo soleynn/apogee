@@ -1,12 +1,9 @@
-//! Peak-memory bound for a single hostile patchlist entry line.
-//!
-//! `parse_entry` must count a line's tab-separated fields before collecting them into a `Vec<&str>`,
-//! the same technique `parse_patch_list` already uses one level up for the line count. Before that
-//! fix, a single entry line made of tab bytes, sized within the crate's own overall body cap,
-//! materialized one `&str` slice per field before the field count was ever checked: ~16 MiB of tab
-//! bytes produced roughly 16.7 million slices, about 267 MB of peak RSS from 16 MB of wire input, a
-//! ~16.9x amplification measured on a release build via `/proc/self/status` (`VmHWM`). Linux-only
-//! (reads `/proc/self/status`).
+// Peak-memory bound for a single hostile patchlist entry line. parse_entry must count a line's
+// tab-separated fields before collecting them into a Vec<&str>. Before that fix, a single entry line
+// made of tab bytes, sized within the crate's own overall body cap, materialized one &str slice per
+// field before the field count was ever checked: ~16 MiB of tab bytes produced roughly 16.7 million
+// slices, about 267 MB of peak RSS from 16 MB of wire input, a ~16.9x amplification measured on a
+// release build via /proc/self/status (VmHWM). Linux-only (reads /proc/self/status).
 
 #![cfg(target_os = "linux")]
 
@@ -14,12 +11,8 @@ use sqex_proto::{ProtoError, parse_patch_list};
 
 const BOUNDARY: &str = "--SYNTHETIC_BOUNDARY_APOGEE";
 
-/// The crate's own overall body cap (`patchlist::MAX_BODY_BYTES`), duplicated here since the constant
-/// is private: the hostile line must stay inside it, or the outer cap would reject the body before
-/// `parse_entry` ever ran, proving nothing about the per-line guard this test targets.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-/// Wrap one entry line in the five-line preamble and two-line trailer the parser expects.
 fn envelope(entry: &str) -> String {
     let mut body = String::new();
     for header in [
@@ -39,7 +32,6 @@ fn envelope(entry: &str) -> String {
     body
 }
 
-/// The process's peak resident set in KiB (`VmHWM`), if readable.
 fn peak_rss_kib() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
