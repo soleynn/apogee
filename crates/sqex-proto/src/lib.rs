@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 //! A reimplementation of Square Enix's FFXIV launcher network protocol: OAuth login, version and
 //! boot checks, patchlist parsing.
@@ -9,9 +10,9 @@
 //! identities, the boot-version check, the patchlist parser, the frontier gate/login status
 //! endpoints), the OAuth login flow, and session registration (the version report and the UID
 //! handshake). Reading an install's `.ver` files for the version report
-//! ([`VersionReport::from_install`]) is the crate's only filesystem access. [`gen_token`] is a
-//! dormant, opt-in surface: SE disables the code path it exercises on the live service, so nothing
-//! here calls it by default.
+//! ([`VersionReport::from_install`]) is the crate's only filesystem access. `gen_token` (behind the
+//! `gen-token` feature) is a dormant, opt-in surface: SE disables the code path it exercises on the
+//! live service, so nothing here calls it by default.
 //!
 //! # Layout
 //!
@@ -93,6 +94,7 @@
 mod bootver;
 mod error;
 mod frontier;
+#[cfg(feature = "gen-token")]
 mod gen_token;
 mod http_date;
 mod identity;
@@ -106,6 +108,7 @@ mod version;
 pub use bootver::check_boot_version;
 pub use error::{ProtoError, Step};
 pub use frontier::{FrontierContext, GateStatus, check_gate_status, check_login_status};
+#[cfg(feature = "gen-token")]
 pub use gen_token::gen_token;
 pub use http_date::parse_http_date;
 pub use identity::{

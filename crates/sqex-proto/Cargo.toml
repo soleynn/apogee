@@ -27,8 +27,18 @@ insta.workspace = true
 rstest.workspace = true
 proptest.workspace = true
 
+[features]
+# The dormant `gen_token` patch-URL tokenization request. SE disables the code path it exercises on
+# the live service, so this is reachable only by an explicit, opt-in caller and stays off by default.
+gen-token = []
+
+[[test]]
+name = "gen_token"
+required-features = ["gen-token"]
+
 [lints]
 workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
