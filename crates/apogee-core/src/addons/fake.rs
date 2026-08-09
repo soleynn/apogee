@@ -30,6 +30,10 @@ pub(crate) enum AddonCall {
     SetupApplied {
         prefix: bool,
     },
+    /// The prefix was asked what setup it is missing, which changes nothing.
+    SetupExamined {
+        prefix: bool,
+    },
     Started {
         game_pid: i32,
         count: usize,
@@ -51,11 +55,36 @@ pub(crate) struct FakeAddons {
     failures: Vec<String>,
     /// What this seam contributes to a launch's plan, so a test can check it reaches the spawn.
     inserted_args: Vec<String>,
+    /// The setup this seam says the prefix is missing, and what is left of it after an apply. `None`
+    /// is the catalog being unreadable, so both default to a catalog that was read and had nothing to
+    /// add: a test not about the catalog should not have to say so.
+    missing: Option<Vec<String>>,
+    still_missing: Option<Vec<String>>,
 }
 
 impl FakeAddons {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            missing: Some(Vec::new()),
+            still_missing: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
+    /// Report `names` as the setup the prefix is missing, and `left` as what an apply does not
+    /// resolve. Two lists rather than one, so a test can tell a fix that applied what a check named
+    /// from one that only said it did.
+    pub(crate) fn missing_setup(mut self, names: &[&str], left: &[&str]) -> Self {
+        self.missing = Some(names.iter().map(|n| (*n).to_owned()).collect());
+        self.still_missing = Some(left.iter().map(|n| (*n).to_owned()).collect());
+        self
+    }
+
+    /// Answer nothing about the catalog, as a launcher that could not read one does.
+    pub(crate) fn without_a_catalog(mut self) -> Self {
+        self.missing = None;
+        self.still_missing = None;
+        self
     }
 
     /// Say that this launch still owes teardown at exit.
@@ -120,10 +149,23 @@ impl AddonBackend for FakeAddons {
         prefix: Option<Prefix>,
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
-    ) {
+    ) -> Option<Vec<String>> {
         self.record(AddonCall::SetupApplied {
             prefix: prefix.is_some(),
         });
+        self.still_missing.clone()
+    }
+
+    async fn missing_setup(
+        &self,
+        prefix: Option<Prefix>,
+        _cancel: &CancellationToken,
+        _events: &UnboundedSender<Event>,
+    ) -> Option<Vec<String>> {
+        self.record(AddonCall::SetupExamined {
+            prefix: prefix.is_some(),
+        });
+        self.missing.clone()
     }
 
     async fn start(

@@ -16,7 +16,7 @@ use apogee_core::{
     EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore, ForeignKey,
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
     KdfCost, ListenerConsent, ListenerSettings, ListenerSources, Notice, OtpDelivery, OtpSource,
-    Passphrase, PatchProgress, PrefixAction, PrefixHealth, Profile, Region, RunIn, RunnerSelection,
+    Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile, Region, RunIn, RunnerSelection,
     STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
     SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
@@ -1041,15 +1041,33 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
 }
 
 /// One line per problem found, or a line saying there were none.
-fn render_health(health: &PrefixHealth) -> String {
-    if health.is_healthy() {
+///
+/// The setup a prefix is missing counts as a problem alongside the structural ones, and a catalog
+/// that could not be read is its own line rather than an absence: "nothing wrong" has to mean the
+/// check looked at both halves and found nothing.
+fn render_health(report: &PrefixReport) -> String {
+    if report.nothing_wrong() {
         return "prefix: nothing wrong".to_owned();
     }
-    let mut out = format!("prefix: {} problem(s)", health.issues.len());
-    for issue in &health.issues {
-        out.push('\n');
-        out.push_str("  ");
-        out.push_str(&render_health_issue(issue));
+    let missing = report.missing_setup.as_deref().unwrap_or_default();
+    let mut lines: Vec<String> = report
+        .health
+        .issues
+        .iter()
+        .map(render_health_issue)
+        .collect();
+    lines.extend(
+        missing
+            .iter()
+            .map(|name| format!("missing setup {name} (fix applies it)")),
+    );
+    if report.missing_setup.is_none() {
+        lines.push("the component catalog could not be read, so what setup this prefix is missing is unknown".to_owned());
+    }
+    let mut out = format!("prefix: {} problem(s)", lines.len());
+    for line in lines {
+        out.push_str("\n  ");
+        out.push_str(&line);
     }
     out
 }
@@ -2033,7 +2051,7 @@ fn render(event: &Event) -> String {
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
         Event::Frontier(_) => "frontier data received".to_owned(),
-        Event::PrefixHealth(health) => render_health(health),
+        Event::Prefix(report) => render_health(report),
         Event::Notice(notice) => render_notice(notice),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
@@ -2203,4 +2221,28 @@ mod tests {
         erased_text(typed);
         erased_secret(read_line_erased);
     };
+
+    fn report(missing: Option<&[&str]>) -> PrefixReport {
+        PrefixReport {
+            health: apogee_core::PrefixHealth::default(),
+            missing_setup: missing
+                .map(|names| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>()),
+        }
+    }
+
+    /// "Nothing wrong" is the one sentence that has to be earned. A prefix the runtime finds intact is
+    /// half the answer: setup it is missing is a problem, a catalog nobody could read is a question,
+    /// and neither of those is a clean bill.
+    #[test]
+    fn nothing_wrong_is_said_only_when_both_halves_answered_and_both_were_clean() {
+        assert_eq!(render_health(&report(Some(&[]))), "prefix: nothing wrong");
+
+        let missing = render_health(&report(Some(&["no-desktop-integration"])));
+        assert!(missing.starts_with("prefix: 1 problem(s)"), "{missing}");
+        assert!(missing.contains("no-desktop-integration"), "{missing}");
+
+        let unknown = render_health(&report(None));
+        assert!(unknown.starts_with("prefix: 1 problem(s)"), "{unknown}");
+        assert!(unknown.contains("could not be read"), "{unknown}");
+    }
 }

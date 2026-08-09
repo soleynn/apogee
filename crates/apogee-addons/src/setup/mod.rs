@@ -30,7 +30,8 @@ use url::Url;
 pub use event::{SetupEvent, SetupEvents};
 
 // The plan is how this module decides, not something a caller composes: it borrows rows out of the
-// manifest it was built from, and every consumer of the decision reads the report instead.
+// manifest it was built from, and every consumer of the decision reads the report or the missing list
+// instead.
 pub(crate) use plan::{SetupPlan, StepAction};
 
 use crate::manifest::{ComponentManifest, Verb};
@@ -77,6 +78,20 @@ impl SetupReport {
         self.outcomes
             .iter()
             .filter(|o| matches!(o.state, SetupState::Applied | SetupState::AlreadyPresent))
+            .map(|o| o.name.as_str())
+            .collect()
+    }
+
+    /// The verbs this pass could not apply, which are the ones the prefix is still missing.
+    ///
+    /// The complement of [`Self::present`] over a pass that considered every verb the manifest
+    /// defines, so a caller reporting what a prefix still needs does not have to read the prefix a
+    /// second time to find out.
+    #[must_use]
+    pub fn failed(&self) -> Vec<&str> {
+        self.outcomes
+            .iter()
+            .filter(|o| matches!(o.state, SetupState::Failed { .. }))
             .map(|o| o.name.as_str())
             .collect()
     }
@@ -220,15 +235,7 @@ pub(crate) async fn apply_verbs(
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
-    let installed = prefix.components().map_err(|source| AddonError::Io {
-        what: "this prefix".to_owned(),
-        step: "read what setup it already has",
-        source: Box::new(source),
-    })?;
-    // A verb the record claims but whose effect is gone has to be applied again, so the check happens
-    // before the plan is built rather than being discovered halfway through it.
-    let stale = stale_verbs(manifest, prefix, &installed);
-    let plan = SetupPlan::build(manifest, &installed, &stale);
+    let plan = plan_for(manifest, prefix)?;
 
     // One scratch directory per prefix, so two passes over different prefixes cannot clobber each
     // other's staging, and removed at the end whatever happened.
@@ -301,6 +308,43 @@ pub(crate) async fn apply_verbs(
         return Err(AddonError::Cancelled);
     }
     Ok(report)
+}
+
+/// What a pass over `prefix` would do about every verb `manifest` defines.
+///
+/// The one place the decision is made, so what [`missing_verbs`] names and what [`apply_verbs`]
+/// applies are the same answer rather than two readings of the same prefix that can disagree.
+///
+/// # Errors
+/// [`AddonError::Io`] if the prefix's record cannot be read.
+fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<SetupPlan<'m>> {
+    let installed = prefix.components().map_err(|source| AddonError::Io {
+        what: "this prefix".to_owned(),
+        step: "read what setup it already has",
+        source: Box::new(source),
+    })?;
+    // A verb the record claims but whose effect is gone has to be applied again, so the check happens
+    // before the plan is built rather than being discovered halfway through it.
+    let stale = stale_verbs(manifest, prefix, &installed);
+    Ok(SetupPlan::build(manifest, &installed, &stale))
+}
+
+/// The verbs `manifest` defines that `prefix` does not have, in manifest order.
+///
+/// Reads the prefix and changes nothing, which is what makes it answerable for a question a user asked
+/// about a prefix rather than only on the way to setting one up. A verb the record claims but whose
+/// effect has gone counts as missing here for the same reason it is reapplied: the record is not the
+/// evidence, the effect is.
+///
+/// # Errors
+/// As [`plan_for`].
+pub(crate) fn missing_verbs(manifest: &ComponentManifest, prefix: &Prefix) -> Result<Vec<String>> {
+    Ok(plan_for(manifest, prefix)?
+        .steps()
+        .iter()
+        .filter(|step| step.action == StepAction::Apply)
+        .map(|step| step.verb.name.clone())
+        .collect())
 }
 
 /// The recorded verbs whose effect the manifest says is checkable and which no longer have it.
