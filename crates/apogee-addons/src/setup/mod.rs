@@ -2,17 +2,50 @@
 //!
 //! Three things hold across this module.
 //!
-//! Applying is idempotent, and the prefix's own `prefix.json` is what makes it so. Nothing here keeps a
-//! list of its own about what a prefix has, because a second list is a second thing that can be wrong
-//! about a prefix somebody else also writes into.
+//! Applying is idempotent, and the prefix's own `prefix.json` is what makes it so. Nothing here
+//! keeps a list of its own about what a prefix has, because a second list is a second thing that can
+//! be wrong about a prefix somebody else also writes into.
 //!
-//! One verb failing costs the prefix that verb. A verb a wine refuses is recorded against its own name
-//! and the rest continue, because a launch that is otherwise fine should not be stopped by one piece of
-//! hygiene. Cancellation is the whole-call failure, and deliberately not a set of failed verbs: what is
-//! missing after it is missing because it was asked to stop.
+//! One verb failing costs the prefix that verb. A verb a wine refuses is recorded against its own
+//! name and the rest continue, because a launch that is otherwise fine should not be stopped by one
+//! piece of hygiene. Cancellation is the whole-call failure instead, and deliberately not a set of
+//! failed verbs: what is missing after it is missing because the pass was asked to stop.
 //!
-//! Nothing chooses which verbs run. The manifest's list is the setup, so the launch path applies what
-//! the prefix does not already have rather than what somebody remembered to switch on.
+//! Nothing chooses which verbs run. The manifest's list is the setup, so a pass applies what the
+//! prefix does not already have rather than what somebody remembered to switch on.
+//!
+//! # Examples
+//!
+//! A pass narrates onto a [`SetupEvents`] stream and returns what became of every verb:
+//!
+//! ```
+//! # use apogee_addons::{Addons, SetupEvent, SetupEvents, VerifiedManifest};
+//! # use apogee_runtime::Prefix;
+//! # use tokio_util::sync::CancellationToken;
+//! # async fn demo(
+//! #     addons: &Addons,
+//! #     manifest: &VerifiedManifest,
+//! #     prefix: &Prefix,
+//! #     cancel: &CancellationToken,
+//! # ) -> apogee_addons::Result<()> {
+//! let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+//! let report = addons
+//!     .apply_setup(manifest, prefix, cancel, &SetupEvents::new(tx))
+//!     .await?;
+//!
+//! // A verb the prefix already recorded, applied again because its effect was gone.
+//! let mut came_back: Vec<String> = Vec::new();
+//! while let Ok(event) = rx.try_recv() {
+//!     if let SetupEvent::Reapplying { verb, .. } = event {
+//!         came_back.push(verb);
+//!     }
+//! }
+//!
+//! // A verb that failed is in the report, not in the error: the rest of the pass still ran.
+//! let still_missing = report.failed();
+//! # Ok(())
+//! # }
+//! ```
 
 mod artifact;
 mod event;
@@ -44,7 +77,7 @@ pub enum SetupState {
     Applied,
     /// The prefix already recorded it, so nothing was done.
     AlreadyPresent,
-    /// Could not be applied. The rest is unaffected.
+    /// It could not be applied. The rest of the pass is unaffected.
     #[non_exhaustive]
     Failed { reason: String },
 }
@@ -58,6 +91,17 @@ pub struct SetupOutcome {
 }
 
 /// Everything one setup pass did.
+///
+/// # Examples
+///
+/// ```
+/// # use apogee_addons::setup::SetupReport;
+/// # fn demo(report: &SetupReport) {
+/// if report.any_failed() {
+///     let (applied, missing) = (report.present(), report.failed());
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SetupReport {
@@ -107,25 +151,23 @@ const STAGING_DIR: &str = ".fetching";
 /// What a failure on the catalog's own filesystem steps is reported against.
 const CATALOG: &str = "the signed catalog";
 
-/// Fetch the signed manifest and its detached signature over HTTPS, then verify against `key`. The
-/// manifest's own bytes are not pinned ahead of time; the signature is the authenticity gate.
+/// Fetch the signed manifest and its detached signature over HTTPS, then verify the manifest against
+/// `keys`.
 ///
-/// The key is passed in rather than read here, so the shipping entry point can hand over the compiled-in
-/// one while a test hands over a key it can also sign with. Nothing else about the path changes: whatever
-/// key arrives is the only thing that can admit a manifest.
+/// The manifest's own bytes are not pinned ahead of time: the Ed25519 signature is the authenticity
+/// gate, and whatever arrives in `keys` is the only thing that can admit a manifest. The keys are
+/// passed in rather than read here so that the shipping entry point can hand over the compiled-in
+/// one while a test hands over a key it can also sign with.
 ///
-/// Two things about *where* it downloads are load-bearing rather than tidiness.
-///
-/// It downloads into a staging directory that is removed first. A manifest is fetched with no content
-/// pin and no declared length, and under those terms the fetcher treats any existing file at the
-/// destination as already satisfying the request (correctly, since it has nothing to check it against).
-/// Downloading straight onto the cache path would therefore serve the first manifest ever fetched back
-/// forever, and a manifest edit would never reach this build. That is the opposite of the point of
-/// keeping setup in signed data.
-///
-/// And it publishes into the cache only after the signature verifies, so what
-/// [`cached_manifest`] later offers as a fallback is a manifest that once verified, and a bad or
+/// The download stages, and publishes into `cache_dir` only once the signature verifies, so what
+/// [`cached_manifest`] later offers as a fallback is a manifest that once verified and a bad or
 /// truncated fetch cannot destroy the last good one.
+///
+/// # Errors
+/// [`AddonError::Io`] for any of its own filesystem steps, [`AddonError::Spec`] for a URL that is
+/// not http(s), [`AddonError::Download`] if a download does not complete (a fired `cancel` arrives
+/// this way, as a cancelled fetch), and [`AddonError::Manifest`] if what was served does not verify
+/// against any key in `keys`, or does not parse once it has.
 pub(crate) async fn fetch_manifest(
     fetcher: &Fetcher,
     manifest_url: &Url,
@@ -134,6 +176,12 @@ pub(crate) async fn fetch_manifest(
     keys: &[[u8; 32]],
     cancel: &CancellationToken,
 ) -> Result<VerifiedManifest> {
+    // Into a staging directory that is removed first, and not straight onto the cache path. A
+    // manifest is fetched with no content pin and no declared length, and under those terms the
+    // fetcher treats any existing file at the destination as already satisfying the request
+    // (correctly, since it has nothing to check it against), so the destination has to be a path
+    // nothing is at. Downloading onto the cache path would serve the first manifest ever fetched
+    // back forever, and an edit to the hosted file would never reach this build.
     let staging = cache_dir.join(STAGING_DIR);
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging)
@@ -165,8 +213,11 @@ pub(crate) async fn fetch_manifest(
 /// Move a verified manifest and its signature from `staging` into the cache.
 ///
 /// Two renames rather than one, so a crash between them can leave a manifest beside the previous
-/// signature. That is survivable rather than silent: [`cached_manifest`] verifies what it reads, so a
-/// mismatched pair is refused like any other unusable cache.
+/// signature. That is survivable rather than silent: [`cached_manifest`] verifies what it reads, so
+/// a mismatched pair is refused like any other unusable cache.
+///
+/// # Errors
+/// [`AddonError::Io`] if the cache directory cannot be made or either rename fails.
 async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(cache_dir)
         .await
@@ -184,13 +235,18 @@ async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The last manifest a fetch verified and left in `cache_dir`, re-verified against `key` before it is
-/// handed back.
+/// The last manifest a fetch verified and left in `cache_dir`, re-verified against `keys` before it
+/// is handed back.
 ///
-/// `None` when nothing has been fetched yet. A signature check stands between the cache and every caller,
-/// so this is a freshness fallback and never a trust one: the worst it can serve is yesterday's rows,
-/// which for a launch beats applying no prefix setup at all. Whether that trade is the right one is the
-/// caller's to make, which is why fetching and reading the cache are separate calls.
+/// `None` when nothing has been fetched yet, or when either cached file cannot be read. A signature
+/// check stands between the cache and every caller, so this is a freshness fallback and never a
+/// trust one: the worst it can serve is yesterday's rows, which for a launch beats applying no
+/// prefix setup at all. Whether that trade is the right one is the caller's to make, which is why
+/// fetching and reading the cache are separate calls.
+///
+/// # Errors
+/// [`AddonError::Manifest`] if what is cached no longer verifies against `keys`, or no longer
+/// parses.
 pub(crate) async fn cached_manifest(
     cache_dir: &Path,
     keys: &[[u8; 32]],
@@ -206,8 +262,13 @@ pub(crate) async fn cached_manifest(
     Ok(Some(VerifiedManifest::verify(&manifest, &signature, keys)?))
 }
 
-/// Download `url` to `dest` over HTTPS with no content pin, because the caller authenticates these bytes
-/// with an Ed25519 signature instead. The fetcher refuses this over plain `http`.
+/// Download `url` to `dest` over HTTPS with no content pin, because the caller authenticates these
+/// bytes with an Ed25519 signature instead. The spec builder refuses an unpinned download over
+/// plain `http`.
+///
+/// # Errors
+/// [`AddonError::Spec`] if `url` is not http(s) or is plain `http`, [`AddonError::Download`] if the
+/// fetch does not complete.
 async fn download_unverified(
     fetcher: &Fetcher,
     url: &Url,
@@ -225,12 +286,15 @@ async fn download_unverified(
     Ok(())
 }
 
-/// Apply every verb `manifest` defines that `prefix` is missing.
+/// Apply every verb `manifest` defines that `prefix` is missing, narrating each step onto `events`.
+///
+/// A verb that could not be applied is a [`SetupState::Failed`] in the returned report rather than
+/// an error here, so one refusal costs the prefix that verb and nothing else.
 ///
 /// # Errors
 /// [`AddonError::Io`] wrapping the runtime's error if the prefix's record cannot be read: without it
 /// there is no way to tell setup that is needed from setup that is not, and re-running everything
-/// against a live prefix is worse than stopping. [`AddonError::Cancelled`] if the token fired, which
+/// against a live prefix is worse than stopping. [`AddonError::Cancelled`] if `cancel` fired, which
 /// ends the pass rather than failing the verbs it did not get to.
 pub(crate) async fn apply_verbs(
     runtime: &Runtime,
@@ -337,8 +401,8 @@ struct StaleVerb {
 /// What a pass over a prefix would do, and why anything the record already claimed is in it.
 ///
 /// The reasons travel in the decision rather than being announced while it is made, because the same
-/// decision answers a question ([`missing_verbs`]) and drives a pass ([`apply_verbs`]), and a question
-/// about a prefix must not report work as happening.
+/// decision answers a question ([`missing_verbs`]) and drives a pass ([`apply_verbs`]), and a
+/// question about a prefix must not report work as happening.
 struct Planned<'m> {
     plan: SetupPlan<'m>,
     stale: Vec<StaleVerb>,
@@ -370,10 +434,10 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Plan
 
 /// The verbs `manifest` defines that `prefix` does not have, in manifest order.
 ///
-/// Reads the prefix and changes nothing, which is what makes it answerable for a question a user asked
-/// about a prefix rather than only on the way to setting one up. A verb the record claims but whose
-/// effect has gone counts as missing here for the same reason it is reapplied: the record is not the
-/// evidence, the effect is.
+/// Reads the prefix and changes nothing, which is what makes it answerable for a question a user
+/// asked about a prefix rather than only on the way to setting one up. A verb the record claims but
+/// whose effect has gone counts as missing here for the same reason it is reapplied: the record is
+/// not the evidence, the effect is.
 ///
 /// # Errors
 /// As [`plan_for`].
@@ -395,10 +459,10 @@ pub(crate) fn missing_verbs(manifest: &VerifiedManifest, prefix: &Prefix) -> Res
 /// write states nothing because the op already says what it wrote. Only a verb that states no paths
 /// and carries no registry op is left with the record as its only evidence.
 ///
-/// Reads the prefix's registry files rather than asking a `reg query`. This runs on every launch, and
-/// a query is a Windows program started through the runner: under Proton that is umu bringing its
-/// container up for one answer. The file is also the more accurate of the two here, since nothing has
-/// run in the prefix yet.
+/// Reads the prefix's registry files rather than asking a `reg query`. This runs on every launch,
+/// and a query is a Windows program started through the runner: under Proton that is umu bringing
+/// its container up for one answer. The file is also the more accurate of the two here, since
+/// nothing has run in the prefix yet.
 fn stale_verbs(
     manifest: &ComponentManifest,
     prefix: &Prefix,
@@ -418,6 +482,10 @@ fn stale_verbs(
 
 /// Apply one verb and record it. Recorded only on success, so a failed apply is retried next time
 /// rather than remembered as done.
+///
+/// # Errors
+/// Whatever the verb's ops failed with, or [`AddonError::Io`] if the prefix's record cannot be
+/// written.
 async fn apply_verb(
     runtime: &Runtime,
     fetcher: &Fetcher,

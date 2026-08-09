@@ -31,8 +31,21 @@ const RESERVED: &[&str] = &[
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-/// Why an entry name was refused. Every variant aborts the restore rather than skipping the entry,
-/// because a restore that quietly drops entries reports success and returns an incomplete tree.
+/// Why an entry name was refused.
+///
+/// Every variant aborts the restore rather than skipping the entry, because a restore that quietly
+/// drops entries reports success and returns an incomplete tree.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::backup::RejectReason;
+///
+/// assert_eq!(
+///     RejectReason::Traversal.to_string(),
+///     "it contains a parent reference"
+/// );
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RejectReason {
@@ -66,9 +79,8 @@ pub enum RejectReason {
 }
 
 impl std::fmt::Display for RejectReason {
-    /// Each reason as the thing that is wrong with the name, so the refusal reads as a sentence rather
-    /// than as an identifier. What is refused is attacker-chosen, so the reason is the only part of the
-    /// message worth reading.
+    /// Each reason as the thing that is wrong with the name, so the refusal reads as a sentence.
+    // What is refused is attacker-chosen, so the reason is the only part of the message worth reading.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::NotAFileOrDir => "it is neither a regular file nor a directory",
@@ -113,8 +125,11 @@ impl ConfinedName {
 
 /// Validate one entry name.
 ///
-/// `is_dir` and `is_file` come from the container, so an entry that claims to be neither is refused
-/// before its name is even looked at.
+/// `is_regular` comes from the container, so an entry that is neither a regular file nor a directory
+/// is refused before its name is even looked at.
+///
+/// # Errors
+/// The first [`RejectReason`] the name fails; the checks stop there.
 pub(crate) fn entry_name(raw: &str, is_regular: bool) -> Result<ConfinedName, RejectReason> {
     if !is_regular {
         return Err(RejectReason::NotAFileOrDir);

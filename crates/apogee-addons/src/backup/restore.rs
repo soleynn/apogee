@@ -1,14 +1,16 @@
 //! Putting an archive's contents back, one root at a time.
 //!
+//! Unix only: every target is opened against a directory descriptor this module holds.
+//!
 //! Restore is the only operation here that writes into a live tree, so it is arranged so that a
 //! failure at any point leaves that tree exactly as it was. Each root is extracted and verified into
 //! a staging directory beside its destination; only once a root is complete does anything move, and
 //! the tree that was there is renamed aside rather than deleted, so a restore is undone with one
 //! rename.
 //!
-//! A root is replaced whole rather than merged into. Merging leaves files from an older configuration
-//! in a tree the game will read, which is a quieter and longer-lived corruption than replacing; the
-//! displaced tree is what keeps replacing lossless.
+//! A root is replaced whole rather than merged into. Merging would leave files from an older
+//! configuration in a tree the game will read, which is a quieter and longer-lived corruption than
+//! replacing; the displaced tree is what keeps replacing lossless.
 //!
 //! Every target is opened one component at a time, relative to a directory this module opened itself,
 //! with symlinks refused. No path is ever re-resolved from a string, so neither a planted link nor a
@@ -56,13 +58,27 @@ impl RestorePlan {
     /// one is not an error: the entries under it match no target and are passed over, so a restore
     /// that put back less than the archive holds returns exactly like one that put back everything.
     ///
-    /// Every recorded root lands in `dir`, which is the shape of every archive this launcher writes.
-    /// A label whose tree belongs somewhere else needs a constructor that says where, rather than this
-    /// one quietly overlaying two trees in one directory.
+    /// Every recorded root lands in `dir`. A label whose tree belongs somewhere else needs a
+    /// constructor that says where, rather than this one quietly overlaying two trees in one
+    /// directory.
     ///
     /// # Errors
     /// Whatever [`inspect`] raises about the archive: it is opened and its record read here, so a
     /// plan cannot name roots an unreadable archive was never asked about.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::path::Path;
+    /// # use tokio_util::sync::CancellationToken;
+    /// # use apogee_addons::backup::{BackupError, RestorePlan, restore};
+    /// # fn demo(archive: &Path, dir: &Path, cancel: &CancellationToken) -> Result<(), BackupError> {
+    /// let plan = RestorePlan::into_dir(archive, dir)?;
+    /// let report = restore(&plan, cancel)?;
+    /// # let _ = (report.restored, report.skipped, report.absent);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn into_dir(
         archive: impl Into<PathBuf>,
         dir: impl Into<PathBuf>,
@@ -92,9 +108,8 @@ pub struct RestoreReport {
     /// Roots the plan named that the archive does not hold.
     ///
     /// The other side of [`Self::skipped`], and the one that costs something: a caller asking for a
-    /// root an archive never had gets a restore that writes nothing, and without this it reads exactly
-    /// like one that wrote everything. The person on the end of it is recovering settings they cannot
-    /// otherwise get back, so "nothing happened" has to be sayable.
+    /// root an archive never had gets a restore that writes nothing, and without this it reads
+    /// exactly like one that wrote everything.
     pub absent: Vec<RootLabel>,
 }
 
@@ -122,6 +137,7 @@ pub struct RestoredRoot {
 /// # Errors
 /// [`BackupError::NotAnArchive`] or [`BackupError::UnsupportedFormat`] if the archive is not one this
 /// build can read, [`BackupError::RejectedEntry`] if any entry name or content fails its checks,
+/// [`BackupError::ContentMismatch`] if an entry's bytes are not what the record says,
 /// [`BackupError::TooLarge`] or [`BackupError::TooManyEntries`] if it exceeds what a restore may
 /// write, [`BackupError::Cancelled`] if the token fired, and [`BackupError::Io`] from the filesystem.
 /// The live tree is untouched in every case.
@@ -308,8 +324,8 @@ impl Staged {
         Ok(())
     }
 
-    /// Open, creating if needed, the directory at `rel`, and every ancestor. Recursive so an archive
-    /// that omits a parent's own entry still works.
+    /// Open, creating if needed, the directory at `rel`, and every ancestor.
+    // Recursive so an archive that omits a parent's own entry still works.
     fn ensure_dir(&mut self, rel: &Path) -> Result<(), BackupError> {
         if self.dirs.contains_key(rel) {
             return Ok(());

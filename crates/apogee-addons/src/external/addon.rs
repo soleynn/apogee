@@ -9,9 +9,9 @@ use crate::{AddonError, Result};
 
 /// Where an external tool runs.
 ///
-/// Declared by the record rather than inferred from the file extension. Switching on the extension
-/// cannot express a native Linux binary at all and mis-files an extensionless one, which is how a
-/// launcher ends up with no way to run the tools a Linux user actually has.
+/// Declared by the record, never inferred from the file extension. An extension cannot express a
+/// native Linux binary at all and mis-files an extensionless one, which is how a launcher ends up
+/// with no way to run the tools a Linux user actually has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -24,20 +24,19 @@ pub enum RunIn {
 
 /// When the tool runs, and what happens to it when the game exits.
 ///
-/// The stop policy lives only on the arm that has something to stop, which is the point of the
-/// shape: carrying "run after the game closes" and "stop it after the game closes" as independent
-/// flags admits a state where the teardown starts a process and then immediately kills the thing it
-/// just started. Here that state has no spelling.
+/// The stop policy lives only on the arm that has something to stop, so "run after the game closes"
+/// and "stop it when the game closes" cannot be asked for together. That pair spells a teardown that
+/// starts a process and then immediately kills what it just started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Trigger {
     /// Starts once the game is running, and is stopped when the game exits unless asked otherwise.
     ///
-    /// `keep_after_close` is spelled so the absent-field default is the policy that terminates. A
-    /// truncated record, a record written by an older build, and a user who never considered the
-    /// question all yield a tool that stops with the game: a wrong default-stop costs a restart, a
-    /// wrong default-keep costs an orphan the user has to hunt down.
+    /// An absent `keep_after_close` defaults to the policy that terminates, so a truncated record, a
+    /// record written by an older build, and a user who never considered the question all yield a
+    /// tool that stops with the game. The two wrong defaults do not cost the same: a wrong
+    /// default-stop costs a restart, a wrong default-keep costs an orphan the user has to hunt down.
     WithGame {
         /// Leave it running after the game exits.
         #[serde(default)]
@@ -49,10 +48,32 @@ pub enum Trigger {
 
 /// A companion tool the user configured: what to run, what to pass it, where it runs, and when.
 ///
-/// There is no elevation field. Asking for elevation both interrupts the launch with a prompt and,
-/// in the launcher this takes its shape from, silently disables every teardown branch. A record that
+/// There is no elevation field. Asking for elevation interrupts the launch with a prompt and, in the
+/// launcher this takes its shape from, silently disables every teardown branch, so a record that
 /// carries one is refused at the point of execution rather than run with the request quietly
 /// dropped.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> apogee_addons::Result<()> {
+/// use apogee_addons::{ExternalAddon, RunIn, Trigger};
+///
+/// let tool = ExternalAddon::new(
+///     "/home/u/tools/ACT/Advanced Combat Tracker.exe",
+///     vec!["-noicon".to_owned()],
+///     RunIn::Prefix,
+///     Trigger::WithGame {
+///         keep_after_close: false,
+///     },
+/// )?;
+///
+/// assert_eq!(tool.args(), ["-noicon"]);
+/// assert!(tool.enabled());
+/// assert!(!tool.keeps_running());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "RawExternalAddon")]
 pub struct ExternalAddon {
@@ -69,9 +90,22 @@ impl ExternalAddon {
     /// Build a record.
     ///
     /// # Errors
-    /// [`AddonError::InvalidAddon`] if `program` is empty or relative. A relative path resolves
-    /// against whatever directory the launcher happened to start in, so the same configuration would
-    /// run a different program depending on how it was started.
+    ///
+    /// Returns [`AddonError::InvalidAddon`] if `program` is empty or relative. A relative path
+    /// resolves against whatever directory the launcher happened to start in, so the same
+    /// configuration would run a different program depending on how it was started.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::{AddonError, ExternalAddon, RunIn, Trigger};
+    ///
+    /// let relative = ExternalAddon::new("tools/act.sh", vec![], RunIn::Host, Trigger::OnClose);
+    /// assert!(matches!(relative, Err(AddonError::InvalidAddon { .. })));
+    ///
+    /// let absolute = ExternalAddon::new("/opt/act/act.sh", vec![], RunIn::Host, Trigger::OnClose);
+    /// assert!(absolute.is_ok());
+    /// ```
     pub fn new(
         program: impl Into<PathBuf>,
         args: Vec<String>,
@@ -143,9 +177,10 @@ impl ExternalAddon {
     /// costs the user that entry rather than the whole configuration it lives in.
     ///
     /// # Errors
-    /// [`AddonError::InvalidAddon`] for a relative program or an unsafe program directory,
-    /// [`AddonError::UnsupportedField`] for a key this build does not understand, and
-    /// [`AddonError::PrefixRequired`] for a prefix tool in a launch that has no prefix.
+    ///
+    /// [`AddonError::InvalidAddon`] for an empty or relative program, [`AddonError::UnsupportedField`]
+    /// for a key this build does not understand, and [`AddonError::PrefixRequired`] for a prefix tool
+    /// in a launch that has no prefix.
     pub(crate) fn validate(&self, index: usize, has_prefix: bool) -> Result<()> {
         self.check_program(index)?;
         if let Some(field) = self.unsupported.keys().next() {
@@ -164,6 +199,7 @@ impl ExternalAddon {
         Ok(())
     }
 
+    /// The program-path rule, checked both when a record is built and when it is run.
     fn check_program(&self, index: usize) -> Result<()> {
         if self.program.as_os_str().is_empty() {
             return Err(AddonError::InvalidAddon {
@@ -201,6 +237,7 @@ struct RawExternalAddon {
     unsupported: BTreeMap<String, serde_json::Value>,
 }
 
+/// An entry is considered unless it was explicitly switched off.
 const fn enabled_default() -> bool {
     true
 }

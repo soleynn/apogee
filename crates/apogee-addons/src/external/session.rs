@@ -1,10 +1,10 @@
 //! The companions one launch started, and what happens to them when the game exits.
 //!
-//! Two things have to hold. The teardown must run at most once, which the type gets by consuming
-//! itself. And it must run at least once, which consuming cannot give: an early return between
-//! starting and stopping would drop the handle and leave every companion running under a name the
-//! user never chose, with nothing left that knows about them. So the drop is a backstop that signals
-//! each group it was going to stop anyway.
+//! Two things have to hold. The teardown must run at most once, which [`AddonSession`] gets by
+//! consuming itself. And it must run at least once, which consuming cannot give: an early return
+//! between starting and stopping would drop the handle and leave every companion running with
+//! nothing left that knows about them. So the drop is a backstop that signals each group it was
+//! going to stop anyway.
 
 use std::time::Duration;
 
@@ -18,6 +18,16 @@ use super::event::{AddonEvent, AddonEvents};
 pub(super) const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// What became of one entry.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::Outcome;
+///
+/// // Printable without the caller owning a rule for what each arm means.
+/// assert_eq!(Outcome::Disabled.to_string(), "switched off");
+/// assert_eq!(Outcome::Cancelled.to_string(), "cancelled");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {
@@ -36,9 +46,8 @@ pub enum Outcome {
     Completed { code: Option<i32> },
     /// Stopped, or never started, because the teardown was cancelled.
     ///
-    /// Its own outcome rather than a failure: nothing went wrong, somebody quit. Reporting a tool the
-    /// user interrupted as failed is the same mistake as reporting a cancelled download as one, and a
-    /// shell counting failures would act on it.
+    /// Its own outcome rather than a failure: nothing went wrong, somebody quit. A shell counting
+    /// failures would act on it.
     Cancelled,
     /// Could not be run. The rest of the launch is unaffected.
     #[non_exhaustive]
@@ -47,7 +56,7 @@ pub enum Outcome {
 
 impl std::fmt::Display for Outcome {
     /// One clause each, so a shell can print an outcome without a rule of its own for what each arm
-    /// means. The arms carry process ids and exit statuses, which is exactly what a user reports back.
+    /// means. The arms carry process ids and exit statuses, which is what a user reports back.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Started { pid } => write!(f, "started as process {pid}"),
@@ -84,6 +93,15 @@ pub struct AddonReport {
 impl AddonReport {
     /// Whether any entry failed. A caller decides what that is worth; nothing here interrupts a
     /// launch over a helper tool.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::AddonReport;
+    ///
+    /// // A launch that configured no companions has nothing to report and nothing to blame.
+    /// assert!(!AddonReport::default().any_failed());
+    /// ```
     #[must_use]
     pub fn any_failed(&self) -> bool {
         self.outcomes
@@ -103,6 +121,7 @@ pub(super) struct Held {
 }
 
 impl Held {
+    /// Hold a started companion, reading its stop policy out of `trigger` once.
     pub(super) fn new(
         index: usize,
         program: std::path::PathBuf,
@@ -126,11 +145,33 @@ impl Held {
 /// The companions one launch started.
 ///
 /// Dropping this without calling [`Self::game_closed`] or [`Self::abandon`] stops the companions it
-/// was going to stop, so an early return cannot leave them running with nobody to end them.
+/// was going to stop, so an early return cannot leave them running with nobody to end them. The drop
+/// backstop runs no queued after-game tool.
+///
+/// # Examples
+///
+/// ```
+/// # use apogee_addons::{AddonEvents, AddonReport, AddonSession};
+/// # use tokio_util::sync::CancellationToken;
+/// # async fn demo(
+/// #     session: AddonSession,
+/// #     game_ran: bool,
+/// #     cancel: &CancellationToken,
+/// #     events: &AddonEvents,
+/// # ) -> AddonReport {
+/// if game_ran {
+///     // Stop the held tools, then run the ones that wait for the game.
+///     session.game_closed(cancel, events).await
+/// } else {
+///     // The launch itself failed: stop what started and run nothing further.
+///     session.abandon(cancel, events).await
+/// }
+/// # }
+/// ```
 #[must_use = "a launch's companions need either game_closed or abandon, or they are stopped on drop"]
 pub struct AddonSession {
-    /// Cloned rather than borrowed so the session outlives the call that made it, which it must:
-    /// the after-game tools run once the launch is already unwinding.
+    /// Cloned rather than borrowed so the session outlives the call that made it, which it must: the
+    /// after-game tools run once the launch is already unwinding.
     runtime: Runtime,
     /// The prefix the launch used, carried so an after-game tool can be told which config tree it is
     /// working on. The game's process id deliberately does not travel here: by the time these run it
@@ -142,6 +183,7 @@ pub struct AddonSession {
 }
 
 impl AddonSession {
+    /// Take ownership of what one launch started.
     pub(super) fn new(
         runtime: Runtime,
         game_prefix: Option<std::path::PathBuf>,
@@ -176,15 +218,14 @@ impl AddonSession {
     /// Consuming `self` is what makes this happen at most once. The order matters: a tool that syncs
     /// what the game wrote should see a stopped game and stopped siblings.
     ///
-    /// `cancel` bounds the waiting, never the stopping. An after-game tool is somebody else's program
-    /// and may never exit, so without a token this waits forever and the launcher looks hung with no
-    /// way out. What the token must not do is skip the stopping: a teardown that returned early over
-    /// companions it started is the leak this type exists to prevent, and those stops are bounded by
-    /// [`STOP_GRACE`] anyway.
+    /// `cancel` bounds the waiting, never the stopping. An after-game tool is somebody else's
+    /// program and may never exit, so without a token this waits forever and the launcher looks hung
+    /// with no way out; skipping the stopping instead is the leak this type exists to prevent, and
+    /// each stop is bounded by a five-second grace anyway.
     ///
-    /// # Errors
-    /// Never fails as a whole. A companion that cannot be stopped or run is recorded in the returned
-    /// report; a helper tool does not fail a launch that already succeeded.
+    /// Never fails as a whole. A companion that could not be stopped or run is an
+    /// [`Outcome::Failed`] in the returned report: a helper tool does not fail a launch that already
+    /// succeeded.
     pub async fn game_closed(
         mut self,
         cancel: &CancellationToken,
@@ -224,13 +265,12 @@ impl AddonSession {
 
     /// Give up on the launch: stop what this session started and run nothing further.
     ///
-    /// Used when the launch itself failed, where running a tool that expects the game to have played
-    /// would be wrong.
+    /// For a launch that itself failed, where running a tool that expects the game to have been
+    /// played would be wrong.
     ///
     /// `cancel` is taken and not consulted, which is the honest signature rather than an oversight:
-    /// this path runs nothing that could go on indefinitely, and stopping is what a cancelled teardown
-    /// still has to do. Taking it keeps the two teardowns callable through one seam and keeps a caller
-    /// from having to know which of them can be interrupted.
+    /// this path runs nothing that could go on indefinitely, and stopping is what a cancelled
+    /// teardown still has to do. Taking it keeps both teardowns callable through one seam.
     pub async fn abandon(
         mut self,
         cancel: &CancellationToken,
@@ -244,6 +284,7 @@ impl AddonSession {
         std::mem::take(&mut self.report)
     }
 
+    /// Stop one held companion and record what that came to, unless its policy is to stay.
     async fn stop_one(mut held: Held, events: &AddonEvents, report: &mut AddonReport) {
         if held.keep_after_close {
             return;
@@ -270,7 +311,8 @@ impl Drop for AddonSession {
     /// The backstop. Consuming the handle guarantees the teardown runs at most once; nothing
     /// guarantees it runs at all, because an error between starting and stopping drops this instead.
     /// Signalling each group here is a plain syscall, so it is safe from a drop, and it turns that
-    /// case into "stopped" rather than "leaked with nobody watching".
+    /// case into "stopped" rather than "leaked with nobody watching". No queued after-game tool runs
+    /// from here.
     fn drop(&mut self) {
         for held in &self.held {
             if held.keep_after_close {
@@ -285,6 +327,8 @@ impl Drop for AddonSession {
 }
 
 impl std::fmt::Debug for AddonSession {
+    /// Counts rather than contents: a session holds a runtime handle and other people's programs,
+    /// neither of which reads as anything useful in a log line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AddonSession")
             .field("running", &self.held.len())

@@ -1,17 +1,35 @@
 //! Dalamud: installed from its own distribution, and reaching the game by wrapping its launch.
 //!
 //! Opt-in and nothing else. Every endpoint below is contacted only once a launch has asked for it, so a
-//! user who leaves the setting off never contacts goatcorp; that is asserted rather than asserted-to.
+//! user who leaves the setting off never reaches the distribution at all.
 //!
 //! The bytes are not pinned by Apogee's signed manifest, because their version is upstream's to choose
-//! and a pin has to describe bytes somebody keeps serving. The manifest carries a *pointer* instead: the
-//! distribution endpoint and the support tier, both correctable by an edit and a re-sign. What stands in
-//! for a pin is the digest map the distribution ships beside the bytes ([`integrity`]).
+//! and a pin has to describe bytes somebody keeps serving. The manifest carries a *pointer* instead:
+//! the distribution endpoint and the support tier, both correctable by an edit and a re-sign. What
+//! stands in for a pin is the digest map the distribution ships beside the bytes.
 //!
-//! Failure degrades rather than propagates. A version built for another game version, a tree that will
+//! Failure degrades rather than propagates. A release built for another game version, a tree that will
 //! not verify, an endpoint that will not answer: each of them leaves the launch alone and says so. The
 //! alternative is a launcher that refuses to start the game because a companion is between releases,
 //! which is the wrong trade every time.
+//!
+//! # Examples
+//!
+//! ```
+//! # use apogee_addons::{Dalamud, DalamudConfig, DalamudPaths, VerifiedManifest};
+//! # use apogee_fetch::Fetcher;
+//! # fn demo(manifest: &VerifiedManifest, fetcher: Fetcher) -> Option<Dalamud> {
+//! Dalamud::new(
+//!     DalamudPaths::under("/home/me/.local/share/apogee/dalamud"),
+//!     fetcher,
+//!     manifest,
+//!     DalamudConfig {
+//!         game_version: "2026.06.18.0000.0000".to_owned(),
+//!         ..DalamudConfig::default()
+//!     },
+//! )
+//! # }
+//! ```
 
 // Off Linux the launch wrap is a stub that refuses, so everything only it uses (the paths it hands the
 // injector, the pack it passes through, the argv it composes) has no caller there. Unreachable on that
@@ -54,8 +72,19 @@ pub const DALAMUD: &str = "Dalamud";
 /// it carries the smallest well-formed value there is.
 const EMPTY_TROUBLESHOOTING_PACK: &str = "e30=";
 
-/// The trees Dalamud installs into. Siblings under one root, so pointing it elsewhere or deleting it is
-/// one directory either way.
+/// The trees Dalamud installs into.
+///
+/// Siblings under one root, so pointing it elsewhere or deleting it is one directory either way.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::DalamudPaths;
+///
+/// let paths = DalamudPaths::under("/home/me/.local/share/apogee/dalamud");
+/// assert!(paths.addon.ends_with("addon"));
+/// assert!(paths.logs.ends_with("logs"));
+/// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct DalamudPaths {
@@ -73,6 +102,16 @@ pub struct DalamudPaths {
 
 impl DalamudPaths {
     /// The standard layout beneath one root.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::DalamudPaths;
+    /// use std::path::PathBuf;
+    ///
+    /// let paths = DalamudPaths::under("/tmp/dalamud");
+    /// assert_eq!(paths.assets, PathBuf::from("/tmp/dalamud/assets"));
+    /// ```
     #[must_use]
     pub fn under(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
@@ -119,10 +158,13 @@ impl DalamudPaths {
 /// How this launch wants Dalamud loaded.
 #[derive(Debug, Clone)]
 pub struct DalamudConfig {
+    /// Entry-point rewrite or post-start injection.
     pub mode: LoadMode,
+    /// The language the game itself was told to start in.
     pub language: ClientLanguage,
     /// How long Dalamud waits before initializing. Zero unless something needs it.
     pub delay_initialize: Duration,
+    /// Which plugins Dalamud may load.
     pub plugins: PluginPolicy,
     /// The install's own `ffxivgame.ver`. A release built for a different one is not loaded.
     pub game_version: String,
@@ -145,6 +187,21 @@ impl Default for DalamudConfig {
 /// Derived rather than listed row by row, because they are one service's layout and a row that could
 /// name them separately could also name five different hosts. Constructible directly so a test can
 /// stand each one up on its own server.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::dalamud::Endpoints;
+/// use url::Url;
+///
+/// let pointer = Url::parse("https://kamori.goats.dev/Dalamud/Release/VersionInfo").expect("a url");
+/// let endpoints = Endpoints::derive(&pointer).expect("a Release/VersionInfo pointer");
+///
+/// assert_eq!(
+///     endpoints.asset_meta.as_str(),
+///     "https://kamori.goats.dev/Dalamud/Asset/Meta"
+/// );
+/// ```
 #[derive(Debug, Clone)]
 pub struct Endpoints {
     /// Where a release is described.
@@ -190,7 +247,7 @@ impl Endpoints {
 
     /// The version-info request for the release track.
     ///
-    /// The rollout bucket is sent as the stable one rather than sampled. Upstream picks a bucket at
+    /// The rollout bucket is stated as the stable one rather than sampled. Upstream picks a bucket at
     /// random once and remembers it, which spreads a bad release across a fraction of installs; a
     /// launcher that says which half it is in every time is one fewer thing that differs between two
     /// machines reporting different behaviour.
@@ -204,6 +261,9 @@ impl Endpoints {
 }
 
 /// Dalamud, behind the launch setting.
+///
+/// The one [`Injectable`] this crate ships: it installs itself from the distribution the manifest
+/// points at, and contributes a [`LaunchEdit`] that redirects the launch through its injector.
 #[derive(Debug, Clone)]
 pub struct Dalamud {
     paths: DalamudPaths,
@@ -221,11 +281,25 @@ pub struct Dalamud {
 impl Dalamud {
     /// Build it from the row a verified manifest carries, or `None` when it carries none.
     ///
-    /// The manifest rather than the row, because the row on its own is not proof of anything: it is a
-    /// struct a parse produces, and this constructor is what turns one into downloads from the URL it
-    /// names and files laid into a prefix. Taking a [`VerifiedManifest`] is what keeps the gate on
-    /// [`Addons::apply_setup`](crate::Addons::apply_setup) from being one that only the setup half of
-    /// the catalog passes through.
+    /// Takes the manifest rather than the row, because a row on its own is not proof of anything: it is
+    /// a struct a parse produced, and this constructor is what turns one into downloads from the URL it
+    /// names and files laid into a prefix. Taking a [`VerifiedManifest`] is what keeps that behind the
+    /// same signature gate as [`Addons::apply_setup`](crate::Addons::apply_setup).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::{Dalamud, DalamudConfig, DalamudPaths, VerifiedManifest};
+    /// # use apogee_fetch::Fetcher;
+    /// # fn demo(manifest: &VerifiedManifest, fetcher: Fetcher) -> Option<Dalamud> {
+    /// Dalamud::new(
+    ///     DalamudPaths::under("/home/me/.local/share/apogee/dalamud"),
+    ///     fetcher,
+    ///     manifest,
+    ///     DalamudConfig::default(),
+    /// )
+    /// # }
+    /// ```
     #[must_use]
     pub fn new(
         paths: DalamudPaths,
@@ -256,12 +330,24 @@ impl Dalamud {
     ///
     /// Read from disk rather than remembered, because the launch path runs in a different call from the
     /// install and must be able to answer without one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::Dalamud;
+    /// # fn demo(dalamud: &Dalamud) -> Option<(String, String)> {
+    /// let installed = dalamud.installed()?;
+    /// Some((installed.assembly_version, installed.supported_game_ver))
+    /// # }
+    /// ```
     #[must_use]
     pub fn installed(&self) -> Option<Installed> {
         let bytes = std::fs::read(self.paths.record()).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// The derived endpoints, or [`AddonError::BadDistribution`] naming the pointer they were not
+    /// derivable from.
     fn endpoints(&self) -> Result<&Endpoints> {
         self.endpoints
             .as_ref()
@@ -271,17 +357,16 @@ impl Dalamud {
             })
     }
 
-    /// Say what this row's own caveats are, and what the runner in front of it costs, before anything is
-    /// fetched.
-    ///
-    /// The tier note is not said here. It is said for every injectable by the loop that installs them,
-    /// so a second one gets the warning by existing rather than by remembering to announce itself.
-    ///
-    /// Nothing is said about the runner either. A compiled-in caveat used to name one runner as the
-    /// supported bet; measurement against the real client found it loads behind the host's own wine,
-    /// wine-xiv and Proton alike, so the claim was wrong and it was the manifest's to make in the
-    /// first place. What a runner costs is published data, correctable by an edit and a re-sign.
+    /// Say what this row's own caveats are, before anything is fetched.
     fn announce(&self, events: &SetupEvents) {
+        // The tier note is not among these. It is said for every injectable by the loop that installs
+        // them, so a second one gets the warning by existing rather than by remembering to announce
+        // itself, and said twice it reads as two different warnings.
+        //
+        // Nothing is said about the runner either. A compiled-in caveat used to name one runner as the
+        // supported bet; measurement against the real client found Dalamud loads behind the host's own
+        // wine, wine-xiv and Proton alike, so the claim was wrong and it was the manifest's to make in
+        // the first place. What a runner costs is published data, correctable by an edit and a re-sign.
         for caveat in &self.caveats {
             events.emit(SetupEvent::Caveat {
                 what: DALAMUD.to_owned(),
@@ -344,8 +429,8 @@ impl Dalamud {
         Ok(())
     }
 
-    /// What is wrong with a version directory, or `None` when it is complete and matches the digest
-    /// map it ships with.
+    /// What is wrong with a version directory, or `None` when it is complete and matches the digest map
+    /// it ships with.
     ///
     /// One reading serving two callers: before a download it decides whether to fetch, after one it is
     /// the failure. A predicate could only serve the first, and the second is where somebody needs to
@@ -376,16 +461,9 @@ impl Dalamud {
     /// Bring the bundled runtime to `version`, which is two archives overlaid into one tree.
     ///
     /// The marker beside the tree is a **seal**, not a note: it is written only once both archives have
-    /// extracted *and* the result has matched the digest map published for that version. So a marker
-    /// naming the version being asked for is a tree this launcher verified, and a later pass trusts it
-    /// rather than hashing it again.
-    ///
-    /// That trade is deliberate and it is where most of a no-op pass's cost went: the runtime is 481
-    /// files and about 170 MiB of stock Microsoft redistributable, and hashing it on every launch buys
-    /// nothing the seal does not already say. What it would have caught is damage done after a verified
-    /// install by something other than this launcher, and the answer to that is to install it again. The
-    /// version directory Dalamud itself lives in is still swept every pass, because that is the code
-    /// being loaded into the game and it is the tree the digest map is really for.
+    /// extracted *and* the result has matched the digest map published for that version. A marker
+    /// naming the version being asked for is therefore a tree this launcher verified, and a later pass
+    /// trusts it rather than hashing it again.
     async fn ensure_runtime(
         &self,
         version: &str,
@@ -393,6 +471,12 @@ impl Dalamud {
         cancel: &CancellationToken,
     ) -> Result<()> {
         let marker = self.paths.runtime.join("version");
+        // Trusting the seal is where most of a no-op pass's cost went: the runtime is 481 files and
+        // about 170 MiB of stock Microsoft redistributable, and re-hashing it on every launch buys
+        // nothing the seal does not already say. What it would have caught is damage done after a
+        // verified install by something other than this launcher, and the answer to that is to install
+        // it again. The version directory Dalamud itself lives in is still swept every pass, because
+        // that is the code being loaded into the game and it is the tree the digest map is really for.
         if std::fs::read_to_string(&marker).unwrap_or_default().trim() == version {
             return Ok(());
         }
@@ -430,13 +514,13 @@ impl Dalamud {
         Ok(())
     }
 
-    /// What is wrong with the runtime on disk against the digest map published for `version`, or
-    /// `None` when it matches.
+    /// What is wrong with the runtime on disk against the digest map published for `version`, or `None`
+    /// when it matches.
     ///
-    /// The map is cached beside the tree so a re-install costs no second request. A map that cannot be
-    /// fetched and was never cached is itself the fault, and it is the fetch's own failure rather than
-    /// a verdict on the tree: nothing was checked, so nothing can be claimed, and an unsealed tree is
-    /// laid down again next pass rather than trusted.
+    /// The map is cached beside the tree so a re-install costs no second request. A fetch that fails
+    /// with nothing cached to fall back on is reported as itself, the fetch's own failure rather than a
+    /// verdict on the tree: nothing was checked, so nothing can be claimed, and the caller unseals the
+    /// tree so the next pass lays it down again rather than trusting it.
     async fn runtime_fault(&self, version: &str, cancel: &CancellationToken) -> Option<AddonError> {
         const WHAT: &str = "Dalamud runtime";
 
@@ -535,12 +619,7 @@ impl Dalamud {
         })
     }
 
-    /// Fetch one JSON document from the distribution.
-    ///
-    /// Into a staging file that is cleared first: these carry no content pin and no declared length, and
-    /// under those terms the fetcher treats an existing file at the destination as already satisfying
-    /// the request. Downloading onto a stable path would serve the first release ever fetched back
-    /// forever while everything appeared to work.
+    /// Fetch one JSON document from the distribution, into a staging file that is cleared first.
     async fn fetch_json<T: serde::de::DeserializeOwned>(
         &self,
         url: &Url,
@@ -548,6 +627,10 @@ impl Dalamud {
         cancel: &CancellationToken,
     ) -> Result<T> {
         let staging = self.paths.staging();
+        // Cleared, and never a stable path: these carry no content pin and no declared length, and under
+        // those terms the fetcher treats an existing file at the destination as already satisfying the
+        // request. Downloading onto a stable path would serve the first release ever fetched back
+        // forever while everything appeared to work.
         let _ = tokio::fs::remove_dir_all(&staging).await;
         tokio::fs::create_dir_all(&staging)
             .await
@@ -664,9 +747,9 @@ impl Dalamud {
         })
     }
 
-    /// One file that proves a tree wrong, in the taxonomy's own terms: a file that could not be read
-    /// is a filesystem failure and a file that read as other bytes is an integrity failure, and the
-    /// two send a reader to different places.
+    /// One file that proves a tree wrong, in the taxonomy's own terms: a file that could not be read is
+    /// a filesystem failure and a file that read as other bytes is an integrity failure, and the two
+    /// send a reader to different places.
     fn tree_fault(what: &str, fault: integrity::TreeFault) -> AddonError {
         match fault {
             integrity::TreeFault::Unreadable { file, source } => AddonError::Io {
@@ -700,14 +783,25 @@ impl Dalamud {
 
 #[async_trait]
 impl Injectable for Dalamud {
+    /// Always [`DALAMUD`].
     fn name(&self) -> &str {
         DALAMUD
     }
 
+    /// The tier the manifest row states, not one this build decides.
     fn support_tier(&self) -> SupportTier {
         self.tier.clone()
     }
 
+    /// State the row's caveats, then install or update the release, its runtime and its assets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AddonError::BadDistribution`] when the manifest pointer yields no endpoints,
+    /// [`AddonError::Distribution`] when the distribution answers with something unreadable,
+    /// [`AddonError::IntegrityMismatch`] when a file it served is not the bytes its digest map names,
+    /// [`AddonError::Unpack`] or [`AddonError::EmptyArchive`] when an archive does not extract, and
+    /// [`AddonError::Io`] when the trees cannot be written.
     async fn ensure(
         &self,
         // Unused since the runner stopped being something this injectable has an opinion about. The
@@ -721,6 +815,16 @@ impl Injectable for Dalamud {
         self.install(events, cancel).await
     }
 
+    /// The edit that redirects this launch through the injector, or [`Contribution::Declined`].
+    ///
+    /// Declines, with a note on the stream, when nothing is installed, when the installed release
+    /// targets another game version, or when the launch has no prefix to translate paths against. None
+    /// of those is a failure: the game starts without it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AddonError::Inject`] when the prefix's drive map cannot be read or a path has no
+    /// Windows form, and [`AddonError::Unsupported`] off Linux, where the wrap is a stub.
     fn prepare_launch(&self, plan: &LaunchPlan, events: &SetupEvents) -> Result<Contribution> {
         let decline = |note: &str| {
             events.emit(SetupEvent::Caveat {
@@ -749,7 +853,7 @@ impl Injectable for Dalamud {
     /// The injector's own boot log, which is written from inside the game once Dalamud is up.
     ///
     /// The one report every runner can produce. A loader's exit status is unreachable behind a
-    /// container-style runner, and the log is written by the code whose being there is the question.
+    /// container-style runner, and this file is written by the code whose being there is the question.
     fn load_evidence(&self, since: SystemTime) -> Option<LoadEvidence> {
         Some(LoadEvidence::new(
             DALAMUD,
@@ -765,6 +869,11 @@ impl Dalamud {
     ///
     /// Translation is in-process against the prefix's own drive map, not seven `winepath` subprocesses
     /// on the launch path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AddonError::Inject`] when the drive map cannot be read, or when any of the paths handed
+    /// to the injector has no Windows form.
     #[cfg(target_os = "linux")]
     fn wrap(
         &self,
@@ -840,6 +949,11 @@ impl Dalamud {
             .env("DALAMUD_BRANCH", installed.track.clone()))
     }
 
+    /// The stub off Linux, where there is no prefix runner to redirect through.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`AddonError::Unsupported`].
     #[cfg(not(target_os = "linux"))]
     fn wrap(
         &self,
@@ -853,8 +967,10 @@ impl Dalamud {
     }
 }
 
-/// Extract on a blocking thread. Split out so the non-Linux build has somewhere to say no: the
-/// extractor is part of the runner surface, which is Linux-first.
+/// Extract `archive` over `dest`, returning how many entries it wrote.
+///
+/// Meant to be called on a blocking thread, and split out so the non-Linux build has somewhere to say
+/// no: the extractor is part of the runner surface, which is Linux-first.
 #[cfg(target_os = "linux")]
 fn extract(archive: &Path, dest: &Path, what: &str) -> Result<u64> {
     let layout = apogee_runtime::ArchiveLayout {
@@ -867,6 +983,7 @@ fn extract(archive: &Path, dest: &Path, what: &str) -> Result<u64> {
     })
 }
 
+/// The stub off Linux, which always returns [`AddonError::Unsupported`].
 #[cfg(not(target_os = "linux"))]
 fn extract(_archive: &Path, _dest: &Path, _what: &str) -> Result<u64> {
     Err(AddonError::Unsupported {

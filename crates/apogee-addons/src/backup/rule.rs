@@ -1,10 +1,10 @@
 //! What a selection rule matches.
 //!
-//! A rule is a kind plus a test over one filename component. Both halves exist to close off a way of
-//! matching nothing without saying so. The kind is written down by the author and compared against
+//! A rule is a kind plus a test over one filename component, and both halves exist to close off a way
+//! of matching nothing without saying so. The kind is written down by the author and compared against
 //! the kind the walk observed, rather than being whatever the enumerator behind the rule happened to
-//! return; and the test folds case on both sides, so a rule cannot work on a case-insensitive
-//! filesystem and quietly match nothing on a case-sensitive one.
+//! return; the test folds case on both sides, so a rule cannot work on a case-insensitive filesystem
+//! and quietly match nothing on a case-sensitive one.
 
 use std::fmt;
 
@@ -22,8 +22,9 @@ pub enum EntryKind {
     Dir,
 }
 
-/// How a rule tests one filename component. Every variant folds ASCII case on both sides, and there
-/// is no case-sensitive variant to reach for.
+/// How a rule tests one filename component.
+///
+/// Every variant folds ASCII case on both sides, and there is no case-sensitive variant to reach for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum NameMatch {
@@ -37,8 +38,9 @@ pub(crate) enum NameMatch {
 }
 
 impl NameMatch {
-    /// Test one component. Slicing goes through `str::get` so a multi-byte name whose boundaries do
-    /// not line up with the pattern length answers `false` instead of panicking.
+    /// Test one component.
+    // Slicing goes through `str::get`, so a multi-byte name whose boundaries do not line up with the
+    // pattern length answers `false` instead of panicking.
     fn test(&self, name: &str) -> bool {
         match self {
             Self::Any => true,
@@ -107,8 +109,10 @@ impl Rule {
         self.expect
     }
 
-    /// Whether `name` of `kind` matches. `kind` is what the walk observed, so a rule written for one
-    /// kind cannot silently be applied to the other.
+    /// Whether `name` of `kind` matches.
+    ///
+    /// `kind` is what the walk observed, so a rule written for one kind cannot silently be applied to
+    /// the other.
     #[must_use]
     pub(crate) fn matches(&self, name: &str, kind: EntryKind) -> bool {
         self.kind == kind && self.name.test(name)

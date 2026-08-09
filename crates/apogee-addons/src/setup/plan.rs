@@ -1,9 +1,9 @@
 //! Deciding what a prefix still needs, before anything touches it.
 //!
 //! Kept as a pure function over the manifest and the prefix's own record, because the property that
-//! matters here is about the decision rather than the doing: a verb the prefix already records is not
-//! applied again, and one whose effect has gone is. Both are checkable without a prefix, a download,
-//! or a wine.
+//! matters here is about the decision rather than the doing: a verb the prefix already records is
+//! not applied again, and one whose effect has gone is. Both are checkable without a prefix, a
+//! download, or a wine.
 
 use apogee_runtime::InstalledComponent;
 
@@ -39,14 +39,14 @@ pub(crate) struct SetupPlan<'m> {
 impl<'m> SetupPlan<'m> {
     /// Plan every verb `manifest` defines, marking what `installed` already covers.
     ///
-    /// Every verb, not a chosen subset: a verb is prefix hygiene the launcher performs, so the list a
-    /// signed manifest publishes *is* the setup, and adding one is an edit rather than something a user
-    /// has to find and switch on.
+    /// Every verb, not a chosen subset: a verb is prefix hygiene the launcher performs, so the list
+    /// a signed manifest publishes *is* the setup, and adding one is an edit rather than something a
+    /// user has to find and switch on.
     ///
     /// `stale` names verbs the record claims but whose effect has been checked and is gone, which
-    /// overrides the record. That is what makes a verb whose effect a runner upgrade removed from under
-    /// us come back, instead of being skipped forever on the strength of an entry that is no longer
-    /// true.
+    /// overrides the record. That is what makes a verb whose effect a runner upgrade removed from
+    /// under us come back, instead of being skipped forever on the strength of an entry that is no
+    /// longer true.
     #[must_use]
     pub fn build(
         manifest: &'m ComponentManifest,
@@ -106,8 +106,8 @@ mod tests {
         plan.steps().iter().map(|s| &s.action).collect()
     }
 
-    /// The manifest's list is the setup, in its own order: nothing chooses a subset, because a verb is
-    /// hygiene rather than a feature somebody opts into.
+    /// The manifest's list is the setup, in its own order: nothing chooses a subset, because a verb
+    /// is hygiene rather than a feature somebody opts into.
     #[test]
     fn every_verb_the_manifest_defines_is_planned_in_manifest_order() {
         let manifest = manifest();
@@ -122,9 +122,9 @@ mod tests {
         assert!(actions(&plan).iter().all(|a| **a == StepAction::Apply));
     }
 
-    /// The prefix's own record is what makes a second pass a no-op. There is no second list of what a
-    /// prefix has, because a second list is a second thing that can be wrong about a prefix other code
-    /// also writes into.
+    /// The prefix's own record is what makes a second pass a no-op. There is no second list of what
+    /// a prefix has, because a second list is a second thing that can be wrong about a prefix other
+    /// code also writes into.
     #[test]
     fn what_the_prefix_already_records_is_not_applied_again() {
         let manifest = manifest();
@@ -143,9 +143,9 @@ mod tests {
         );
     }
 
-    /// A verb whose effect has gone has to be applied again, whatever the record says. Without this, one
-    /// runner upgrade that removes what a verb wrote leaves it skipped forever on the strength of an
-    /// entry that is no longer true.
+    /// A verb whose effect has gone has to be applied again, whatever the record says. Without this,
+    /// one runner upgrade that removes what a verb wrote leaves it skipped forever on the strength
+    /// of an entry that is no longer true.
     #[test]
     fn a_recorded_verb_whose_effect_is_gone_is_applied_again() {
         let manifest = manifest();
@@ -158,8 +158,8 @@ mod tests {
         );
     }
 
-    /// A manifest with no verbs is a prefix with nothing to do, not an error: the catalog is allowed to
-    /// publish none.
+    /// A manifest with no verbs is a prefix with nothing to do, not an error: the catalog is allowed
+    /// to publish none.
     #[test]
     fn a_manifest_with_no_verbs_plans_nothing() {
         let manifest = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#)

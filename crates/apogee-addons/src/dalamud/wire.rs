@@ -1,6 +1,6 @@
 //! What the distribution serves, and what this launcher writes down about it.
 //!
-//! Every response type is `#[serde(deny_unknown_fields)]`-free on purpose: the distribution adds fields
+//! No response type here is `#[serde(deny_unknown_fields)]`, on purpose: the distribution adds fields
 //! (a changelog, a display name, an applicability flag it computes against its own idea of the current
 //! game version) and a client that refused them would break on an upstream release note. What this
 //! launcher reads is what it acts on, and nothing more.

@@ -1,18 +1,15 @@
 //! Confirming that what a launch was redirected through actually came up inside the game.
 //!
-//! A loader reports its own verdict by exiting with a status, and on a container-style runner that
-//! status never reaches the launcher: what was spawned is the runner, which outlives the session, and
-//! the loader finishes inside it. So the launcher's own reading has to come from somewhere else.
+//! A loader reports its own verdict by exiting with a status, and behind a container-style runner that
+//! status never reaches the launcher: what was spawned is the runner, it outlives the session, and the
+//! loader finishes inside it. So the reading comes from a file instead. This crate tells the injector
+//! where to write its boot log, that log is written from *inside* the game process, and it lands on the
+//! host filesystem whatever runner the prefix uses, so a write to it after this launch began is proof
+//! the payload is in the game.
 //!
-//! It comes from a file. The launcher tells the injector where to write its boot log, that log is
-//! written from *inside* the game process, and it lands on the host filesystem whatever runner the
-//! prefix uses. A write to it after this launch began is therefore proof the payload is in the game,
-//! and it is a stronger claim than the loader's own status, which is only what the loader believed on
-//! its way out.
-//!
-//! Reading it back is not a dependency on somebody else's format: the path is one this crate chose and
-//! passed in, and nothing here parses a byte of what it contains. The question asked is only whether it
-//! was written.
+//! Reading it back depends on nobody else's format. The path is one this crate chose and passed in,
+//! nothing here parses a byte of what it contains, and the only question asked is whether it was
+//! written.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -22,22 +19,35 @@ use tokio_util::sync::CancellationToken;
 use crate::external::{AddonEvent, AddonEvents};
 
 /// How often the file is checked. Small enough that the report lands while a user is still looking at
-/// the launcher, large enough that a bounded wait is a handful of stats rather than thousands.
+/// the launcher, large enough that a bounded wait costs a handful of stats rather than thousands.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// What a launch is watching for, owned so it can outlive the call that made it.
 ///
-/// Owned rather than borrowing the addon layer, because the wait outlasts the launch step that starts
-/// it: the game is up, the setup pass is over, and the thing being waited on happens seconds later
-/// inside a process this launcher did not start.
+/// The wait outlasts the launch step that starts it: the game is up, the setup pass is over, and the
+/// write being waited on happens seconds later inside a process this launcher did not start.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::LoadEvidence;
+/// use std::path::Path;
+/// use std::time::{Duration, SystemTime};
+///
+/// let log = "/home/me/.local/share/apogee/dalamud/logs/dalamud.boot.log";
+/// let evidence = LoadEvidence::new("Dalamud", log, SystemTime::now())
+///     .within(Duration::from_secs(30));
+///
+/// assert_eq!(evidence.path(), Path::new(log));
+/// ```
 #[derive(Debug, Clone)]
 pub struct LoadEvidence {
     /// What to call it in the report.
     what: String,
     /// The file whose being written is the proof.
     path: PathBuf,
-    /// The launch's own starting point. A write older than this belongs to a previous session: the
-    /// boot log is appended to across runs rather than truncated, so its mere existence proves nothing.
+    /// The launch's own starting point. A write older than this belongs to a previous session: the boot
+    /// log is appended to across runs rather than truncated, so its mere existence proves nothing.
     since: SystemTime,
     /// How long absence stays "not yet" before it is reported as such.
     window: Duration,
@@ -55,8 +65,10 @@ impl LoadEvidence {
         }
     }
 
-    /// Wait a different length of time. The default is 90 seconds, which is the game's own start-up
-    /// time on a cold prefix plus room to spare, measured against a real client rather than guessed.
+    /// Wait a different length of time.
+    ///
+    /// The default is 90 seconds: the game's own start-up time on a cold prefix plus room to spare,
+    /// measured against a real client rather than guessed.
     #[must_use]
     pub fn within(mut self, window: Duration) -> Self {
         self.window = window;
@@ -71,15 +83,23 @@ impl LoadEvidence {
 
     /// Poll until the proof appears, the window closes, or `cancel` fires.
     ///
-    /// Consuming, because a watch is one launch's question and asking it twice would report twice. It
-    /// reports on both outcomes for the same reason the loader's exit status is reported on success:
-    /// a companion that loaded and one that never ran are indistinguishable from outside the game, so
-    /// silence would mean both. A cancelled watch reports neither, which is the honest answer: both
-    /// readings are only worth having while the session they are about is still running.
+    /// Emits [`AddonEvent::Loaded`] on proof and [`AddonEvent::NotConfirmed`] when the window closes.
+    /// Both, because a companion that loaded and one that never ran are indistinguishable from outside
+    /// the game, so silence would mean both. A cancelled watch emits neither: either reading is only
+    /// worth having while the session it is about is still running.
     ///
-    /// The token is owned rather than borrowed because this is spawned, and a borrow cannot outlive
-    /// the call that starts the wait. Without one the only way to stop it is to abort the task, which
-    /// makes a task something every caller has to keep rather than something it may choose.
+    /// Consuming, and the token is owned rather than borrowed, because this outlives the call that
+    /// starts it and is meant to be spawned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::{AddonEvents, LoadEvidence};
+    /// # use tokio_util::sync::CancellationToken;
+    /// # async fn demo(evidence: LoadEvidence, cancel: CancellationToken, events: AddonEvents) {
+    /// evidence.watch(cancel, events).await;
+    /// # }
+    /// ```
     pub async fn watch(self, cancel: CancellationToken, events: AddonEvents) {
         let started = SystemTime::now();
         loop {
@@ -105,9 +125,9 @@ impl LoadEvidence {
 
     /// Whether the file has been written since this launch began.
     ///
-    /// A file that cannot be read counts as not written. Every reason it might not be (absent, a
-    /// directory that was never created, a filesystem with no modification time) is the same answer to
-    /// the only question being asked, and none of them is worth failing a launch over.
+    /// A file that cannot be read counts as not written. Absent, a directory that was never created, a
+    /// filesystem with no modification time: each is the same answer to the only question being asked,
+    /// and none of them is worth failing a launch over.
     fn written_since(&self) -> bool {
         std::fs::metadata(&self.path)
             .and_then(|meta| meta.modified())
@@ -120,8 +140,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// A file written after the launch began is the proof, and it is reported under the name the
-    /// caller gave rather than the file's.
+    /// A file written after the launch began is the proof, and it is reported under the name the caller
+    /// gave rather than the file's.
     #[tokio::test]
     async fn a_write_after_the_launch_began_is_proof_it_loaded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -140,9 +160,9 @@ mod tests {
         }
     }
 
-    /// The boot log is appended to across runs rather than truncated, so a file left by an earlier
-    /// session is present and proves nothing. Reading its existence as proof is how a launch that
-    /// loaded nothing would report success forever after the first one that did.
+    /// The boot log is appended to across runs rather than truncated, so a file an earlier session left
+    /// is present and proves nothing. Reading mere existence as proof is how a launch that loaded
+    /// nothing would report success forever after the first one that did.
     #[tokio::test]
     async fn a_file_left_by_an_earlier_session_is_not_proof() {
         let dir = tempfile::tempdir().expect("tempdir");
