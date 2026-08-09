@@ -92,14 +92,18 @@ pub(crate) trait LaunchBackend: Send + Sync {
         events: &UnboundedSender<Event>,
     ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
 
-    /// Delete the prefix and build it again.
+    /// Delete the prefix and build it again, handing back the fresh one.
+    ///
+    /// Handed back rather than dropped, because a rebuilt prefix has lost everything that was
+    /// installed into it and putting that back is the caller's next step. `None` is a backend with no
+    /// real prefix, as [`Self::prepare`].
     async fn recreate_prefix(
         &self,
         runner: &RunnerSelection,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<(), CoreError>;
+    ) -> Result<Option<apogee_runtime::Prefix>, CoreError>;
 
     /// Spawn `plan` and supervise the game, relaying download/extract progress onto `events` as
     /// [`Event::Progress`]. Returns a handle to the running game.
@@ -317,9 +321,10 @@ pub(crate) mod fake {
             _prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
-        ) -> Result<(), CoreError> {
+        ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
             self.recreated.store(true, Ordering::SeqCst);
-            Ok(())
+            // No prefix, for the reason `prepare` has none.
+            Ok(None)
         }
 
         async fn launch(
