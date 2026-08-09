@@ -13,6 +13,35 @@ use std::net::IpAddr;
 /// the user's own browser can issue this request, needs no cross-origin permission to do it, and
 /// arrives from a loopback address; an implicit exemption would hand exactly that peer a way around
 /// the pin the user set to stop it. Loopback is admitted when it is in the list.
+///
+/// # Examples
+/// ```
+/// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+///
+/// use apogee_otp::SourceFilter;
+///
+/// let phone = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+/// let laptop = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 6));
+///
+/// // The default admits anything that can route a packet to the bound interface.
+/// assert!(SourceFilter::default().admits(laptop));
+///
+/// let pinned = SourceFilter::only(phone, &[]).expect("a routable address can be pinned");
+/// assert!(pinned.admits(phone));
+/// assert!(!pinned.admits(laptop));
+/// // No exemption for the machine itself: a page in the user's own browser arrives from here.
+/// assert!(!pinned.admits(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+///
+/// // A dual-stack host reports an IPv4 peer in the mapped form. Both spellings are one address,
+/// // so the user's own phone does not silently stop matching.
+/// let mapped: Ipv6Addr = "::ffff:192.168.1.5".parse().expect("a literal");
+/// assert!(pinned.admits(IpAddr::V6(mapped)));
+///
+/// // A link-local address means nothing without the interface it is on, and that interface is not
+/// // part of an `IpAddr`, so pinning one is refused rather than half-honored.
+/// let link_local: Ipv6Addr = "fe80::1".parse().expect("a literal");
+/// assert!(SourceFilter::only(IpAddr::V6(link_local), &[]).is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum SourceFilter {
@@ -26,6 +55,24 @@ pub enum SourceFilter {
 /// A non-empty set of admitted addresses.
 ///
 /// Private field and no public constructor, so the invariant cannot be forged by a struct literal.
+/// It is public only because it is what [`SourceFilter::Only`] carries; the addresses are matched
+/// through [`SourceFilter::admits`] rather than read back out, so there is no accessor for them.
+///
+/// # Examples
+/// ```
+/// use std::net::{IpAddr, Ipv4Addr};
+///
+/// use apogee_otp::SourceFilter;
+///
+/// let phone = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+///
+/// let Some(SourceFilter::Only(pinned)) = SourceFilter::only(phone, &[phone]) else {
+///     panic!("a routable address can be pinned");
+/// };
+/// // A repeated entry collapses, so a hand-edited list cannot grow the scan.
+/// assert_eq!(pinned.len(), 1);
+/// assert!(!pinned.is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pinned(Vec<IpAddr>);
 
@@ -36,8 +83,9 @@ impl Pinned {
         self.0.len()
     }
 
-    /// Always false. Present because a `len` without one is a lint, and because the invariant is
-    /// worth being able to state at a call site.
+    /// Always false, and that is the invariant rather than an accident: [`SourceFilter::only`] takes
+    /// its first address separately, so "admit nobody" has no spelling. Kept so a call site can
+    /// state it, and because a `len` without one is a lint.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

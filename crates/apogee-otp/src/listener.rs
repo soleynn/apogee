@@ -28,6 +28,15 @@
 //!
 //! Nothing here sleeps on a human. A caller passes the deadline it is willing to wait and holds its
 //! own cancellation around the call, exactly as it does for the reuse guard's hold.
+//!
+//! # What is settled, and what is not
+//! The shape is: the types below, which of them owns the socket and for how long, and the one legal
+//! request answered once. Which byte sequences count as that request is *not* settled, and the
+//! version this crate carries does not claim otherwise. The request the grammar was written against
+//! is constructed rather than captured, so three of its details are still open, the version token,
+//! the line terminator, and whether a header block follows at all, and a capture of the real
+//! companion app is what decides them. Accepting more than it does today is expected and changes no
+//! signature here; accepting less, ahead of that capture, would refuse a client that works now.
 
 mod conn;
 mod filter;
@@ -60,6 +69,13 @@ pub use filter::{Pinned, SourceFilter};
 /// Not a preference: a listener on any other port is one that nothing will find. It is configurable
 /// only because a machine may already have something else on it, and a user who moves it has to move
 /// the phone too.
+///
+/// # Examples
+/// ```
+/// use apogee_otp::{ListenerConfig, COMPAT_PORT};
+///
+/// assert_eq!(ListenerConfig::default().port, COMPAT_PORT);
+/// ```
 pub const COMPAT_PORT: u16 = 4646;
 
 /// How many connections are served at once.
@@ -107,6 +123,33 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 /// The derived `Debug` is deliberate and is the only one in this module. Nothing here is a secret: it
 /// is the user's own configuration, already in their settings file, and a redacted bind address would
 /// make a bind failure undiagnosable.
+///
+/// The fields are public and the struct is not `#[non_exhaustive]`, so a settings layer can write a
+/// literal and have the compiler tell it when a field is missing. That is deliberate at this version:
+/// the three facts below are the whole set, and everything else the listener needs is a constant with
+/// a stated reason, so a fourth field would be a knob on the hardening rather than a new fact about
+/// the machine.
+///
+/// # Examples
+/// ```
+/// use std::net::{IpAddr, Ipv4Addr};
+///
+/// use apogee_otp::{ListenerConfig, SourceFilter, COMPAT_PORT};
+///
+/// // What the phone app expects with no configuration at all.
+/// let usual = ListenerConfig::default();
+/// assert_eq!(usual.port, COMPAT_PORT);
+/// assert_eq!(usual.allow, SourceFilter::Any);
+///
+/// // A multi-homed host names the interface that faces the phone, and pins the phone.
+/// let phone = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+/// let narrowed = ListenerConfig {
+///     bind: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+///     allow: SourceFilter::only(phone, &[]).expect("a routable address can be pinned"),
+///     ..ListenerConfig::default()
+/// };
+/// assert_eq!(narrowed.port, COMPAT_PORT);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
     /// The interface to take.
@@ -135,14 +178,33 @@ impl Default for ListenerConfig {
 /// waits.
 ///
 /// Holds nothing, and is neither `Clone`, `Copy`, `Default`, nor deserializable, with a private field,
-/// so it cannot be conjured by a struct literal or produced by parsing a config file. It is consumed
-/// by the call it authorizes. What it does is confine the ability to say "the user asked for this" to
-/// the layer that can actually ask, and its single constructor is greppable, so that confinement is
-/// checkable rather than merely intended.
+/// so it cannot be conjured by a struct literal or produced by parsing a config file. It is taken by
+/// value, so one grant authorizes one call.
+///
+/// Nothing in this crate takes one, and that is the split rather than an oversight. What needs
+/// authorizing is turning pushed codes on for an account, which happens once, in the layer that can
+/// actually put the question to a user; every later login binds from the setting that answer wrote.
+/// Requiring one at [`Listener::bind`] would move the grant onto the per-login path, where the only
+/// way to produce it is to call [`ListenerConsent::granted`] with nobody asked. What this type does is
+/// confine that constructor to the layer that can ask, and the constructor is greppable, so the
+/// confinement is checkable rather than merely intended.
+///
+/// # Examples
+/// ```
+/// use apogee_otp::ListenerConsent;
+///
+/// // The only way to make one, and it takes no arguments: what it carries is that the question was
+/// // put and answered, never anything about the answer beyond that it was yes.
+/// let consent = ListenerConsent::granted();
+/// assert_eq!(format!("{consent:?}"), "ListenerConsent");
+/// ```
 pub struct ListenerConsent(());
 
 impl ListenerConsent {
     /// The user was shown what a listening port admits and said yes.
+    ///
+    /// Call this only from a layer that just asked. Everything the type is for is in who may reach
+    /// this function, since it can otherwise be called from anywhere.
     #[must_use]
     pub fn granted() -> Self {
         Self(())

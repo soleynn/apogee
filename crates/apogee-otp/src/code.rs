@@ -11,6 +11,24 @@ use zeroize::Zeroizing;
 /// from a secret this crate holds. It implements no `Clone` (a clone is a second buffer of digits
 /// with its own lifetime), no `Display`, no `PartialEq`, no `Default` and no `serde::Serialize`, and
 /// the `Debug` renders the digit count and never the digits. The buffer is erased when it drops.
+///
+/// # Examples
+/// ```
+/// use std::time::{Duration, UNIX_EPOCH};
+///
+/// use apogee_otp::{ClockSkew, TotpParams};
+///
+/// let params = TotpParams::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")?;
+/// let code = params.code(UNIX_EPOCH + Duration::from_secs(59), ClockSkew::NONE)?;
+///
+/// assert_eq!(code.len(), 6);
+/// assert!(!code.is_empty());
+///
+/// // The digits have exactly one way out, and rendering is not it.
+/// assert_eq!(format!("{code:?}"), "Code(6 digits)");
+/// assert_eq!(code.expose(), "287082");
+/// # Ok::<(), apogee_otp::OtpError>(())
+/// ```
 pub struct Code(Zeroizing<String>);
 
 impl Code {
