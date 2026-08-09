@@ -2,7 +2,7 @@
 //!
 //! Its own enum rather than the runtime's: these are facts about companion tools, and widening the
 //! runtime's event type would make every runtime consumer match on variants it can never see. The
-//! composition root translates, which is what it already does for the runtime's own stream.
+//! composition root translates.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,16 +38,16 @@ pub enum AddonEvent {
     /// process was written after this launch began.
     ///
     /// The only report of its kind every runner can produce. A loader's own exit status says what it
-    /// believed on its way out, and is unreachable behind a container-style runner where what the
+    /// believed on its way out, and is unreachable behind a container-style runner, where what the
     /// launcher spawned is the runner rather than the loader.
     #[non_exhaustive]
     Loaded { what: String },
     /// No such proof yet, after waiting.
     ///
-    /// Deliberately not "it failed". Absence is not evidence here, because the game may still be
-    /// starting, and a launcher that announced a failure on a slow machine would be wrong in the one
-    /// direction that costs a user their trust in the report. `evidence` is the file that was watched,
-    /// so whoever reads this can look for themselves.
+    /// Deliberately not "it failed". The game may still be starting, and a launcher that announced a
+    /// failure on a slow machine would be wrong in the one direction that costs a user their trust
+    /// in the report. `evidence` is the file that was watched, so whoever reads this can look for
+    /// themselves.
     #[non_exhaustive]
     NotConfirmed {
         what: String,
@@ -56,7 +56,21 @@ pub enum AddonEvent {
     },
 }
 
-/// Where addon events go. Cloneable and cheap, like the runtime's own.
+/// Where addon events go. Cheap to clone, so a launch can hand one to each stage.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::{AddonEvent, AddonEvents};
+///
+/// let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AddonEvent>();
+/// let events = AddonEvents::new(tx);
+/// // Each stage of a launch takes one, so it travels by clone.
+/// let for_teardown = events.clone();
+///
+/// assert!(rx.try_recv().is_err(), "nothing has been reported yet");
+/// # drop((events, for_teardown));
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct AddonEvents {
     tx: Option<UnboundedSender<AddonEvent>>,
@@ -64,6 +78,14 @@ pub struct AddonEvents {
 
 impl AddonEvents {
     /// A stream that goes nowhere, for a caller that does not want the events.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::AddonEvents;
+    ///
+    /// let events = AddonEvents::none();
+    /// ```
     #[must_use]
     pub fn none() -> Self {
         Self { tx: None }

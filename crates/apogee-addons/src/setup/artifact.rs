@@ -1,10 +1,12 @@
 //! Getting a pinned artifact onto disk.
 //!
-//! One path for every *pinned* download, so the sha256 pin is checked in exactly one place and nothing
-//! downstream is handed a path to bytes that failed it: the fetcher returns a `VerifiedFile`, which only
-//! it can mint, and that is what reaches extraction. The signed manifest itself is the one download that
-//! does not come through here, because it has no pin to check: an Ed25519 signature stands in its place
-//! and its fetch lives beside the verification that gates it.
+//! One path for every *pinned* download, so the sha256 pin is checked in exactly one place and
+//! nothing downstream is handed a path to bytes that failed it: the fetcher returns a
+//! [`VerifiedFile`], which only it can mint, and that is what reaches extraction.
+//!
+//! The signed manifest itself is the one download that does not come through here, because it has
+//! no pin to check: an Ed25519 signature stands in its place, and its fetch lives beside the
+//! verification that gates it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -25,10 +27,13 @@ const RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Download `artifact` into `work`, verify its sha256, and extract it into `dest`.
 ///
 /// `what` names whatever the caller is setting up, and is what every failure is reported against.
+/// Returns the number of entries written.
 ///
-/// Returns the number of entries written. Zero is a failure rather than an empty success: an archive
-/// that yields nothing under its declared strip prefix means the row's layout is wrong, and sealing
-/// that as applied would leave an empty directory that never gets fixed.
+/// # Errors
+/// [`AddonError::EmptyArchive`] when the archive yields nothing under its declared layout. Zero is a
+/// failure rather than an empty success: it means the row's layout is wrong, and sealing that as
+/// applied would leave an empty directory that never gets fixed. Otherwise whatever [`download`]
+/// failed with, or [`AddonError::Unpack`] if the archive does not unpack.
 pub(super) async fn install(
     fetcher: &Fetcher,
     artifact: &Artifact,
@@ -62,6 +67,9 @@ pub(super) async fn install(
 
 /// Extract on a blocking thread. Split out so the non-Linux build has somewhere to say no: the
 /// extractor is part of the runner surface, which is Linux-first.
+///
+/// # Errors
+/// [`AddonError::Unpack`] if the archive does not unpack.
 #[cfg(target_os = "linux")]
 fn extract(
     archive: &Path,
@@ -75,6 +83,10 @@ fn extract(
     })
 }
 
+/// Where the non-Linux build says no.
+///
+/// # Errors
+/// Always [`AddonError::Unsupported`].
 #[cfg(not(target_os = "linux"))]
 fn extract(
     _archive: &Path,
@@ -88,6 +100,12 @@ fn extract(
 }
 
 /// Download and verify one artifact, relaying progress onto the setup event stream.
+///
+/// # Errors
+/// [`AddonError::IntegrityMismatch`] if the bytes that arrived are not the ones the manifest pinned,
+/// [`AddonError::Download`] if the transfer did not complete after [`MAX_DOWNLOAD_ATTEMPTS`],
+/// [`AddonError::Io`] if the staging directory cannot be made, [`AddonError::Spec`] if the row's URL
+/// is not one the fetcher will take.
 async fn download(
     fetcher: &Fetcher,
     artifact: &Artifact,

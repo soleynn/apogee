@@ -1,16 +1,53 @@
-//! Choosing what a config backup covers.
+//! Reproducible archives of the settings the game writes for itself.
 //!
-//! Selection is one filesystem walk plus rules that are predicates over what it found. The shape is
-//! a response to how this goes wrong in practice: a backup that quietly covers less than it claims
+//! A [`Selection`] names the source trees and the rules that carve them up, [`create`] writes one
+//! into a deterministic zip carrying its own [`BackupManifest`], [`inspect`] reads that record back,
+//! `restore` (unix only) puts a root back, and [`prune`] removes all but the newest few.
+//!
+//! Selection is one filesystem walk plus rules that are predicates over what it found. The shape is a
+//! response to how this goes wrong in practice: a backup that quietly covers less than it claims
 //! reports success, and the loss is only discovered when someone tries to restore it. So a rule
 //! states the kind of entry it matches and is checked against the kind actually on disk, name tests
 //! fold case rather than inheriting the filesystem's answer, and every rule reports how many entries
 //! it matched, which makes a rule that matched nothing a zero on a report instead of silence.
 //!
 //! The tree the game writes is taken whole and thinned by naming what to drop, rather than being
-//! assembled by naming what to keep. A name that is never spelled cannot be misspelled, and a
-//! mistake in a rule that drops things costs archive size, while a mistake in a rule that keeps
-//! things costs the user their settings.
+//! assembled by naming what to keep. A name that is never spelled cannot be misspelled, and a mistake
+//! in a rule that drops things costs archive size, while a mistake in a rule that keeps things costs
+//! the user their settings.
+//!
+//! # Examples
+//!
+//! Capture the config tree inside a prefix, then prune the directory it landed in:
+//!
+//! ```
+//! # use std::path::Path;
+//! # use std::time::SystemTime;
+//! # use tokio_util::sync::CancellationToken;
+//! # use apogee_addons::backup::{
+//! #     BackupError, BackupSpec, GameConfigOpts, Retain, Selection, SelectionRoot, create,
+//! #     game_config_dirs, prune,
+//! # };
+//! # fn demo(
+//! #     prefix: &Path,
+//! #     dest: &Path,
+//! #     policy: Retain,
+//! #     cancel: &CancellationToken,
+//! # ) -> Result<(), BackupError> {
+//! // A prefix run under more than one runner holds a tree per runner; the newest is the live one.
+//! let mut selection = Selection::new();
+//! if let Some(tree) = game_config_dirs(prefix).into_iter().next() {
+//!     let root = SelectionRoot::game_config(tree, GameConfigOpts::default());
+//!     selection = selection.with_root(root)?;
+//! }
+//!
+//! let spec = BackupSpec::new(selection, dest, SystemTime::now()).note("before a patch");
+//! let report = create(&spec, cancel)?;
+//! let pruned = prune(dest, policy)?;
+//! # let _ = (report.archive, pruned.deleted);
+//! # Ok(())
+//! # }
+//! ```
 
 mod archive;
 mod confine;
@@ -227,13 +264,24 @@ const NOT_A_USER: &[&str] = &["Public"];
 /// relocates the whole prefix a level down, so the drive is either directly inside or one `pfx`
 /// deeper.
 ///
-/// Returning them all is deliberate: on a real prefix run under two runners, both trees hold a full
-/// set of settings, and choosing between them by name would quietly back up whichever sorted first.
-/// The caller decides, and the order here gives it something better than alphabetical to decide with:
-/// the tree the game wrote to last is the one it is using.
+/// On such a prefix both trees hold a full set of settings, so the caller chooses; the order here
+/// gives it something better than alphabetical to choose with, since the tree the game wrote to last
+/// is the one it is using.
 ///
 /// Empty when the game has never written a config, which is the state of a prefix that has only been
 /// prepared.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> std::io::Result<()> {
+/// use apogee_addons::backup::game_config_dirs;
+///
+/// let prepared_but_never_played = tempfile::tempdir()?;
+/// assert!(game_config_dirs(prepared_but_never_played.path()).is_empty());
+/// # Ok(())
+/// # }
+/// ```
 #[must_use]
 pub fn game_config_dirs(prefix: &Path) -> Vec<PathBuf> {
     let mut found: Vec<(std::time::SystemTime, PathBuf, PathBuf)> = Vec::new();
@@ -297,8 +345,10 @@ impl Selection {
     }
 
     /// Add a source tree, resolving its path first so two roots that reach the same directory
-    /// through different links cannot both be walked. A prefix reaches its config tree by several
-    /// names, so this is the difference between one copy of the settings and four.
+    /// through different links cannot both be walked.
+    ///
+    /// A prefix reaches its config tree under several names, so this is the difference between one
+    /// copy of the settings and four.
     ///
     /// # Errors
     /// [`BackupError::DuplicateRoot`] if it resolves to a directory already added.
@@ -366,11 +416,8 @@ impl Selection {
 
 #[cfg(test)]
 mod tests {
-    //! What the rule vocabulary does, which is in here because the vocabulary is.
-    //!
-    //! These three used to live beside the selection tests in `tests/`, and moved when `Rule` and its
-    //! words stopped being public. The rest of that file drives the presets, which are still the whole
-    //! of what a caller outside can ask for.
+    //! What the rule vocabulary does, which is in here because the vocabulary is crate-private. The
+    //! tests that drive the presets from outside are still in `tests/`.
 
     use super::*;
 
@@ -389,8 +436,9 @@ mod tests {
         )?)
     }
 
-    /// A rule that matches nothing is the failure this selection exists to make impossible to miss. On
-    /// an allowlist root, where a misspelling would silently shrink the archive, it stops the backup.
+    /// A rule that matches nothing is the failure this selection exists to make impossible to miss.
+    /// On an allowlist root, where a misspelling would silently shrink the archive, it stops the
+    /// backup.
     #[test]
     fn a_required_rule_that_matches_nothing_fails_the_backup() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -415,8 +463,8 @@ mod tests {
     }
 
     /// A root the game has been pointed at and has never written into is the ordinary state before a
-    /// first launch, so it is recorded rather than treated as a fault, and the populated root beside it
-    /// is still captured.
+    /// first launch, so it is recorded rather than treated as a fault, and the populated root beside
+    /// it is still captured.
     #[test]
     fn an_absent_optional_root_is_recorded_beside_a_populated_one() -> Result<(), BackupError> {
         let tmp = tempfile::tempdir().expect("tempdir");

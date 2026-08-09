@@ -1,13 +1,13 @@
 //! Composing the injector's command line.
 //!
-//! Pure and separate from everything that touches a disk or a network, because this is the part with an
-//! external contract: the flags, their spelling, and their order are the reference launcher's, and the
-//! injector's own parser is not ours to read. A golden test over this function is what that contract is
-//! pinned by.
+//! Pure, and separate from everything that touches a disk or a network, because this is the part with
+//! an external contract: the flags, their spelling and their order are the reference launcher's, and
+//! the injector's own parser is not ours to read. A golden test over [`injector_argv`] is what that
+//! contract is pinned by.
 //!
 //! One deliberate difference from the reference launcher. It joins its arguments into a single string
 //! that wine splits again, so it wraps every path in literal double quotes to survive that round trip.
-//! We build a real argv, where a quote is just a character, so the quotes are not emitted: a path
+//! This builds a real argv, where a quote is just a character, so the quotes are not emitted: a path
 //! carrying them would be a path that does not exist.
 
 use std::fmt;
@@ -18,12 +18,13 @@ use std::fmt;
 pub enum LoadMode {
     /// Rewrite the original entry point. Loads earlier, and is the mode Dalamud develops against.
     EntryPoint,
-    /// Inject once the process is up. The reference launcher's default under wine, and so ours.
+    /// Inject once the process is up. The reference launcher's default under wine, and so this one's.
     #[default]
     Inject,
 }
 
 impl LoadMode {
+    /// The spelling `--mode` takes.
     fn as_flag_value(self) -> &'static str {
         match self {
             Self::EntryPoint => "entrypoint",
@@ -47,29 +48,61 @@ pub enum PluginPolicy {
 
 /// The game's own language ordinal, which the injector takes as a number.
 ///
-/// Numbered explicitly because the wire value is the number, not the name: renaming a variant is free
-/// and reordering one is a silent behaviour change.
+/// Numbered explicitly because the wire value is the number and not the name: renaming a variant is
+/// free, reordering one is a silent behaviour change.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::ClientLanguage;
+///
+/// assert_eq!(ClientLanguage::German.ordinal(), 2);
+/// assert_eq!(ClientLanguage::from_ordinal(2), ClientLanguage::German);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ClientLanguage {
+    /// Japanese.
     Japanese = 0,
+    /// English.
     #[default]
     English = 1,
+    /// German.
     German = 2,
+    /// French.
     French = 3,
 }
 
 impl ClientLanguage {
     /// The ordinal the injector expects.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::ClientLanguage;
+    ///
+    /// assert_eq!(ClientLanguage::Japanese.ordinal(), 0);
+    /// assert_eq!(ClientLanguage::French.ordinal(), 3);
+    /// ```
     #[must_use]
     pub fn ordinal(self) -> u8 {
         self as u8
     }
 
-    /// The language an ordinal names, defaulting to English for one this build does not know.
+    /// The language an ordinal names, defaulting to [`ClientLanguage::English`] for one this build does
+    /// not know.
     ///
     /// Takes the number rather than a name because the number is what the game itself is told, so the
     /// launcher decides the language once and this converts it rather than deciding again.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::ClientLanguage;
+    ///
+    /// assert_eq!(ClientLanguage::from_ordinal(0), ClientLanguage::Japanese);
+    /// assert_eq!(ClientLanguage::from_ordinal(200), ClientLanguage::English);
+    /// ```
     #[must_use]
     pub fn from_ordinal(ordinal: u8) -> Self {
         match ordinal {
@@ -82,6 +115,7 @@ impl ClientLanguage {
 }
 
 impl fmt::Display for ClientLanguage {
+    /// Formats as the ordinal, which is what the flag carries.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.ordinal())
     }
@@ -193,8 +227,8 @@ mod tests {
     }
 
     /// The reference launcher quotes its path arguments because it hands wine one string to re-split.
-    /// We pass argv directly, so a quote would be part of the path and every one of these would name
-    /// something that does not exist.
+    /// This passes argv directly, so a quote would be part of the path and every one of these would
+    /// name something that does not exist.
     #[test]
     fn no_path_argument_carries_a_literal_quote() {
         for arg in injector_argv(&invocation()) {
@@ -251,6 +285,7 @@ mod tests {
         }
     }
 
+    /// The mode reaches the injector as the word it parses, not as the variant's Rust name.
     #[test]
     fn the_entry_point_mode_is_spelled_as_the_injector_expects() {
         let argv = injector_argv(&InjectorInvocation {

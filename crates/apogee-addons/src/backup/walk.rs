@@ -1,8 +1,8 @@
 //! The one walk that produces every candidate entry.
 //!
-//! Rules are predicates over what this walk found, never enumerators of their own. That is what
-//! keeps a rule from being paired with a traversal that cannot return the kind of entry it was
-//! written for, and it means no rule can cover for another by sweeping the same subtree twice.
+//! Rules are predicates over what this walk found, never enumerators of their own. That is what keeps
+//! a rule from being paired with a traversal that cannot return the kind of entry it was written for,
+//! and it means no rule can cover for another by sweeping the same subtree twice.
 
 use std::path::Path;
 
@@ -23,6 +23,11 @@ struct Counts {
 }
 
 /// Walk one root, returning its entries in discovery order and a report of what every rule did.
+///
+/// # Errors
+/// [`BackupError::MissingRoot`] if a required root is absent, [`BackupError::RuleMatchedNothing`] if
+/// a required rule matched no entry, and [`BackupError::Io`], [`BackupError::NonUtf8Name`] or
+/// [`BackupError::TooDeep`] from reading the tree.
 pub(super) fn walk(
     root: &SelectionRoot,
     deny: &[Rule],

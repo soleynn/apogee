@@ -1,9 +1,10 @@
 //! Applying prefix setup against a scratch prefix and a chaos-served archive.
 //!
-//! No wine and no network here. The prefix is a handle over a temporary directory, and the archives are
-//! built in-process and served by the test HTTP server, which is what makes the properties that matter
-//! checkable: what the prefix records, that a second pass does nothing, that a verb which did not land
-//! is not remembered as done, and that a pin which does not match stops before anything is written.
+//! No wine and no network here. The prefix is a handle over a temporary directory, and the archives
+//! are built in-process and served by the test HTTP server, which is what makes the properties that
+//! matter checkable: what the prefix records, that a second pass does nothing, that a verb which did
+//! not land is not remembered as done, and that a pin which does not match stops before anything is
+//! written.
 //!
 //! The verbs here carry `files` ops rather than registry ones, since a registry op needs a wine. The
 //! registry path has its own test against a real one.
@@ -45,8 +46,8 @@ fn runtime() -> Runtime {
     Runtime::new(Fetcher::builder().build().unwrap(), RuntimePaths::default())
 }
 
-/// Three verbs: one that lands what it promises, one whose op succeeds without producing what it names,
-/// and one whose op cannot succeed at all.
+/// Three verbs: one that lands what it promises, one whose op succeeds without producing what it
+/// names, and one whose op cannot succeed at all.
 fn manifest(server: &ChaosServer, pin: &str) -> VerifiedManifest {
     let json = format!(
         r#"{{
@@ -198,8 +199,8 @@ async fn a_second_pass_applies_nothing_and_downloads_nothing() {
     );
 }
 
-/// A verb whose ops "succeeded" without producing what it names is a failure, and an unrecorded one, so
-/// the next pass tries again instead of remembering a half-finished apply as done.
+/// A verb whose ops "succeeded" without producing what it names is a failure, and an unrecorded one,
+/// so the next pass tries again instead of remembering a half-finished apply as done.
 #[tokio::test]
 async fn a_verb_that_did_not_produce_what_it_names_fails_and_is_not_recorded() {
     let (server, pin) = served().await;
@@ -225,9 +226,9 @@ async fn a_verb_that_did_not_produce_what_it_names_fails_and_is_not_recorded() {
     );
 }
 
-/// A verb the record claims but whose effect has been removed from the prefix comes back. This is what a
-/// runner upgrade does to prefix state a verb wrote, so it is simulated by deleting what the verb
-/// produced.
+/// A verb the record claims but whose effect has been removed from the prefix comes back. This is
+/// what a runner upgrade does to prefix state a verb wrote, so it is simulated by deleting what the
+/// verb produced.
 #[tokio::test]
 async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
     let (server, pin) = served().await;
@@ -265,9 +266,9 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
     );
 }
 
-/// Asking what a prefix is missing is answerable without setting it up, and the answer is the one the
-/// apply then acts on. Two readings of the same prefix that could disagree would let a report name
-/// setup a fix does not apply, or a fix apply setup no report named.
+/// Asking what a prefix is missing is answerable without setting it up, and the answer is the one
+/// the apply then acts on. Two readings of the same prefix that could disagree would let a report
+/// name setup a fix does not apply, or a fix apply setup no report named.
 #[tokio::test]
 async fn what_a_prefix_is_missing_is_what_a_pass_then_applies() {
     let (server, pin) = served().await;
@@ -310,8 +311,8 @@ async fn what_a_prefix_is_missing_is_what_a_pass_then_applies() {
     );
 }
 
-/// The record is not the evidence. A verb whose effect has gone is missing again, which is what makes a
-/// report of what a prefix needs survive a runner upgrade undoing what a verb wrote.
+/// The record is not the evidence. A verb whose effect has gone is missing again, which is what
+/// makes a report of what a prefix needs survive a runner upgrade undoing what a verb wrote.
 #[tokio::test]
 async fn a_verb_whose_effect_was_removed_is_missing_again() {
     let (server, pin) = served().await;
@@ -332,8 +333,8 @@ async fn a_verb_whose_effect_was_removed_is_missing_again() {
     assert_eq!(recorded(&prefix), ["checked"]);
 }
 
-/// One verb failing costs the prefix that verb. A launch that is otherwise fine should not be stopped by
-/// one piece of hygiene, and the rest of the setup still has to happen.
+/// One verb failing costs the prefix that verb. A launch that is otherwise fine should not be
+/// stopped by one piece of hygiene, and the rest of the setup still has to happen.
 #[tokio::test]
 async fn one_failing_verb_does_not_stop_the_others() {
     let (server, pin) = served().await;
@@ -351,8 +352,8 @@ async fn one_failing_verb_does_not_stop_the_others() {
     assert_eq!(recorded(&prefix), ["checked"]);
 }
 
-/// A pin that does not match is its own thing, not a download problem: the bytes arrived, they are just
-/// not the bytes the signed manifest promised. Nothing is written and nothing is recorded.
+/// A pin that does not match is its own thing, not a download problem: the bytes arrived, they are
+/// just not the bytes the signed manifest promised. Nothing is written and nothing is recorded.
 #[tokio::test]
 async fn a_pin_that_does_not_match_is_an_integrity_failure_and_writes_nothing() {
     let (server, pin) = served().await;
@@ -380,7 +381,8 @@ async fn a_pin_that_does_not_match_is_an_integrity_failure_and_writes_nothing() 
 }
 
 /// A pass the user stopped ends as a cancellation, not as a report full of failures. A caller counts
-/// failures to decide whether it got what it asked for, and a run somebody stopped has nothing to count.
+/// failures to decide whether it got what it asked for, and a run somebody stopped has nothing to
+/// count.
 #[tokio::test]
 async fn a_stopped_pass_is_a_cancellation_rather_than_a_set_of_failures() {
     let (server, pin) = served().await;
@@ -399,8 +401,8 @@ async fn a_stopped_pass_is_a_cancellation_rather_than_a_set_of_failures() {
     assert!(recorded(&prefix).is_empty());
 }
 
-/// The catalog decides the setup, so a manifest with no verbs is a prefix with nothing to do rather than
-/// an error.
+/// The catalog decides the setup, so a manifest with no verbs is a prefix with nothing to do rather
+/// than an error.
 #[tokio::test]
 async fn a_manifest_with_no_verbs_does_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -456,7 +458,7 @@ fn write_user_reg(prefix: &Prefix, values: &str) {
 /// What a pass would do about a prefix that already records every verb the manifest defines, and the
 /// reading behind anything it would do again.
 ///
-/// Goes through the same `plan_for` a launch and `prefix health` both use, over the prefix's own
+/// Goes through the same `plan_for` a launch and a health check both use, over the prefix's own
 /// record, so what these check is the decision as it is actually reached.
 fn planned(manifest: &ComponentManifest, prefix: &Prefix) -> (Vec<StepAction>, Vec<String>) {
     for verb in &manifest.verbs {

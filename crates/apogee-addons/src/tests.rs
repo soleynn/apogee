@@ -1,33 +1,14 @@
-//! The error taxonomy, frozen.
-//!
-//! Three enums leave this crate: [`AddonError`] for the launch path, and the two the parser and the
-//! backup engine keep to themselves so they stay total and cross-platform. Every one of them reaches a
-//! user as a rendered string, because each seam the layer reports through carries a `String` rather
-//! than the error itself, and the shell prints what it is handed. That makes the messages part of the
-//! contract, and nothing was checking them: renaming a field, reordering a chain, or interpolating a
-//! `Debug` where a sentence belonged was a silent change to what a user reads.
-//!
-//! One list per enum does both halves of the freeze, which is the point of the macro below. Written as
-//! two lists, a match and a table, the pair fails open: the compiler forces an arm for a new variant,
-//! and the edit that adds the arm is the same edit that would have to remember the table, so a variant
-//! could be named and never rendered. Here a variant is a pattern and its sample and its expected line
-//! in one entry, so the exhaustiveness check and the rendering check cannot disagree.
-//!
-//! [`AddonError`] renders through [`AddonError::chain`] rather than `Display`, because that is what the
-//! seams call and therefore what a user sees. Its two transparent arms are why the difference matters:
-//! their `Display` is their inner error, and their chain is the sentence a shell prints.
-
 use std::path::PathBuf;
 
 use super::*;
 use crate::backup::BackupError;
 use crate::manifest::ManifestError;
 
-/// The three enums are carried across task boundaries and stored in `Box<dyn Error + Send + Sync>`
-/// chains, so they have to be `Send + Sync + 'static`. Nothing else in the workspace pins it: the
-/// `Send` half is proven incidentally by the `async_trait` on [`Injectable`] and the `Sync` half by
-/// nothing at all, which means a boxed source with an `Rc` in it would be caught at the first caller
-/// rather than here.
+// The three enums are carried across task boundaries and stored in `Box<dyn Error + Send + Sync>`
+// chains, so they have to be `Send + Sync + 'static`. Nothing else in the workspace pins it: the
+// `Send` half is proven incidentally by the `async_trait` on `Injectable` and the `Sync` half by
+// nothing at all, which means a boxed source with an `Rc` in it would be caught at the first caller
+// rather than here.
 const _: fn() = || {
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
     assert_send_sync_static::<AddonError>();
@@ -35,14 +16,15 @@ const _: fn() = || {
     assert_send_sync_static::<BackupError>();
 };
 
-/// Freeze one taxonomy: every variant as a pattern, a value built from it, and the line it renders as.
+/// Freeze one taxonomy: every variant as a pattern, a value built from it, and the line it renders
+/// as.
 ///
-/// The `match` is exhaustive with no wildcard arm, so a variant added to the enum stops this compiling
-/// until it gains an entry, and an entry is a pattern *and* a sample *and* an expected string. That is
-/// the whole reason the three are written together rather than as a match beside a table.
+/// The `match` is exhaustive with no wildcard arm, so a variant added to the enum stops this
+/// compiling until it gains an entry, and an entry is a pattern *and* a sample *and* an expected
+/// string. That is why the three are written together rather than as a match beside a table.
 ///
-/// Each sample is also checked against its own pattern, so an entry cannot be filed under one variant
-/// while building another.
+/// Each sample is also checked against its own pattern, so an entry cannot be filed under one
+/// variant while building another.
 macro_rules! frozen {
     ($test:ident, $ty:ty, $render:expr, {
         $( $pat:pat => ($sample:expr, $expected:expr $(,)?) ),+ $(,)?
@@ -405,8 +387,8 @@ frozen!(
     }
 );
 
-/// The same for the reasons a prune left a file alone, which are read in the same place and by the same
-/// person: a directory that still has files in it after a prune, and a line per file saying why.
+/// The reasons a foreign backup was refused are interpolated into a message a user reads, so a
+/// variant added without a sentence of its own would render as an identifier.
 #[test]
 fn every_foreign_reason_reads_as_a_sentence() {
     use crate::backup::ForeignReason::{
@@ -440,8 +422,9 @@ fn every_foreign_reason_reads_as_a_sentence() {
     );
 }
 
-/// Every reject reason has a sentence of its own. The enum is interpolated into a refusal, so a variant
-/// added without one would render as an identifier in a message a user reads.
+/// The same for the reasons a prune left a file alone, which are read in the same place and by the
+/// same person: a directory that still has files in it after a prune, and a line per file saying
+/// why.
 #[test]
 fn every_reject_reason_reads_as_a_sentence() {
     use crate::backup::RejectReason::{
@@ -482,11 +465,11 @@ fn every_reject_reason_reads_as_a_sentence() {
 
 /// A verify failure has a home of its own, and the conversion is what puts it there.
 ///
-/// This is why [`AddonError::Download`] carries no `#[from]`. The impl one generates is invisible at the
-/// call site: a `?` on a fetch, written by somebody who never thought about integrity, would flatten a
-/// pin that did not match into "download failed" and lose both digests. Every fetch in this crate is
-/// unpinned today, so the arm below is unreachable; a `From` that is wrong only once a validator is
-/// added is a `From` that will be wrong quietly.
+/// This is why [`AddonError::Download`] carries no `#[from]`. The impl one generates is invisible at
+/// the call site: a `?` on a fetch, written by somebody who never thought about integrity, would
+/// flatten a pin that did not match into "download failed" and lose both digests. Every fetch in
+/// this crate is unpinned today, so that arm is unreachable; a `From` that is wrong only once a
+/// validator is added is a `From` that will be wrong quietly.
 #[test]
 fn a_verify_failure_converts_to_the_integrity_arm_and_the_rest_pass_through() {
     let verify = AddonError::from_fetch(

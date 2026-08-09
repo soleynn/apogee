@@ -1,23 +1,39 @@
-//! The signed component manifest: what companions and prefix verbs exist, as data.
+//! The signed component manifest: which companions and prefix verbs exist, as data.
 //!
-//! Same discipline as the runner and index catalogs, with its own keys: a JSON manifest whose Ed25519
-//! signature is verified against compiled-in verifying keys **before** any `sha256` pin inside it is
-//! trusted. [`ComponentManifest::from_json_bytes`] is a pure, total parser over untrusted input (the
-//! fuzz entry point) and carries no authenticity guarantee on its own.
-//! [`ComponentManifest::parse_and_verify`] is what gates it behind the signature, and it takes the keys
-//! it checks against rather than reaching for them, so the fetch path and a test can drive the same code
-//! with different keys. `default_keys` supplies the compiled-in ones, which is what every shipping caller
-//! passes; [`ComponentManifest::verify_trusted`] binds the two for a caller that holds both halves and
-//! wants neither decision.
+//! A JSON body whose Ed25519 signature is verified against compiled-in keys **before** any `sha256`
+//! pin inside it is trusted. [`ComponentManifest::from_json_bytes`] is a pure, total parser over
+//! untrusted input and carries no authenticity guarantee on its own. [`VerifiedManifest`] is the
+//! shape that has been through the signature check, and the only one the apply path accepts.
 //!
-//! Everything the launcher sets up is in a row, so adding a prefix-setup verb, correcting where a
-//! verb's files land, or repointing an injectable's distribution is a manifest edit rather than a
-//! release.
+//! Everything the launcher sets up is a row, so adding a prefix-setup verb, correcting where a
+//! verb's files land, or repointing an injectable's distribution is an edit to this file rather than
+//! a release. A key the schema no longer defines is ignored rather than refused, which is what lets
+//! one manifest serve an older build while a newer one stops reading a list it has retired.
 //!
-//! Two lists, because two kinds of bytes. A verb's [`VerbOp::Files`] pins what it places by `sha256`,
-//! since Apogee names the archive it fetches. An [`InjectableEntry`] carries a distribution endpoint
-//! instead, for a component whose own versioned, integrity-checked distribution is the thing that
-//! authenticates its bytes and whose current version this manifest is in no position to pin.
+//! Two lists, because two kinds of bytes. A verb's [`VerbOp::Files`] pins what it places by
+//! `sha256`, since the launcher names the archive it fetches. An [`InjectableEntry`] carries a
+//! distribution endpoint instead, for a component whose own versioned, integrity-checked
+//! distribution is what authenticates its bytes and whose current version this manifest is in no
+//! position to pin.
+//!
+//! # Examples
+//!
+//! ```
+//! # fn main() -> Result<(), apogee_addons::ManifestError> {
+//! use apogee_addons::ComponentManifest;
+//!
+//! let json = br#"{
+//!     "version": 1,
+//!     "verbs": [
+//!         { "name": "renderer", "reason": "the game needs a d3d runtime", "ops": [] }
+//!     ]
+//! }"#;
+//!
+//! let manifest = ComponentManifest::from_json_bytes(json)?;
+//! assert!(manifest.verb("renderer").is_some());
+//! # Ok(())
+//! # }
+//! ```
 
 use std::path::{Component, Path, PathBuf};
 
@@ -33,24 +49,22 @@ use crate::SupportTier;
 /// The manifest schema version this build understands.
 pub const COMPONENT_MANIFEST_VERSION: u32 = 1;
 
-/// The public keys a component manifest may be authenticated against, the one it is signed with today
-/// first.
+/// The public keys a component manifest may be authenticated against, the one it is signed with
+/// today first.
 ///
 /// Its own keys, not the runner catalog's: the two are published on different cadences by different
-/// steps, and one compromised signer should not authenticate both. The matching private seeds are held
-/// offline.
+/// steps, and one compromised signer should not authenticate both. The matching private seeds are
+/// held offline.
 ///
-/// **A list, because a single constant cannot be rotated without an outage.** With one key, replacing
-/// it means re-signing the hosted file and shipping a build that trusts the new key, and one of those
-/// has to happen first: re-sign first and every client in the field rejects the catalog until it
-/// updates, ship first and every updated client rejects it until the re-sign. A list removes the
-/// ordering. The new key is added here and released, the file is re-signed once that build is in the
-/// field, and the retired key is dropped from the list in a later release. Every client in the window
-/// holds a key that matches whatever it is served.
-///
-/// It widens nothing. Every entry was compiled into this binary by the same build, so anyone who can
-/// append one can already replace the first, and a retired key is dropped rather than kept forever:
-/// the window is for finishing a rotation, not for keeping an old signer trusted.
+/// **A list, because a single constant cannot be rotated without an outage.** With one key,
+/// replacing it means both re-signing the hosted file and shipping a build that trusts the new key,
+/// and one of those has to happen first: re-sign first and every client in the field rejects the
+/// catalog until it updates, ship first and every updated client rejects it until the re-sign. A
+/// list removes the ordering. The new key is added here and released, the file is re-signed once
+/// that build is in the field, and the retired key is dropped in a later release.
+// It widens nothing. Every entry was compiled into this binary by the same build, so anyone who can
+// append one can already replace the first, and a retired key is dropped rather than kept forever:
+// the window is for finishing a rotation, not for keeping an old signer trusted.
 pub const COMPONENT_PUBLIC_KEYS: &[[u8; 32]] = &[[
     0x6d, 0x35, 0x68, 0x49, 0x3e, 0x56, 0x73, 0xb1, 0xa3, 0x10, 0xfa, 0xe7, 0x20, 0x1b, 0xec, 0xd2,
     0x21, 0xd6, 0x70, 0xb9, 0x28, 0x6a, 0xa9, 0xfd, 0x3f, 0xc7, 0x6c, 0xdf, 0xc7, 0xb9, 0x94, 0x00,
@@ -66,8 +80,16 @@ const _: () = assert!(
 /// Which of the trusted keys admitted a manifest.
 ///
 /// The answer stops being uninteresting the moment [`COMPONENT_PUBLIC_KEYS`] holds more than one. A
-/// manifest that only ever verifies against a retired key is a rotation whose re-sign never happened,
-/// and the release that drops that key from the list is where it becomes an outage.
+/// manifest that only ever verifies against a retired key is a rotation whose re-sign never
+/// happened, and the release that drops that key from the list is where it becomes an outage.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::manifest::TrustedKey;
+///
+/// assert!(TrustedKey::Current.is_current());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustedKey {
@@ -76,7 +98,10 @@ pub enum TrustedKey {
     /// A key still inside its overlap window. Whatever served this manifest has not been re-signed
     /// since the rotation started.
     #[non_exhaustive]
-    Retired { position: usize },
+    Retired {
+        /// Its index in [`COMPONENT_PUBLIC_KEYS`], which is what locates it in a release.
+        position: usize,
+    },
 }
 
 impl TrustedKey {
@@ -95,22 +120,21 @@ impl TrustedKey {
     }
 }
 
-/// The compiled-in keys as usable ones, decompressed from their 32 bytes each.
+/// The keys compiled into this build.
 ///
 /// One place, so every path that admits a manifest against a shipping key goes through the same
-/// constant and there is no field anywhere holding a key that could have been substituted.
-///
-/// # Errors
-/// [`ManifestError::TrustedKeyUnusable`] if an entry is not a point on the curve, which a build with a
-/// mistyped key would be. Its own variant rather than a bad signature: the hosted file is the one thing
-/// that is not wrong here, and reporting it as a signature failure sends whoever reads it to go and
-/// check it.
+/// constant and no field anywhere holds a key that could have been substituted.
 pub(crate) fn default_keys() -> &'static [[u8; 32]] {
     COMPONENT_PUBLIC_KEYS
 }
 
-/// The same over any list, so the failure and the position it names are testable without a build whose
-/// own constant is broken.
+/// Decompress raw key bytes into usable ones, preserving order.
+///
+/// Takes any list rather than reading [`COMPONENT_PUBLIC_KEYS`], so the failure and the position it
+/// names are testable without a build whose own constant is broken.
+///
+/// # Errors
+/// [`ManifestError::TrustedKeyUnusable`] if an entry is not a point on the curve.
 fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, ManifestError> {
     raw.iter()
         .enumerate()
@@ -122,77 +146,132 @@ fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, ManifestError> {
 }
 
 /// Components a name may nest, and bytes one component may hold. A real destination is two or three
-/// deep; these only exist so a hostile row cannot describe a path no filesystem would take.
+/// deep; these exist only so a hostile row cannot describe a path no filesystem would take.
 const MAX_PATH_DEPTH: usize = 32;
 const MAX_NAME_BYTES: usize = 255;
 
 /// Why a component manifest was rejected.
 ///
-/// Its own taxonomy, like the runner catalog's, so the pure parser stays total and cross-platform;
+/// Its own taxonomy, like the runner catalog's, so the pure parser stays total and cross-platform.
 /// [`crate::AddonError`] wraps it.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::{ComponentManifest, ManifestError};
+///
+/// let result = ComponentManifest::from_json_bytes(br#"{"version": 2}"#);
+/// assert!(matches!(result, Err(ManifestError::UnsupportedVersion { found: 2, .. })));
+/// ```
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ManifestError {
+    /// The body is not JSON, or it is JSON the schema does not admit.
     #[error("manifest is not valid JSON or violates the schema")]
     Malformed(#[source] serde_json::Error),
+    /// The signature is not 64 bytes, or it verifies against none of the trusted keys.
     #[error("manifest signature did not verify against any trusted key")]
     BadSignature,
-    /// A key compiled into this build is not a point on the curve, so it can admit nothing. A build
-    /// problem, and the one failure on this path that the hosted file cannot be the cause of.
+    /// A key compiled into this build is not a point on the curve, so it can admit nothing.
+    ///
+    /// A build problem, and the one failure on this path the hosted file cannot be the cause of.
+    /// Reporting it as a bad signature would send whoever reads it to check the one thing that is
+    /// not wrong.
     #[error("the trusted key at position {position} in this build is not a usable ed25519 key")]
     #[non_exhaustive]
-    TrustedKeyUnusable { position: usize },
+    TrustedKeyUnusable {
+        /// Its index in the key list, which is the only part of the message that locates the typo.
+        position: usize,
+    },
+    /// A schema version this build does not implement.
     #[error("unsupported manifest version {found} (expected {expected})")]
     #[non_exhaustive]
-    UnsupportedVersion { found: u32, expected: u32 },
+    UnsupportedVersion {
+        /// The version the body declares.
+        found: u32,
+        /// [`COMPONENT_MANIFEST_VERSION`].
+        expected: u32,
+    },
+    /// A field whose value is outside the set this build knows: a kind, a tier, an archive format.
     #[error("{component}: unknown {field} {value:?}")]
     #[non_exhaustive]
     UnknownValue {
+        /// The row it appears in.
         component: String,
+        /// The field name.
         field: &'static str,
+        /// The value as published.
         value: String,
     },
+    /// A `sha256` pin that is not 64 hex digits.
     #[error("{component}: sha256 pin is not 32 hex bytes")]
     #[non_exhaustive]
-    BadPin { component: String },
+    BadPin {
+        /// The row it appears in.
+        component: String,
+    },
+    /// A URL that does not parse as an absolute one.
     #[error("{component}: {url:?} is not a valid absolute url")]
     #[non_exhaustive]
-    BadUrl { component: String, url: String },
+    BadUrl {
+        /// The row it appears in.
+        component: String,
+        /// The URL as published.
+        url: String,
+    },
+    /// A destination path a component may not write to.
     #[error("{component}: path {path:?} is not one a component may write: {reason}")]
     #[non_exhaustive]
     BadPath {
+        /// The row it appears in.
         component: String,
+        /// The path as published.
         path: String,
+        /// Which rule it broke.
         reason: &'static str,
     },
-    /// A name that would not survive being part of a filename. It ends up in one, since a verb's
-    /// scratch file is named after it, so it is held to the same standard as the destinations, which
-    /// are validated a few lines away.
+    /// A name that would not survive being part of a filename.
+    ///
+    /// It ends up in one, since a verb's scratch file is named after it, so it is held to the same
+    /// standard as the destinations.
     #[error("{field} {value:?} is not usable: {reason}")]
     #[non_exhaustive]
     BadIdentifier {
+        /// Which name it is: a component name, a verb name.
         field: &'static str,
+        /// The name as published.
         value: String,
+        /// Which rule it broke.
         reason: &'static str,
     },
+    /// A registry edit this launcher will not perform.
     #[error("{component}: registry edit {key:?} is not one this launcher will write: {reason}")]
     #[non_exhaustive]
     BadRegistryEdit {
+        /// The row it appears in.
         component: String,
+        /// The key, and the value name where the edit names one.
         key: String,
+        /// Which rule it broke.
         reason: &'static str,
     },
-    /// Two rows offering the same name, in either list. A component name is what `prefix.json`
-    /// records, so a duplicate would make "is it applied?" ambiguous.
+    /// Two rows offering the same name, in either list.
+    ///
+    /// A component name is what the prefix records, so a duplicate would make "is it applied?"
+    /// unanswerable.
     #[error("two components are both named {name:?}")]
     #[non_exhaustive]
-    DuplicateName { name: String },
+    DuplicateName {
+        /// The name both rows claim.
+        name: String,
+    },
 }
 
 /// The injection-shaped companions: the ones that reach the game by wrapping its launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InjectableKind {
+    /// Dalamud, the plugin loader.
     Dalamud,
 }
 
@@ -212,9 +291,14 @@ impl ComponentPath {
 
     /// Validate one manifest-supplied relative path.
     ///
-    /// `\` is folded to `/` first. On Linux a backslash is an ordinary character, so a Windows-shaped
-    /// path in a manifest would otherwise arrive as a single filename and sail past every check below
-    /// while landing somewhere nobody intended.
+    /// A backslash is folded to `/` first. On Linux it is an ordinary character, so a Windows-shaped
+    /// path in a manifest would otherwise arrive as a single filename, sail past every check below,
+    /// and land somewhere nobody intended.
+    ///
+    /// # Errors
+    /// [`ManifestError::BadPath`] if it is empty, absolute, climbs out of its root, carries a drive
+    /// letter, a null byte or a control character, nests deeper than [`MAX_PATH_DEPTH`], or has a
+    /// component longer than [`MAX_NAME_BYTES`].
     fn parse(raw: &str, component: &str) -> Result<Self, ManifestError> {
         let bad = |reason: &'static str| ManifestError::BadPath {
             component: component.to_owned(),
@@ -268,8 +352,11 @@ impl ComponentPath {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Artifact {
+    /// Where to fetch it.
     pub url: Url,
+    /// What the fetched bytes must hash to.
     pub sha256: [u8; 32],
+    /// How to unpack it, and which prefix of the archive to strip.
     pub archive: ArchiveLayout,
 }
 
@@ -277,30 +364,41 @@ pub struct Artifact {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct InjectableEntry {
+    /// What it is recorded and reported under.
     pub name: String,
+    /// Which built-in pipeline installs it.
     pub kind: InjectableKind,
-    /// The upstream endpoint its versioned, integrity-checked distribution is served from. Reached only
-    /// when the component is enabled.
+    /// The upstream endpoint its versioned, integrity-checked distribution is served from. Reached
+    /// only when the component is enabled.
     pub distribution: Url,
+    /// How well it is supported here.
     pub tier: SupportTier,
+    /// Things the user should know before enabling it, beyond what the tier says.
     pub caveats: Vec<String>,
 }
 
 /// One step of a verb.
 ///
 /// Every kind is idempotent by construction: the write overwrites, the removal treats "it was not
-/// there" as success, and the placement overwrites. That is the selection criterion, not a happy
-/// accident, because the only thing between a re-apply and a re-run is the prefix's own record.
+/// there" as success, and the placement overwrites. That is the selection criterion rather than a
+/// happy accident, because the only thing between a re-apply and a re-run is the prefix's own
+/// record.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum VerbOp {
-    /// Write one registry value. Idempotent by construction.
+    /// Write one registry value.
     Registry(RegistryEdit),
-    /// Remove a registry value, or a key and its subtree. Idempotent: nothing to remove is success.
+    /// Remove a registry value, or a key and its subtree.
+    ///
+    /// The one registry operation that can destroy something the launcher did not create, so a row
+    /// naming a key too shallow to be ours is refused at parse time. Naming the value makes the same
+    /// key fine: it then removes exactly what it names.
     RegistryDelete(RegistryDelete),
-    /// Place a pinned artifact's files under the prefix's `C:`. Idempotent by overwrite.
+    /// Place a pinned artifact's files under the prefix's `C:`.
     Files {
+        /// What to fetch, and what its bytes must be.
         artifact: Artifact,
+        /// Where its files land, relative to the prefix's `C:`.
         into: ComponentPath,
     },
 }
@@ -310,56 +408,73 @@ pub enum VerbOp {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Verb {
+    /// What the prefix records it under.
     pub name: String,
     /// Why it exists, shown when it is applied. A verb with no reason is a verb nobody can review.
     pub reason: String,
     /// Paths under the prefix's `C:` that must exist once this verb has been applied.
     ///
-    /// This is what makes a verb's effect checkable rather than merely recorded, and it does three jobs
-    /// at once. A verb whose ops "succeeded" without producing these is a failure, so a half-finished
-    /// install is not remembered as done. A verb the prefix records but whose paths have since gone is
-    /// applied again, which is how something a runner upgrade removed from under us comes back. And it is
-    /// the same evidence a health check would want.
+    /// What makes a verb's effect checkable rather than merely recorded, and it does three jobs at
+    /// once. A verb whose ops succeeded without producing these is a failure, so a half-finished
+    /// install is not remembered as done. A verb the prefix records but whose paths have since gone
+    /// is applied again, which is how something a runner upgrade removed from under us comes back.
+    /// And it is the evidence a health check wants.
     ///
-    /// Empty is allowed, and is what a verb whose whole effect is a registry value states: there is no
-    /// file to look for. Such a verb is not thereby unchecked. Its ops already declare the key, name and
-    /// value, so the setup layer derives the question from the op and reads the prefix's own registry
-    /// files, and this field is for the effects that cannot be derived that way: what a placement put
-    /// somewhere, which its op names only the destination directory of.
+    /// Empty is allowed, and is what a verb whose whole effect is a registry value states: there is
+    /// no file to look for. Such a verb is not thereby unchecked. Its ops already declare the key,
+    /// name and value, so the setup layer derives the question from the op and reads the prefix's
+    /// own registry files. This field is for the effects that cannot be derived that way, such as
+    /// what a placement put somewhere, which its op names only the destination directory of.
     pub verify: Vec<ComponentPath>,
+    /// What to do, in order.
     pub ops: Vec<VerbOp>,
 }
 
-/// A verified component manifest.
+/// The rows a manifest carries.
 ///
-/// It carries no schema version, because a parsed manifest can only ever be
-/// [`COMPONENT_MANIFEST_VERSION`]: anything else is refused before this is built. A field holding one
-/// reachable value would also have made `Default` produce a version the parser rejects.
+/// No schema version field: a parsed manifest can only ever be [`COMPONENT_MANIFEST_VERSION`],
+/// since anything else is refused before this is built, and a field holding one reachable value
+/// would have made `Default` produce a version the parser rejects.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ComponentManifest {
+    /// The companions that reach the game by wrapping its launch.
     pub injectables: Vec<InjectableEntry>,
+    /// The prefix-setup steps the launch path applies on its own.
     pub verbs: Vec<Verb>,
 }
 
 impl ComponentManifest {
-    /// Parse a manifest from untrusted JSON. Pure and total: any byte sequence yields a manifest or a
-    /// typed [`ManifestError`], never a panic. This is the fuzz target and carries **no** authenticity
-    /// guarantee: callers must have verified the signature.
+    /// Parse a manifest from untrusted JSON.
+    ///
+    /// Pure and total: any byte sequence yields a manifest or a typed [`ManifestError`], never a
+    /// panic. This is the fuzz entry point, and it carries **no** authenticity guarantee. A caller
+    /// that is going to act on the rows wants [`VerifiedManifest`] instead.
     ///
     /// # Errors
     /// Any [`ManifestError`] except [`ManifestError::BadSignature`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), apogee_addons::ManifestError> {
+    /// use apogee_addons::ComponentManifest;
+    ///
+    /// let manifest = ComponentManifest::from_json_bytes(br#"{"version": 1}"#)?;
+    /// assert!(manifest.verbs.is_empty());
+    /// assert!(manifest.injectables.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, ManifestError> {
         let raw: RawManifest = serde_json::from_slice(bytes).map_err(ManifestError::Malformed)?;
         Self::try_from(raw)
     }
 
     /// Verify `signature` over the exact `manifest_json` bytes against `keys`, in order, then parse.
-    /// The signature is checked **first**, so no `sha256` pin is trusted before authenticity is
-    /// established.
     ///
-    /// Returns which key admitted it, so a caller that cares whether a rotation is finished can ask.
-    /// Most do not: the point of an overlap window is that a launch works either way.
+    /// The signature is checked **first**, so no `sha256` pin is trusted before authenticity is
+    /// established. Returns which key admitted it.
     ///
     /// # Errors
     /// [`ManifestError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
@@ -380,13 +495,11 @@ impl ComponentManifest {
         ))
     }
 
-    /// [`Self::parse_and_verify`] against the keys compiled into this build, for a caller that already
-    /// holds both halves. A fetch takes its keys as an argument instead, so the download path can be
-    /// driven against a key a test can sign with; this is the same check with nothing to choose.
+    /// [`Self::parse_and_verify`] against the keys compiled into this build.
     ///
     /// # Errors
-    /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
-    /// [`Self::parse_and_verify`] raises.
+    /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then
+    /// anything [`Self::parse_and_verify`] raises.
     pub(crate) fn verify_trusted(
         manifest_json: &[u8],
         signature: &[u8],
@@ -402,9 +515,9 @@ impl ComponentManifest {
 
     /// The injectable row of `kind`.
     ///
-    /// By kind rather than by name, because the kind is what selects which built-in pipeline runs and a
-    /// name is a label on it. Two lookup keys for one list would let a caller find a row the launch path
-    /// would not.
+    /// By kind rather than by name, because the kind is what selects which built-in pipeline runs
+    /// and a name is a label on it. Two lookup keys for one list would let a caller find a row the
+    /// launch path would not.
     #[must_use]
     pub fn injectable(&self, kind: InjectableKind) -> Option<&InjectableEntry> {
         self.injectables.iter().find(|i| i.kind == kind)
@@ -529,7 +642,11 @@ impl TryFrom<RawManifest> for ComponentManifest {
 impl ComponentManifest {
     /// Every name is unique across both lists.
     ///
-    /// A cross-row property, so it is checked once the rows are built rather than while building one.
+    /// A cross-row property, so it is checked once the rows are built rather than while building
+    /// one.
+    ///
+    /// # Errors
+    /// [`ManifestError::DuplicateName`] naming the first repeat.
     fn check_names(&self) -> Result<(), ManifestError> {
         let mut seen: Vec<&str> = Vec::new();
         for name in self.names() {
@@ -546,10 +663,14 @@ impl ComponentManifest {
 
 /// Refuse a name that would not survive being part of a filename.
 ///
-/// A name becomes one: a verb's scratch file is named after it. Everything else derived from manifest
-/// data is confined by [`ComponentPath`], so leaving this unchecked would be the one place a row could
-/// name a path component the rest of the parser exists to prevent. The manifest is signed, so this is
-/// depth rather than a boundary, but a signed row can still be a mistaken one.
+/// A name becomes one: a verb's scratch file is named after it. Everything else derived from
+/// manifest data is confined by [`ComponentPath`], so leaving this unchecked would be the one place
+/// a row could name a path component the rest of the parser exists to prevent. The manifest is
+/// signed, so this is depth rather than a boundary, but a signed row can still be a mistaken one.
+///
+/// # Errors
+/// [`ManifestError::BadIdentifier`] if it is empty, is `.` or `..`, carries a path separator, a
+/// control character or a null byte, or is longer than [`MAX_NAME_BYTES`].
 fn check_identifier(field: &'static str, value: &str) -> Result<(), ManifestError> {
     let bad = |reason: &'static str| ManifestError::BadIdentifier {
         field,
@@ -703,9 +824,10 @@ fn build_artifact(
     })
 }
 
-/// Map an archive-format string to a layout format. No default: a component archive is as likely to be
-/// a zip as a tarball, so the row states which and a row that forgets is a parse error rather than a
-/// guess that fails at extraction.
+/// Map an archive-format string to a layout format.
+///
+/// No default: a component archive is as likely to be a zip as a tarball, so the row states which,
+/// and a row that forgets is a parse error rather than a guess that fails at extraction.
 fn parse_format(component: &str, format: &str) -> Result<ArchiveFormat, ManifestError> {
     match format {
         "zip" => Ok(ArchiveFormat::Zip),
@@ -810,6 +932,7 @@ mod tests {
         }
     }
 
+    /// Every field of every row survives the round trip, against a real signature.
     #[test]
     fn a_signed_manifest_parses_every_row() {
         let json = manifest();
@@ -852,6 +975,7 @@ mod tests {
         );
     }
 
+    /// A body edited after signing verifies against nothing.
     #[test]
     fn signature_rejects_a_tampered_manifest() {
         let json = manifest();
@@ -865,6 +989,7 @@ mod tests {
         ));
     }
 
+    /// A valid signature by a key this build does not trust is still a refusal.
     #[test]
     fn signature_rejects_the_wrong_key() {
         let json = manifest();
@@ -876,6 +1001,7 @@ mod tests {
         ));
     }
 
+    /// A signature that is not exactly 64 bytes is refused before any key is tried.
     #[test]
     fn signature_rejects_absent_or_short() {
         let json = manifest();
@@ -921,6 +1047,7 @@ mod tests {
         assert_eq!(of(&lower)[0], 0x01);
     }
 
+    /// A value outside the set this build knows is refused by name rather than defaulted.
     #[test]
     fn an_unknown_kind_format_or_registry_type_is_a_typed_error() {
         for (from, to) in [
@@ -1100,9 +1227,9 @@ mod tests {
         assert!(verb.verify.is_empty());
     }
 
-    /// A key removal is the one registry operation that can destroy something the launcher did not create,
-    /// so a row naming a key too shallow to be ours is refused. Naming the value makes the same key fine:
-    /// it then removes exactly what it names.
+    /// A key removal is the one registry operation that can destroy something the launcher did not
+    /// create, so a row naming a key too shallow to be ours is refused. Naming the value makes the same
+    /// key fine: it then removes exactly what it names.
     #[test]
     fn a_key_removal_too_shallow_to_be_ours_is_refused() {
         let row = |key: &str, name: &str| {
@@ -1138,6 +1265,7 @@ mod tests {
         assert!(parse(&row(r"HKCU\\Software\\Wine", r#", "name": "Version""#)).is_ok());
     }
 
+    /// A schema version this build does not implement is refused before any row is read.
     #[test]
     fn an_unsupported_version_is_refused() {
         let json = manifest().replace("\"version\": 1", "\"version\": 999");
@@ -1150,6 +1278,7 @@ mod tests {
         ));
     }
 
+    /// The parser is total over arbitrary bytes, which is what makes it a fuzz target.
     #[test]
     fn malformed_json_is_a_typed_error_not_a_panic() {
         for bytes in [
@@ -1165,8 +1294,8 @@ mod tests {
         }
     }
 
-    /// An empty manifest is well-formed: a build with nothing to offer is a valid state, and refusing it
-    /// would make "no rows yet" indistinguishable from a broken manifest.
+    /// An empty manifest is well-formed: a build with nothing to offer is a valid state, and refusing
+    /// it would make "no rows yet" indistinguishable from a broken manifest.
     #[test]
     fn a_manifest_with_no_rows_parses() {
         let parsed = parse(r#"{ "version": 1 }"#).expect("parse");
@@ -1183,18 +1312,17 @@ mod tests {
         assert_eq!(parsed.names(), ["v"]);
     }
 
-    /// Every key this build would accept has to be one, or it can admit nothing and the build says so
-    /// as a signature failure on a user's machine instead.
+    /// Every key this build would accept has to be usable, or it can admit nothing and the build says
+    /// so as a signature failure on a user's machine instead.
     #[test]
     fn every_compiled_in_key_parses() {
         trusted_keys(default_keys())
             .expect("every trusted key in this build is a usable ed25519 key");
     }
 
-    /// A key that is not a point on the curve is this build's problem, and has to read as one. Reported
-    /// as a bad signature it would send whoever hits it to go and check the hosted file, which is the
-    /// one thing that cannot be at fault. The position matters too: with a list, "which entry" is the
-    /// only part of the message that locates the typo.
+    /// Reported as a bad signature it would send whoever hits it to go and check the hosted file, which
+    /// is the one thing that cannot be at fault. The position matters too: with a list, "which entry"
+    /// is the only part of the message that locates the typo.
     #[test]
     fn a_key_that_is_not_a_key_is_a_build_problem_rather_than_a_bad_signature() {
         // Not a decompressable compressed Edwards point, so it can never verify anything.
@@ -1207,9 +1335,8 @@ mod tests {
         ));
     }
 
-    /// The property the overlap window buys: a manifest signed by a key that has been retired but is
-    /// still accepted verifies, and says which one admitted it. Without the second half a rotation
-    /// nobody finished looks exactly like one that is done, right up until the retiring release.
+    /// The property the overlap window buys. Without the second half a rotation nobody finished looks
+    /// exactly like one that is done, right up until the retiring release.
     #[test]
     fn a_retired_key_still_admits_a_manifest_and_says_it_did() {
         let json = manifest();
@@ -1262,9 +1389,7 @@ mod tests {
     /// was never re-signed, which works everywhere until the retired key is dropped and then works
     /// nowhere.
     ///
-    /// It asserts what every row has to carry rather than naming rows, so the file stays editable: a
-    /// verb without a reason is one nobody can review, and an injectable without a distribution has
-    /// nowhere to fetch from.
+    /// It asserts what every row has to carry rather than naming rows, so the file stays editable.
     #[test]
     fn the_hosted_manifest_is_signed_by_the_key_in_use_today() {
         let manifest = include_bytes!("../../../site/components/manifest.json");
@@ -1300,16 +1425,32 @@ mod tests {
 
 /// Proof that a manifest verified against a trusted key, and the only shape the apply path accepts.
 ///
-/// The same shape as `apogee_fetch::VerifiedFile`, for the same reason. Applying a manifest is not a
-/// read: it sets values inside a prefix's registry and lays files into it from URLs the manifest names,
-/// so a manifest that reaches [`Addons::apply_setup`](crate::Addons::apply_setup) has to be one
-/// somebody verified rather than one somebody parsed. Parsing is public, total, and fuzzed
-/// ([`ComponentManifest::from_json_bytes`]) and carries no authenticity whatsoever, which makes a
-/// signature check that is only a convention one call site away from not happening.
+/// Applying a manifest is not a read: it sets values inside a prefix's registry and lays files into
+/// it from URLs the manifest names. So a manifest that reaches
+/// [`Addons::apply_setup`](crate::Addons::apply_setup) has to be one somebody verified rather than
+/// one somebody parsed. Parsing is public, total and fuzzed
+/// ([`ComponentManifest::from_json_bytes`]) and carries no authenticity whatsoever, which would
+/// leave a signature check that is only a convention one call site away from not happening.
 ///
-/// Minted here and nowhere else, by verifying. There is deliberately no test-only constructor beside
-/// it: a gated mint is a second way in, and the tests that need a manifest are not the ones the gate
-/// would be on. A test signs its fixture with a key it made, which is the same check the launcher makes.
+/// Minted here and nowhere else, by verifying.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> Result<(), apogee_addons::ManifestError> {
+/// use apogee_addons::VerifiedManifest;
+/// use ed25519_dalek::{Signer, SigningKey};
+///
+/// let signing = SigningKey::from_bytes(&[7u8; 32]);
+/// let json = br#"{"version": 1}"#;
+/// let signature = signing.sign(json).to_bytes();
+///
+/// let verified = VerifiedManifest::verify(json, &signature, &[signing.verifying_key().to_bytes()])?;
+/// assert!(verified.key().is_current());
+/// assert!(verified.rows().verbs.is_empty());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct VerifiedManifest {
     manifest: ComponentManifest,
@@ -1319,13 +1460,13 @@ pub struct VerifiedManifest {
 impl VerifiedManifest {
     /// Verify `signature` over the exact `manifest_json` bytes against `keys`, in order, then parse.
     ///
-    /// The keys are an argument rather than this build's own, so the fetch path can be driven against a
-    /// key a test signs with. Nothing about that weakens the gate: a caller cannot verify against keys
-    /// it does not have, and the launcher passes the ones compiled into it.
+    /// The keys are an argument rather than this build's own, so the fetch path can be driven
+    /// against a key a test signs with. Nothing about that weakens the gate: a caller cannot verify
+    /// against keys it does not have, and the launcher passes the ones compiled into it.
     ///
-    /// Raw 32-byte keys, the shape [`COMPONENT_PUBLIC_KEYS`] is compiled in as, rather than a type from
-    /// the signature crate. A key is 32 bytes on any implementation, and naming the crate's type here
-    /// would put its major version in this one's frozen surface for nothing.
+    /// Raw 32-byte keys, the shape [`COMPONENT_PUBLIC_KEYS`] is compiled in as, rather than a type
+    /// from the signature crate. A key is 32 bytes on any implementation, and naming that crate's
+    /// type here would put its major version in this one's surface for nothing.
     ///
     /// # Errors
     /// [`ManifestError::TrustedKeyUnusable`] if one of `keys` is not a usable key, then
@@ -1344,8 +1485,8 @@ impl VerifiedManifest {
     /// The same, against the keys compiled into this build.
     ///
     /// # Errors
-    /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
-    /// [`Self::verify`] raises.
+    /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then
+    /// anything [`Self::verify`] raises.
     pub fn verify_trusted(manifest_json: &[u8], signature: &[u8]) -> Result<Self, ManifestError> {
         let (manifest, key) = ComponentManifest::verify_trusted(manifest_json, signature)?;
         Ok(Self { manifest, key })
@@ -1358,8 +1499,8 @@ impl VerifiedManifest {
     }
 
     /// Which of this build's trusted keys admitted it, for a caller that wants to know whether a
-    /// rotation is finished. Most do not: the point of an overlap window is that a launch works either
-    /// way.
+    /// rotation is finished. Most do not: the point of an overlap window is that a launch works
+    /// either way.
     #[must_use]
     pub fn key(&self) -> TrustedKey {
         self.key
@@ -1372,11 +1513,9 @@ impl VerifiedManifest {
     ///
     /// `cfg(test)` rather than a feature. A feature is a build somebody can ship and a second public
     /// way to reach the apply path, and it would not even help: the tests that need a manifest are
-    /// spread across the ones a feature gate is on and the ones it is not. This exists only while
-    /// compiling this crate's own unit tests, so no other crate and no shipped build can see it.
-    ///
-    /// The tests that drive the seam itself are integration tests, and those sign a fixture with a key
-    /// they made and verify it, which is the same call the launcher makes.
+    /// spread across the ones a feature gate is on and the ones it is not. The tests that drive the
+    /// seam itself are integration tests, and those sign a fixture with a key they made and verify
+    /// it, which is the same call the launcher makes.
     pub(crate) fn minted_for_tests(manifest: ComponentManifest) -> Self {
         Self {
             manifest,

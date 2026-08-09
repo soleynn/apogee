@@ -1,10 +1,37 @@
 //! Running the user's own tools alongside the game.
 //!
-//! One pass over the configured list starts everything that runs with the game and hands back a
-//! session that owns them. The launch is never blocked by a helper: an entry that cannot be run is
-//! recorded and reported, and the game still starts. That is a deliberate middle: the shape this
-//! takes its cues from swallows the failure entirely and then logs that it launched, which is how a
-//! missing interpreter looks exactly like success.
+//! One pass over the configured list starts everything that runs with the game and hands back an
+//! [`AddonSession`] that owns them. The launch is never blocked by a helper: an entry that cannot be
+//! run is recorded against its own index and reported, and the game still starts.
+//!
+//! # Examples
+//!
+//! ```
+//! # use apogee_addons::{AddonEvents, ExternalAddon, GameContext};
+//! # use apogee_runtime::Runtime;
+//! # use tokio_util::sync::CancellationToken;
+//! # async fn demo(
+//! #     runtime: &Runtime,
+//! #     tools: &[ExternalAddon],
+//! #     cancel: &CancellationToken,
+//! # ) -> apogee_addons::Result<()> {
+//! let events = AddonEvents::none();
+//! let game = GameContext::new(4321)?;
+//! let session = apogee_addons::external::start(runtime, tools, &game, &events).await;
+//!
+//! // ... the game runs ...
+//!
+//! let report = session.game_closed(cancel, &events).await;
+//!
+//! // What each entry came to, one line per tool, already narrated onto `events`.
+//! let lines: Vec<String> = report
+//!     .outcomes
+//!     .iter()
+//!     .map(|entry| format!("{}: {}", entry.program.display(), entry.outcome))
+//!     .collect();
+//! # Ok(())
+//! # }
+//! ```
 
 mod addon;
 mod event;
@@ -29,10 +56,23 @@ use session::Held;
 /// How long an after-game tool runs before the wait is reported as still going.
 const STILL_WAITING_AFTER: Duration = Duration::from_secs(30);
 
-/// The running game, as plain values.
+/// The running game, as plain values: its process id, and the prefix it was launched into.
 ///
-/// Not the runtime's session type: its constructor is private to that crate, so a lifecycle test
-/// outside it could not build one, and these are exactly such tests.
+/// Not the runtime's own session type, whose constructor is private to that crate: a lifecycle test
+/// living outside it could then build no game at all to start companions against.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> apogee_addons::Result<()> {
+/// use apogee_addons::GameContext;
+///
+/// let game = GameContext::new(4321)?;
+/// assert_eq!(game.game_pid(), 4321);
+/// assert!(game.prefix().is_none());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct GameContext {
     pid: i32,
@@ -43,9 +83,21 @@ impl GameContext {
     /// A launch with no prefix. A prefix tool against this context fails that entry.
     ///
     /// # Errors
-    /// [`AddonError::InvalidAddon`] if `game_pid` is not positive. The pid is handed to the child so
-    /// a wrapper can signal it, and zero means "my whole process group" while minus one means
-    /// "everything this user owns".
+    ///
+    /// Returns [`AddonError::InvalidAddon`] if `game_pid` is not positive. The pid is handed to the
+    /// child so a wrapper can signal it, and zero means "my whole process group" while minus one
+    /// means "everything this user owns".
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::{AddonError, GameContext};
+    ///
+    /// assert!(matches!(
+    ///     GameContext::new(0),
+    ///     Err(AddonError::InvalidAddon { .. })
+    /// ));
+    /// ```
     pub fn new(game_pid: i32) -> Result<Self> {
         if game_pid <= 0 {
             return Err(AddonError::InvalidAddon {
@@ -63,7 +115,20 @@ impl GameContext {
     /// A launch into `prefix`, which is what a prefix tool is run through.
     ///
     /// # Errors
+    ///
     /// As [`Self::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::GameContext;
+    /// # use apogee_runtime::Prefix;
+    /// # fn demo(prefix: &Prefix) -> apogee_addons::Result<()> {
+    /// let game = GameContext::in_prefix(4321, prefix)?;
+    /// assert!(game.prefix().is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn in_prefix(game_pid: i32, prefix: &Prefix) -> Result<Self> {
         Ok(Self {
             prefix: Some(prefix.clone()),
@@ -73,9 +138,9 @@ impl GameContext {
 
     /// The process id of the game when the companions started.
     ///
-    /// The runner renames a short-lived loader to the executable's own name and hands off, so this
-    /// can be the pre-handoff loader: correct when it was read, and expected to die. A hint for
-    /// reporting, not a handle to attach to.
+    /// A hint for reporting, not a handle to attach to: a runner renames a short-lived loader to the
+    /// executable's own name and hands off, so this can be the pre-handoff loader, correct when it
+    /// was read and expected to die.
     #[must_use]
     pub fn game_pid(&self) -> i32 {
         self.pid
@@ -91,7 +156,27 @@ impl GameContext {
 /// Start every companion that runs with the game.
 ///
 /// Entries are considered in order. Each one that fails is recorded against its own index and the
-/// rest continue, so one bad entry costs the user that tool rather than the launch.
+/// rest continue, so one bad entry costs the user that tool rather than the launch. An entry that
+/// runs after the game is validated here too, then kept for the returned [`AddonSession`].
+///
+/// # Examples
+///
+/// ```
+/// # use apogee_addons::{AddonEvents, AddonSession, ExternalAddon, GameContext};
+/// # use apogee_runtime::Runtime;
+/// # async fn demo(
+/// #     runtime: &Runtime,
+/// #     tools: &[ExternalAddon],
+/// #     game: &GameContext,
+/// #     events: &AddonEvents,
+/// # ) -> AddonSession {
+/// let session = apogee_addons::external::start(runtime, tools, game, events).await;
+///
+/// // The launch carries on regardless; the report says what each entry came to.
+/// let started = session.report().outcomes.len();
+/// session
+/// # }
+/// ```
 pub async fn start(
     runtime: &Runtime,
     addons: &[ExternalAddon],
@@ -175,6 +260,9 @@ pub async fn start(
 
 /// Report a failure and turn it into an outcome, so the two never disagree.
 fn fail(err: &AddonError, program: &std::path::Path, events: &AddonEvents) -> Outcome {
+    // Both reported and returned rather than swallowed: the launcher this takes its cues from drops
+    // the failure and then logs that it launched, which is how a missing interpreter comes to look
+    // exactly like a working tool.
     let reason = err.chain();
     events.emit(AddonEvent::Failed {
         program: program.to_path_buf(),
@@ -226,8 +314,10 @@ fn spawn(
         })
 }
 
-/// What a companion is told about the launch. Deliberately small and named, so a tool can find the
-/// game without the launcher inventing a substitution language in the argument vector.
+/// What a companion is told about the launch: the game's process id, and the prefix if there is one.
+///
+/// Deliberately small and named, so a tool can find the game without the launcher inventing a
+/// substitution language in the argument vector.
 fn child_env(game: &GameContext) -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
     env.insert("APOGEE_GAME_PID".to_owned(), game.game_pid().to_string());
@@ -240,12 +330,12 @@ fn child_env(game: &GameContext) -> std::collections::BTreeMap<String, String> {
     env
 }
 
-/// Run one after-game tool to completion, reporting if it takes long enough that a launcher still
-/// sitting there would otherwise look stuck.
+/// Run one after-game tool to completion, reporting once the wait is long enough that a launcher
+/// still sitting there would otherwise look stuck.
 ///
-/// The tool is somebody else's program and may never exit, so `cancel` is the only thing that bounds
-/// this. A cancelled wait stops the tool rather than walking away from it: the launcher is what
-/// started it, and nothing else is left that knows it is there.
+/// `cancel` is the only thing that bounds this: the tool is somebody else's program and may never
+/// exit. A cancelled wait stops the tool rather than walking away from it, because the launcher is
+/// what started it and nothing else is left that knows it is there.
 pub(crate) async fn run_to_completion(
     runtime: &Runtime,
     game_prefix: Option<&std::path::Path>,

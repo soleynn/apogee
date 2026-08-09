@@ -1,4 +1,4 @@
-//! Config backup failures.
+//! Config backup failures: one taxonomy for capture, restore, and retention alike.
 
 use std::path::PathBuf;
 
@@ -7,6 +7,17 @@ use thiserror::Error;
 use super::confine::RejectReason;
 
 /// Config backup failures.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::backup::BackupError;
+///
+/// assert_eq!(
+///     BackupError::NothingSelected.to_string(),
+///     "no source tree held anything to back up"
+/// );
+/// ```
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BackupError {
@@ -73,10 +84,11 @@ pub enum BackupError {
     #[error("archive entry {entry} does not match the hash the archive recorded for it")]
     #[non_exhaustive]
     ContentMismatch { entry: String },
-    /// The token fired, so the work stopped where it was. Its own variant rather than an io failure,
-    /// for the same reason the crate's own taxonomy separates them: a caller counts what went wrong to
-    /// decide whether it did what was asked, and a run somebody stopped on purpose has nothing to
-    /// count. Nothing half-written survives either way, so there is no partial state to describe.
+    /// The token fired, so the work stopped where it was.
+    ///
+    /// Its own variant rather than an I/O failure: a caller counts what went wrong to decide whether
+    /// it did what was asked, and a run somebody stopped on purpose has nothing to count. Nothing
+    /// half-written survives either way, so there is no partial state to describe.
     #[error("cancelled")]
     Cancelled,
 }
