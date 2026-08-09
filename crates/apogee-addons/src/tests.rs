@@ -377,6 +377,9 @@ frozen!(
             BackupError::ContentMismatch { entry: "user/FFXIV.cfg".to_owned() },
             "archive entry user/FFXIV.cfg does not match the hash the archive recorded for it",
         ),
+        // One word, like the crate's own cancellation: there is no path, entry or limit to name,
+        // because nothing about the work is wrong.
+        BackupError::Cancelled => (BackupError::Cancelled, "cancelled"),
     }
 );
 

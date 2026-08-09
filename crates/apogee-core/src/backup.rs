@@ -28,6 +28,7 @@ pub(crate) fn create(
     kept: u32,
     created_at: u64,
     note: Option<String>,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(BackupReport, Vec<PathBuf>), CoreError> {
     let prefix = prefixes_dir.join(crate::flow::prefix_name(profile));
     let mut trees = apogee_addons::backup::game_config_dirs(&prefix);
@@ -50,7 +51,7 @@ pub(crate) fn create(
         created_at: UNIX_EPOCH + Duration::from_secs(created_at),
         note,
     };
-    let report = apogee_addons::backup::create(&spec).map_err(AddonError::Backup)?;
+    let report = apogee_addons::backup::create(&spec, cancel).map_err(AddonError::Backup)?;
     if let Some(keep) = std::num::NonZeroUsize::new(kept as usize) {
         // After a successful capture, never before: the new archive is what makes dropping an old
         // one safe.

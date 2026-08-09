@@ -72,12 +72,21 @@ pub struct RestoredRoot {
 
 /// Restore the roots `plan` names.
 ///
+/// Blocking, and unbounded in the size of the archive, so `cancel` is checked between entries. A
+/// stopped restore leaves the live tree exactly as it was: everything is assembled in a staging tree
+/// and only moved into place once the whole archive has been read, and cancelling takes the same path
+/// out as a refused entry.
+///
 /// # Errors
 /// [`BackupError::NotAnArchive`] or [`BackupError::UnsupportedFormat`] if the archive is not one this
 /// build can read, [`BackupError::RejectedEntry`] if any entry name or content fails its checks,
 /// [`BackupError::TooLarge`] or [`BackupError::TooManyEntries`] if it exceeds what a restore may
-/// write, and [`BackupError::Io`] from the filesystem. The live tree is untouched in every case.
-pub fn restore(plan: &RestorePlan) -> Result<RestoreReport, BackupError> {
+/// write, [`BackupError::Cancelled`] if the token fired, and [`BackupError::Io`] from the filesystem.
+/// The live tree is untouched in every case.
+pub fn restore(
+    plan: &RestorePlan,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RestoreReport, BackupError> {
     let size = std::fs::metadata(&plan.archive)
         .map_err(|source| BackupError::Io {
             path: plan.archive.clone(),
@@ -118,6 +127,12 @@ pub fn restore(plan: &RestorePlan) -> Result<RestoreReport, BackupError> {
 
     let outcome = (|| -> Result<(), BackupError> {
         for i in 0..zip.len() {
+            // Between entries, which is also where the staging trees are still discardable: the exit
+            // below is the one a refused entry takes, so a stopped restore and a refused one leave the
+            // live tree in the same state.
+            if cancel.is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
             let mut entry = zip.by_index(i).map_err(|_| BackupError::NotAnArchive {
                 path: plan.archive.clone(),
             })?;

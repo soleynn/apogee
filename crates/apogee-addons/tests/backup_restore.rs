@@ -13,6 +13,7 @@ use apogee_addons::backup::{
 };
 
 use common::{CHARACTER_DIR, game_tree, write};
+use tokio_util::sync::CancellationToken;
 
 type Fallible = Box<dyn std::error::Error>;
 
@@ -29,7 +30,7 @@ fn back_up(source: &Path, dest: &Path) -> Result<PathBuf, Fallible> {
         created_at: UNIX_EPOCH + Duration::from_secs(AT),
         note: None,
     };
-    Ok(create(&spec)?.archive)
+    Ok(create(&spec, &CancellationToken::new())?.archive)
 }
 
 fn plan(archive: &Path, target: &Path) -> RestorePlan {
@@ -116,7 +117,7 @@ fn a_restored_tree_matches_what_was_backed_up() -> Result<(), Fallible> {
 
     let live = tempfile::tempdir()?;
     let target = live.path().join("config");
-    let report = restore(&plan(&archive, &target))?;
+    let report = restore(&plan(&archive, &target), &CancellationToken::new())?;
 
     assert_eq!(report.restored.len(), 1);
     assert_eq!(report.restored[0].label, RootLabel::User);
@@ -154,7 +155,7 @@ fn the_previous_tree_is_set_aside_not_deleted() -> Result<(), Fallible> {
     write(&target.join("FFXIV.cfg"), "a different config")?;
     write(&target.join("something-else.txt"), "only in the live tree")?;
 
-    let report = restore(&plan(&archive, &target))?;
+    let report = restore(&plan(&archive, &target), &CancellationToken::new())?;
     let displaced = report.restored[0]
         .displaced_to
         .clone()
@@ -188,7 +189,7 @@ fn a_root_the_plan_does_not_name_is_untouched() -> Result<(), Fallible> {
         archive: archive.clone(),
         targets: BTreeMap::new(),
     };
-    let report = restore(&empty)?;
+    let report = restore(&empty, &CancellationToken::new())?;
     assert!(report.restored.is_empty());
     assert_eq!(report.skipped, vec![RootLabel::User]);
     assert_eq!(std::fs::read_dir(live.path())?.count(), 0);
@@ -217,7 +218,7 @@ fn an_entry_that_would_escape_aborts_the_restore() -> Result<(), Fallible> {
     for (name, want) in cases {
         let archive = dir.path().join("hostile.apbk");
         hostile_archive(&archive, &[(name, b"pwned", false)], &[])?;
-        match restore(&plan(&archive, &target)) {
+        match restore(&plan(&archive, &target), &CancellationToken::new()) {
             Err(BackupError::RejectedEntry { reason, .. }) => assert_eq!(&reason, want, "{name}"),
             other => panic!("{name} should have been refused, got {other:?}"),
         }
@@ -245,7 +246,10 @@ fn a_symlink_entry_is_refused() -> Result<(), Fallible> {
         &[("user/escape", "/etc")],
     )?;
 
-    match restore(&plan(&archive, &live.path().join("config"))) {
+    match restore(
+        &plan(&archive, &live.path().join("config")),
+        &CancellationToken::new(),
+    ) {
         Err(BackupError::RejectedEntry { reason, .. }) => {
             assert_eq!(reason, RejectReason::NotAFileOrDir);
         }
@@ -270,7 +274,10 @@ fn two_entries_that_differ_only_in_case_are_refused() -> Result<(), Fallible> {
         &[],
     )?;
 
-    match restore(&plan(&archive, &live.path().join("config"))) {
+    match restore(
+        &plan(&archive, &live.path().join("config")),
+        &CancellationToken::new(),
+    ) {
         Err(BackupError::RejectedEntry { reason, .. }) => {
             assert_eq!(reason, RejectReason::Collision);
         }
@@ -307,7 +314,7 @@ fn a_tampered_entry_is_caught_by_its_recorded_hash() -> Result<(), Fallible> {
     w.finish()?;
 
     let target = live.path().join("config");
-    match restore(&plan(&archive, &target)) {
+    match restore(&plan(&archive, &target), &CancellationToken::new()) {
         Err(BackupError::ContentMismatch { entry }) => assert_eq!(entry, "user/FFXIV.cfg"),
         other => panic!("expected a hash mismatch, got {other:?}"),
     }
@@ -339,7 +346,10 @@ fn an_entry_missing_from_the_record_is_refused() -> Result<(), Fallible> {
     w.write_all(manifest.to_string().as_bytes())?;
     w.finish()?;
 
-    match restore(&plan(&archive, &live.path().join("config"))) {
+    match restore(
+        &plan(&archive, &live.path().join("config")),
+        &CancellationToken::new(),
+    ) {
         Err(BackupError::RejectedEntry { reason, .. }) => {
             assert_eq!(reason, RejectReason::NotInRecord);
         }
@@ -363,7 +373,13 @@ fn a_refused_restore_leaves_no_staging_directory() -> Result<(), Fallible> {
         &[],
     )?;
 
-    assert!(restore(&plan(&archive, &live.path().join("config"))).is_err());
+    assert!(
+        restore(
+            &plan(&archive, &live.path().join("config")),
+            &CancellationToken::new()
+        )
+        .is_err()
+    );
     let leftovers: Vec<_> = std::fs::read_dir(live.path())?
         .filter_map(Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -384,8 +400,8 @@ fn restoring_twice_keeps_both_previous_trees() -> Result<(), Fallible> {
     let target = live.path().join("config");
     write(&target.join("original.txt"), "first")?;
 
-    let one = restore(&plan(&archive, &target))?;
-    let two = restore(&plan(&archive, &target))?;
+    let one = restore(&plan(&archive, &target), &CancellationToken::new())?;
+    let two = restore(&plan(&archive, &target), &CancellationToken::new())?;
 
     let a = one.restored[0].displaced_to.clone().expect("first");
     let b = two.restored[0].displaced_to.clone().expect("second");

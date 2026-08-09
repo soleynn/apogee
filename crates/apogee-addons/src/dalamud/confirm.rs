@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::external::{AddonEvent, AddonEvents};
 
 /// How often the file is checked. Small enough that the report lands while a user is still looking at
@@ -67,13 +69,18 @@ impl LoadEvidence {
         &self.path
     }
 
-    /// Poll until the proof appears or the window closes, reporting either way.
+    /// Poll until the proof appears, the window closes, or `cancel` fires.
     ///
     /// Consuming, because a watch is one launch's question and asking it twice would report twice. It
     /// reports on both outcomes for the same reason the loader's exit status is reported on success:
     /// a companion that loaded and one that never ran are indistinguishable from outside the game, so
-    /// silence would mean both.
-    pub async fn watch(self, events: AddonEvents) {
+    /// silence would mean both. A cancelled watch reports neither, which is the honest answer: both
+    /// readings are only worth having while the session they are about is still running.
+    ///
+    /// The token is owned rather than borrowed because this is spawned, and a borrow cannot outlive
+    /// the call that starts the wait. Without one the only way to stop it is to abort the task, which
+    /// makes a task something every caller has to keep rather than something it may choose.
+    pub async fn watch(self, cancel: CancellationToken, events: AddonEvents) {
         let started = SystemTime::now();
         loop {
             if self.written_since() {
@@ -89,7 +96,10 @@ impl LoadEvidence {
                 });
                 return;
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::select! {
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = cancel.cancelled() => return,
+            }
         }
     }
 
@@ -121,7 +131,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         LoadEvidence::new("Dalamud", &log, since)
-            .watch(AddonEvents::new(tx))
+            .watch(CancellationToken::new(), AddonEvents::new(tx))
             .await;
 
         match rx.try_recv().expect("a report") {
@@ -144,7 +154,7 @@ mod tests {
 
         LoadEvidence::new("Dalamud", &log, since)
             .within(Duration::from_millis(1))
-            .watch(AddonEvents::new(tx))
+            .watch(CancellationToken::new(), AddonEvents::new(tx))
             .await;
 
         match rx.try_recv().expect("a report") {
@@ -165,7 +175,7 @@ mod tests {
 
         LoadEvidence::new("Dalamud", dir.path().join("never"), SystemTime::now())
             .within(Duration::from_millis(1))
-            .watch(AddonEvents::new(tx))
+            .watch(CancellationToken::new(), AddonEvents::new(tx))
             .await;
 
         assert!(matches!(
@@ -193,7 +203,7 @@ mod tests {
         // Far longer than the write takes: finishing early is the property under test.
         LoadEvidence::new("Dalamud", &log, since)
             .within(Duration::from_secs(30))
-            .watch(AddonEvents::new(tx))
+            .watch(CancellationToken::new(), AddonEvents::new(tx))
             .await;
         writing.await.expect("writer");
 

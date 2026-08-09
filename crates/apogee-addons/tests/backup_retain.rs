@@ -13,6 +13,7 @@ use apogee_addons::backup::{
 };
 
 use common::{game_tree, write};
+use tokio_util::sync::CancellationToken;
 
 type Fallible = Box<dyn std::error::Error>;
 
@@ -31,7 +32,7 @@ fn archive_at(source: &Path, dest: &Path, at: u64) -> Result<PathBuf, Fallible> 
         created_at: UNIX_EPOCH + Duration::from_secs(at),
         note: None,
     };
-    Ok(create(&spec)?.archive)
+    Ok(create(&spec, &CancellationToken::new())?.archive)
 }
 
 /// A zip carrying an arbitrary record, for the cases a real backup cannot produce.

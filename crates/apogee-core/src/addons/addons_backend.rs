@@ -114,15 +114,17 @@ impl AddonBackend for AddonsBackend {
         prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
         confirming: Option<LoadEvidence>,
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         let (addon_events, relay) = relay(events);
         // Spawned rather than awaited: the proof lands seconds after the game does, and a launch that
         // waited for it would hold the flow at the point it is supposed to report the game running.
+        // The token ends it on the path where the launch is stopped; the teardown below ends it on the
+        // path where the game simply exited, which is not a cancellation of anything.
         let confirming = confirming.map(|evidence| {
             let events = addon_events.clone();
-            tokio::spawn(evidence.watch(events))
+            tokio::spawn(evidence.watch(cancel.clone(), events))
         });
         // A pid the runtime reported cannot be zero or negative, but building the context is
         // fallible, and a launch is not worth failing over a helper: an unusable context simply
@@ -314,9 +316,9 @@ impl RunningAddons {
     /// The sender is moved out and dropped here rather than cloned. The relay ends when the channel
     /// closes, and the channel closes only when the last sender is gone, so holding a second one
     /// across the await would wait forever.
-    async fn finish<F>(mut self, teardown: F) -> Vec<CoreError>
+    async fn finish<F>(mut self, cancel: &CancellationToken, teardown: F) -> Vec<CoreError>
     where
-        F: AsyncFnOnce(AddonSession, &AddonEvents) -> AddonReport,
+        F: AsyncFnOnce(AddonSession, &CancellationToken, &AddonEvents) -> AddonReport,
     {
         // Stopped first, and waited for, because it holds a sender. The relay below ends only when the
         // last sender is gone, so a watch still polling would hold the teardown open for the rest of
@@ -329,7 +331,7 @@ impl RunningAddons {
         }
         let events = self.addon_events.take().unwrap_or_else(AddonEvents::none);
         let report = match self.session.take() {
-            Some(session) => teardown(session, &events).await,
+            Some(session) => teardown(session, cancel, &events).await,
             None => AddonReport::default(),
         };
         let failures = failures(&report);
@@ -345,15 +347,19 @@ impl AddonLifecycle for RunningAddons {
         self.session.as_ref().is_some_and(AddonSession::has_work)
     }
 
-    async fn game_closed(self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
+    async fn game_closed(self: Box<Self>, cancel: &CancellationToken) -> Vec<CoreError> {
         (*self)
-            .finish(async |session, events| session.game_closed(events).await)
+            .finish(cancel, async |session, cancel, events| {
+                session.game_closed(cancel, events).await
+            })
             .await
     }
 
-    async fn abandon(self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
+    async fn abandon(self: Box<Self>, cancel: &CancellationToken) -> Vec<CoreError> {
         (*self)
-            .finish(async |session, events| session.abandon(events).await)
+            .finish(cancel, async |session, cancel, events| {
+                session.abandon(cancel, events).await
+            })
             .await
     }
 }

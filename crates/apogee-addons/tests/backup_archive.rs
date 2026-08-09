@@ -13,6 +13,7 @@ use apogee_addons::backup::{
 };
 
 use common::{CHARACTER_DIR, CHARACTER_FILES, game_tree, game_tree_reversed, write};
+use tokio_util::sync::CancellationToken;
 
 /// A fixed instant, so an archive is a function of its contents alone.
 const AT: u64 = 1_785_000_000;
@@ -61,7 +62,10 @@ fn rebuilding_a_tree_differently_does_not_change_the_archive() -> Result<(), Bac
     let out = tempfile::tempdir().unwrap();
 
     game_tree(source.path()).unwrap();
-    let a = create(&spec(source.path(), out.path(), AT)?)?;
+    let a = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
     let bytes_a = std::fs::read(&a.archive).unwrap();
 
     // Same content at the same path, written in the opposite order so the filesystem enumerates it
@@ -87,7 +91,10 @@ fn rebuilding_a_tree_differently_does_not_change_the_archive() -> Result<(), Bac
         .set_modified(long_ago)
         .unwrap();
 
-    let b = create(&spec(source.path(), out.path(), AT)?)?;
+    let b = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
     let bytes_b = std::fs::read(&b.archive).unwrap();
 
     assert_ne!(a.archive, b.archive, "two archives, not one overwritten");
@@ -107,8 +114,14 @@ fn a_different_instant_gives_a_different_archive() -> Result<(), BackupError> {
     game_tree(source.path()).unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    let a = create(&spec(source.path(), out.path(), AT)?)?;
-    let b = create(&spec(source.path(), out.path(), AT + 1)?)?;
+    let a = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
+    let b = create(
+        &spec(source.path(), out.path(), AT + 1)?,
+        &CancellationToken::new(),
+    )?;
     assert_ne!(
         std::fs::read(&a.archive).unwrap(),
         std::fs::read(&b.archive).unwrap()
@@ -130,7 +143,10 @@ fn entries_carry_fixed_metadata_not_the_sources() -> Result<(), BackupError> {
     .unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    let report = create(&spec(source.path(), out.path(), AT)?)?;
+    let report = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
     let file = std::fs::File::open(&report.archive).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
     for i in 0..zip.len() {
@@ -161,7 +177,10 @@ fn a_directory_entry_precedes_its_contents() -> Result<(), Fallible> {
     game_tree(source.path()).unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    let report = create(&spec(source.path(), out.path(), AT)?)?;
+    let report = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
     let names: Vec<String> = listing(&report.archive)?
         .into_iter()
         .map(|(n, ..)| n)
@@ -187,7 +206,10 @@ fn contents_round_trip_and_match_their_recorded_hash() -> Result<(), Fallible> {
     game_tree(source.path()).unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    let report = create(&spec(source.path(), out.path(), AT)?)?;
+    let report = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
     let manifest = inspect(&report.archive)?;
     let stored = listing(&report.archive)?;
 
@@ -229,7 +251,7 @@ fn the_record_describes_the_selection_that_produced_it() -> Result<(), BackupErr
 
     let mut s = spec(source.path(), out.path(), AT)?;
     s.note = Some("before a patch".into());
-    let report = create(&s)?;
+    let report = create(&s, &CancellationToken::new())?;
     let manifest = inspect(&report.archive)?;
 
     assert_eq!(manifest.format, BACKUP_FORMAT);
@@ -257,8 +279,14 @@ fn a_second_backup_in_the_same_second_gets_its_own_name() -> Result<(), BackupEr
     game_tree(source.path()).unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    let a = create(&spec(source.path(), out.path(), AT)?)?;
-    let b = create(&spec(source.path(), out.path(), AT)?)?;
+    let a = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
+    let b = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    )?;
     assert_ne!(a.archive, b.archive);
     assert!(a.archive.exists() && b.archive.exists());
     // The name states the instant, so a directory listing sorts chronologically.
@@ -342,8 +370,37 @@ fn a_backup_that_selects_nothing_writes_no_file() -> Result<(), BackupError> {
     std::fs::create_dir_all(source.path().join("screenshots")).unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    let err = create(&spec(source.path(), out.path(), AT)?);
+    let err = create(
+        &spec(source.path(), out.path(), AT)?,
+        &CancellationToken::new(),
+    );
     assert!(matches!(err, Err(BackupError::NothingSelected)));
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    Ok(())
+}
+
+/// A capture is a blocking copy of a tree of unbounded size, so it has to be stoppable, and stopping it
+/// must leave nothing half-written where a reader looks for archives. The archive is assembled in a
+/// temporary file and only named once it is complete, which is what makes the refusal clean.
+#[test]
+fn a_cancelled_capture_writes_no_archive() -> Result<(), Fallible> {
+    let source = tempfile::tempdir()?;
+    let out = tempfile::tempdir()?;
+    game_tree(source.path())?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let refused = create(&spec(source.path(), out.path(), AT)?, &cancel);
+
+    assert!(
+        matches!(refused, Err(BackupError::Cancelled)),
+        "a stopped capture is not a failed one: {refused:?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(out.path())?.collect::<Result<_, _>>()?;
+    assert!(
+        left.is_empty(),
+        "a stopped capture left something behind: {:?}",
+        left.iter().map(std::fs::DirEntry::path).collect::<Vec<_>>()
+    );
     Ok(())
 }

@@ -59,4 +59,10 @@ pub enum BackupError {
     RejectedEntry { entry: String, reason: RejectReason },
     #[error("archive entry {entry} does not match the hash the archive recorded for it")]
     ContentMismatch { entry: String },
+    /// The token fired, so the work stopped where it was. Its own variant rather than an io failure,
+    /// for the same reason the crate's own taxonomy separates them: a caller counts what went wrong to
+    /// decide whether it did what was asked, and a run somebody stopped on purpose has nothing to
+    /// count. Nothing half-written survives either way, so there is no partial state to describe.
+    #[error("cancelled")]
+    Cancelled,
 }

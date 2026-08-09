@@ -8,6 +8,7 @@ use apogee_addons::external::{
     AddonEvents, ExternalAddon, GameContext, Outcome, RunIn, Trigger, start,
 };
 use apogee_runtime::{Runtime, RuntimePaths};
+use tokio_util::sync::CancellationToken;
 
 type Fallible = Box<dyn std::error::Error>;
 
@@ -89,7 +90,9 @@ async fn a_companion_starts_with_the_game_and_stops_with_it() -> Result<(), Fall
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(marker.exists(), "the companion did not run");
 
-    let report = session.game_closed(&AddonEvents::none()).await;
+    let report = session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     assert!(!report.any_failed(), "{report:?}");
     assert!(!still_running(&marker), "the companion outlived the game");
     Ok(())
@@ -123,7 +126,9 @@ async fn stopping_reaches_a_process_the_tool_backgrounded() -> Result<(), Fallib
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(marker.exists(), "the backgrounded process did not run");
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     assert!(
         !still_running(&marker),
         "the backgrounded process was orphaned"
@@ -157,7 +162,9 @@ async fn a_companion_asked_to_stay_is_left_running_while_its_sibling_stops() -> 
         Outcome::Started { pid } => pid,
         ref other => panic!("expected a start, got {other:?}"),
     };
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
 
     assert!(!still_running(&stop_marker), "the sibling was not stopped");
     assert!(still_running(&keep_marker), "the kept tool was stopped");
@@ -185,7 +192,9 @@ async fn an_after_game_tool_runs_once_after_the_game() -> Result<(), Fallible> {
     assert!(!marker.exists(), "an after-game tool ran during the launch");
     assert!(session.report().outcomes.is_empty());
 
-    let report = session.game_closed(&AddonEvents::none()).await;
+    let report = session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     assert!(marker.exists(), "the after-game tool did not run");
     assert_eq!(report.outcomes.len(), 1, "it ran once");
     assert!(matches!(
@@ -224,7 +233,9 @@ async fn an_already_running_tool_is_recognized_and_left_alone() -> Result<(), Fa
         ref other => panic!("expected it to be recognized, got {other:?}"),
     }
 
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     assert!(
         still_running(&marker),
         "a tool this launch did not start was stopped by it"
@@ -269,7 +280,9 @@ async fn two_tools_sharing_a_file_name_both_start() -> Result<(), Fallible> {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(a_marker.exists() && b_marker.exists());
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     Ok(())
 }
 
@@ -309,7 +322,9 @@ async fn a_broken_entry_does_not_stop_the_others() -> Result<(), Fallible> {
     assert!(report.any_failed());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(marker.exists(), "the working tool did not run");
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     Ok(())
 }
 
@@ -329,7 +344,9 @@ async fn a_disabled_entry_is_skipped() -> Result<(), Fallible> {
     assert_eq!(session.report().outcomes[0].outcome, Outcome::Disabled);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!marker.exists(), "a disabled entry ran");
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     Ok(())
 }
 
@@ -387,7 +404,9 @@ async fn abandoning_a_launch_stops_tools_and_skips_the_after_game_ones() -> Resu
     .await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    session.abandon(&AddonEvents::none()).await;
+    session
+        .abandon(&CancellationToken::new(), &AddonEvents::none())
+        .await;
 
     assert!(!still_running(&alive), "the companion was not stopped");
     assert!(!ran.exists(), "an after-game tool ran for a failed launch");
@@ -407,7 +426,9 @@ async fn a_session_reports_whether_it_still_has_work() -> Result<(), Fallible> {
     // Nothing configured: nothing owed.
     let empty = start(&runtime, &[], &game, &AddonEvents::none()).await;
     assert!(!empty.has_work());
-    empty.game_closed(&AddonEvents::none()).await;
+    empty
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
 
     // A tool that is explicitly left running owes nothing either.
     let keeps = start(
@@ -422,7 +443,9 @@ async fn a_session_reports_whether_it_still_has_work() -> Result<(), Fallible> {
         Outcome::Started { pid } => pid,
         ref other => panic!("expected a start, got {other:?}"),
     };
-    keeps.game_closed(&AddonEvents::none()).await;
+    keeps
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     if let Some(pid) = rustix::process::Pid::from_raw(kept_pid) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
@@ -436,7 +459,9 @@ async fn a_session_reports_whether_it_still_has_work() -> Result<(), Fallible> {
     )
     .await;
     assert!(stops.has_work());
-    stops.game_closed(&AddonEvents::none()).await;
+    stops
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
     Ok(())
 }
 
@@ -466,7 +491,9 @@ async fn a_companion_is_told_the_game_process_id() -> Result<(), Fallible> {
     )
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    session.game_closed(&AddonEvents::none()).await;
+    session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
 
     assert_eq!(std::fs::read_to_string(&out)?, "4242");
     Ok(())
@@ -493,7 +520,7 @@ async fn an_after_game_tool_is_not_told_a_process_id_that_is_gone() -> Result<()
     let game = GameContext::new(4242)?;
     start(&runtime, &[addon], &game, &AddonEvents::none())
         .await
-        .game_closed(&AddonEvents::none())
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
         .await;
 
     assert_eq!(std::fs::read_to_string(&out)?, "[]");
@@ -533,9 +560,79 @@ async fn arguments_reach_the_child_unsplit() -> Result<(), Fallible> {
     let game = GameContext::new(1)?;
     start(&runtime, &[addon], &game, &AddonEvents::none())
         .await
-        .game_closed(&AddonEvents::none())
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
         .await;
 
     assert_eq!(std::fs::read_to_string(&out)?, "one two \"three\"\n");
+    Ok(())
+}
+
+/// An after-game tool that never exits used to hold the teardown open forever: the game was gone, the
+/// launcher had nothing left to do, and the only way out was to kill it. The token is what bounds that
+/// wait, and the tool is stopped on the way out rather than left running with nothing that knows it is
+/// there.
+#[tokio::test]
+async fn a_cancelled_teardown_stops_waiting_on_a_tool_that_never_exits() -> Result<(), Fallible> {
+    let dir = tempfile::tempdir()?;
+    let marker = dir.path().join("alive");
+    let tool = ticker(dir.path(), "forever.sh", &marker)?;
+    let addon = ExternalAddon::new(&tool, vec![], RunIn::Host, Trigger::OnClose)?;
+
+    let runtime = runtime(dir.path())?;
+    let game = GameContext::new(std::process::id().cast_signed())?;
+    let session = start(&runtime, &[addon], &game, &AddonEvents::none()).await;
+
+    // Fired while the wait is already running, which is the shape the flow has: the teardown is under
+    // way and then the user quits.
+    let cancel = CancellationToken::new();
+    let firing = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            cancel.cancel();
+        }
+    });
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(20),
+        session.game_closed(&cancel, &AddonEvents::none()),
+    )
+    .await
+    .map_err(|_| "the teardown waited on a tool that never exits")?;
+    firing.await?;
+
+    assert!(
+        matches!(report.outcomes[0].outcome, Outcome::Cancelled),
+        "a tool the user interrupted is not a failure: {:?}",
+        report.outcomes
+    );
+    assert!(!still_running(&marker), "the tool was left running");
+    Ok(())
+}
+
+/// A teardown that is cancelled before it reaches an after-game tool does not start it. Checking the
+/// token only inside the wait would start every remaining tool and stop it a moment later, which for a
+/// tool that writes something is not the same as never running it.
+#[tokio::test]
+async fn a_teardown_cancelled_first_never_starts_the_tools_it_has_left() -> Result<(), Fallible> {
+    let dir = tempfile::tempdir()?;
+    let marker = dir.path().join("ran");
+    let tool = one_shot(dir.path(), "sync.sh", &marker)?;
+    let addon = ExternalAddon::new(&tool, vec![], RunIn::Host, Trigger::OnClose)?;
+
+    let runtime = runtime(dir.path())?;
+    let game = GameContext::new(std::process::id().cast_signed())?;
+    let session = start(&runtime, &[addon], &game, &AddonEvents::none()).await;
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let report = session.game_closed(&cancel, &AddonEvents::none()).await;
+
+    assert!(
+        matches!(report.outcomes[0].outcome, Outcome::Cancelled),
+        "{:?}",
+        report.outcomes
+    );
+    assert!(!marker.exists(), "the tool ran anyway");
     Ok(())
 }

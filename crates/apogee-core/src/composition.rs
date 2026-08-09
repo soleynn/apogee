@@ -892,6 +892,11 @@ impl Core {
             kept,
             (self.clock)(),
             note,
+            // Nothing here to stop it with. This is a command a caller makes and waits for, unlike the
+            // capture on the launch path, which is one step of something a user can abandon. A token a
+            // caller could fire belongs on this method, and it is owed the day a shell offers a way to
+            // press cancel.
+            &CancellationToken::new(),
         )
     }
 
@@ -944,7 +949,11 @@ impl Core {
             archive: archive.to_path_buf(),
             targets,
         };
-        Ok(apogee_addons::backup::restore(&plan).map_err(AddonError::Backup)?)
+        // Uncancellable for the same reason as the capture above.
+        Ok(
+            apogee_addons::backup::restore(&plan, &CancellationToken::new())
+                .map_err(AddonError::Backup)?,
+        )
     }
 
     /// Prune `profile`'s backups to `keep`, deleting only archives this launcher wrote.
