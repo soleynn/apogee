@@ -117,6 +117,18 @@ pub enum AddonError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Two companions each reach the game by becoming the program the launch spawns, and a launch
+    /// spawns one program. No `source`, because nothing underneath went wrong: both composed their
+    /// invocation correctly and the launch has room for one of them.
+    #[error(
+        "{injectable} cannot redirect this launch: {redirector} already did, and a launch spawns one program"
+    )]
+    LaunchAlreadyRedirected {
+        /// The one refused.
+        injectable: String,
+        /// The one that already holds the launch.
+        redirector: String,
+    },
     /// A distribution answered with something this launcher cannot read. Its own variant rather than a
     /// download failure: the bytes arrived, they just are not the shape the endpoint promises, which is
     /// an upstream change rather than a network problem.
@@ -192,6 +204,19 @@ impl AddonError {
     }
 }
 
+/// Narrate a companion's failure and keep it for the caller.
+///
+/// Both, always, and in one place: the launch goes ahead either way, so the event stream is the only
+/// thing that tells a user why a companion they asked for is not in the game they are playing, and a
+/// returned failure nobody said out loud is the silent case this layer exists to avoid.
+fn report(failures: &mut Vec<AddonError>, events: &SetupEvents, what: &str, err: AddonError) {
+    events.emit(SetupEvent::Failed {
+        what: what.to_owned(),
+        reason: err.chain(),
+    });
+    failures.push(err);
+}
+
 /// The same for any error, so the places this crate reports another crate's failure through a `String`
 /// do not have to lose its causes either.
 pub(crate) fn chain_of(err: &dyn std::error::Error) -> String {
@@ -241,6 +266,11 @@ pub trait Injectable: Send + Sync {
     /// A companion that finds itself inapplicable (not installed, built for another game version) says
     /// so on `events`, leaves `plan` untouched, and returns `Ok(())`. Failing here would fail a launch
     /// that is otherwise fine.
+    ///
+    /// Redirecting the program is the one contribution a launch has room for once: a second one in the
+    /// same pass is refused and undone by
+    /// [`Addons::prepare_launch`](crate::Addons::prepare_launch), so an implementor composes its own
+    /// invocation without checking what ran before it.
     ///
     /// # Errors
     /// Whatever the companion raises while composing its invocation.
@@ -497,6 +527,11 @@ impl Addons {
     /// The same list and the same loop as [`Self::ensure_injectables`], so nothing about a launch knows
     /// which companion it is composing. One failing leaves the plan as the previous ones left it and the
     /// launch proceeds.
+    ///
+    /// A launch spawns one program, so the first companion to redirect it keeps it and a second is
+    /// refused with [`AddonError::LaunchAlreadyRedirected`], reported by name like any other companion
+    /// failure. The refused one's contribution is undone rather than left around a program it does not
+    /// wrap, and the launch proceeds with the first one's.
     #[must_use]
     pub fn prepare_launch(
         &self,
@@ -505,14 +540,45 @@ impl Addons {
         events: &SetupEvents,
     ) -> Vec<AddonError> {
         let mut failures = Vec::new();
+        // The companion that became the program, so a second one asking for the same slot is refused
+        // rather than silently overwriting it. Kept here rather than as a flag on the plan because the
+        // rule is about companions: `apogee-runtime` does not know they exist, and a plan that refused
+        // its own `set_program` would raise inside whichever injectable happened to call it, leaving
+        // every implementor to map and narrate a rule that belongs to the one loop that runs them.
+        let mut redirector: Option<String> = None;
         for injectable in injectables {
+            let program = plan.program().to_owned();
+            // Who holds the slot and the plan as it stands, taken only once someone does, since that
+            // is the only pass a refusal has to undo.
+            let held = redirector
+                .as_ref()
+                .map(|holder| (holder.clone(), plan.clone()));
+
             if let Err(err) = injectable.prepare_launch(plan, events) {
-                events.emit(SetupEvent::Failed {
-                    what: injectable.name().to_owned(),
-                    reason: err.chain(),
-                });
-                failures.push(err);
+                report(&mut failures, events, injectable.name(), err);
+                continue;
             }
+            if plan.program() == program {
+                continue;
+            }
+            let Some((holder, restore)) = held else {
+                redirector = Some(injectable.name().to_owned());
+                continue;
+            };
+            // First wins, and the loser is put back rather than left half-applied. The plan only ever
+            // accumulates what earlier injectables put in it, so letting a later one overwrite the
+            // program would keep the env and argv of a companion whose program is gone: two companions
+            // each in part of a launch neither of them composed, which is worse than one absent.
+            *plan = restore;
+            report(
+                &mut failures,
+                events,
+                injectable.name(),
+                AddonError::LaunchAlreadyRedirected {
+                    injectable: injectable.name().to_owned(),
+                    redirector: holder,
+                },
+            );
         }
         failures
     }

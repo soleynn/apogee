@@ -133,6 +133,16 @@ frozen!(
             },
             "injection of Dalamud failed (best effort tier): built for another game version",
         ),
+        // Both companions are named, and neither is at fault: the sentence is about the launch having
+        // one program, not about either of them being broken.
+        AddonError::LaunchAlreadyRedirected { .. } => (
+            AddonError::LaunchAlreadyRedirected {
+                injectable: "Perigee".to_owned(),
+                redirector: "Dalamud".to_owned(),
+            },
+            "Perigee cannot redirect this launch: Dalamud already did, \
+             and a launch spawns one program",
+        ),
         AddonError::Distribution { .. } => (
             AddonError::Distribution {
                 injectable: "Dalamud".to_owned(),
