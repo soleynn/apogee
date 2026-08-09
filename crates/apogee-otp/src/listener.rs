@@ -124,11 +124,11 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 /// is the user's own configuration, already in their settings file, and a redacted bind address would
 /// make a bind failure undiagnosable.
 ///
-/// The fields are public and the struct is not `#[non_exhaustive]`, which is the one place in this
-/// crate where a caller may write a literal and destructure exhaustively. That is deliberate at this
-/// version: the three facts below are the whole set, and everything else the listener needs is a
-/// constant with a stated reason, so a fourth field would be a knob on the hardening rather than a
-/// new fact about the machine.
+/// The fields are public and the struct is not `#[non_exhaustive]`, so a settings layer can write a
+/// literal and have the compiler tell it when a field is missing. That is deliberate at this version:
+/// the three facts below are the whole set, and everything else the listener needs is a constant with
+/// a stated reason, so a fourth field would be a knob on the hardening rather than a new fact about
+/// the machine.
 ///
 /// # Examples
 /// ```
