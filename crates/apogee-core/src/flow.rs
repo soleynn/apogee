@@ -1190,9 +1190,11 @@ async fn prefix(
     match action {
         PrefixAction::Create => {
             emit(tx, FlowState::PreparingPrefix);
-            ctx.launch
+            let prepared = ctx
+                .launch
                 .prepare(&profile.runner, &prefix_dir, cancel, tx)
                 .await?;
+            ctx.addons.apply_setup(prepared.prefix, cancel, tx).await;
         }
         PrefixAction::Check => {
             emit(tx, FlowState::CheckingPrefix);
@@ -1221,9 +1223,14 @@ async fn prefix(
         }
         PrefixAction::Recreate => {
             emit(tx, FlowState::RecreatingPrefix);
-            ctx.launch
+            let fresh = ctx
+                .launch
                 .recreate_prefix(&profile.runner, &prefix_dir, cancel, tx)
                 .await?;
+            // A rebuilt prefix is a new one, so it needs the setup a new one gets. Without this, the
+            // command that exists to put a prefix back in a known state leaves it in one no other
+            // path produces.
+            ctx.addons.apply_setup(fresh, cancel, tx).await;
         }
     }
     Ok(())

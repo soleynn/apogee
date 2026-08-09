@@ -52,30 +52,29 @@ impl AddonBackend for AddonsBackend {
             return;
         };
         let (setup, relay) = relay_setup(events);
-        let Some(manifest) = self.launch_manifest(cancel, &setup).await else {
+        let Some(manifest) = self.setup_pass(&prefix, cancel, &setup).await else {
             finish(setup, relay).await;
             return;
         };
-
-        match self
-            .addons
-            .apply_setup(&manifest, &prefix, cancel, &setup)
-            .await
-        {
-            Ok(report) => {
-                tracing::debug!(applied = report.present().len(), "prefix setup complete");
-            }
-            // Each verb that failed is already on the stream as the event that failed it, so a whole-call
-            // failure here is the prefix record being unreadable or the run being stopped. Neither is
-            // worth failing a launch over: the setup is hygiene, and a stopped run is about to be torn
-            // down anyway.
-            Err(err) => tracing::warn!(reason = err.chain(), "the prefix setup did not complete"),
-        }
 
         if let Some(config) = dalamud {
             self.inject(&manifest, &prefix, config, plan, cancel, &setup)
                 .await;
         }
+        finish(setup, relay).await;
+    }
+
+    async fn apply_setup(
+        &self,
+        prefix: Option<Prefix>,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) {
+        let Some(prefix) = prefix else {
+            return;
+        };
+        let (setup, relay) = relay_setup(events);
+        self.setup_pass(&prefix, cancel, &setup).await;
         finish(setup, relay).await;
     }
 
@@ -115,6 +114,34 @@ impl AddonBackend for AddonsBackend {
 }
 
 impl AddonsBackend {
+    /// Apply what the catalog publishes to `prefix`, and hand back the catalog it read.
+    ///
+    /// Returned rather than fetched twice, because a launch needs the same manifest again for the row
+    /// describing what it loads into the game, and a second fetch could answer differently.
+    async fn setup_pass(
+        &self,
+        prefix: &Prefix,
+        cancel: &CancellationToken,
+        setup: &SetupEvents,
+    ) -> Option<ComponentManifest> {
+        let manifest = self.launch_manifest(cancel, setup).await?;
+        match self
+            .addons
+            .apply_setup(&manifest, prefix, cancel, setup)
+            .await
+        {
+            Ok(report) => {
+                tracing::debug!(applied = report.present().len(), "prefix setup complete");
+            }
+            // Each verb that failed is already on the stream as the event that failed it, so a whole-call
+            // failure here is the prefix record being unreadable or the run being stopped. Neither is
+            // worth failing a launch over: the setup is hygiene, and a stopped run is about to be torn
+            // down anyway.
+            Err(err) => tracing::warn!(reason = err.chain(), "the prefix setup did not complete"),
+        }
+        Some(manifest)
+    }
+
     /// Install whatever this launch loads into the game, and let it compose the launch.
     ///
     /// Failures are narrated by the addon layer as they happen and dropped here. Turning one into an

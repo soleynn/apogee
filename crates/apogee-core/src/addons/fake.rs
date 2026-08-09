@@ -26,6 +26,10 @@ pub(crate) enum AddonCall {
         prefix: bool,
         dalamud: bool,
     },
+    /// The prefix was brought up to the catalog's setup with no launch around it.
+    SetupApplied {
+        prefix: bool,
+    },
     Started {
         game_pid: i32,
         count: usize,
@@ -109,6 +113,17 @@ impl AddonBackend for FakeAddons {
         if !self.inserted_args.is_empty() {
             plan.set_inserted_args(self.inserted_args.clone());
         }
+    }
+
+    async fn apply_setup(
+        &self,
+        prefix: Option<Prefix>,
+        _cancel: &CancellationToken,
+        _events: &UnboundedSender<Event>,
+    ) {
+        self.record(AddonCall::SetupApplied {
+            prefix: prefix.is_some(),
+        });
     }
 
     async fn start(

@@ -305,7 +305,7 @@ impl LaunchBackend for RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<(), CoreError> {
+    ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
         let progress = relay_progress(events);
         // Preparing an absent prefix already builds a fresh one, so tearing it down to build it
         // again would be paying twice for the same result.
@@ -314,7 +314,7 @@ impl LaunchBackend for RuntimeLauncher {
             .prepare_prefix(runner, prefix_dir, cancel, &progress)
             .await?;
         let Some(prefix) = prepared.prefix else {
-            return Ok(());
+            return Ok(None);
         };
         let prefix = if existed {
             self.runtime
@@ -325,7 +325,7 @@ impl LaunchBackend for RuntimeLauncher {
         };
         self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), false, cancel, &progress)
             .await?;
-        Ok(())
+        Ok(Some(prefix))
     }
 
     async fn launch(

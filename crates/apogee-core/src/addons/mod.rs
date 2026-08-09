@@ -67,6 +67,23 @@ pub(crate) trait AddonBackend: Send + Sync {
         events: &UnboundedSender<Event>,
     );
 
+    /// Bring `prefix` up to the setup the signed catalog publishes, with no launch around it.
+    ///
+    /// The same pass [`Self::prepare_launch`] performs, minus everything about a game: a prefix
+    /// prepared on its own has to end up in the state a launch would leave it in, or preparing one
+    /// ahead of time buys nothing and the first launch still pays for it. What the catalog publishes
+    /// is prefix hygiene rather than launch setup, and the shipped verb says so itself: it is to be
+    /// applied before any Windows program runs in the prefix, and creating one runs several.
+    ///
+    /// Infallible for the same reason as `prepare_launch`, and `prefix` of `None` is likewise nothing
+    /// to do.
+    async fn apply_setup(
+        &self,
+        prefix: Option<Prefix>,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    );
+
     /// Start the profile's companions for a game that is already running.
     ///
     /// Infallible by design: a helper tool that cannot start is reported on `events` and in the
