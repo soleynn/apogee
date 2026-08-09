@@ -24,6 +24,7 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
 - Receive a one-time code pushed to the local listener (#125) _(added)_
+- API freeze and documentation pass, bump to 1.0.0 (#161) _(miscellaneous)_
 
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
