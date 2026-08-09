@@ -228,8 +228,8 @@ impl Prefix {
     }
 }
 
-/// A launch about to be spawned. Injectables may wrap or mutate it (program, env, wrappers) via
-/// `prepare_launch(&mut LaunchPlan)` before it reaches the spawner.
+/// A launch about to be spawned. The companion layer amends it (program, argv, env, wrappers) before it
+/// reaches the spawner.
 #[derive(Clone)]
 pub struct LaunchPlan {
     program: String,

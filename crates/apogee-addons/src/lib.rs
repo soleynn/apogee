@@ -21,6 +21,7 @@ use apogee_runtime::{LaunchPlan, Prefix, Runtime};
 pub mod backup;
 pub mod dalamud;
 pub mod external;
+pub mod launch;
 pub mod manifest;
 pub mod setup;
 
@@ -35,6 +36,7 @@ pub use external::{
     AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
     Outcome, RunIn, Running, Trigger,
 };
+pub use launch::{Contribution, LaunchEdit, Redirect};
 pub use manifest::{
     Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
     InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
@@ -263,20 +265,29 @@ pub trait Injectable: Send + Sync {
         events: &SetupEvents,
     ) -> Result<()>;
 
-    /// Contribute to the launch before it is spawned: redirect the program, insert argv, add env.
+    /// What to add to the launch before it is spawned: redirect the program, insert argv, add env, add
+    /// a wrapper.
+    ///
+    /// Composed and handed back rather than written into `plan`, which is read-only here for two
+    /// reasons. A companion whose own work fails partway through contributes nothing rather than the
+    /// half it had already written. And what a companion may change is then the three things a
+    /// [`LaunchEdit`] can express, rather than every field of a launch it did not compose.
+    ///
+    /// `plan` is the launch as the injectables before it left it, to read the program and the prefix
+    /// from.
     ///
     /// A companion that finds itself inapplicable (not installed, built for another game version) says
-    /// so on `events`, leaves `plan` untouched, and returns `Ok(())`. Failing here would fail a launch
-    /// that is otherwise fine.
+    /// so on `events` and returns [`Contribution::Declined`]. Failing here would fail a launch that is
+    /// otherwise fine.
     ///
-    /// Redirecting the program is the one contribution a launch has room for once: a second one in the
-    /// same pass is refused and undone by
+    /// Redirecting the program is the one contribution a launch has room for once: a second
+    /// [`Redirect`] in the same pass is refused whole by
     /// [`Addons::prepare_launch`](crate::Addons::prepare_launch), so an implementor composes its own
     /// invocation without checking what ran before it.
     ///
     /// # Errors
     /// Whatever the companion raises while composing its invocation.
-    fn prepare_launch(&self, plan: &mut LaunchPlan, events: &SetupEvents) -> Result<()>;
+    fn prepare_launch(&self, plan: &LaunchPlan, events: &SetupEvents) -> Result<Contribution>;
 }
 
 /// Where the companion layer keeps what it installs outside a prefix.
@@ -546,13 +557,19 @@ impl Addons {
     /// Let each injectable contribute to `plan`, in order, returning what failed.
     ///
     /// The same list and the same loop as [`Self::ensure_injectables`], so nothing about a launch knows
-    /// which companion it is composing. One failing leaves the plan as the previous ones left it and the
-    /// launch proceeds.
+    /// which companion it is composing. Each is offered the launch as the ones before it left it, and
+    /// what it hands back is applied here: one failing contributes nothing at all and the launch
+    /// proceeds.
     ///
     /// A launch spawns one program, so the first companion to redirect it keeps it and a second is
     /// refused with [`AddonError::LaunchAlreadyRedirected`], reported by name like any other companion
-    /// failure. The refused one's contribution is undone rather than left around a program it does not
-    /// wrap, and the launch proceeds with the first one's.
+    /// failure. The refusal is of the whole contribution rather than of the redirect alone: a plan
+    /// carrying one companion's env and argv around another's program is a launch neither of them
+    /// composed, which is worse than one companion cleanly absent.
+    ///
+    /// *First* wins, and what claims the slot is asking for a [`Redirect`] rather than changing the
+    /// program to something new, so a companion that redirects a launch to the program it already names
+    /// still holds it.
     #[must_use]
     pub fn prepare_launch(
         &self,
@@ -564,42 +581,30 @@ impl Addons {
         // The companion that became the program, so a second one asking for the same slot is refused
         // rather than silently overwriting it. Kept here rather than as a flag on the plan because the
         // rule is about companions: `apogee-runtime` does not know they exist, and a plan that refused
-        // its own `set_program` would raise inside whichever injectable happened to call it, leaving
+        // its own redirect would raise inside whichever injectable happened to compose it, leaving
         // every implementor to map and narrate a rule that belongs to the one loop that runs them.
         let mut redirector: Option<String> = None;
         for injectable in injectables {
-            let program = plan.program().to_owned();
-            // Who holds the slot and the plan as it stands, taken only once someone does, since that
-            // is the only pass a refusal has to undo.
-            let held = redirector
-                .as_ref()
-                .map(|holder| (holder.clone(), plan.clone()));
-
-            if let Err(err) = injectable.prepare_launch(plan, events) {
-                report(&mut failures, events, injectable.name(), err);
-                continue;
-            }
-            if plan.program() == program {
-                continue;
-            }
-            let Some((holder, restore)) = held else {
-                redirector = Some(injectable.name().to_owned());
-                continue;
+            let edit = match injectable.prepare_launch(plan, events) {
+                Ok(Contribution::Edit(edit)) => edit,
+                Ok(Contribution::Declined) => continue,
+                Err(err) => {
+                    report(&mut failures, events, injectable.name(), err);
+                    continue;
+                }
             };
-            // First wins, and the loser is put back rather than left half-applied. The plan only ever
-            // accumulates what earlier injectables put in it, so letting a later one overwrite the
-            // program would keep the env and argv of a companion whose program is gone: two companions
-            // each in part of a launch neither of them composed, which is worse than one absent.
-            *plan = restore;
-            report(
-                &mut failures,
-                events,
-                injectable.name(),
-                AddonError::LaunchAlreadyRedirected {
-                    injectable: injectable.name().to_owned(),
-                    redirector: holder,
-                },
-            );
+            if edit.redirects() {
+                if let Some(holder) = redirector.as_deref() {
+                    let refused = AddonError::LaunchAlreadyRedirected {
+                        injectable: injectable.name().to_owned(),
+                        redirector: holder.to_owned(),
+                    };
+                    report(&mut failures, events, injectable.name(), refused);
+                    continue;
+                }
+                redirector = Some(injectable.name().to_owned());
+            }
+            edit.apply(plan);
         }
         failures
     }

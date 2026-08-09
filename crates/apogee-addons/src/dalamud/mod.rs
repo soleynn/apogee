@@ -31,6 +31,7 @@ pub use confirm::LoadEvidence;
 pub use injector::{ClientLanguage, InjectorInvocation, LoadMode, PluginPolicy, injector_argv};
 pub use wire::Installed;
 
+use crate::launch::{Contribution, LaunchEdit, Redirect};
 use crate::manifest::InjectableEntry;
 use crate::setup::{SetupEvent, SetupEvents};
 use crate::{AddonError, Injectable, Result, SupportTier};
@@ -652,42 +653,45 @@ impl Injectable for Dalamud {
         self.install(events, cancel).await
     }
 
-    fn prepare_launch(&self, plan: &mut LaunchPlan, events: &SetupEvents) -> Result<()> {
+    fn prepare_launch(&self, plan: &LaunchPlan, events: &SetupEvents) -> Result<Contribution> {
         let decline = |note: &str| {
             events.emit(SetupEvent::Caveat {
                 what: DALAMUD.to_owned(),
                 note: format!("not loading into this launch: {note}"),
             });
+            Ok(Contribution::Declined)
         };
         let Some(installed) = self.installed() else {
-            decline("nothing is installed");
-            return Ok(());
+            return decline("nothing is installed");
         };
         // The one hard gate. Dalamud reads the client's memory at offsets it was built for, so loading
         // it into another version is not a degraded experience, it is a crash.
         if installed.supported_game_ver != self.config.game_version {
-            decline(&format!(
+            return decline(&format!(
                 "the installed release targets game version {}, and this install is {}",
                 installed.supported_game_ver, self.config.game_version
             ));
-            return Ok(());
         }
         let Some(prefix) = plan.prefix_of().cloned() else {
-            decline("this launch has no prefix to translate paths against");
-            return Ok(());
+            return decline("this launch has no prefix to translate paths against");
         };
-        self.wrap(&prefix, &installed, plan)
+        self.wrap(&prefix, &installed, plan).map(Contribution::Edit)
     }
 }
 
 impl Dalamud {
-    /// Redirect `plan` through the injector, with every path in the form the injector reads.
+    /// The edit that redirects `plan` through the injector, with every path in the form the injector
+    /// reads.
     ///
     /// Translation is in-process against the prefix's own drive map, not seven `winepath` subprocesses
-    /// on the launch path. The injector itself is named by its host path, since the runner is what
-    /// executes it and a Windows path there would be one indirection for nothing.
+    /// on the launch path.
     #[cfg(target_os = "linux")]
-    fn wrap(&self, prefix: &Prefix, installed: &Installed, plan: &mut LaunchPlan) -> Result<()> {
+    fn wrap(
+        &self,
+        prefix: &Prefix,
+        installed: &Installed,
+        plan: &LaunchPlan,
+    ) -> Result<LaunchEdit> {
         let drives = prefix.drive_map().map_err(|source| AddonError::Inject {
             injectable: DALAMUD.to_owned(),
             tier: self.tier.clone(),
@@ -719,45 +723,50 @@ impl Dalamud {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
 
-        plan.set_inserted_args(injector_argv(&InjectorInvocation {
-            mode: self.config.mode,
-            game: &game,
-            working_directory: &working_directory,
-            configuration_path: &configuration_path,
-            logging_path: &logging_path,
-            plugin_directory: &plugin_directory,
-            asset_directory: &asset_directory,
-            client_language: self.config.language,
-            delay_initialize_ms: self
-                .config
-                .delay_initialize
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            troubleshooting_b64: EMPTY_TROUBLESHOOTING_PACK,
-            plugins: self.config.plugins,
-        }));
-        // In Windows form, like every other path handed to the injector. A host path works only
-        // because plain wine happens to accept one; a Proton runner sees a path that is not its own
-        // and routes the program through a launch helper rather than starting it directly, and the
+        // The injector is named in Windows form, like every other path handed to it. A host path works
+        // only because plain wine happens to accept one; a Proton runner sees a path that is not its
+        // own and routes the program through a launch helper rather than starting it directly, and the
         // injector's handoff to the game does not survive that. This is the one path whose reader is
         // the runner rather than the injector, which is the argument for spelling it the way every
         // runner reads rather than the way one of them tolerates.
-        plan.set_program(to_windows(&version_dir.join("Dalamud.Injector.exe"))?);
+        let mut redirect = Redirect::to(to_windows(&version_dir.join("Dalamud.Injector.exe"))?)
+            .with_args(injector_argv(&InjectorInvocation {
+                mode: self.config.mode,
+                game: &game,
+                working_directory: &working_directory,
+                configuration_path: &configuration_path,
+                logging_path: &logging_path,
+                plugin_directory: &plugin_directory,
+                asset_directory: &asset_directory,
+                client_language: self.config.language,
+                delay_initialize_ms: self
+                    .config
+                    .delay_initialize
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                troubleshooting_b64: EMPTY_TROUBLESHOOTING_PACK,
+                plugins: self.config.plugins,
+            }));
         if let Some(basename) = supervised {
-            plan.set_supervised(basename);
+            redirect = redirect.supervising(basename);
         }
-        // Both, and both in Windows form: the injector reads one and the runtime it starts reads the
-        // other, and a Unix path in either is a runtime that does not resolve.
-        let env = plan.env_mut();
-        env.insert("DALAMUD_RUNTIME".to_owned(), runtime.clone());
-        env.insert("DOTNET_ROOT".to_owned(), runtime);
-        env.insert("DALAMUD_BRANCH".to_owned(), installed.track.clone());
-        Ok(())
+        // Both variables, and both in Windows form: the injector reads one and the runtime it starts
+        // reads the other, and a Unix path in either is a runtime that does not resolve.
+        Ok(LaunchEdit::new()
+            .redirect(redirect)
+            .env("DALAMUD_RUNTIME", runtime.clone())
+            .env("DOTNET_ROOT", runtime)
+            .env("DALAMUD_BRANCH", installed.track.clone()))
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn wrap(&self, _prefix: &Prefix, _installed: &Installed, _plan: &mut LaunchPlan) -> Result<()> {
+    fn wrap(
+        &self,
+        _prefix: &Prefix,
+        _installed: &Installed,
+        _plan: &LaunchPlan,
+    ) -> Result<LaunchEdit> {
         Err(AddonError::Unsupported {
             what: "redirecting a launch through an injector is Linux-only",
         })

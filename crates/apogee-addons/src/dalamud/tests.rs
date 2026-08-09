@@ -74,6 +74,18 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
     .prefix(prefix)
 }
 
+/// Prepare a launch and apply what came back, which is the pass the loop makes over one companion.
+///
+/// A decline leaves the plan as it was built, so a test that expects an edit catches one through the
+/// assertions it was going to make anyway.
+fn applied(dalamud: &Dalamud, prefix: &Prefix, events: &SetupEvents) -> LaunchPlan {
+    let mut plan = plan(prefix);
+    if let Contribution::Edit(edit) = dalamud.prepare_launch(&plan, events).expect("prepare") {
+        edit.apply(&mut plan);
+    }
+    plan
+}
+
 fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<SetupEvent>) -> Vec<SetupEvent> {
     let mut out = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -99,11 +111,8 @@ fn wrapping_a_launch_keeps_the_game_as_the_supervised_process() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
     pretend_installed(&dalamud, GAME_VERSION);
-    let mut plan = plan(&prefix);
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::none())
-        .expect("prepare");
+    let plan = applied(&dalamud, &prefix, &SetupEvents::none());
 
     assert!(
         plan.program().ends_with("Dalamud.Injector.exe"),
@@ -145,11 +154,8 @@ fn the_runtime_reaches_the_child_as_a_windows_path_in_both_variables() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
     pretend_installed(&dalamud, GAME_VERSION);
-    let mut plan = plan(&prefix);
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::none())
-        .expect("prepare");
+    let plan = applied(&dalamud, &prefix, &SetupEvents::none());
 
     let runtime = plan.env().get("DALAMUD_RUNTIME").expect("DALAMUD_RUNTIME");
     assert_eq!(
@@ -175,16 +181,17 @@ fn a_release_built_for_another_game_version_leaves_the_launch_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
     pretend_installed(&dalamud, "2020.01.01.0000.0000");
-    let mut plan = plan(&prefix);
+    let plan = plan(&prefix);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::new(tx))
+    let contribution = dalamud
+        .prepare_launch(&plan, &SetupEvents::new(tx))
         .expect("declining is not a failure");
 
-    assert_eq!(plan.program(), "/games/ffxiv/game/ffxiv_dx11.exe");
-    assert!(plan.inserted_args().is_empty());
-    assert!(plan.supervised().is_none());
+    assert!(
+        matches!(contribution, Contribution::Declined),
+        "a release for another game version contributes nothing to the launch"
+    );
     assert!(
         notes(&drain(&mut rx))
             .iter()
@@ -199,13 +206,16 @@ fn a_release_built_for_another_game_version_leaves_the_launch_alone() {
 fn nothing_installed_leaves_the_launch_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
-    let mut plan = plan(&prefix);
+    let plan = plan(&prefix);
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::none())
+    let contribution = dalamud
+        .prepare_launch(&plan, &SetupEvents::none())
         .expect("declining is not a failure");
-    assert_eq!(plan.program(), "/games/ffxiv/game/ffxiv_dx11.exe");
-    assert!(plan.inserted_args().is_empty());
+
+    assert!(
+        matches!(contribution, Contribution::Declined),
+        "nothing installed contributes nothing to the launch"
+    );
 }
 
 /// The row's caveats are stated every time, before anything is fetched.

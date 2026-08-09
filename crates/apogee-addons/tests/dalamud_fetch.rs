@@ -395,10 +395,10 @@ async fn preparing_a_launch_on_its_own_contacts_nothing() -> Result<(), Box<dyn 
     let dist = Distribution::start(false, 432).await?;
     let dalamud = dalamud(root.path(), &dist)?;
     let prefix = prefix(&root.path().join("prefix"))?;
-    let mut plan =
+    let plan =
         apogee_runtime::LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
 
-    dalamud.prepare_launch(&mut plan, &SetupEvents::none())?;
+    dalamud.prepare_launch(&plan, &SetupEvents::none())?;
 
     for server in dist.servers() {
         assert_eq!(

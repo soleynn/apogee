@@ -16,8 +16,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use apogee_addons::{
-    AddonError, AddonPaths, Addons, ComponentManifest, DalamudConfig, Injectable, SetupEvent,
-    SetupEvents, SupportTier,
+    AddonError, AddonPaths, Addons, ComponentManifest, Contribution, DalamudConfig, Injectable,
+    LaunchEdit, Redirect, SetupEvent, SetupEvents, SupportTier,
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{LaunchPlan, Prefix, RunnerKind, Runtime, RuntimePaths};
@@ -64,10 +64,15 @@ impl Injectable for Framework {
 
     fn prepare_launch(
         &self,
-        plan: &mut LaunchPlan,
+        _plan: &LaunchPlan,
         _events: &SetupEvents,
-    ) -> Result<(), AddonError> {
+    ) -> Result<Contribution, AddonError> {
+        let edit = LaunchEdit::new()
+            .env("APOGEE_FRAMEWORK", "1")
+            .wrapper("frameworkrun");
         if self.fail_prepare {
+            // Composed and then dropped with the error, which is the shape of every implementor that
+            // does fallible work: what it had built cannot reach the launch.
             return Err(AddonError::Inject {
                 injectable: "Framework".to_owned(),
                 tier: SupportTier::FirstClass,
@@ -76,9 +81,7 @@ impl Injectable for Framework {
                 )),
             });
         }
-        plan.env_mut()
-            .insert("APOGEE_FRAMEWORK".to_owned(), "1".to_owned());
-        Ok(())
+        Ok(edit.into())
     }
 }
 
@@ -110,22 +113,18 @@ impl Injectable for Loader {
 
     fn prepare_launch(
         &self,
-        plan: &mut LaunchPlan,
+        plan: &LaunchPlan,
         _events: &SetupEvents,
-    ) -> Result<(), AddonError> {
-        let supervised = Path::new(plan.program())
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        plan.set_inserted_args(vec![format!("--loader={}", self.name)]);
-        plan.set_program(format!("C:\\{}\\loader.exe", self.name));
-        if let Some(basename) = supervised {
-            plan.set_supervised(basename);
+    ) -> Result<Contribution, AddonError> {
+        let mut redirect = Redirect::to(format!("C:\\{}\\loader.exe", self.name))
+            .with_args(vec![format!("--loader={}", self.name)]);
+        if let Some(basename) = Path::new(plan.program()).file_name() {
+            redirect = redirect.supervising(basename.to_string_lossy().into_owned());
         }
-        plan.env_mut().insert(
-            format!("APOGEE_{}", self.name.to_uppercase()),
-            "1".to_owned(),
-        );
-        Ok(())
+        Ok(LaunchEdit::new()
+            .redirect(redirect)
+            .env(format!("APOGEE_{}", self.name.to_uppercase()), "1")
+            .into())
     }
 }
 
@@ -163,6 +162,8 @@ fn prefix(root: &Path) -> Result<Prefix, Box<dyn Error>> {
     ))
 }
 
+/// A launch that already carries a wrapper of the launcher's own, so what a companion adds to that
+/// list is visible against something.
 fn plan(prefix: &Prefix) -> LaunchPlan {
     LaunchPlan::new(
         "/games/ffxiv/game/ffxiv_dx11.exe",
@@ -170,6 +171,7 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
         BTreeMap::new(),
     )
     .prefix(prefix)
+    .with_wrappers(vec!["gamemoderun".to_owned()])
 }
 
 fn events() -> (
@@ -215,6 +217,9 @@ async fn a_new_injectable_and_dalamud_go_through_the_same_calls() -> Result<(), 
         Some("1"),
         "the first-class companion contributed to the launch"
     );
+    // A companion composes what it needs around the launch rather than deciding what wraps it, so its
+    // wrapper goes inside the launcher's own instead of replacing the list.
+    assert_eq!(plan.wrappers(), ["gamemoderun", "frameworkrun"]);
     // Dalamud declined because nothing is installed, and declining is not a failure.
     assert!(plan.inserted_args().is_empty());
     Ok(())
@@ -251,6 +256,10 @@ async fn an_injectable_that_fails_is_reported_with_its_tier_and_does_not_stop_th
         "/games/ffxiv/game/ffxiv_dx11.exe",
         "the launch is untouched by a companion that could not compose one"
     );
+    // Not even the part it had already composed: the edit went with the error, so a failure halfway
+    // through cannot leave a launch carrying half a companion.
+    assert_eq!(plan.env().get("APOGEE_FRAMEWORK"), None);
+    assert_eq!(plan.wrappers(), ["gamemoderun"]);
     let mut rx = rx.into_inner()?;
     let mut reported = false;
     while let Ok(event) = rx.try_recv() {
