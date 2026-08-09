@@ -33,6 +33,21 @@ impl fmt::Debug for OtpSource {
 
 impl OtpSource {
     /// The variant's name, for a caller rendering a redacted view of something holding one.
+    ///
+    /// # Examples
+    /// ```
+    /// use apogee_otp::OtpSource;
+    /// use apogee_secrets::Secret;
+    ///
+    /// assert_eq!(OtpSource::Totp.label(), "Totp");
+    /// assert_eq!(OtpSource::Listener.label(), "Listener");
+    ///
+    /// // A typed code renders as its variant and never as its digits, which is what the whole
+    /// // hand-written `Debug` on this enum exists for.
+    /// let typed = OtpSource::Manual(Secret::from_string("287082".to_owned()));
+    /// assert_eq!(typed.label(), "Manual");
+    /// assert_eq!(format!("{typed:?}"), "Manual");
+    /// ```
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {

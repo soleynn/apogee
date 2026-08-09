@@ -37,6 +37,43 @@ const MIN_LIFE_SECS: u64 = 3;
 /// The guard is against reuse across sequential attempts, which is what the login server rejects.
 /// Two logins racing for one account can both mint the same code, because minting computes and does
 /// not reserve.
+///
+/// # Examples
+/// The read and the derive are two calls, and the login server's answer is what belongs between them:
+/// ```
+/// use std::sync::Arc;
+/// use std::time::{Duration, UNIX_EPOCH};
+///
+/// use apogee_otp::{ClockSkew, Otp, TotpParams};
+/// use apogee_secrets::{MemoryStore, SecretKind, SecretStore};
+/// use uuid::Uuid;
+///
+/// let account = Uuid::from_u128(0x5eed);
+/// let store = Arc::new(MemoryStore::new());
+/// store.set(
+///     account,
+///     SecretKind::TotpSecret,
+///     TotpParams::parse("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")?.into_secret(),
+/// )?;
+/// let otp = Otp::new(store as Arc<dyn SecretStore + Send + Sync>);
+///
+/// // One: the store read. This is the call that raises the platform's unlock prompt, and how long
+/// // it takes is up to the user.
+/// let prepared = otp.prepare_blocking(account)?;
+///
+/// // ... a login server round trip happens here, and only afterwards is its clock known ...
+/// let skew = ClockSkew::from_seconds(2);
+///
+/// // Two: the derive, against the window that clock is in.
+/// let minted = prepared.mint_at(UNIX_EPOCH + Duration::from_secs(1_234_567_905), skew)?;
+/// assert_eq!(minted.code().len(), 6);
+/// assert_eq!(minted.wait(), Duration::ZERO);
+///
+/// // Recorded once it has actually gone to the server, never at mint time: an attempt abandoned
+/// // before the code was sent has replayed nothing.
+/// otp.submitted(account, minted.code());
+/// # Ok::<(), apogee_otp::OtpError>(())
+/// ```
 #[derive(Clone)]
 pub struct Otp {
     store: Arc<dyn SecretStore + Send + Sync>,
@@ -125,6 +162,12 @@ impl fmt::Debug for Otp {
 /// reads, which is the one stretch where the correction can still be applied. It is not `Clone` (a
 /// clone is a second copy of the key with its own lifetime) and there is no way to read the key back
 /// out; the key is erased when this drops, so a caller drops it as soon as the code exists.
+///
+/// Nothing here enforces that anything happens in between, and nothing can: the fact that separates
+/// the two calls is which window the login server is in, which is not a value this crate could
+/// demand as an argument without inventing a token for it. Writing
+/// `otp.prepare(id).await?.mint(ClockSkew::NONE)?` compiles and is the shape to avoid, because it
+/// puts the unlock prompt's unbounded wait inside the thirty seconds the code is good for.
 pub struct Prepared {
     account: Uuid,
     params: TotpParams,
@@ -145,6 +188,41 @@ impl Prepared {
 
     /// [`Prepared::mint`] for a named instant rather than for the clock, for a caller that has one of
     /// its own: a test pinning it, or a caller correcting against a clock it already read.
+    ///
+    /// # Examples
+    /// A code the account has already submitted is stepped past rather than handed back, and what
+    /// that costs the caller is a wait it is told about:
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::time::{Duration, UNIX_EPOCH};
+    ///
+    /// use apogee_otp::{ClockSkew, Otp, TotpParams};
+    /// use apogee_secrets::{MemoryStore, SecretKind, SecretStore};
+    /// use uuid::Uuid;
+    ///
+    /// let account = Uuid::from_u128(0x5eed);
+    /// let store = Arc::new(MemoryStore::new());
+    /// store.set(
+    ///     account,
+    ///     SecretKind::TotpSecret,
+    ///     TotpParams::parse("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")?.into_secret(),
+    /// )?;
+    /// let otp = Otp::new(store as Arc<dyn SecretStore + Send + Sync>);
+    ///
+    /// // Fifteen seconds into a window, so the two answers below are different numbers.
+    /// let at = UNIX_EPOCH + Duration::from_secs(1_234_567_905);
+    ///
+    /// let first = otp.prepare_blocking(account)?.mint_at(at, ClockSkew::NONE)?;
+    /// assert_eq!(first.wait(), Duration::ZERO);
+    /// assert_eq!(first.valid_for(), Duration::from_secs(15));
+    /// otp.submitted(account, first.code());
+    ///
+    /// // Same account, same instant: the guard recognizes the code and takes the next window's.
+    /// let again = otp.prepare_blocking(account)?.mint_at(at, ClockSkew::NONE)?;
+    /// assert_eq!(again.wait(), Duration::from_secs(15));
+    /// assert_eq!(again.valid_for(), Duration::from_secs(30));
+    /// # Ok::<(), apogee_otp::OtpError>(())
+    /// ```
     ///
     /// # Errors
     /// As [`Prepared::mint`], reading `at` for the clock.

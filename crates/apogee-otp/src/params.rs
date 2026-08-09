@@ -57,6 +57,16 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// The name the stored form and the import grammar both spell it with.
+    ///
+    /// # Examples
+    /// ```
+    /// use apogee_otp::Algorithm;
+    ///
+    /// assert_eq!(Algorithm::Sha1.label(), "SHA1");
+    /// assert_eq!(Algorithm::Sha512.label(), "SHA512");
+    /// // The default is the one the login server takes.
+    /// assert_eq!(Algorithm::default(), Algorithm::Sha1);
+    /// ```
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -84,6 +94,22 @@ impl Algorithm {
 /// Each variant carries both halves of the comparison. A shell that knew only what was offered would
 /// have to spell the accepted value out as a literal of its own, which is a second copy of a rule
 /// this crate owns and the copy nothing updates when the rule moves.
+///
+/// # Examples
+/// ```
+/// use apogee_otp::{Deviation, TotpParams};
+///
+/// let params = TotpParams::parse(
+///     "otpauth://totp/apogee?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&digits=8",
+/// )?;
+///
+/// // Both halves travel together, so the sentence needs no literal of its own.
+/// assert_eq!(
+///     params.deviations(),
+///     vec![Deviation::Digits { offered: 8, accepted: 6 }]
+/// );
+/// # Ok::<(), apogee_otp::OtpError>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Deviation {
@@ -128,6 +154,37 @@ impl TotpParams {
     /// another program wrote. Nothing is forwarded to a general-purpose URL parser, and no reason
     /// carries a fragment of what was offered.
     ///
+    /// # Examples
+    /// A bare secret defaults every parameter to what the login server takes:
+    /// ```
+    /// use apogee_otp::{Algorithm, TotpParams};
+    ///
+    /// let params = TotpParams::parse("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")?;
+    /// assert_eq!(params.algorithm(), Algorithm::Sha1);
+    /// assert_eq!(params.digits(), 6);
+    /// assert_eq!(params.period(), 30);
+    /// # Ok::<(), apogee_otp::OtpError>(())
+    /// ```
+    ///
+    /// Case, padding, spacing and hyphens are all normalized away, because real exports and
+    /// hand-transcribed keys carry them:
+    /// ```
+    /// use apogee_otp::TotpParams;
+    ///
+    /// let spaced = TotpParams::parse("jbswy3dp ehpk3pxp-jbswy3dp-ehpk3pxp===")?;
+    /// assert_eq!(spaced.digits(), 6);
+    /// # Ok::<(), apogee_otp::OtpError>(())
+    /// ```
+    ///
+    /// A refusal names the rule and never any of the text:
+    /// ```
+    /// use apogee_otp::{OtpError, Rejected};
+    ///
+    /// let refused = apogee_otp::TotpParams::parse("otpauth://hotp/apogee?secret=JBSWY3DP")
+    ///     .expect_err("a counter-based profile is a different algorithm");
+    /// assert!(matches!(refused, OtpError::Import { reason: Rejected::Type }));
+    /// ```
+    ///
     /// # Errors
     /// [`OtpError::Import`], carrying the [`Rejected`] rule the text broke.
     pub fn parse(offered: &str) -> Result<Self, OtpError> {
@@ -154,6 +211,23 @@ impl TotpParams {
     /// Consumes `self` so no un-erased copy of the key stays behind at the call site. All four
     /// parameters are written explicitly and the label is a fixed literal, so nothing a user typed
     /// rides along into the store.
+    ///
+    /// # Examples
+    /// Whatever shape a secret was imported in, what goes to the store is the canonical one, and it
+    /// reads back through [`TotpParams::from_secret`] unchanged:
+    /// ```
+    /// use apogee_otp::TotpParams;
+    ///
+    /// let imported = TotpParams::parse("otpauth://totp/Someone%20Else?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")?;
+    /// let stored = imported.into_secret();
+    ///
+    /// let back = TotpParams::from_secret(&stored)?;
+    /// assert_eq!(back.digits(), 6);
+    /// assert_eq!(back.period(), 30);
+    /// // The label the user's export carried was dropped rather than stored.
+    /// assert!(!String::from_utf8_lossy(stored.expose()).contains("Someone"));
+    /// # Ok::<(), apogee_otp::OtpError>(())
+    /// ```
     #[must_use]
     pub fn into_secret(self) -> Secret {
         let mut text = self.canonical();
@@ -204,6 +278,26 @@ impl TotpParams {
 
     /// Every parameter that departs from what the login server accepts, in a fixed order. An empty
     /// answer is the usable case.
+    ///
+    /// # Examples
+    /// ```
+    /// use apogee_otp::{Deviation, TotpParams};
+    ///
+    /// let usual = TotpParams::parse("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")?;
+    /// assert!(usual.deviations().is_empty());
+    ///
+    /// // Reported rather than rewritten: the profile keeps what it was given, so the user gets
+    /// // wrong codes with an explanation rather than wrong codes without one.
+    /// let unusual = TotpParams::parse(
+    ///     "otpauth://totp/apogee?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&period=60",
+    /// )?;
+    /// assert_eq!(unusual.period(), 60);
+    /// assert_eq!(
+    ///     unusual.deviations(),
+    ///     vec![Deviation::Period { offered: 60, accepted: 30 }]
+    /// );
+    /// # Ok::<(), apogee_otp::OtpError>(())
+    /// ```
     #[must_use]
     pub fn deviations(&self) -> Vec<Deviation> {
         let mut found = Vec::new();
@@ -229,6 +323,32 @@ impl TotpParams {
     }
 
     /// The code for `at`, shifted by `skew`. Pure: no store, no reuse guard.
+    ///
+    /// No reuse guard is the difference from [`Prepared::mint`](crate::Prepared::mint), and it is why
+    /// a login uses that one instead: this call will hand back the same digits twice for two instants
+    /// in the same window, and the login server refuses a code it has already seen.
+    ///
+    /// # Examples
+    /// The RFC 6238 test vector, truncated to the six digits this profile asks for:
+    /// ```
+    /// use std::time::{Duration, SystemTime};
+    ///
+    /// use apogee_otp::{ClockSkew, TotpParams};
+    ///
+    /// // Base32 of the RFC's ASCII secret "12345678901234567890".
+    /// let params = TotpParams::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")?;
+    /// let at = SystemTime::UNIX_EPOCH + Duration::from_secs(59);
+    ///
+    /// let code = params.code(at, ClockSkew::NONE)?;
+    /// assert_eq!(code.expose(), "287082");
+    ///
+    /// // A skew that stays inside the window changes nothing; one that steps out of it does.
+    /// let same = params.code(at, ClockSkew::from_seconds(-29))?;
+    /// assert_eq!(same.expose(), "287082");
+    /// let next = params.code(at, ClockSkew::from_seconds(1))?;
+    /// assert_ne!(next.expose(), "287082");
+    /// # Ok::<(), apogee_otp::OtpError>(())
+    /// ```
     ///
     /// # Errors
     /// [`OtpError::Clock`] if `at` plus `skew` is not an instant a counter is defined for.

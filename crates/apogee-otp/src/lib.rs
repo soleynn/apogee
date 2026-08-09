@@ -29,13 +29,57 @@
 //! # Layout
 //! - [`Otp`] the handle: read the secret, record what was submitted.
 //! - [`Prepared`] one account's secret, in hand and waiting for the clock it derives against.
-//! - [`TotpParams`] the validated profile, and the import grammar behind it.
+//! - [`TotpParams`] the validated profile, and the import grammar behind it. [`Algorithm`] is the
+//!   hash it derives with, and [`Deviation`] is each parameter the login server will not take a code
+//!   derived from, reported rather than rewritten.
 //! - [`Code`] and [`Minted`] a live code and when it may be sent.
 //! - [`ClockSkew`] the offset between this host's clock and the login server's.
 //! - [`OtpSource`] where a login's code comes from.
 //! - [`Listener`] the local delivery endpoint, and [`Received`] what one wait took off it.
-//! - [`ListenerConfig`] where it sits, [`SourceFilter`] who may reach it, [`ListenerConsent`] the
-//!   token that says a user asked for a port on their network at all.
+//! - [`ListenerConfig`] where it sits, [`SourceFilter`] (and the [`Pinned`] set it may carry) who may
+//!   reach it, [`COMPAT_PORT`] the port the companion app dials, [`ListenerConsent`] the token that
+//!   says a user asked for a port on their network at all.
+//! - [`OtpError`] is the single error type every fallible surface returns, and [`Rejected`] names
+//!   which rule a refused import broke.
+//!
+//! # Features
+//! `fuzzing` exposes the two grammars that take hostile input, the secret import and the listener's
+//! request line, plus the listener's framing, as plain functions a fuzz target can call. It is off by
+//! default and switched on by the fuzz workspace and by nothing else, so no shipping build has a
+//! parser entry point in its public API.
+//!
+//! # Examples
+//! Importing a secret, and the two calls a login makes against it:
+//! ```
+//! use std::sync::Arc;
+//! use std::time::{Duration, UNIX_EPOCH};
+//!
+//! use apogee_otp::{ClockSkew, Otp, TotpParams};
+//! use apogee_secrets::{MemoryStore, SecretKind, SecretStore};
+//! use uuid::Uuid;
+//!
+//! // What a user pastes, in the one form this crate stores.
+//! let imported = TotpParams::parse("otpauth://totp/Apogee?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")?;
+//! assert!(imported.deviations().is_empty());
+//!
+//! let account = Uuid::from_u128(0x5eed);
+//! let store = Arc::new(MemoryStore::new());
+//! store.set(account, SecretKind::TotpSecret, imported.into_secret())?;
+//!
+//! let otp = Otp::new(store as Arc<dyn SecretStore + Send + Sync>);
+//!
+//! // The read, which may sit on an unlock prompt for as long as the user takes.
+//! let prepared = otp.prepare_blocking(account)?;
+//!
+//! // The derive, once the login server's clock is known.
+//! let minted = prepared.mint_at(
+//!     UNIX_EPOCH + Duration::from_secs(1_234_567_905),
+//!     ClockSkew::from_seconds(2),
+//! )?;
+//! assert_eq!(minted.wait(), Duration::ZERO);
+//! assert_eq!(minted.code().len(), 6);
+//! # Ok::<(), apogee_otp::OtpError>(())
+//! ```
 
 mod code;
 mod error;
