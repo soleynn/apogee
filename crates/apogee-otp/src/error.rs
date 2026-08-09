@@ -14,6 +14,29 @@ use thiserror::Error;
 /// No variant carries a fragment of a secret or of a code. The enum is wrapped by the launcher's
 /// top-level error and rendered by a shell, so anything a caller passed in would reach a log line
 /// through a route this crate does not choose.
+///
+/// There is no passthrough variant for a socket or filesystem failure, and the absence is the
+/// contract rather than an omission. Every IO failure this crate can reach is already named as the
+/// thing it means to a login: a bind that lost the race is [`ListenerBind`](Self::ListenerBind), and
+/// a failure on one connection is that connection's outcome rather than the wait's. A
+/// `From<std::io::Error>` conversion would let a `?` added later route one of those past its own
+/// variant and reach a caller as an untriageable line.
+///
+/// # Examples
+/// ```
+/// use apogee_otp::{OtpError, Rejected, TotpParams};
+///
+/// let refused = TotpParams::parse("not base32 at all!")
+///     .expect_err("the alphabet rule refuses this");
+/// assert!(matches!(
+///     refused,
+///     OtpError::Import { reason: Rejected::SecretAlphabet }
+/// ));
+/// assert_eq!(
+///     refused.to_string(),
+///     "the offered one-time-password secret is not usable: the secret is not base32"
+/// );
+/// ```
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum OtpError {
@@ -64,9 +87,6 @@ pub enum OtpError {
     /// Nothing delivered a code inside the deadline.
     #[error("timed out waiting for a code")]
     Timeout,
-    /// A local filesystem or socket failure.
-    #[error("io error")]
-    Io(#[from] std::io::Error),
 }
 
 /// Why text offered as a one-time-password secret was refused.
@@ -157,7 +177,6 @@ mod tests {
                 OtpError::Interrupted => (),
                 OtpError::ListenerBind { .. } => (),
                 OtpError::Timeout => (),
-                OtpError::Io(_) => (),
             }
         }
 
@@ -196,7 +215,6 @@ mod tests {
                 "failed to bind the one-time-password listener on port 4646",
             ),
             (OtpError::Timeout, "timed out waiting for a code"),
-            (OtpError::Io(std::io::Error::other("socket")), "io error"),
         ];
         for (err, expected) in cases {
             assert_eq!(err.to_string(), expected);
@@ -249,9 +267,17 @@ mod tests {
 
     /// The rendered strings are the whole public surface of these errors, so none of them may echo a
     /// value a caller passed in. A regression here is a leak, not a wording change.
+    ///
+    /// Driven through the parser rather than over a hand-built variant, so what it covers is the
+    /// route a real secret takes: the text goes in, a reason comes back, and the reason is a closed
+    /// enum this crate owns with nowhere in it for a fragment of the input to sit.
     #[test]
     fn no_error_renders_a_caller_supplied_value() {
-        let rendered = OtpError::Io(std::io::Error::other("JBSWY3DPEHPK3PXP")).to_string();
+        const OFFERED: &str = "otpauth://totp/JBSWY3DPEHPK3PXP?secret=JBSWY3DPEHPK3PXP";
+
+        let rendered = crate::TotpParams::parse(OFFERED)
+            .expect_err("a ten-byte key is under the floor and has to be refused")
+            .to_string();
         assert!(!rendered.contains("JBSWY3DP"), "{rendered}");
     }
 }
