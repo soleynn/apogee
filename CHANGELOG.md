@@ -18,6 +18,7 @@ is tagged with its change type. Versioning aims to follow
 - Correct the transport contract doc and add wire-level accept tests (#146) _(documentation)_
 - Pin Accept-Language to XIVLauncher's actual seed-0 draw (#151) _(fixed)_
 - Apply the catalog's prefix setup outside a launch (#162) _(fixed)_
+- Report the setup a prefix is missing in its health check (#163) _(fixed)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
