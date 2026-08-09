@@ -379,17 +379,27 @@ impl GameHandle for RuntimeGameHandle {
 /// Spawn a task relaying the runtime's stream onto `events`, returning the runtime progress sink to
 /// hand to `apogee-runtime`.
 ///
-/// The task outlives the call it was made for. A launch keeps a clone of the sink alive to report the
-/// status of the program it spawned, which is not something the launch can wait for, so the relay ends
-/// when that report lands rather than when `launch` returns.
+/// The task outlives the call it was made for: a launch keeps a clone of the sink alive to report the
+/// status of the program it spawned, and under a container-style runner that program outlives the whole
+/// session. So the relay holds a **weak** sender. A strong one would keep the flow's event stream open
+/// for as long as that program ran, and a launcher told to detach once the game is up would sit there
+/// for the rest of the session instead, looking like it had hung.
+///
+/// Upgrading per send is also what implements "a late status is dropped rather than held for": once the
+/// flow has finished and let go of its sender there is nobody left to tell, so the report goes nowhere.
+/// The flow holds its sender across every call that relays here, so nothing in flight is lost.
 fn relay_progress(events: &UnboundedSender<Event>) -> Progress {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let events = events.clone();
+    let events = events.downgrade();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if let Some(event) = to_core_event(event) {
-                let _ = events.send(event);
-            }
+            let Some(event) = to_core_event(event) else {
+                continue;
+            };
+            let Some(sender) = events.upgrade() else {
+                break;
+            };
+            let _ = sender.send(event);
         }
     });
     Progress::new(tx)
@@ -517,5 +527,25 @@ mod tests {
     fn the_runtimes_own_steps_stop_at_the_seam() {
         assert!(to_core_event(RuntimeEvent::GameResolved { pid: 42 }).is_none());
         assert!(to_core_event(RuntimeEvent::PrefixReady).is_none());
+    }
+
+    /// A launch holds its progress sink open until the program it spawned exits, which under a
+    /// container-style runner is the whole session. The relay must not turn that into a hold on the
+    /// flow's own stream: a launcher told to detach once the game is up would stay attached for hours,
+    /// which is indistinguishable from having hung.
+    #[tokio::test]
+    async fn the_event_stream_closes_though_a_launchs_program_is_still_running() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let progress = relay_progress(&tx);
+
+        // The flow finished and let go of its sender; the launch's sink is still alive.
+        drop(tx);
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
+        assert!(
+            matches!(ended, Ok(None)),
+            "the stream was held open by the relay: {ended:?}"
+        );
+        drop(progress);
     }
 }
