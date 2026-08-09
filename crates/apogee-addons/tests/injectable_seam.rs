@@ -82,6 +82,53 @@ impl Injectable for Framework {
     }
 }
 
+/// A companion that reaches the game the way the shipped one does: by becoming the program the launch
+/// spawns, with its own flags ahead of the game's argument string and the game named as the process to
+/// wait on.
+struct Loader {
+    name: &'static str,
+}
+
+#[async_trait]
+impl Injectable for Loader {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn support_tier(&self) -> SupportTier {
+        SupportTier::FirstClass
+    }
+
+    async fn ensure(
+        &self,
+        _prefix: &Prefix,
+        _cancel: &CancellationToken,
+        _events: &SetupEvents,
+    ) -> Result<(), AddonError> {
+        Ok(())
+    }
+
+    fn prepare_launch(
+        &self,
+        plan: &mut LaunchPlan,
+        _events: &SetupEvents,
+    ) -> Result<(), AddonError> {
+        let supervised = Path::new(plan.program())
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        plan.set_inserted_args(vec![format!("--loader={}", self.name)]);
+        plan.set_program(format!("C:\\{}\\loader.exe", self.name));
+        if let Some(basename) = supervised {
+            plan.set_supervised(basename);
+        }
+        plan.env_mut().insert(
+            format!("APOGEE_{}", self.name.to_uppercase()),
+            "1".to_owned(),
+        );
+        Ok(())
+    }
+}
+
 /// The row the launch setting reads, pointed at a name that cannot resolve.
 ///
 /// Deliberately not the real distribution. What is under test is the loop, not the download, and a test
@@ -212,6 +259,74 @@ async fn an_injectable_that_fails_is_reported_with_its_tier_and_does_not_stop_th
         }
     }
     assert!(reported, "the failure reached the event stream");
+    Ok(())
+}
+
+/// A launch spawns one program, so two companions that each become it cannot share one. The first to
+/// redirect keeps it, the second is refused by name, and the game still starts: a companion is an
+/// addition to a launch, never a precondition for one. The refused one leaves nothing behind, because a
+/// plan carrying one companion's argv and env around another's program is a launch neither composed.
+#[tokio::test]
+async fn a_second_companion_cannot_redirect_a_launch_that_is_already_redirected()
+-> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let addons = addons(root.path())?;
+    let prefix = prefix(&root.path().join("prefix"))?;
+    let first = Loader { name: "Loader" };
+    let second = Loader { name: "Injector" };
+    let both: [&dyn Injectable; 2] = [&first, &second];
+    let (sink, rx) = events();
+    let mut plan = plan(&prefix);
+
+    let failures = addons.prepare_launch(&both, &mut plan, &sink);
+
+    assert!(
+        matches!(
+            failures.as_slice(),
+            [AddonError::LaunchAlreadyRedirected {
+                injectable,
+                redirector,
+            }] if injectable == "Injector" && redirector == "Loader"
+        ),
+        "the second is refused, and the failure names both: {failures:?}"
+    );
+    assert_eq!(
+        plan.program(),
+        "C:\\Loader\\loader.exe",
+        "the launch is the first one's"
+    );
+    assert_eq!(
+        plan.inserted_args(),
+        ["--loader=Loader"],
+        "with the first one's flags, not the second's"
+    );
+    assert_eq!(
+        plan.env().get("APOGEE_LOADER").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        plan.env().get("APOGEE_INJECTOR"),
+        None,
+        "the refused companion left nothing in the launch"
+    );
+    // Still a launch: the game's own argument string is untouched and the launcher waits on the game
+    // rather than on the loader that wraps it.
+    assert_eq!(plan.args(), "//**sqex0003**//");
+    assert_eq!(plan.supervised(), Some("ffxiv_dx11.exe"));
+
+    drop(sink);
+    let mut rx = rx.into_inner()?;
+    let mut reported = Vec::new();
+    while let Ok(SetupEvent::Failed { what, reason }) = rx.try_recv() {
+        reported.push(format!("{what}: {reason}"));
+    }
+    assert_eq!(
+        reported.len(),
+        1,
+        "the loser is reported once, and only the loser: {reported:?}"
+    );
+    assert!(reported[0].starts_with("Injector: "), "{reported:?}");
+    assert!(reported[0].contains("Loader already did"), "{reported:?}");
     Ok(())
 }
 
