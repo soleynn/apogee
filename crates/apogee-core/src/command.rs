@@ -136,9 +136,10 @@ pub enum PrefixAction {
     /// Create the prefix if it is not there, and bring it up to what a prepared one has. What a
     /// launch does first, on its own.
     Create,
-    /// Report what has drifted, changing nothing.
+    /// Report what has drifted and what setup the prefix is missing, changing nothing.
     Check,
-    /// Apply a targeted fix for each problem that has one, and report what is left. Never deletes.
+    /// Apply a targeted fix for each problem that has one, apply the setup the check reports missing,
+    /// and report what is left. Never deletes.
     Fix,
     /// Delete the prefix and build it again.
     ///
@@ -164,11 +165,11 @@ pub enum Event {
     /// since they are only useful while the thing is being set up.
     Setup(apogee_addons::SetupEvent),
     Frontier(FrontierData),
-    /// What a prefix check found, relayed verbatim. Empty is a prefix with nothing wrong.
+    /// What a prefix check found.
     ///
     /// A report rather than a stream of findings: the whole point is the list a user decides about,
     /// and a list arriving one item at a time is one a shell has to reassemble before it can ask.
-    PrefixHealth(apogee_runtime::PrefixHealth),
+    Prefix(PrefixReport),
     /// Something true and worth saying that the run has already worked around.
     ///
     /// Its own variant rather than a [`FlowState`] because a flow is never *in* one of these: nothing
@@ -176,6 +177,38 @@ pub enum Event {
     /// state would sit on a notice the run moved past a moment later.
     Notice(Notice),
     Error(CoreError),
+}
+
+/// Everything wrong with one prefix, from both of the layers that have a view of it.
+///
+/// Composed here because neither layer can hold the other's half: what a prefix *is* belongs to
+/// `apogee-runtime`, the setup a prefix should have belongs to `apogee-addons`, and the addon layer
+/// sits on top of the runtime rather than beside it. Wiring the two together is the one thing this
+/// crate is for, so the composed answer is its type rather than a variant smuggled into either.
+#[derive(Debug, Clone, Default)]
+pub struct PrefixReport {
+    /// The runtime's own diagnosis: the skeleton, the drive maps, the runner it records, the graphics
+    /// translation it records. Empty is a prefix whose *structure* is intact.
+    pub health: apogee_runtime::PrefixHealth,
+    /// The prefix-setup verbs the signed catalog publishes that this prefix does not have, in the
+    /// catalog's own order.
+    ///
+    /// `None` is the catalog being unreadable, which is a question left unanswered rather than an
+    /// answer of "none": a prefix missing every verb and a launcher that could not find out what the
+    /// verbs are must not report the same thing. Why it could not be read arrives separately, as the
+    /// addon layer's own [`Event::Setup`].
+    pub missing_setup: Option<Vec<String>>,
+}
+
+impl PrefixReport {
+    /// Whether the prefix is intact, has every published verb, and nothing went unanswered.
+    ///
+    /// An unanswered half is deliberately not "nothing wrong". A check that could not look is the one
+    /// report a user must never read as a clean bill.
+    #[must_use]
+    pub fn nothing_wrong(&self) -> bool {
+        self.health.is_healthy() && self.missing_setup.as_ref().is_some_and(Vec::is_empty)
+    }
 }
 
 /// An advisory a run raises in passing: true, actionable by the user later, and not something the run

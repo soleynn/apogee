@@ -51,7 +51,7 @@ pub use apogee_secrets::{
 };
 pub use command::{
     Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Notice, PrefixAction,
-    Progress,
+    PrefixReport, Progress,
 };
 pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;

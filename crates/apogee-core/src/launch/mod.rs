@@ -57,6 +57,20 @@ pub(crate) struct Prepared {
     pub(crate) catalog: Option<apogee_runtime::Catalog>,
 }
 
+/// A prefix that was looked at, and what the runtime made of it.
+///
+/// The prefix comes back with the diagnosis because the runtime's view is only half of one: what setup
+/// a prefix is missing is the addon layer's answer, and asking it needs the same prefix handle this
+/// seam already built. Handing back only the health would leave the flow able to report half the
+/// question and unable to ask the other half.
+#[derive(Debug, Clone)]
+pub(crate) struct Examined {
+    /// The prefix that was examined. `None` for a backend with no real prefix, as [`Prepared`].
+    pub(crate) prefix: Option<apogee_runtime::Prefix>,
+    /// The runtime's own diagnosis.
+    pub(crate) health: apogee_runtime::PrefixHealth,
+}
+
 /// Prepares a runner/prefix and launches the supervised game.
 #[async_trait::async_trait]
 pub(crate) trait LaunchBackend: Send + Sync {
@@ -81,7 +95,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
+    ) -> Result<Option<Examined>, CoreError>;
 
     /// Apply a targeted fix for each problem that has one, and report what is left.
     async fn fix_prefix(
@@ -90,7 +104,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError>;
+    ) -> Result<Option<Examined>, CoreError>;
 
     /// Delete the prefix and build it again, handing back the fresh one.
     ///
@@ -127,9 +141,17 @@ pub(crate) mod fake {
     use tokio::sync::Notify;
 
     use super::{
-        CancellationToken, CoreError, Event, GameHandle, LaunchBackend, LaunchPlan, Prepared,
-        RunnerSelection, UnboundedSender,
+        CancellationToken, CoreError, Event, Examined, GameHandle, LaunchBackend, LaunchPlan,
+        Prepared, RunnerSelection, UnboundedSender,
     };
+
+    /// A diagnosis with no prefix behind it, for the reason `prepare` hands back none.
+    fn examined(health: apogee_runtime::PrefixHealth) -> Examined {
+        Examined {
+            prefix: None,
+            health,
+        }
+    }
 
     /// A fake backend. `exiting` returns handles that exit immediately (drives through to `Exited`);
     /// `running` returns handles that stay running until killed. `was_killed` reports whether any
@@ -298,8 +320,8 @@ pub(crate) mod fake {
             _prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
-        ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError> {
-            Ok(self.health.clone())
+        ) -> Result<Option<Examined>, CoreError> {
+            Ok(self.health.clone().map(examined))
         }
 
         async fn fix_prefix(
@@ -308,11 +330,11 @@ pub(crate) mod fake {
             _prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
-        ) -> Result<Option<apogee_runtime::PrefixHealth>, CoreError> {
+        ) -> Result<Option<Examined>, CoreError> {
             self.fixed.store(true, Ordering::SeqCst);
             // A fix resolves whatever the double was told to report, which is what lets a test tell
             // "the fix ran" from "the fix ran and something is still wrong".
-            Ok(self.residual.clone())
+            Ok(self.residual.clone().map(examined))
         }
 
         async fn recreate_prefix(

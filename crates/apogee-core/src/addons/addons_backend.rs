@@ -52,7 +52,7 @@ impl AddonBackend for AddonsBackend {
             return;
         };
         let (setup, relay) = relay_setup(events);
-        let Some(manifest) = self.setup_pass(&prefix, cancel, &setup).await else {
+        let Some(manifest) = self.setup_pass(&prefix, cancel, &setup).await.manifest else {
             finish(setup, relay).await;
             return;
         };
@@ -69,13 +69,39 @@ impl AddonBackend for AddonsBackend {
         prefix: Option<Prefix>,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) {
-        let Some(prefix) = prefix else {
-            return;
-        };
+    ) -> Option<Vec<String>> {
+        let prefix = prefix?;
         let (setup, relay) = relay_setup(events);
-        self.setup_pass(&prefix, cancel, &setup).await;
+        let left = self.setup_pass(&prefix, cancel, &setup).await.still_missing;
         finish(setup, relay).await;
+        left
+    }
+
+    async fn missing_setup(
+        &self,
+        prefix: Option<Prefix>,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Option<Vec<String>> {
+        let prefix = prefix?;
+        let (setup, relay) = relay_setup(events);
+        let manifest = self.catalog_manifest(cancel, &setup).await;
+        let missing = manifest.and_then(|manifest| {
+            self.addons
+                .missing_setup(&manifest, &prefix)
+                // The prefix's own record is unreadable, which is the same refusal an apply makes over
+                // it: with no record there is no telling setup that is needed from setup that is not,
+                // and answering "none" would be inventing the half that could not be read.
+                .inspect_err(|err| {
+                    tracing::warn!(
+                        reason = err.chain(),
+                        "what the prefix is missing is unknown"
+                    );
+                })
+                .ok()
+        });
+        finish(setup, relay).await;
+        missing
     }
 
     async fn start(
@@ -113,33 +139,53 @@ impl AddonBackend for AddonsBackend {
     }
 }
 
+/// What one setup pass leaves behind.
+#[derive(Default)]
+struct SetupPass {
+    /// The catalog the pass read, so a launch that needs the row for what it loads into the game does
+    /// not fetch and re-verify the same signed file twice, and cannot get a different answer the
+    /// second time.
+    manifest: Option<ComponentManifest>,
+    /// The verbs the pass did not leave the prefix with, or `None` when it could not tell.
+    still_missing: Option<Vec<String>>,
+}
+
 impl AddonsBackend {
-    /// Apply what the catalog publishes to `prefix`, and hand back the catalog it read.
-    ///
-    /// Returned rather than fetched twice, because a launch needs the same manifest again for the row
-    /// describing what it loads into the game, and a second fetch could answer differently.
+    /// Apply what the catalog publishes to `prefix`.
     async fn setup_pass(
         &self,
         prefix: &Prefix,
         cancel: &CancellationToken,
         setup: &SetupEvents,
-    ) -> Option<ComponentManifest> {
-        let manifest = self.launch_manifest(cancel, setup).await?;
-        match self
+    ) -> SetupPass {
+        let Some(manifest) = self.catalog_manifest(cancel, setup).await else {
+            return SetupPass::default();
+        };
+        let still_missing = match self
             .addons
             .apply_setup(&manifest, prefix, cancel, setup)
             .await
         {
             Ok(report) => {
                 tracing::debug!(applied = report.present().len(), "prefix setup complete");
+                // What the pass just did, rather than a second reading of the prefix: this pass
+                // applied every verb the prefix was missing, so the ones it reports as failed are
+                // exactly the ones still missing, and nothing else has touched the prefix since.
+                Some(report.failed().into_iter().map(str::to_owned).collect())
             }
             // Each verb that failed is already on the stream as the event that failed it, so a whole-call
             // failure here is the prefix record being unreadable or the run being stopped. Neither is
             // worth failing a launch over: the setup is hygiene, and a stopped run is about to be torn
-            // down anyway.
-            Err(err) => tracing::warn!(reason = err.chain(), "the prefix setup did not complete"),
+            // down anyway. Neither leaves anything to claim about what the prefix now has.
+            Err(err) => {
+                tracing::warn!(reason = err.chain(), "the prefix setup did not complete");
+                None
+            }
+        };
+        SetupPass {
+            manifest: Some(manifest),
+            still_missing,
         }
-        Some(manifest)
     }
 
     /// Install whatever this launch loads into the game, and let it compose the launch.
@@ -177,14 +223,14 @@ impl AddonsBackend {
         }
     }
 
-    /// The manifest to read a launch's prefix setup from: the hosted one, or the last one a fetch
-    /// verified when it cannot be reached.
+    /// The manifest to read a prefix's setup from: the hosted one, or the last one a fetch verified
+    /// when it cannot be reached.
     ///
     /// Announced rather than silent, because which rows a launch applied is exactly what somebody
     /// debugging one needs to know. Announced as a *report* rather than an error, because falling back to
     /// a catalog that once verified is the correct outcome here, and a shell that turned it into a failed
     /// exit would report a game that started fine as a failure.
-    async fn launch_manifest(
+    async fn catalog_manifest(
         &self,
         cancel: &CancellationToken,
         setup: &SetupEvents,
