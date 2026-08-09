@@ -176,7 +176,33 @@ pub enum Event {
     /// waits on it, the next step follows regardless, and a shell binding a status line to the last
     /// state would sit on a notice the run moved past a moment later.
     Notice(Notice),
+    /// The program a launch was spawned as reported its exit status, for a launch something redirected.
+    LaunchProgramExited(LaunchProgramExit),
     Error(CoreError),
+}
+
+/// What the program a launch was spawned as reported when it exited.
+///
+/// Only raised for a launch something redirected, where that program is a loader and the game is a
+/// separate process it started. The status is then the loader's own report about whether it did its
+/// job, and it is the only one it makes: the game is running either way, so nothing else tells a
+/// companion that loaded from one that did not.
+///
+/// Carried uninterpreted. Which non-zero code means what belongs to whatever put the program on the
+/// launch, and the loaders that redirect one number their own failures; deciding here would be guessing
+/// on their behalf, and wrong the next time either of them renumbered.
+///
+/// Arrives whenever that program happens to exit, which is not tied to the launch: a loader that starts
+/// the game and returns reports seconds in, a container-style runner not until the session is over. One
+/// that lands after the flow has said the launch ended is dropped rather than waited for, because what
+/// it answers is only worth acting on while the session is still running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchProgramExit {
+    /// The program as it was spawned. It is what names the report, since nothing else can: the layer
+    /// that knows which companion redirected the launch is not the one that reaps it.
+    pub program: String,
+    /// Its raw status.
+    pub status: apogee_runtime::ProgramStatus,
 }
 
 /// Everything wrong with one prefix, from both of the layers that have a view of it.

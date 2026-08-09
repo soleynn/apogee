@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{Examined, GameHandle, LaunchBackend, Prepared};
-use crate::command::{Event, Progress as CoreProgress};
+use crate::command::{Event, LaunchProgramExit, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
 
@@ -376,22 +376,45 @@ impl GameHandle for RuntimeGameHandle {
     }
 }
 
-/// Spawn a task relaying runner download progress onto `events` as core progress, returning the
-/// runtime progress sink to hand to `apogee-runtime`.
+/// Spawn a task relaying the runtime's stream onto `events`, returning the runtime progress sink to
+/// hand to `apogee-runtime`.
+///
+/// The task outlives the call it was made for. A launch keeps a clone of the sink alive to report the
+/// status of the program it spawned, which is not something the launch can wait for, so the relay ends
+/// when that report lands rather than when `launch` returns.
 fn relay_progress(events: &UnboundedSender<Event>) -> Progress {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let events = events.clone();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if let RuntimeEvent::Download(p) = event {
-                let _ = events.send(Event::Progress(CoreProgress {
-                    completed: p.bytes_done,
-                    total: p.total.unwrap_or(0),
-                }));
+            if let Some(event) = to_core_event(event) {
+                let _ = events.send(event);
             }
         }
     });
     Progress::new(tx)
+}
+
+/// The core event one runtime event becomes, or `None` for one the shell has no use for.
+///
+/// Most of the stream is the runtime narrating its own steps to itself; what crosses this seam is what
+/// a user waits on (bytes) or has to be told (a companion's own report about whether it loaded).
+fn to_core_event(event: RuntimeEvent) -> Option<Event> {
+    match event {
+        RuntimeEvent::Download(p) => Some(Event::Progress(CoreProgress {
+            completed: p.bytes_done,
+            total: p.total.unwrap_or(0),
+        })),
+        // Passed through with the status untouched. This layer knows a program was redirected and not
+        // which companion did it, so it adds nothing and hides nothing.
+        RuntimeEvent::LaunchProgramExited { program, status } => {
+            Some(Event::LaunchProgramExited(LaunchProgramExit {
+                program,
+                status,
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// Resolve the runner catalog manifest and signature URLs. The catalog is hosted at a fixed HTTPS
@@ -470,5 +493,29 @@ mod tests {
 
         // Idempotent: a second call over the same directory succeeds.
         assert_eq!(synthesize_system_wine(tmp.path()).unwrap(), dir);
+    }
+
+    /// The one report a launch cannot reconstruct from anything else has to cross the seam, and cross it
+    /// with the status as it was read. A relay that dropped it is the hole this arm exists to close.
+    #[test]
+    fn a_launch_programs_status_reaches_the_shell_uninterpreted() {
+        let event = to_core_event(RuntimeEvent::LaunchProgramExited {
+            program: "/loader/Loader.exe".to_owned(),
+            status: apogee_runtime::ProgramStatus::Code(3),
+        });
+
+        let Some(Event::LaunchProgramExited(exit)) = event else {
+            panic!("the status did not reach the shell: {event:?}");
+        };
+        assert_eq!(exit.program, "/loader/Loader.exe");
+        assert_eq!(exit.status, apogee_runtime::ProgramStatus::Code(3));
+    }
+
+    /// The rest of the runtime's stream is it narrating its own steps. Forwarding those would put a line
+    /// in front of the user for every prefix and every scan, none of which is theirs to act on.
+    #[test]
+    fn the_runtimes_own_steps_stop_at_the_seam() {
+        assert!(to_core_event(RuntimeEvent::GameResolved { pid: 42 }).is_none());
+        assert!(to_core_event(RuntimeEvent::PrefixReady).is_none());
     }
 }
