@@ -324,7 +324,7 @@ fn a_version_directory_without_its_hash_map_is_not_intact() {
     for name in integrity::REQUIRED {
         std::fs::write(dir.join(name), b"MZ").expect("write");
     }
-    assert!(!dalamud.tree_is_intact(&dir));
+    assert!(dalamud.version_fault(&dir).is_some());
 
     let hashes: BTreeMap<String, String> = integrity::REQUIRED
         .iter()
@@ -340,5 +340,93 @@ fn a_version_directory_without_its_hash_map_is_not_intact() {
         serde_json::to_vec(&hashes).expect("serialize"),
     )
     .expect("write");
-    assert!(dalamud.tree_is_intact(&dir));
+    assert!(dalamud.version_fault(&dir).is_none());
+}
+
+/// A tree whose bytes moved is an integrity failure that names the file and both digests, not a
+/// sentence about the tree.
+///
+/// This is the reading somebody does when an install keeps failing: "it does not match its own hashes"
+/// is true of a distribution that served a bad build and of a disk that corrupted one file, and the
+/// file plus the two digests is what tells them apart. The check that produces this used to answer with
+/// a bool, so there was nothing to say either way.
+#[test]
+fn a_file_whose_bytes_moved_is_named_with_both_digests() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dalamud, _prefix) = dalamud(tmp.path(), "wine-xiv-staging");
+    let dir = dalamud.paths.version_dir("15.0.2.3");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    for name in integrity::REQUIRED {
+        std::fs::write(dir.join(name), b"MZ").expect("write");
+    }
+    // A map that describes the tree correctly except for one file, which is what a partly-corrupted
+    // download looks like from here.
+    let mut hashes: BTreeMap<String, String> = integrity::REQUIRED
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                integrity::hash_file(&dir.join(name), Digest::Md5).expect("hash"),
+            )
+        })
+        .collect();
+    let moved = integrity::REQUIRED[0];
+    let stated = "0".repeat(32);
+    hashes.insert(moved.to_owned(), stated.clone());
+    std::fs::write(
+        dir.join("hashes.json"),
+        serde_json::to_vec(&hashes).expect("serialize"),
+    )
+    .expect("write");
+
+    let fault = dalamud.version_fault(&dir).expect("the tree is not intact");
+
+    let AddonError::IntegrityMismatch {
+        file,
+        expected,
+        got,
+        ..
+    } = &fault
+    else {
+        panic!("bytes that arrived and do not match are an integrity failure, not: {fault:?}");
+    };
+    assert!(file.ends_with(moved), "{file:?}");
+    assert_eq!(*expected, stated);
+    assert_eq!(
+        *got,
+        integrity::hash_file(&dir.join(moved), Digest::Md5).expect("hash"),
+        "the digest the file actually has"
+    );
+}
+
+/// And a file the map names that is not there at all is a filesystem failure carrying the path and what
+/// the open said, rather than the same integrity sentence: one of them is the distribution's fault and
+/// the other is this machine's.
+#[test]
+fn a_file_the_map_names_and_the_tree_lacks_is_a_filesystem_failure() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dalamud, _prefix) = dalamud(tmp.path(), "wine-xiv-staging");
+    let dir = dalamud.paths.version_dir("15.0.2.3");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    for name in integrity::REQUIRED {
+        std::fs::write(dir.join(name), b"MZ").expect("write");
+    }
+    let mut hashes: BTreeMap<String, String> = BTreeMap::new();
+    hashes.insert("absent.dll".to_owned(), "0".repeat(32));
+    std::fs::write(
+        dir.join("hashes.json"),
+        serde_json::to_vec(&hashes).expect("serialize"),
+    )
+    .expect("write");
+
+    let fault = dalamud.version_fault(&dir).expect("the tree is not intact");
+
+    let AddonError::Io { path, source, .. } = &fault else {
+        panic!("a file that cannot be read is a filesystem failure, not: {fault:?}");
+    };
+    assert!(path.ends_with("absent.dll"), "{path:?}");
+    assert!(
+        source.to_string().to_lowercase().contains("no such file"),
+        "the error the filesystem raised is the one carried: {source}"
+    );
 }

@@ -369,7 +369,8 @@ async fn a_pin_that_does_not_match_is_an_integrity_failure_and_writes_nothing() 
     assert!(
         events.iter().any(|e| matches!(
             e,
-            SetupEvent::Failed { what, reason } if what == "unfixable" && reason.contains("not the ones it pins")
+            SetupEvent::Failed { what, reason }
+                if what == "unfixable" && reason.contains("is not the bytes it was published as")
         )),
         "a pin failure is reported as one: {events:?}"
     );

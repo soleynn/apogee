@@ -219,7 +219,10 @@ async fn download_unverified(
         apogee_fetch::DownloadSpec::builder(url.clone(), dest, apogee_fetch::Validator::None)
             .allow_unverified()
             .build()?;
-    fetcher.download(&spec, None, cancel.clone()).await?;
+    fetcher
+        .download(&spec, None, cancel.clone())
+        .await
+        .map_err(|source| AddonError::from_fetch(source, CATALOG, dest))?;
     Ok(())
 }
 
@@ -351,6 +354,7 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Plan
     let installed = prefix.components().map_err(|source| AddonError::Io {
         what: "this prefix".to_owned(),
         step: "read what setup it already has",
+        path: prefix.metadata_path(),
         source: Box::new(source),
     })?;
     // A verb the record claims but whose effect is gone has to be applied again, so the check happens
@@ -433,6 +437,7 @@ async fn apply_verb(
         .map_err(|source| AddonError::Io {
             what: row.name.clone(),
             step: "record itself in the prefix",
+            path: prefix.metadata_path(),
             source: Box::new(source),
         })?;
     events.emit(SetupEvent::Applied {

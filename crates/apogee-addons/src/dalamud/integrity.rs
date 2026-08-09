@@ -83,13 +83,44 @@ pub(crate) fn resolve(root: &Path, key: &str) -> PathBuf {
     path
 }
 
-/// Whether every file `manifest` names is present under `root` with the digest it states.
+/// Why a tree is not the tree its digest map describes.
 ///
-/// A file that cannot be read counts as a mismatch, since the reason it cannot be read (absent,
-/// truncated, unreadable) is the same reason not to trust the tree.
-pub(crate) fn verify_tree(root: &Path, manifest: &HashManifest, digest: Digest) -> bool {
-    manifest.iter().all(|(key, expected)| {
-        hash_file(&resolve(root, key), digest).is_ok_and(|found| found == *expected)
+/// Both arms name the file, because "it does not match its own hashes" is the part a reader already
+/// knows by the time they are reading an error: what they need is which file, and what about it.
+#[derive(Debug)]
+pub(crate) enum TreeFault {
+    /// A file the map names could not be read. Absent, truncated, a directory where a file was
+    /// promised: the reason it cannot be read is the same reason not to trust the tree, and the io
+    /// error is what says which of those it was.
+    Unreadable { file: PathBuf, source: io::Error },
+    /// A file the map names is there and carries other bytes.
+    Mismatch {
+        file: PathBuf,
+        expected: String,
+        found: String,
+    },
+}
+
+/// The first file `manifest` names that is not the file it describes, or `None` when every one is.
+///
+/// One fault rather than all of them, for the reason the module header gives: there is no per-file
+/// repair to fall back to, so the first file that proves the tree wrong is the whole of the answer.
+pub(crate) fn first_fault(
+    root: &Path,
+    manifest: &HashManifest,
+    digest: Digest,
+) -> Option<TreeFault> {
+    manifest.iter().find_map(|(key, expected)| {
+        let file = resolve(root, key);
+        match hash_file(&file, digest) {
+            Ok(found) if found == *expected => None,
+            Ok(found) => Some(TreeFault::Mismatch {
+                file,
+                expected: expected.clone(),
+                found,
+            }),
+            Err(source) => Some(TreeFault::Unreadable { file, source }),
+        }
     })
 }
 
@@ -99,9 +130,18 @@ pub(crate) fn verify_tree(root: &Path, manifest: &HashManifest, digest: Digest) 
 /// list of individual mismatches, and so a tree missing the injector never reaches the launch path.
 pub(crate) const REQUIRED: &[&str] = &["Dalamud.Injector.exe", "Dalamud.dll", "ImGuiScene.dll"];
 
-/// Whether the files a version directory cannot work without are all there.
-pub(crate) fn required_files_present(root: &Path) -> bool {
-    REQUIRED.iter().all(|name| root.join(name).is_file())
+/// The first of those files that is not there, or `None` when every one is.
+///
+/// Opened rather than tested for existence, so the fault carries what the filesystem actually said: a
+/// name held by a directory and a name held by nothing are different problems, and the reader of an
+/// install failure wants the one that happened.
+pub(crate) fn missing_required(root: &Path) -> Option<TreeFault> {
+    REQUIRED.iter().find_map(|name| {
+        let file = root.join(name);
+        File::open(&file)
+            .err()
+            .map(|source| TreeFault::Unreadable { file, source })
+    })
 }
 
 #[cfg(test)]
@@ -133,16 +173,8 @@ mod tests {
     fn a_key_written_with_windows_separators_resolves_the_same_file() {
         let (_tmp, root) = tree();
         let digest = payload_md5(&root);
-        assert!(verify_tree(
-            &root,
-            &manifest(r"sub\thing.dll", &digest),
-            Digest::Md5
-        ));
-        assert!(verify_tree(
-            &root,
-            &manifest("sub/thing.dll", &digest),
-            Digest::Md5
-        ));
+        assert!(first_fault(&root, &manifest(r"sub\thing.dll", &digest), Digest::Md5).is_none());
+        assert!(first_fault(&root, &manifest("sub/thing.dll", &digest), Digest::Md5).is_none());
     }
 
     /// There is no per-file repair, so one bad file means the version comes down again.
@@ -151,7 +183,13 @@ mod tests {
         let (_tmp, root) = tree();
         let mut map = manifest(r"sub\thing.dll", &payload_md5(&root));
         map.insert("sub\\missing.dll".to_owned(), "0".repeat(32));
-        assert!(!verify_tree(&root, &map, Digest::Md5));
+        // And it says which file, with what the read of it said: the caller turns this into the
+        // failure a user reads, and "the tree does not match" names nothing to look at.
+        let fault = first_fault(&root, &map, Digest::Md5).expect("the missing file is a fault");
+        assert!(
+            matches!(&fault, TreeFault::Unreadable { file, .. } if file.ends_with("missing.dll")),
+            "{fault:?}"
+        );
     }
 
     /// A digest is compared as written, and the distribution writes uppercase. Folding case here would
@@ -166,11 +204,13 @@ mod tests {
             "digests are produced uppercase"
         );
         let lower = upper.to_lowercase();
-        assert!(!verify_tree(
-            &root,
-            &manifest(r"sub\thing.dll", &lower),
-            Digest::Md5
-        ));
+        let fault = first_fault(&root, &manifest(r"sub\thing.dll", &lower), Digest::Md5)
+            .expect("a lowercase digest does not match");
+        assert!(
+            matches!(&fault, TreeFault::Mismatch { expected, found, .. }
+                if *expected == lower && *found == upper),
+            "the fault carries both digests: {fault:?}"
+        );
     }
 
     /// The distribution ships files its own map does not list. Walking the directory instead of the
@@ -179,11 +219,14 @@ mod tests {
     fn a_file_the_manifest_does_not_list_is_not_a_failure() {
         let (_tmp, root) = tree();
         std::fs::write(root.join("unlisted.txt"), b"extra").expect("write");
-        assert!(verify_tree(
-            &root,
-            &manifest(r"sub\thing.dll", &payload_md5(&root)),
-            Digest::Md5
-        ));
+        assert!(
+            first_fault(
+                &root,
+                &manifest(r"sub\thing.dll", &payload_md5(&root)),
+                Digest::Md5
+            )
+            .is_none()
+        );
     }
 
     /// A tree without the injector cannot launch anything, so it is caught as incomplete rather than
@@ -191,11 +234,11 @@ mod tests {
     #[test]
     fn a_version_directory_missing_the_injector_is_not_usable() {
         let (_tmp, root) = tree();
-        assert!(!required_files_present(&root));
+        assert!(missing_required(&root).is_some());
         for name in REQUIRED {
             std::fs::write(root.join(name), b"MZ").expect("write");
         }
-        assert!(required_files_present(&root));
+        assert!(missing_required(&root).is_none());
     }
 
     /// Both digests are the ones the distribution uses, and they are not interchangeable.

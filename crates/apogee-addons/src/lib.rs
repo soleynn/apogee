@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use apogee_fetch::{FetchError, Fetcher};
 use apogee_runtime::{LaunchPlan, Prefix, Runtime};
+use url::Url;
 
 pub mod backup;
 pub mod dalamud;
@@ -82,8 +83,12 @@ impl std::fmt::Display for SupportTier {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AddonError {
+    /// Deliberately no `#[from]`. The conversion it generates would map every fetch failure onto this
+    /// arm, including [`FetchError::FileVerifyFailed`], which is the one this crate has a typed home
+    /// for and would be flattened into "download failed" by a `?` nobody wrote. Every caller converts
+    /// through [`AddonError::from_fetch`], which routes that one and passes the rest through.
     #[error("download failed")]
-    Download(#[from] FetchError),
+    Download(#[source] FetchError),
     #[error("invalid download request")]
     Spec(#[from] apogee_fetch::SpecError),
     /// The signed catalog was refused. Transparent, because the reason is the inner variant and an
@@ -91,20 +96,32 @@ pub enum AddonError {
     /// signature at once, which reads as tampering either way.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
-    #[error("{verb}: the bytes fetched are not the ones it pins (expected {expected}, got {got})")]
+    /// Bytes that arrived intact and are not the bytes they were published as.
+    ///
+    /// Names the file, because a component is a tree of them: "it does not match its own hashes" is
+    /// the part a reader already knows by the time they are reading this.
+    #[error(
+        "{what}: {file:?} is not the bytes it was published as (expected {expected}, got {got})"
+    )]
     #[non_exhaustive]
     IntegrityMismatch {
-        verb: String,
+        what: String,
+        file: PathBuf,
         expected: String,
         got: String,
     },
-    /// A filesystem step failed. `what` names what was being set up and `step` which part of it: the
-    /// io error underneath names a path and a kind, and nothing about why the launcher was there.
-    #[error("{what}: could not {step}")]
+    /// A filesystem step failed. `what` names what was being set up, `step` which part of it, and
+    /// `path` what it was working on.
+    ///
+    /// The path is a field rather than something folded into the message, because an `io::Error`
+    /// carries a kind and no path: folding one in means building a second error to hold the string and
+    /// dropping the one the filesystem raised.
+    #[error("{what}: could not {step} at {path:?}")]
     #[non_exhaustive]
     Io {
         what: String,
         step: &'static str,
+        path: PathBuf,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -118,6 +135,19 @@ pub enum AddonError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// An archive that unpacked and produced nothing. Separate from [`Self::Unpack`], which carries the
+    /// failure underneath it: here the extraction succeeded and the layout declared for the archive
+    /// selected none of what it held, so there is no error to carry and inventing one to hold that
+    /// sentence would render the sentence as a cause.
+    #[error("{what}: the archive that was served held nothing under the layout declared for it")]
+    #[non_exhaustive]
+    EmptyArchive { what: String },
+    /// A pointer the catalog carries that the endpoints around it cannot be derived from. No `source`
+    /// for the same reason as [`Self::EmptyArchive`], and it names the pointer because that is the row
+    /// somebody has to correct.
+    #[error("{injectable}: {pointer} is not a pointer its other endpoints can be derived from")]
+    #[non_exhaustive]
+    BadDistribution { injectable: String, pointer: Url },
     #[error("injection of {injectable} failed ({tier} tier)")]
     Inject {
         injectable: String,
@@ -155,6 +185,12 @@ pub enum AddonError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Every op a verb declares ran and something it promised is still not there. Separate from
+    /// [`Self::VerbFailed`], which carries the op that raised: nothing raised here, so what there is to
+    /// say is the path that was promised, and it is a path rather than a sentence about one.
+    #[error("verb {verb} finished without producing {missing:?}")]
+    #[non_exhaustive]
+    VerbIncomplete { verb: String, missing: PathBuf },
     #[error("addon {index} ({program:?}) cannot be run: {reason}")]
     #[non_exhaustive]
     InvalidAddon {
@@ -193,6 +229,28 @@ pub enum AddonError {
 }
 
 impl AddonError {
+    /// A fetch failure in this crate's taxonomy, with the one arm that has a home of its own routed
+    /// into it.
+    ///
+    /// A named conversion rather than a `From`, for two reasons. It needs to be told what was being
+    /// fetched and where it landed, which a `From` cannot be. And a `From` puts the flattening one
+    /// unwritten `?` away: any call site added later would turn a verify failure into "download
+    /// failed" without anybody choosing that.
+    #[must_use]
+    pub fn from_fetch(source: FetchError, what: &str, file: &std::path::Path) -> Self {
+        match source {
+            // The bytes arrived and are not the bytes that were promised, which is not a download
+            // problem: retrying fetches the same wrong file.
+            FetchError::FileVerifyFailed { expected, got } => Self::IntegrityMismatch {
+                what: what.to_owned(),
+                file: file.to_path_buf(),
+                expected,
+                got,
+            },
+            other => Self::Download(other),
+        }
+    }
+
     /// This failure and its causes as one line.
     ///
     /// The outer message is routinely the least specific part of a chain: "could not stage a download"
