@@ -182,7 +182,7 @@ fn check_component(part: &str) -> Result<(), RejectReason> {
 
 /// The root a leading component names, folded because the rest of this layer folds.
 fn label(head: &str) -> Option<RootLabel> {
-    [RootLabel::User, RootLabel::Roaming]
+    [RootLabel::User]
         .into_iter()
         .find(|candidate| head.eq_ignore_ascii_case(candidate.prefix()))
 }
@@ -263,7 +263,10 @@ mod tests {
     fn an_entry_outside_a_declared_root_is_refused() {
         assert_eq!(err("elsewhere/FFXIV.cfg"), RejectReason::UnknownRoot);
         assert_eq!(err("apogee-backup.json"), RejectReason::UnknownRoot);
-        assert_eq!(ok("roaming/dalamudConfig.json").root(), RootLabel::Roaming);
+        // Including a namespace this build once had a producer for. A reader that kept accepting one
+        // would be accepting entries nothing here can restore, on a label no archive carries.
+        assert_eq!(err("roaming/dalamudConfig.json"), RejectReason::UnknownRoot);
+        assert_eq!(ok("user/FFXIV.cfg").root(), RootLabel::User);
     }
 
     #[test]

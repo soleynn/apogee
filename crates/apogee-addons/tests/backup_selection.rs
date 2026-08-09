@@ -8,7 +8,7 @@ use std::io;
 use std::path::Path;
 
 use apogee_addons::backup::{
-    BackupError, CompanionConfigOpts, GameConfigOpts, Presence, Rule, RuleRole, Selected,
+    BackupError, Expect, GameConfigOpts, NameMatch, Presence, RootLabel, Rule, RuleRole, Selected,
     Selection, SelectionRoot,
 };
 
@@ -178,22 +178,36 @@ fn opting_in_brings_back_exactly_what_was_pruned() -> Result<(), BackupError> {
 #[test]
 fn a_required_rule_that_matches_nothing_fails_the_backup() {
     let tmp = tempfile::tempdir().unwrap();
-    let companion = tmp.path().join("companion");
-    write(&companion.join("dalamudUI.ini"), "ui").unwrap();
+    let root = tmp.path().join("tree");
+    write(&root.join("present.cfg"), "here").unwrap();
 
-    let err = Selection::new()
-        .with_root(SelectionRoot::companion_config(
-            &companion,
-            CompanionConfigOpts::default(),
-        ))
-        .and_then(|s| s.resolve());
+    let err = allowlist(
+        &root,
+        vec![
+            Rule::file(NameMatch::Exact("present.cfg".into()), Expect::Required),
+            Rule::file(NameMatch::Exact("absent.cfg".into()), Expect::Required),
+        ],
+    )
+    .and_then(|s| s.resolve());
 
     match err {
         Err(BackupError::RuleMatchedNothing { rule, .. }) => {
-            assert_eq!(rule, "file dalamudConfig.json");
+            assert_eq!(rule, "file absent.cfg");
         }
         other => panic!("expected the missing rule to be named, got {other:?}"),
     }
+}
+
+/// A selection over one tree with rules written here, for the properties that are about rules rather
+/// than about a preset.
+fn allowlist(root: &Path, include: Vec<Rule>) -> Result<Selection, BackupError> {
+    Selection::new().with_root(SelectionRoot::new(
+        RootLabel::User,
+        root,
+        include,
+        vec![],
+        Presence::Required,
+    )?)
 }
 
 /// An optional rule that matches nothing still reports, because a zero is something a reader can
@@ -309,10 +323,13 @@ fn an_absent_optional_root_is_recorded_beside_a_populated_one() -> Result<(), Ba
             tmp.path(),
             GameConfigOpts::default(),
         ))?
-        .with_root(SelectionRoot::companion_config(
+        .with_root(SelectionRoot::new(
+            RootLabel::User,
             tmp.path().join("never-written"),
-            CompanionConfigOpts::default(),
-        ))?
+            vec![Rule::file(NameMatch::Any, Expect::Optional)],
+            vec![],
+            Presence::Optional,
+        )?)?
         .resolve()?;
 
     assert_eq!(selected.roots().len(), 2);
@@ -387,54 +404,6 @@ fn the_order_does_not_depend_on_the_order_the_tree_was_built() -> Result<(), Bac
     Ok(())
 }
 
-/// A directory selected at the root level brings its whole subtree, which is what makes the include
-/// side free of directory literals.
-#[test]
-fn selecting_a_directory_takes_everything_under_it() -> Result<(), BackupError> {
-    let tmp = tempfile::tempdir().unwrap();
-    let companion = tmp.path().join("companion");
-    write(&companion.join("dalamudConfig.json"), "{}").unwrap();
-    write(&companion.join("pluginConfigs").join("cadence.json"), "{}").unwrap();
-    write(
-        &companion
-            .join("pluginConfigs")
-            .join("cadence")
-            .join("policy-pack")
-            .join("blm-pack.json"),
-        "{}",
-    )
-    .unwrap();
-    // Recorded telemetry sits under the same directory as the settings and is pruned by name.
-    write(
-        &companion
-            .join("pluginConfigs")
-            .join("cadence")
-            .join("captures")
-            .join("tick-000001.json"),
-        "{}",
-    )
-    .unwrap();
-    // A sibling that is not on the allowlist is not swept in.
-    write(&companion.join("runtime").join("dotnet.exe"), "binary").unwrap();
-
-    let selected = Selection::new()
-        .with_root(SelectionRoot::companion_config(
-            &companion,
-            CompanionConfigOpts::default(),
-        ))?
-        .resolve()?;
-    let names = names(&selected);
-
-    assert!(has(&names, "roaming/pluginConfigs/cadence.json"));
-    assert!(has(
-        &names,
-        "roaming/pluginConfigs/cadence/policy-pack/blm-pack.json"
-    ));
-    assert!(!names.iter().any(|n| n.contains("captures")));
-    assert!(!names.iter().any(|n| n.contains("runtime")));
-    Ok(())
-}
-
 /// The deny list is crate policy rather than a caller's choice, so it is worth pinning that it names
 /// what it is meant to name.
 #[test]
@@ -463,14 +432,10 @@ fn a_missing_required_root_fails() {
 
 /// Presence is part of the root's contract, so it is readable back off the root.
 #[test]
-fn the_game_root_is_required_and_the_companion_root_is_not() {
+fn the_game_root_is_required() {
     assert_eq!(
         SelectionRoot::game_config("/tmp/x", GameConfigOpts::default()).presence(),
         Presence::Required
-    );
-    assert_eq!(
-        SelectionRoot::companion_config("/tmp/x", CompanionConfigOpts::default()).presence(),
-        Presence::Optional
     );
 }
 

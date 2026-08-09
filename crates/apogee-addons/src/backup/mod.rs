@@ -38,7 +38,7 @@ pub use manifest::{
 #[cfg(unix)]
 pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
 pub use retain::{ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, plan_prune, prune};
-pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, SelectionRoot};
+pub use root::{GameConfigOpts, Presence, RootLabel, SelectionRoot};
 pub use rule::{EntryKind, Expect, NameMatch, Rule};
 
 /// Where a rule sits in the order each entry is tested in.

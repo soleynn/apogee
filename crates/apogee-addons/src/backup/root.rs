@@ -15,8 +15,6 @@ use super::rule::{Expect, NameMatch, Rule};
 pub enum RootLabel {
     /// The game's own config tree.
     User,
-    /// A companion tool's config tree.
-    Roaming,
 }
 
 impl RootLabel {
@@ -25,7 +23,6 @@ impl RootLabel {
     pub fn prefix(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::Roaming => "roaming",
         }
     }
 }
@@ -55,14 +52,6 @@ pub struct GameConfigOpts {
     pub rotations: bool,
     /// Keep the game's own restore blob, a stale re-encoding of the same character's settings.
     pub game_restore_blob: bool,
-}
-
-/// Parts of a companion tree beyond its settings.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CompanionConfigOpts {
-    /// Keep installed plugin binaries, which are redownloadable. Plugin *configuration* is kept
-    /// either way and outlives installation, so leaving this off loses no settings.
-    pub plugin_binaries: bool,
 }
 
 /// One source tree and the rules that carve it up.
@@ -150,38 +139,6 @@ impl SelectionRoot {
         )
     }
 
-    /// A companion tool's config tree: an allowlist, because the siblings of these entries in a real
-    /// companion home hold a redownloadable runtime, an extracted prefix, and recorded telemetry
-    /// that dwarf the settings.
-    #[must_use]
-    pub fn companion_config(path: impl Into<PathBuf>, opts: CompanionConfigOpts) -> Self {
-        let mut include = vec![
-            Rule::file(
-                NameMatch::Exact("dalamudConfig.json".into()),
-                Expect::Required,
-            ),
-            Rule::file(NameMatch::Exact("dalamudUI.ini".into()), Expect::Optional),
-            Rule::file(NameMatch::Exact("dalamudVfs.db".into()), Expect::Optional),
-            Rule::dir(NameMatch::Exact("pluginConfigs".into()), Expect::Optional),
-        ];
-        if opts.plugin_binaries {
-            include.push(Rule::dir(
-                NameMatch::Exact("installedPlugins".into()),
-                Expect::Optional,
-            ));
-        }
-        Self::assembled(
-            RootLabel::Roaming,
-            path,
-            include,
-            vec![Rule::dir(
-                NameMatch::Exact("captures".into()),
-                Expect::Optional,
-            )],
-            Presence::Optional,
-        )
-    }
-
     /// The namespace this root's entries sit under.
     #[must_use]
     pub fn label(&self) -> RootLabel {
@@ -245,20 +202,6 @@ mod tests {
         };
         for opts in [GameConfigOpts::default(), all_on] {
             let preset = SelectionRoot::game_config("/tmp/x", opts);
-            assert!(
-                SelectionRoot::new(
-                    preset.label,
-                    preset.path.clone(),
-                    preset.include.clone(),
-                    preset.prune.clone(),
-                    preset.presence,
-                )
-                .is_ok()
-            );
-        }
-        for plugin_binaries in [false, true] {
-            let preset =
-                SelectionRoot::companion_config("/tmp/x", CompanionConfigOpts { plugin_binaries });
             assert!(
                 SelectionRoot::new(
                     preset.label,
