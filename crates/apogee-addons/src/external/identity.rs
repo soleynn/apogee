@@ -27,7 +27,7 @@ use apogee_runtime::Prefix;
 /// A process that appears to be this program already running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Running {
+pub(crate) struct Running {
     /// The process id that matched.
     pub pid: i32,
 }

@@ -160,7 +160,7 @@ fn catalog() -> Result<VerifiedManifest, Box<dyn Error>> {
     Ok(VerifiedManifest::verify(
         json,
         &signature,
-        &[apogee_test_support::catalog_sign::test_verifying_key()],
+        &[apogee_test_support::catalog_sign::test_verifying_key_bytes()],
     )?)
 }
 

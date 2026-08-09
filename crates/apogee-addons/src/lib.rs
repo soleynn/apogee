@@ -20,6 +20,9 @@ use apogee_fetch::{FetchError, Fetcher};
 use apogee_runtime::{LaunchPlan, Prefix, Runtime};
 use url::Url;
 
+use crate::launch::Preparation;
+use crate::setup::SetupReport;
+
 pub mod backup;
 pub mod dalamud;
 pub mod external;
@@ -31,19 +34,18 @@ pub mod setup;
 mod tests;
 
 pub use backup::{BackupError, Selection};
-pub use dalamud::{
-    ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadEvidence, LoadMode, PluginPolicy,
-};
+
+// What is re-exported here is what a consumer imports from the crate root. The rest keeps its module
+// path and nothing else: a name reachable at two paths that nobody spells at either is two things to
+// keep working rather than one.
+pub use dalamud::{ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadEvidence};
 pub use external::{
     AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
-    Outcome, RunIn, Running, Trigger,
+    Outcome, RunIn, Trigger,
 };
-pub use launch::{Contribution, LaunchEdit, Preparation, Redirect};
-pub use manifest::{
-    Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
-    InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp, VerifiedManifest,
-};
-pub use setup::{SetupEvent, SetupEvents, SetupOutcome, SetupReport, SetupState};
+pub use launch::{Contribution, LaunchEdit, Redirect};
+pub use manifest::{ComponentManifest, ManifestError, VerifiedManifest};
+pub use setup::{SetupEvent, SetupEvents, SetupState};
 
 /// Crate result over [`AddonError`].
 pub type Result<T> = std::result::Result<T, AddonError>;
@@ -448,7 +450,7 @@ impl Addons {
             manifest_url,
             signature_url,
             &self.paths.catalog_cache(),
-            &manifest::default_keys()?,
+            manifest::default_keys(),
             cancel,
         )
         .await
@@ -469,7 +471,7 @@ impl Addons {
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
-        keys: &[ed25519_dalek::VerifyingKey],
+        keys: &[[u8; 32]],
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<VerifiedManifest> {
         setup::fetch_manifest(
@@ -495,7 +497,7 @@ impl Addons {
     /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
     /// cache rather than an absent one.
     pub async fn cached_manifest(&self) -> Result<Option<VerifiedManifest>> {
-        setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_keys()?).await
+        setup::cached_manifest(&self.paths.catalog_cache(), manifest::default_keys()).await
     }
 
     /// The same read, verified against `keys`, so a test can read back what a test-key fetch published.
@@ -505,7 +507,7 @@ impl Addons {
     #[cfg(feature = "testing")]
     pub async fn cached_manifest_for_testing(
         &self,
-        keys: &[ed25519_dalek::VerifyingKey],
+        keys: &[[u8; 32]],
     ) -> Result<Option<VerifiedManifest>> {
         setup::cached_manifest(&self.paths.catalog_cache(), keys).await
     }

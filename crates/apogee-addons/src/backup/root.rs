@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::error::BackupError;
 use super::rule::{Expect, NameMatch, Rule};
 
@@ -68,10 +69,15 @@ impl SelectionRoot {
     /// A root whose immediate children are tested against `include`, with `prune` applied at every
     /// depth.
     ///
+    /// The duplicate check the presets are held to. `cfg(test)` because that is where it is exercised:
+    /// the presets are built by [`Self::assembled`] and asserted here to satisfy this, and there is no
+    /// caller composing a root at runtime for it to guard.
+    ///
     /// # Errors
     /// [`BackupError::DuplicateRule`] if two rules in either list render identically, which would
     /// make their match counts impossible to tell apart in the report.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         label: RootLabel,
         path: impl Into<PathBuf>,
         include: Vec<Rule>,
@@ -159,13 +165,13 @@ impl SelectionRoot {
 
     /// The rules tested against the root's immediate children.
     #[must_use]
-    pub fn include(&self) -> &[Rule] {
+    pub(crate) fn include(&self) -> &[Rule] {
         &self.include
     }
 
     /// The rules that drop an entry at any depth.
     #[must_use]
-    pub fn prune(&self) -> &[Rule] {
+    pub(crate) fn prune(&self) -> &[Rule] {
         &self.prune
     }
 

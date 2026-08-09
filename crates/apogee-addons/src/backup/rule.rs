@@ -26,13 +26,11 @@ pub enum EntryKind {
 /// is no case-sensitive variant to reach for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum NameMatch {
+pub(crate) enum NameMatch {
     /// Every name, leaving the rule's kind as the only test.
     Any,
     /// The whole component.
     Exact(String),
-    /// A leading run, for a name that ends in an id.
-    Prefix(String),
     /// A trailing run. A doubled extension belongs to the outer one, so `ADDON.DAT.old` is matched by
     /// `Suffix(".old")` and never by `Suffix(".DAT")`.
     Suffix(String),
@@ -45,9 +43,6 @@ impl NameMatch {
         match self {
             Self::Any => true,
             Self::Exact(want) => name.eq_ignore_ascii_case(want),
-            Self::Prefix(want) => name
-                .get(..want.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(want)),
             Self::Suffix(want) => name
                 .len()
                 .checked_sub(want.len())
@@ -62,7 +57,6 @@ impl fmt::Display for NameMatch {
         match self {
             Self::Any => f.write_str("*"),
             Self::Exact(name) => f.write_str(name),
-            Self::Prefix(head) => write!(f, "{head}*"),
             Self::Suffix(tail) => write!(f, "*{tail}"),
         }
     }
@@ -71,7 +65,7 @@ impl fmt::Display for NameMatch {
 /// What zero matches for a rule means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Expect {
+pub(crate) enum Expect {
     /// Zero matches fails the backup, naming the rule.
     Required,
     /// Zero matches is recorded with a count of zero and the backup continues.
@@ -80,7 +74,7 @@ pub enum Expect {
 
 /// One selection rule: the kind of entry it can match, and the test its name must pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rule {
+pub(crate) struct Rule {
     kind: EntryKind,
     name: NameMatch,
     expect: Expect,
@@ -89,7 +83,7 @@ pub struct Rule {
 impl Rule {
     /// A rule that can only ever match a directory.
     #[must_use]
-    pub fn dir(name: NameMatch, expect: Expect) -> Self {
+    pub(crate) fn dir(name: NameMatch, expect: Expect) -> Self {
         Self {
             kind: EntryKind::Dir,
             name,
@@ -99,7 +93,7 @@ impl Rule {
 
     /// A rule that can only ever match a regular file.
     #[must_use]
-    pub fn file(name: NameMatch, expect: Expect) -> Self {
+    pub(crate) fn file(name: NameMatch, expect: Expect) -> Self {
         Self {
             kind: EntryKind::File,
             name,
@@ -107,22 +101,16 @@ impl Rule {
         }
     }
 
-    /// The kind of entry this rule matches.
-    #[must_use]
-    pub fn kind(&self) -> EntryKind {
-        self.kind
-    }
-
     /// What zero matches means for this rule.
     #[must_use]
-    pub fn expect(&self) -> Expect {
+    pub(crate) fn expect(&self) -> Expect {
         self.expect
     }
 
     /// Whether `name` of `kind` matches. `kind` is what the walk observed, so a rule written for one
     /// kind cannot silently be applied to the other.
     #[must_use]
-    pub fn matches(&self, name: &str, kind: EntryKind) -> bool {
+    pub(crate) fn matches(&self, name: &str, kind: EntryKind) -> bool {
         self.kind == kind && self.name.test(name)
     }
 }
@@ -149,7 +137,7 @@ mod tests {
         let names = [
             NameMatch::Any,
             NameMatch::Exact("cfgcopy".into()),
-            NameMatch::Prefix("FFXIV_CHR".into()),
+            NameMatch::Exact("FFXIV_CHR004000174C116E58".into()),
             NameMatch::Suffix(".DAT".into()),
         ];
         for name in names {
@@ -177,7 +165,7 @@ mod tests {
             ("ADDON.DAT.old", NameMatch::Suffix(".OLD".into())),
             (
                 "FFXIV_CHR004000174C116E58",
-                NameMatch::Prefix("ffxiv_chr".into()),
+                NameMatch::Exact("ffxiv_chr004000174c116e58".into()),
             ),
             ("Accounts.JSON", NameMatch::Exact("accounts.json".into())),
         ];
@@ -202,12 +190,10 @@ mod tests {
     /// panicking on a slice.
     #[test]
     fn a_pattern_longer_than_the_name_or_astride_a_character_is_just_a_miss() {
-        let long = Rule::file(NameMatch::Prefix("FFXIV_CHR".into()), Expect::Optional);
-        assert!(!long.matches("FF", EntryKind::File));
-        let tail = Rule::file(NameMatch::Suffix(".dat".into()), Expect::Optional);
-        assert!(!tail.matches("d", EntryKind::File));
+        let long = Rule::file(NameMatch::Suffix(".dat".into()), Expect::Optional);
+        assert!(!long.matches("d", EntryKind::File));
         // The pattern length falls inside the multi-byte character rather than on a boundary.
-        let mid = Rule::file(NameMatch::Prefix("ab".into()), Expect::Optional);
+        let mid = Rule::file(NameMatch::Suffix("xb".into()), Expect::Optional);
         assert!(!mid.matches("a\u{00e9}b", EntryKind::File));
     }
 
@@ -216,8 +202,8 @@ mod tests {
     #[test]
     fn a_rule_renders_its_kind_and_its_test() {
         assert_eq!(
-            Rule::dir(NameMatch::Prefix("FFXIV_CHR".into()), Expect::Optional).to_string(),
-            "dir FFXIV_CHR*"
+            Rule::dir(NameMatch::Exact("cfgcopy".into()), Expect::Optional).to_string(),
+            "dir cfgcopy"
         );
         assert_eq!(
             Rule::file(NameMatch::Suffix(".old".into()), Expect::Optional).to_string(),

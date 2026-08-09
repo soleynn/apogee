@@ -105,8 +105,8 @@ impl TrustedKey {
 /// mistyped key would be. Its own variant rather than a bad signature: the hosted file is the one thing
 /// that is not wrong here, and reporting it as a signature failure sends whoever reads it to go and
 /// check it.
-pub(crate) fn default_keys() -> Result<Vec<VerifyingKey>, ManifestError> {
-    trusted_keys(COMPONENT_PUBLIC_KEYS)
+pub(crate) fn default_keys() -> &'static [[u8; 32]] {
+    COMPONENT_PUBLIC_KEYS
 }
 
 /// The same over any list, so the failure and the position it names are testable without a build whose
@@ -391,7 +391,7 @@ impl ComponentManifest {
         manifest_json: &[u8],
         signature: &[u8],
     ) -> Result<(Self, TrustedKey), ManifestError> {
-        Self::parse_and_verify(manifest_json, signature, &default_keys()?)
+        Self::parse_and_verify(manifest_json, signature, &trusted_keys(default_keys())?)
     }
 
     /// The verb row named `name`.
@@ -1187,7 +1187,8 @@ mod tests {
     /// as a signature failure on a user's machine instead.
     #[test]
     fn every_compiled_in_key_parses() {
-        default_keys().expect("every trusted key in this build is a usable ed25519 key");
+        trusted_keys(default_keys())
+            .expect("every trusted key in this build is a usable ed25519 key");
     }
 
     /// A key that is not a point on the curve is this build's problem, and has to read as one. Reported
@@ -1322,15 +1323,21 @@ impl VerifiedManifest {
     /// key a test signs with. Nothing about that weakens the gate: a caller cannot verify against keys
     /// it does not have, and the launcher passes the ones compiled into it.
     ///
+    /// Raw 32-byte keys, the shape [`COMPONENT_PUBLIC_KEYS`] is compiled in as, rather than a type from
+    /// the signature crate. A key is 32 bytes on any implementation, and naming the crate's type here
+    /// would put its major version in this one's frozen surface for nothing.
+    ///
     /// # Errors
+    /// [`ManifestError::TrustedKeyUnusable`] if one of `keys` is not a usable key, then
     /// [`ManifestError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
     /// none of `keys`, then anything [`ComponentManifest::from_json_bytes`] raises.
     pub fn verify(
         manifest_json: &[u8],
         signature: &[u8],
-        keys: &[VerifyingKey],
+        keys: &[[u8; 32]],
     ) -> Result<Self, ManifestError> {
-        let (manifest, key) = ComponentManifest::parse_and_verify(manifest_json, signature, keys)?;
+        let keys = trusted_keys(keys)?;
+        let (manifest, key) = ComponentManifest::parse_and_verify(manifest_json, signature, &keys)?;
         Ok(Self { manifest, key })
     }
 

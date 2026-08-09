@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use apogee_addons::{AddonError, AddonPaths, Addons, ComponentManifest, ManifestError};
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Runtime, RuntimePaths};
-use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
+use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key_bytes};
 use apogee_test_support::chaos::ChaosServer;
 use tokio_util::sync::CancellationToken;
 
@@ -104,7 +104,7 @@ async fn a_signature_that_does_not_verify_publishes_nothing() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.bad.url("manifest.json.sig"),
-            &[test_verifying_key()],
+            &[test_verifying_key_bytes()],
             &CancellationToken::new(),
         )
         .await
@@ -132,7 +132,7 @@ async fn a_verified_fetch_is_what_the_cache_holds() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &[test_verifying_key()],
+            &[test_verifying_key_bytes()],
             &CancellationToken::new(),
         )
         .await
@@ -154,7 +154,7 @@ async fn a_verified_fetch_is_what_the_cache_holds() {
 
     // And the fallback path reads that pair back rather than reporting an empty cache.
     let cached = addons
-        .cached_manifest_for_testing(&[test_verifying_key()])
+        .cached_manifest_for_testing(&[test_verifying_key_bytes()])
         .await
         .expect("the published pair verifies")
         .expect("a fetch published one");
@@ -178,7 +178,7 @@ async fn a_failed_fetch_leaves_the_last_good_manifest_in_place() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &[test_verifying_key()],
+            &[test_verifying_key_bytes()],
             &cancel,
         )
         .await
@@ -188,7 +188,7 @@ async fn a_failed_fetch_leaves_the_last_good_manifest_in_place() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.bad.url("manifest.json.sig"),
-            &[test_verifying_key()],
+            &[test_verifying_key_bytes()],
             &cancel,
         )
         .await
@@ -204,7 +204,7 @@ async fn a_failed_fetch_leaves_the_last_good_manifest_in_place() {
     );
     assert!(
         addons
-            .cached_manifest_for_testing(&[test_verifying_key()])
+            .cached_manifest_for_testing(&[test_verifying_key_bytes()])
             .await
             .expect("the surviving pair verifies")
             .is_some(),
@@ -234,7 +234,7 @@ async fn a_cache_rewritten_after_it_was_published_is_refused() {
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &[test_verifying_key()],
+            &[test_verifying_key_bytes()],
             &CancellationToken::new(),
         )
         .await
@@ -247,7 +247,7 @@ async fn a_cache_rewritten_after_it_was_published_is_refused() {
     std::fs::write(&manifest_path, TAMPERED).expect("rewrite the published manifest in place");
 
     let err = addons
-        .cached_manifest_for_testing(&[test_verifying_key()])
+        .cached_manifest_for_testing(&[test_verifying_key_bytes()])
         .await
         .expect_err("rows the key never signed must not reach a launch");
     assert!(
@@ -271,7 +271,7 @@ async fn a_second_fetch_goes_back_to_the_server() {
             .fetch_manifest_for_testing(
                 &servers.manifest.url("manifest.json"),
                 &servers.good.url("manifest.json.sig"),
-                &[test_verifying_key()],
+                &[test_verifying_key_bytes()],
                 &cancel,
             )
             .await
@@ -296,13 +296,15 @@ async fn a_key_inside_its_overlap_window_still_admits_the_catalog() {
     let dir = tempfile::tempdir().expect("tempdir");
     let servers = Servers::start().await.expect("servers");
     let addons = servers.addons(dir.path()).expect("addons");
-    let successor = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+    let successor = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32])
+        .verifying_key()
+        .to_bytes();
 
     let fetched = addons
         .fetch_manifest_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &[successor, test_verifying_key()],
+            &[successor, test_verifying_key_bytes()],
             &CancellationToken::new(),
         )
         .await
@@ -316,7 +318,7 @@ async fn a_key_inside_its_overlap_window_still_admits_the_catalog() {
     // is not left with a cache it published and can no longer open.
     assert!(
         addons
-            .cached_manifest_for_testing(&[successor, test_verifying_key()])
+            .cached_manifest_for_testing(&[successor, test_verifying_key_bytes()])
             .await
             .expect("the published pair still verifies")
             .is_some()
@@ -330,7 +332,9 @@ async fn a_key_that_was_never_trusted_admits_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let servers = Servers::start().await.expect("servers");
     let addons = servers.addons(dir.path()).expect("addons");
-    let stranger = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32])
+        .verifying_key()
+        .to_bytes();
 
     let err = addons
         .fetch_manifest_for_testing(

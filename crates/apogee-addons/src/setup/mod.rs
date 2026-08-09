@@ -23,7 +23,6 @@ use std::path::Path;
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, Runtime};
-use ed25519_dalek::VerifyingKey;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -132,7 +131,7 @@ pub(crate) async fn fetch_manifest(
     manifest_url: &Url,
     signature_url: &Url,
     cache_dir: &Path,
-    keys: &[VerifyingKey],
+    keys: &[[u8; 32]],
     cancel: &CancellationToken,
 ) -> Result<VerifiedManifest> {
     let staging = cache_dir.join(STAGING_DIR);
@@ -194,7 +193,7 @@ async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
 /// caller's to make, which is why fetching and reading the cache are separate calls.
 pub(crate) async fn cached_manifest(
     cache_dir: &Path,
-    keys: &[VerifyingKey],
+    keys: &[[u8; 32]],
 ) -> Result<Option<VerifiedManifest>> {
     let manifest_path = cache_dir.join(MANIFEST_FILE);
     let signature_path = cache_dir.join(SIGNATURE_FILE);

@@ -18,7 +18,9 @@ use apogee_runtime::{CompanionSpec, Prefix, Runtime};
 
 pub use addon::{ExternalAddon, RunIn, Trigger};
 pub use event::{AddonEvent, AddonEvents};
-pub use identity::Running;
+// Not public: every function that produces one is crate-private, so a caller outside could name the
+// type and never obtain one.
+pub(crate) use identity::Running;
 pub use session::{AddonOutcome, AddonReport, AddonSession, Outcome};
 
 use crate::{AddonError, Result};

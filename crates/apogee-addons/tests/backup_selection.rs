@@ -8,8 +8,7 @@ use std::io;
 use std::path::Path;
 
 use apogee_addons::backup::{
-    BackupError, Expect, GameConfigOpts, NameMatch, Presence, RootLabel, Rule, RuleRole, Selected,
-    Selection, SelectionRoot,
+    BackupError, GameConfigOpts, Presence, RuleRole, Selected, Selection, SelectionRoot,
 };
 
 /// The fourteen settings files a character directory holds, uppercase as the game writes them.
@@ -173,43 +172,6 @@ fn opting_in_brings_back_exactly_what_was_pruned() -> Result<(), BackupError> {
     Ok(())
 }
 
-/// A rule that matches nothing is the failure this selection exists to make impossible to miss. On
-/// an allowlist root, where a misspelling would silently shrink the archive, it stops the backup.
-#[test]
-fn a_required_rule_that_matches_nothing_fails_the_backup() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("tree");
-    write(&root.join("present.cfg"), "here").unwrap();
-
-    let err = allowlist(
-        &root,
-        vec![
-            Rule::file(NameMatch::Exact("present.cfg".into()), Expect::Required),
-            Rule::file(NameMatch::Exact("absent.cfg".into()), Expect::Required),
-        ],
-    )
-    .and_then(|s| s.resolve());
-
-    match err {
-        Err(BackupError::RuleMatchedNothing { rule, .. }) => {
-            assert_eq!(rule, "file absent.cfg");
-        }
-        other => panic!("expected the missing rule to be named, got {other:?}"),
-    }
-}
-
-/// A selection over one tree with rules written here, for the properties that are about rules rather
-/// than about a preset.
-fn allowlist(root: &Path, include: Vec<Rule>) -> Result<Selection, BackupError> {
-    Selection::new().with_root(SelectionRoot::new(
-        RootLabel::User,
-        root,
-        include,
-        vec![],
-        Presence::Required,
-    )?)
-}
-
 /// An optional rule that matches nothing still reports, because a zero is something a reader can
 /// act on and an absent row is not.
 #[test]
@@ -311,34 +273,6 @@ fn a_tree_that_yields_nothing_fails_instead_of_succeeding_empty() {
     assert!(matches!(err, Err(BackupError::NothingSelected)));
 }
 
-/// A config directory the game has been pointed at but never written into is a real state, and it is
-/// recorded rather than treated as a fault.
-#[test]
-fn an_absent_optional_root_is_recorded_beside_a_populated_one() -> Result<(), BackupError> {
-    let tmp = tempfile::tempdir().unwrap();
-    game_tree(tmp.path()).unwrap();
-
-    let selected = Selection::new()
-        .with_root(SelectionRoot::game_config(
-            tmp.path(),
-            GameConfigOpts::default(),
-        ))?
-        .with_root(SelectionRoot::new(
-            RootLabel::User,
-            tmp.path().join("never-written"),
-            vec![Rule::file(NameMatch::Any, Expect::Optional)],
-            vec![],
-            Presence::Optional,
-        )?)?
-        .resolve()?;
-
-    assert_eq!(selected.roots().len(), 2);
-    assert!(selected.roots()[0].present());
-    assert!(!selected.roots()[1].present());
-    assert_eq!(selected.roots()[1].files(), 0);
-    Ok(())
-}
-
 /// Order comes from the archive names, not from the order the filesystem hands entries back, so two
 /// trees with the same contents built in different orders select identically.
 #[test]
@@ -402,24 +336,6 @@ fn the_order_does_not_depend_on_the_order_the_tree_was_built() -> Result<(), Bac
         .unwrap();
     assert!(dir_at < file_at);
     Ok(())
-}
-
-/// The deny list is crate policy rather than a caller's choice, so it is worth pinning that it names
-/// what it is meant to name.
-#[test]
-fn the_deny_list_covers_the_launcher_identity_files() {
-    let rendered: Vec<String> = Selection::deny_rules()
-        .iter()
-        .map(Rule::to_string)
-        .collect();
-    for want in [
-        "file accounts.json",
-        "file accountsList.json",
-        "file launcher.ini",
-        "file launcherConfigV3.json",
-    ] {
-        assert!(rendered.iter().any(|r| r == want), "{want} not denied");
-    }
 }
 
 /// A required root that is absent is a fault, because the caller asked for a tree that is not there.

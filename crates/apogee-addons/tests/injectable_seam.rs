@@ -21,7 +21,7 @@ use apogee_addons::{
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{LaunchPlan, Prefix, RunnerKind, Runtime, RuntimePaths};
-use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
+use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key_bytes};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -149,7 +149,7 @@ fn verified(json: &[u8]) -> Result<VerifiedManifest, Box<dyn Error>> {
     Ok(VerifiedManifest::verify(
         json,
         &signature,
-        &[test_verifying_key()],
+        &[test_verifying_key_bytes()],
     )?)
 }
 
