@@ -191,6 +191,30 @@ impl Prefix {
         )
     }
 
+    /// Whether this prefix's registry still holds what `edit` wrote, read out of the prefix's own
+    /// registry files without starting the runner.
+    ///
+    /// For asking about a prefix that is **not running**, which is what makes the file the answer: it
+    /// is what the last wineserver flushed, and there is no live registry it is behind. The write path
+    /// reads `reg add`'s exit status instead, because the flush is asynchronous and a file read taken
+    /// straight after a write can still show the value that was there before.
+    ///
+    /// Total by construction. A prefix with no registry file, a root no single file holds, and a value
+    /// in an encoding this build does not decode all come back as
+    /// [`RegistryEffect::Unknown`](crate::RegistryEffect::Unknown) rather than as an absence, since a
+    /// caller that reapplies what is missing would otherwise reapply it on every launch forever.
+    #[must_use]
+    pub fn registry_effect(&self, edit: &crate::RegistryEdit) -> crate::RegistryEffect {
+        crate::hive::edit_effect(&self.wine_root(), edit)
+    }
+
+    /// Whether what `delete` removes is still absent from this prefix's registry, on the same terms as
+    /// [`Self::registry_effect`]. The readings invert: finding the target is the effect being gone.
+    #[must_use]
+    pub fn registry_removal_effect(&self, delete: &crate::RegistryDelete) -> crate::RegistryEffect {
+        crate::hive::removal_effect(&self.wine_root(), delete)
+    }
+
     /// The recorded `prefix.json`, or `None` if the prefix has not been initialized yet.
     pub fn metadata(&self) -> Result<Option<crate::metadata::PrefixMetadata>, crate::RuntimeError> {
         crate::metadata::PrefixMetadata::load(&self.metadata_path())

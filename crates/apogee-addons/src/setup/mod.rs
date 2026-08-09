@@ -235,7 +235,7 @@ pub(crate) async fn apply_verbs(
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
-    let plan = plan_for(manifest, prefix)?;
+    let Planned { plan, stale } = plan_for(manifest, prefix)?;
 
     // One scratch directory per prefix, so two passes over different prefixes cannot clobber each
     // other's staging, and removed at the end whatever happened.
@@ -263,6 +263,17 @@ pub(crate) async fn apply_verbs(
                 });
             }
             StepAction::Apply => {
+                // Said before it is done, and only for a verb the record already claimed: a verb
+                // reapplied on every launch is what a wrong reading of the prefix looks like from
+                // outside, and the reading is the only thing that tells it from something in the
+                // prefix genuinely undoing the verb each time. Inside the loop rather than beside the
+                // plan, so a pass that stops early does not announce work it never reached.
+                if let Some(entry) = stale.iter().find(|s| s.name == step.verb.name) {
+                    events.emit(SetupEvent::Reapplying {
+                        verb: entry.name.clone(),
+                        because: entry.because.clone(),
+                    });
+                }
                 let outcome =
                     apply_verb(runtime, fetcher, prefix, step.verb, &work, cancel, events).await;
                 // The step that was in flight when the token fired is the one the check above cannot
@@ -310,6 +321,22 @@ pub(crate) async fn apply_verbs(
     Ok(report)
 }
 
+/// A recorded verb whose effect was checked and is gone, with the reading that says so.
+struct StaleVerb {
+    name: String,
+    because: String,
+}
+
+/// What a pass over a prefix would do, and why anything the record already claimed is in it.
+///
+/// The reasons travel in the decision rather than being announced while it is made, because the same
+/// decision answers a question ([`missing_verbs`]) and drives a pass ([`apply_verbs`]), and a question
+/// about a prefix must not report work as happening.
+struct Planned<'m> {
+    plan: SetupPlan<'m>,
+    stale: Vec<StaleVerb>,
+}
+
 /// What a pass over `prefix` would do about every verb `manifest` defines.
 ///
 /// The one place the decision is made, so what [`missing_verbs`] names and what [`apply_verbs`]
@@ -317,7 +344,7 @@ pub(crate) async fn apply_verbs(
 ///
 /// # Errors
 /// [`AddonError::Io`] if the prefix's record cannot be read.
-fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<SetupPlan<'m>> {
+fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Planned<'m>> {
     let installed = prefix.components().map_err(|source| AddonError::Io {
         what: "this prefix".to_owned(),
         step: "read what setup it already has",
@@ -326,7 +353,11 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Setu
     // A verb the record claims but whose effect is gone has to be applied again, so the check happens
     // before the plan is built rather than being discovered halfway through it.
     let stale = stale_verbs(manifest, prefix, &installed);
-    Ok(SetupPlan::build(manifest, &installed, &stale))
+    let names: Vec<String> = stale.iter().map(|verb| verb.name.clone()).collect();
+    Ok(Planned {
+        plan: SetupPlan::build(manifest, &installed, &names),
+        stale,
+    })
 }
 
 /// The verbs `manifest` defines that `prefix` does not have, in manifest order.
@@ -340,6 +371,7 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Setu
 /// As [`plan_for`].
 pub(crate) fn missing_verbs(manifest: &ComponentManifest, prefix: &Prefix) -> Result<Vec<String>> {
     Ok(plan_for(manifest, prefix)?
+        .plan
         .steps()
         .iter()
         .filter(|step| step.action == StepAction::Apply)
@@ -347,20 +379,32 @@ pub(crate) fn missing_verbs(manifest: &ComponentManifest, prefix: &Prefix) -> Re
         .collect())
 }
 
-/// The recorded verbs whose effect the manifest says is checkable and which no longer have it.
+/// The recorded verbs whose effect can be checked and is no longer there, each with the reading that
+/// says so.
 ///
-/// Only those naming something to look for: a verb that states nothing has no evidence beyond the
-/// record, which is the honest answer for one whose whole effect is a registry value.
+/// Checked against the paths a verb states *and* against the registry its ops declare, because those
+/// cover different verbs: a placement is only checkable through what the row states, and a registry
+/// write states nothing because the op already says what it wrote. Only a verb that states no paths
+/// and carries no registry op is left with the record as its only evidence.
+///
+/// Reads the prefix's registry files rather than asking a `reg query`. This runs on every launch, and
+/// a query is a Windows program started through the runner: under Proton that is umu bringing its
+/// container up for one answer. The file is also the more accurate of the two here, since nothing has
+/// run in the prefix yet.
 fn stale_verbs(
     manifest: &ComponentManifest,
     prefix: &Prefix,
     installed: &[apogee_runtime::InstalledComponent],
-) -> Vec<String> {
+) -> Vec<StaleVerb> {
     installed
         .iter()
         .filter_map(|record| manifest.verb(record.name()))
-        .filter(|verb| verb::missing(prefix, verb).is_some())
-        .map(|verb| verb.name.clone())
+        .filter_map(|verb| {
+            Some(StaleVerb {
+                because: verb::stale(prefix, verb)?,
+                name: verb.name.clone(),
+            })
+        })
         .collect()
 }
 
