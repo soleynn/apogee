@@ -41,7 +41,7 @@ pub use external::{
 pub use launch::{Contribution, LaunchEdit, Preparation, Redirect};
 pub use manifest::{
     Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
-    InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
+    InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp, VerifiedManifest,
 };
 pub use setup::{SetupEvent, SetupEvents, SetupOutcome, SetupReport, SetupState};
 
@@ -442,7 +442,7 @@ impl Addons {
         manifest_url: &url::Url,
         signature_url: &url::Url,
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<ComponentManifest> {
+    ) -> Result<VerifiedManifest> {
         setup::fetch_manifest(
             &self.fetcher,
             manifest_url,
@@ -471,7 +471,7 @@ impl Addons {
         signature_url: &url::Url,
         keys: &[ed25519_dalek::VerifyingKey],
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<ComponentManifest> {
+    ) -> Result<VerifiedManifest> {
         setup::fetch_manifest(
             &self.fetcher,
             manifest_url,
@@ -494,7 +494,7 @@ impl Addons {
     /// # Errors
     /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
     /// cache rather than an absent one.
-    pub async fn cached_manifest(&self) -> Result<Option<ComponentManifest>> {
+    pub async fn cached_manifest(&self) -> Result<Option<VerifiedManifest>> {
         setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_keys()?).await
     }
 
@@ -506,7 +506,7 @@ impl Addons {
     pub async fn cached_manifest_for_testing(
         &self,
         keys: &[ed25519_dalek::VerifyingKey],
-    ) -> Result<Option<ComponentManifest>> {
+    ) -> Result<Option<VerifiedManifest>> {
         setup::cached_manifest(&self.paths.catalog_cache(), keys).await
     }
 
@@ -521,7 +521,7 @@ impl Addons {
     /// the token fired. A single verb failing is in the report rather than the error.
     pub async fn apply_setup(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         prefix: &Prefix,
         cancel: &tokio_util::sync::CancellationToken,
         events: &SetupEvents,
@@ -549,7 +549,7 @@ impl Addons {
     /// that is not.
     pub fn missing_setup(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         prefix: &Prefix,
     ) -> Result<Vec<String>> {
         setup::missing_verbs(manifest, prefix)
@@ -568,24 +568,19 @@ impl Addons {
     #[must_use]
     pub fn dalamud(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         config: DalamudConfig,
         events: &SetupEvents,
     ) -> Option<Dalamud> {
-        let Some(entry) = manifest.injectable(InjectableKind::Dalamud) else {
+        let built = Dalamud::new(self.paths.dalamud(), self.fetcher.clone(), manifest, config);
+        if built.is_none() {
             events.emit(SetupEvent::Failed {
                 what: dalamud::DALAMUD.to_owned(),
                 reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
                     .to_owned(),
             });
-            return None;
-        };
-        Some(Dalamud::new(
-            self.paths.dalamud(),
-            self.fetcher.clone(),
-            entry,
-            config,
-        ))
+        }
+        built
     }
 
     /// Install or update each injectable, returning what failed.

@@ -16,11 +16,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use apogee_addons::{
-    AddonError, AddonPaths, Addons, ComponentManifest, Contribution, DalamudConfig, Injectable,
-    LaunchEdit, Redirect, SetupEvent, SetupEvents, SupportTier,
+    AddonError, AddonPaths, Addons, Contribution, DalamudConfig, Injectable, LaunchEdit, Redirect,
+    SetupEvent, SetupEvents, SupportTier, VerifiedManifest,
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{LaunchPlan, Prefix, RunnerKind, Runtime, RuntimePaths};
+use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -133,12 +134,23 @@ impl Injectable for Loader {
 /// Deliberately not the real distribution. What is under test is the loop, not the download, and a test
 /// that reached goatcorp would pull a real release over the network on every CI run while claiming to be
 /// hermetic. `.invalid` is reserved for exactly this and never resolves.
-fn manifest() -> Result<ComponentManifest, Box<dyn Error>> {
-    let json = r#"{ "version": 1, "injectables": [
+fn manifest() -> Result<VerifiedManifest, Box<dyn Error>> {
+    let json = br#"{ "version": 1, "injectables": [
         { "name": "Dalamud", "kind": "dalamud",
           "distribution": "https://dalamud.invalid/Dalamud/Release/VersionInfo",
           "tier": "best_effort", "note": "Best with the wine-xiv runner." } ] }"#;
-    Ok(ComponentManifest::from_json_bytes(json.as_bytes())?)
+    verified(json)
+}
+
+/// A manifest that verified, built the only way there is one: signed with a key this test made and
+/// checked against it. There is no mint to reach for, which is the point of the type.
+fn verified(json: &[u8]) -> Result<VerifiedManifest, Box<dyn Error>> {
+    let signature = sign_manifest(json);
+    Ok(VerifiedManifest::verify(
+        json,
+        &signature,
+        &[test_verifying_key()],
+    )?)
 }
 
 fn addons(root: &Path) -> Result<Addons, Box<dyn Error>> {
@@ -359,7 +371,7 @@ async fn a_second_companion_cannot_redirect_a_launch_that_is_already_redirected(
 async fn a_catalog_with_no_row_declines_and_says_so() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let addons = addons(root.path())?;
-    let empty = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#)?;
+    let empty = verified(br#"{ "version": 1 }"#)?;
     let (sink, rx) = events();
 
     let declined = addons.dalamud(&empty, DalamudConfig::default(), &sink);

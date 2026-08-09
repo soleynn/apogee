@@ -33,7 +33,7 @@ pub(crate) use injector::{InjectorInvocation, injector_argv};
 pub use wire::Installed;
 
 use crate::launch::{Contribution, LaunchEdit, Redirect};
-use crate::manifest::InjectableEntry;
+use crate::manifest::{InjectableKind, VerifiedManifest};
 use crate::setup::{SetupEvent, SetupEvents};
 use crate::{AddonError, Injectable, Result, SupportTier};
 use integrity::Digest;
@@ -212,15 +212,22 @@ pub struct Dalamud {
 }
 
 impl Dalamud {
-    /// Build it from the manifest row that points at its distribution.
+    /// Build it from the row a verified manifest carries, or `None` when it carries none.
+    ///
+    /// The manifest rather than the row, because the row on its own is not proof of anything: it is a
+    /// struct a parse produces, and this constructor is what turns one into downloads from the URL it
+    /// names and files laid into a prefix. Taking a [`VerifiedManifest`] is what keeps the gate on
+    /// [`Addons::apply_setup`](crate::Addons::apply_setup) from being one that only the setup half of
+    /// the catalog passes through.
     #[must_use]
     pub fn new(
         paths: DalamudPaths,
         fetcher: Fetcher,
-        entry: &InjectableEntry,
+        manifest: &VerifiedManifest,
         config: DalamudConfig,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let entry = manifest.rows().injectable(InjectableKind::Dalamud)?;
+        Some(Self {
             paths,
             fetcher,
             distribution: entry.distribution.clone(),
@@ -228,7 +235,7 @@ impl Dalamud {
             tier: entry.tier.clone(),
             caveats: entry.caveats.clone(),
             config,
-        }
+        })
     }
 
     /// Point it at endpoints assembled by hand, so a test can serve each one separately.

@@ -34,7 +34,7 @@ pub use event::{SetupEvent, SetupEvents};
 // instead.
 pub(crate) use plan::{SetupPlan, StepAction};
 
-use crate::manifest::{ComponentManifest, Verb};
+use crate::manifest::{ComponentManifest, Verb, VerifiedManifest};
 use crate::{AddonError, Result};
 
 /// What became of one verb.
@@ -134,7 +134,7 @@ pub(crate) async fn fetch_manifest(
     cache_dir: &Path,
     keys: &[VerifyingKey],
     cancel: &CancellationToken,
-) -> Result<ComponentManifest> {
+) -> Result<VerifiedManifest> {
     let staging = cache_dir.join(STAGING_DIR);
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging)
@@ -153,13 +153,14 @@ pub(crate) async fn fetch_manifest(
     let signature = tokio::fs::read(&signature_path).await.map_err(|source| {
         artifact::io_failed(CATALOG, "read what it downloaded", &signature_path, source)
     })?;
-    // Which key admitted it is deliberately dropped here. An overlap window exists so that a launch
-    // does not have to care which side of a rotation it is on; the re-sign it is waiting for is a
-    // maintainer's business and is asserted where the hosted file is embedded, not on a user's machine.
-    let (parsed, _trusted) = ComponentManifest::parse_and_verify(&manifest, &signature, keys)?;
+    // Which key admitted it travels on the proof and nothing here reads it. An overlap window exists so
+    // that a launch does not have to care which side of a rotation it is on; the re-sign it is waiting
+    // for is a maintainer's business, asserted where the hosted file is embedded rather than on a
+    // user's machine.
+    let verified = VerifiedManifest::verify(&manifest, &signature, keys)?;
 
     publish(&staging, cache_dir).await?;
-    Ok(parsed)
+    Ok(verified)
 }
 
 /// Move a verified manifest and its signature from `staging` into the cache.
@@ -194,7 +195,7 @@ async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
 pub(crate) async fn cached_manifest(
     cache_dir: &Path,
     keys: &[VerifyingKey],
-) -> Result<Option<ComponentManifest>> {
+) -> Result<Option<VerifiedManifest>> {
     let manifest_path = cache_dir.join(MANIFEST_FILE);
     let signature_path = cache_dir.join(SIGNATURE_FILE);
     let (Ok(manifest), Ok(signature)) = (
@@ -203,8 +204,7 @@ pub(crate) async fn cached_manifest(
     ) else {
         return Ok(None);
     };
-    let (parsed, _trusted) = ComponentManifest::parse_and_verify(&manifest, &signature, keys)?;
-    Ok(Some(parsed))
+    Ok(Some(VerifiedManifest::verify(&manifest, &signature, keys)?))
 }
 
 /// Download `url` to `dest` over HTTPS with no content pin, because the caller authenticates these bytes
@@ -236,12 +236,14 @@ async fn download_unverified(
 pub(crate) async fn apply_verbs(
     runtime: &Runtime,
     fetcher: &Fetcher,
-    manifest: &ComponentManifest,
+    manifest: &VerifiedManifest,
     prefix: &Prefix,
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
-    let Planned { plan, stale } = plan_for(manifest, prefix)?;
+    // The proof stops here, at the last thing that decides *whether* to write. Below this the rows are
+    // ordinary data and the functions that read them are private to this crate.
+    let Planned { plan, stale } = plan_for(manifest.rows(), prefix)?;
 
     // One scratch directory per prefix, so two passes over different prefixes cannot clobber each
     // other's staging, and removed at the end whatever happened.
@@ -376,8 +378,8 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Plan
 ///
 /// # Errors
 /// As [`plan_for`].
-pub(crate) fn missing_verbs(manifest: &ComponentManifest, prefix: &Prefix) -> Result<Vec<String>> {
-    Ok(plan_for(manifest, prefix)?
+pub(crate) fn missing_verbs(manifest: &VerifiedManifest, prefix: &Prefix) -> Result<Vec<String>> {
+    Ok(plan_for(manifest.rows(), prefix)?
         .plan
         .steps()
         .iter()

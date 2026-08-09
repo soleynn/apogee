@@ -11,20 +11,19 @@ use apogee_fetch::Fetcher;
 use apogee_runtime::{LaunchPlan, Prefix, RunnerKind};
 
 use super::*;
-use crate::manifest::ComponentManifest;
+use crate::manifest::{ComponentManifest, VerifiedManifest};
 
 const GAME_VERSION: &str = "2026.06.18.0000.0000";
 
-fn entry() -> InjectableEntry {
+fn catalog() -> VerifiedManifest {
     let json = r#"{ "version": 1, "injectables": [
         { "name": "Dalamud", "kind": "dalamud",
           "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
           "tier": "best_effort", "note": "Best with the wine-xiv runner.",
           "caveats": ["Third-party code is loaded into the game client."] } ] }"#;
-    ComponentManifest::from_json_bytes(json.as_bytes())
-        .expect("fixture parses")
-        .injectables
-        .remove(0)
+    VerifiedManifest::minted_for_tests(
+        ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses"),
+    )
 }
 
 fn dalamud(root: &Path, runner: &str) -> (Dalamud, Prefix) {
@@ -43,9 +42,10 @@ fn dalamud(root: &Path, runner: &str) -> (Dalamud, Prefix) {
     let dalamud = Dalamud::new(
         DalamudPaths::under(root.join("dalamud")),
         Fetcher::builder().build().expect("fetcher"),
-        &entry(),
+        &catalog(),
         config,
-    );
+    )
+    .expect("the fixture carries a Dalamud row");
     (dalamud, prefix)
 }
 
@@ -271,7 +271,8 @@ fn no_runner_draws_a_warning_of_its_own() {
 /// Every endpoint is a sibling of the pointer the manifest carries, so one row describes the service.
 #[test]
 fn the_endpoints_are_derived_from_the_one_pointer_the_row_carries() {
-    let endpoints = Endpoints::derive(&entry().distribution).expect("derive");
+    let endpoints =
+        Endpoints::derive(&catalog().rows().injectables[0].distribution).expect("derive");
     assert_eq!(
         endpoints.asset_meta.as_str(),
         "https://kamori.goats.dev/Dalamud/Asset/Meta"
@@ -298,7 +299,8 @@ fn the_endpoints_are_derived_from_the_one_pointer_the_row_carries() {
 /// the same release.
 #[test]
 fn the_release_request_names_the_track_and_a_fixed_bucket() {
-    let endpoints = Endpoints::derive(&entry().distribution).expect("derive");
+    let endpoints =
+        Endpoints::derive(&catalog().rows().injectables[0].distribution).expect("derive");
     let query = endpoints.release_query();
     let pairs: Vec<(String, String)> = query
         .query_pairs()

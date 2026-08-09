@@ -15,7 +15,7 @@ use std::error::Error;
 use std::path::Path;
 
 use apogee_addons::{
-    AddonPaths, ComponentManifest, Dalamud, DalamudConfig, Injectable, SetupEvent, SetupEvents,
+    AddonPaths, Dalamud, DalamudConfig, Injectable, SetupEvent, SetupEvents, VerifiedManifest,
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, RunnerKind};
@@ -25,23 +25,19 @@ type R<T> = Result<T, Box<dyn Error>>;
 
 /// The hosted catalog's own row, so this drives the pointer that ships rather than one written here.
 fn dalamud(root: &Path) -> R<Dalamud> {
-    let (manifest, _trusted) = ComponentManifest::verify_trusted(
+    let manifest = VerifiedManifest::verify_trusted(
         include_bytes!("../../../site/components/manifest.json"),
         include_bytes!("../../../site/components/manifest.json.sig"),
     )?;
-    let entry = manifest
-        .injectables
-        .iter()
-        .find(|entry| entry.name == "Dalamud")
-        .ok_or("the hosted catalog carries no Dalamud row")?;
     // The game version is left empty on purpose: what is under test is the install, and this asserts on
     // the caveat that mismatch produces rather than needing a real install to match against.
     Ok(Dalamud::new(
         AddonPaths::new(root).dalamud(),
         Fetcher::builder().build()?,
-        entry,
+        &manifest,
         DalamudConfig::default(),
-    ))
+    )
+    .ok_or("the hosted catalog carries no Dalamud row")?)
 }
 
 fn prefix(root: &Path) -> R<Prefix> {

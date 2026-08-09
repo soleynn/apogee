@@ -47,7 +47,7 @@ fn runtime() -> Runtime {
 
 /// Three verbs: one that lands what it promises, one whose op succeeds without producing what it names,
 /// and one whose op cannot succeed at all.
-fn manifest(server: &ChaosServer, pin: &str) -> ComponentManifest {
+fn manifest(server: &ChaosServer, pin: &str) -> VerifiedManifest {
     let json = format!(
         r#"{{
           "version": 1,
@@ -72,12 +72,15 @@ fn manifest(server: &ChaosServer, pin: &str) -> ComponentManifest {
         // A pin the served bytes cannot match, so the op fails without needing a wine.
         wrong_pin = "f".repeat(64),
     );
-    ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses")
+    VerifiedManifest::minted_for_tests(
+        ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses"),
+    )
 }
 
 /// Only the verb named, so one test's subject is not another's noise.
-fn only(manifest: &ComponentManifest, name: &str) -> ComponentManifest {
-    ComponentManifest {
+fn only(manifest: &VerifiedManifest, name: &str) -> VerifiedManifest {
+    let manifest = manifest.rows();
+    VerifiedManifest::minted_for_tests(ComponentManifest {
         verbs: manifest
             .verbs
             .iter()
@@ -85,12 +88,12 @@ fn only(manifest: &ComponentManifest, name: &str) -> ComponentManifest {
             .cloned()
             .collect(),
         ..manifest.clone()
-    }
+    })
 }
 
 async fn apply(
     prefix: &Prefix,
-    manifest: &ComponentManifest,
+    manifest: &VerifiedManifest,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
     apply_with(prefix, manifest, &CancellationToken::new(), events).await
@@ -98,7 +101,7 @@ async fn apply(
 
 async fn apply_with(
     prefix: &Prefix,
-    manifest: &ComponentManifest,
+    manifest: &VerifiedManifest,
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
@@ -402,7 +405,9 @@ async fn a_stopped_pass_is_a_cancellation_rather_than_a_set_of_failures() {
 async fn a_manifest_with_no_verbs_does_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = scratch(dir.path());
-    let manifest = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#).expect("parse");
+    let manifest = VerifiedManifest::minted_for_tests(
+        ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#).expect("parse"),
+    );
 
     let report = apply(&prefix, &manifest, &SetupEvents::none())
         .await
@@ -421,7 +426,7 @@ async fn a_manifest_with_no_verbs_does_nothing() {
 // reads.
 
 /// The verb the hosted catalog ships: one registry write, and nothing on disk to name.
-fn registry_manifest() -> ComponentManifest {
+fn registry_manifest() -> VerifiedManifest {
     let json = r#"{
       "version": 1,
       "verbs": [
@@ -430,7 +435,9 @@ fn registry_manifest() -> ComponentManifest {
                                    "name": "winemenubuilder.exe", "type": "disabled" } } ] }
       ]
     }"#;
-    ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses")
+    VerifiedManifest::minted_for_tests(
+        ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses"),
+    )
 }
 
 /// A `user.reg` holding the key the verb writes into, with `values` inside it.
@@ -480,7 +487,7 @@ fn a_registry_verb_whose_value_was_deleted_is_planned_again() {
     let prefix = scratch(dir.path());
     write_user_reg(&prefix, "");
 
-    let (actions, because) = planned(&registry_manifest(), &prefix);
+    let (actions, because) = planned(registry_manifest().rows(), &prefix);
 
     assert_eq!(actions, [StepAction::Apply]);
     assert!(
@@ -498,7 +505,7 @@ fn a_registry_verb_whose_value_is_intact_is_left_alone() {
     write_user_reg(&prefix, "\"winemenubuilder.exe\"=\"\"\n");
 
     assert_eq!(
-        planned(&registry_manifest(), &prefix).0,
+        planned(registry_manifest().rows(), &prefix).0,
         [StepAction::AlreadyPresent]
     );
 }
@@ -512,7 +519,7 @@ fn a_registry_verb_whose_value_was_overwritten_is_planned_again() {
     write_user_reg(&prefix, "\"winemenubuilder.exe\"=\"builtin\"\n");
 
     assert_eq!(
-        planned(&registry_manifest(), &prefix).0,
+        planned(registry_manifest().rows(), &prefix).0,
         [StepAction::Apply]
     );
 }
@@ -527,7 +534,7 @@ fn a_prefix_whose_registry_cannot_be_read_leaves_the_record_standing() {
 
     // `scratch` lays down the wine skeleton, which has no `user.reg` in it.
     assert!(!prefix.path().join("user.reg").exists());
-    let (actions, because) = planned(&registry_manifest(), &prefix);
+    let (actions, because) = planned(registry_manifest().rows(), &prefix);
 
     assert_eq!(actions, [StepAction::AlreadyPresent]);
     assert!(

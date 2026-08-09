@@ -16,7 +16,7 @@ use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use apogee_addons::{AddonPaths, Addons, ComponentManifest, SetupEvents, SetupState};
+use apogee_addons::{AddonPaths, Addons, SetupEvents, SetupState, VerifiedManifest};
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, ProgramInPrefix, Progress, RunnerKind, Runtime, RuntimePaths};
 use serial_test::serial;
@@ -24,12 +24,11 @@ use tokio_util::sync::CancellationToken;
 
 /// The manifest the launcher actually ships, so this exercises the shipped verb rather than a fixture
 /// written to pass.
-fn hosted() -> Result<ComponentManifest, Box<dyn Error>> {
-    let (manifest, _trusted) = ComponentManifest::verify_trusted(
+fn hosted() -> Result<VerifiedManifest, Box<dyn Error>> {
+    Ok(VerifiedManifest::verify_trusted(
         include_bytes!("../../../site/components/manifest.json"),
         include_bytes!("../../../site/components/manifest.json.sig"),
-    )?;
-    Ok(manifest)
+    )?)
 }
 
 /// A custom runner whose `bin/wine` shims to the host's wine on `PATH`.

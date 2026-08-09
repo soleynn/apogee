@@ -364,7 +364,7 @@ impl ComponentManifest {
     /// # Errors
     /// [`ManifestError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
     /// none of `keys`, then anything [`Self::from_json_bytes`] raises.
-    pub fn parse_and_verify(
+    pub(crate) fn parse_and_verify(
         manifest_json: &[u8],
         signature: &[u8],
         keys: &[VerifyingKey],
@@ -387,7 +387,7 @@ impl ComponentManifest {
     /// # Errors
     /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
     /// [`Self::parse_and_verify`] raises.
-    pub fn verify_trusted(
+    pub(crate) fn verify_trusted(
         manifest_json: &[u8],
         signature: &[u8],
     ) -> Result<(Self, TrustedKey), ManifestError> {
@@ -1294,5 +1294,86 @@ mod tests {
             matches!(&dalamud.tier, SupportTier::BestEffort { note } if !note.is_empty()),
             "the tier has to say what it costs"
         );
+    }
+}
+
+/// Proof that a manifest verified against a trusted key, and the only shape the apply path accepts.
+///
+/// The same shape as `apogee_fetch::VerifiedFile`, for the same reason. Applying a manifest is not a
+/// read: it sets values inside a prefix's registry and lays files into it from URLs the manifest names,
+/// so a manifest that reaches [`Addons::apply_setup`](crate::Addons::apply_setup) has to be one
+/// somebody verified rather than one somebody parsed. Parsing is public, total, and fuzzed
+/// ([`ComponentManifest::from_json_bytes`]) and carries no authenticity whatsoever, which makes a
+/// signature check that is only a convention one call site away from not happening.
+///
+/// Minted here and nowhere else, by verifying. There is deliberately no test-only constructor beside
+/// it: a gated mint is a second way in, and the tests that need a manifest are not the ones the gate
+/// would be on. A test signs its fixture with a key it made, which is the same check the launcher makes.
+#[derive(Debug, Clone)]
+pub struct VerifiedManifest {
+    manifest: ComponentManifest,
+    key: TrustedKey,
+}
+
+impl VerifiedManifest {
+    /// Verify `signature` over the exact `manifest_json` bytes against `keys`, in order, then parse.
+    ///
+    /// The keys are an argument rather than this build's own, so the fetch path can be driven against a
+    /// key a test signs with. Nothing about that weakens the gate: a caller cannot verify against keys
+    /// it does not have, and the launcher passes the ones compiled into it.
+    ///
+    /// # Errors
+    /// [`ManifestError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
+    /// none of `keys`, then anything [`ComponentManifest::from_json_bytes`] raises.
+    pub fn verify(
+        manifest_json: &[u8],
+        signature: &[u8],
+        keys: &[VerifyingKey],
+    ) -> Result<Self, ManifestError> {
+        let (manifest, key) = ComponentManifest::parse_and_verify(manifest_json, signature, keys)?;
+        Ok(Self { manifest, key })
+    }
+
+    /// The same, against the keys compiled into this build.
+    ///
+    /// # Errors
+    /// [`ManifestError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
+    /// [`Self::verify`] raises.
+    pub fn verify_trusted(manifest_json: &[u8], signature: &[u8]) -> Result<Self, ManifestError> {
+        let (manifest, key) = ComponentManifest::verify_trusted(manifest_json, signature)?;
+        Ok(Self { manifest, key })
+    }
+
+    /// The rows it carries. Reading them is not applying them, so this is ordinary access.
+    #[must_use]
+    pub fn rows(&self) -> &ComponentManifest {
+        &self.manifest
+    }
+
+    /// Which of this build's trusted keys admitted it, for a caller that wants to know whether a
+    /// rotation is finished. Most do not: the point of an overlap window is that a launch works either
+    /// way.
+    #[must_use]
+    pub fn key(&self) -> TrustedKey {
+        self.key
+    }
+}
+
+#[cfg(test)]
+impl VerifiedManifest {
+    /// Mint one for this crate's own unit tests, which drive the machinery below the gate.
+    ///
+    /// `cfg(test)` rather than a feature. A feature is a build somebody can ship and a second public
+    /// way to reach the apply path, and it would not even help: the tests that need a manifest are
+    /// spread across the ones a feature gate is on and the ones it is not. This exists only while
+    /// compiling this crate's own unit tests, so no other crate and no shipped build can see it.
+    ///
+    /// The tests that drive the seam itself are integration tests, and those sign a fixture with a key
+    /// they made and verify it, which is the same call the launcher makes.
+    pub(crate) fn minted_for_tests(manifest: ComponentManifest) -> Self {
+        Self {
+            manifest,
+            key: TrustedKey::Current,
+        }
     }
 }

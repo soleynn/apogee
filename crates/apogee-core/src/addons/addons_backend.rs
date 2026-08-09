@@ -5,8 +5,8 @@
 //! launch is over.
 
 use apogee_addons::{
-    AddonEvents, AddonReport, AddonSession, Addons, ComponentManifest, DalamudConfig,
-    ExternalAddon, GameContext, Injectable, LoadEvidence, Outcome, SetupEvent, SetupEvents,
+    AddonEvents, AddonReport, AddonSession, Addons, DalamudConfig, ExternalAddon, GameContext,
+    Injectable, LoadEvidence, Outcome, SetupEvent, SetupEvents, VerifiedManifest,
 };
 use std::time::SystemTime;
 
@@ -159,7 +159,7 @@ struct SetupPass {
     /// The catalog the pass read, so a launch that needs the row for what it loads into the game does
     /// not fetch and re-verify the same signed file twice, and cannot get a different answer the
     /// second time.
-    manifest: Option<ComponentManifest>,
+    manifest: Option<VerifiedManifest>,
     /// The verbs the pass did not leave the prefix with, or `None` when it could not tell.
     still_missing: Option<Vec<String>>,
 }
@@ -210,7 +210,7 @@ impl AddonsBackend {
     /// its companion, which is exactly the report a best-effort tier exists to avoid.
     async fn inject(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         prefix: &Prefix,
         config: DalamudConfig,
         plan: &mut LaunchPlan,
@@ -257,7 +257,7 @@ impl AddonsBackend {
         &self,
         cancel: &CancellationToken,
         setup: &SetupEvents,
-    ) -> Option<ComponentManifest> {
+    ) -> Option<VerifiedManifest> {
         let fetch_error = match self.catalog_urls() {
             Ok((manifest_url, signature_url)) => match self
                 .addons

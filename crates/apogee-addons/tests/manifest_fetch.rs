@@ -137,7 +137,10 @@ async fn a_verified_fetch_is_what_the_cache_holds() {
         )
         .await
         .expect("a manifest signed by the key it is checked against");
-    assert!(fetched.verb("a-verb").is_some(), "the row that was served");
+    assert!(
+        fetched.rows().verb("a-verb").is_some(),
+        "the row that was served"
+    );
 
     assert_eq!(
         std::fs::read(&manifest_path).expect("published manifest"),
@@ -156,7 +159,7 @@ async fn a_verified_fetch_is_what_the_cache_holds() {
         .expect("the published pair verifies")
         .expect("a fetch published one");
     assert!(
-        cached.verb("a-verb").is_some(),
+        cached.rows().verb("a-verb").is_some(),
         "the cache serves the rows that were fetched"
     );
 }
@@ -304,7 +307,10 @@ async fn a_key_inside_its_overlap_window_still_admits_the_catalog() {
         )
         .await
         .expect("a build that has taken on the next key still accepts the one in the file");
-    assert!(fetched.verb("a-verb").is_some(), "the row that was served");
+    assert!(
+        fetched.rows().verb("a-verb").is_some(),
+        "the row that was served"
+    );
 
     // And the fallback the launch path leans on reads it back the same way, so a client mid-rotation
     // is not left with a cache it published and can no longer open.
