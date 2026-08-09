@@ -75,6 +75,7 @@ pub enum TrustedKey {
     Current,
     /// A key still inside its overlap window. Whatever served this manifest has not been re-signed
     /// since the rotation started.
+    #[non_exhaustive]
     Retired { position: usize },
 }
 
@@ -139,20 +140,26 @@ pub enum ManifestError {
     /// A key compiled into this build is not a point on the curve, so it can admit nothing. A build
     /// problem, and the one failure on this path that the hosted file cannot be the cause of.
     #[error("the trusted key at position {position} in this build is not a usable ed25519 key")]
+    #[non_exhaustive]
     TrustedKeyUnusable { position: usize },
     #[error("unsupported manifest version {found} (expected {expected})")]
+    #[non_exhaustive]
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("{component}: unknown {field} {value:?}")]
+    #[non_exhaustive]
     UnknownValue {
         component: String,
         field: &'static str,
         value: String,
     },
     #[error("{component}: sha256 pin is not 32 hex bytes")]
+    #[non_exhaustive]
     BadPin { component: String },
     #[error("{component}: {url:?} is not a valid absolute url")]
+    #[non_exhaustive]
     BadUrl { component: String, url: String },
     #[error("{component}: path {path:?} is not one a component may write: {reason}")]
+    #[non_exhaustive]
     BadPath {
         component: String,
         path: String,
@@ -162,12 +169,14 @@ pub enum ManifestError {
     /// scratch file is named after it, so it is held to the same standard as the destinations, which
     /// are validated a few lines away.
     #[error("{field} {value:?} is not usable: {reason}")]
+    #[non_exhaustive]
     BadIdentifier {
         field: &'static str,
         value: String,
         reason: &'static str,
     },
     #[error("{component}: registry edit {key:?} is not one this launcher will write: {reason}")]
+    #[non_exhaustive]
     BadRegistryEdit {
         component: String,
         key: String,
@@ -176,6 +185,7 @@ pub enum ManifestError {
     /// Two rows offering the same name, in either list. A component name is what `prefix.json`
     /// records, so a duplicate would make "is it applied?" ambiguous.
     #[error("two components are both named {name:?}")]
+    #[non_exhaustive]
     DuplicateName { name: String },
 }
 
@@ -256,6 +266,7 @@ impl ComponentPath {
 
 /// A pinned artifact: where to get it, what its bytes must hash to, and how to lay it down.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Artifact {
     pub url: Url,
     pub sha256: [u8; 32],
@@ -264,6 +275,7 @@ pub struct Artifact {
 
 /// One injectable companion. Its bytes come from its own distribution, so there is no pin here.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct InjectableEntry {
     pub name: String,
     pub kind: InjectableKind,
@@ -296,6 +308,7 @@ pub enum VerbOp {
 /// A curated prefix-setup step, described entirely by the manifest so it is auditable and ships as
 /// data.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Verb {
     pub name: String,
     /// Why it exists, shown when it is applied. A verb with no reason is a verb nobody can review.
@@ -323,6 +336,7 @@ pub struct Verb {
 /// [`COMPONENT_MANIFEST_VERSION`]: anything else is refused before this is built. A field holding one
 /// reachable value would also have made `Default` produce a version the parser rejects.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ComponentManifest {
     pub injectables: Vec<InjectableEntry>,
     pub verbs: Vec<Verb>,

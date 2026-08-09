@@ -46,11 +46,13 @@ pub enum SetupState {
     /// The prefix already recorded it, so nothing was done.
     AlreadyPresent,
     /// Could not be applied. The rest is unaffected.
+    #[non_exhaustive]
     Failed { reason: String },
 }
 
 /// One verb and what became of it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SetupOutcome {
     pub name: String,
     pub state: SetupState,
@@ -58,6 +60,7 @@ pub struct SetupOutcome {
 
 /// Everything one setup pass did.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct SetupReport {
     /// One per planned verb, in plan order.
     pub outcomes: Vec<SetupOutcome>,

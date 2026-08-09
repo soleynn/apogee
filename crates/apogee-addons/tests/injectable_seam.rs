@@ -300,6 +300,7 @@ async fn a_second_companion_cannot_redirect_a_launch_that_is_already_redirected(
             [AddonError::LaunchAlreadyRedirected {
                 injectable,
                 redirector,
+                ..
             }] if injectable == "Injector" && redirector == "Loader"
         ),
         "the second is refused, and the failure names both: {:?}",

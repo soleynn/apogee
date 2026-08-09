@@ -371,7 +371,7 @@ fn failures(report: &AddonReport) -> Vec<CoreError> {
         .outcomes
         .iter()
         .filter_map(|outcome| match &outcome.outcome {
-            Outcome::Failed { reason } => Some(CoreError::Addon {
+            Outcome::Failed { reason, .. } => Some(CoreError::Addon {
                 program: outcome.program.clone(),
                 reason: reason.clone(),
             }),

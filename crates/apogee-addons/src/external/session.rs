@@ -22,14 +22,17 @@ pub(super) const STOP_GRACE: Duration = Duration::from_secs(5);
 #[non_exhaustive]
 pub enum Outcome {
     /// Started, and running under the given process id.
+    #[non_exhaustive]
     Started { pid: i32 },
     /// Not started because it was already running, under the given process id.
     ///
     /// Whoever started it owns it: a launch that finds a companion it did not start never stops it.
+    #[non_exhaustive]
     AlreadyRunning { pid: i32 },
     /// Not started because the entry is switched off.
     Disabled,
     /// Ran after the game exited and finished with this status.
+    #[non_exhaustive]
     Completed { code: Option<i32> },
     /// Stopped, or never started, because the teardown was cancelled.
     ///
@@ -38,6 +41,7 @@ pub enum Outcome {
     /// shell counting failures would act on it.
     Cancelled,
     /// Could not be run. The rest of the launch is unaffected.
+    #[non_exhaustive]
     Failed { reason: String },
 }
 
@@ -59,6 +63,7 @@ impl std::fmt::Display for Outcome {
 
 /// One entry and what became of it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AddonOutcome {
     /// Its position in the configured list, so a message can point at the entry.
     pub index: usize,
@@ -70,6 +75,7 @@ pub struct AddonOutcome {
 
 /// Everything that happened to a launch's companions.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AddonReport {
     /// One per configured entry, in order.
     pub outcomes: Vec<AddonOutcome>,

@@ -28,7 +28,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub use confirm::LoadEvidence;
-pub use injector::{ClientLanguage, InjectorInvocation, LoadMode, PluginPolicy, injector_argv};
+pub use injector::{ClientLanguage, LoadMode, PluginPolicy};
+pub(crate) use injector::{InjectorInvocation, injector_argv};
 pub use wire::Installed;
 
 use crate::launch::{Contribution, LaunchEdit, Redirect};
@@ -49,6 +50,7 @@ const EMPTY_TROUBLESHOOTING_PACK: &str = "e30=";
 /// The trees Dalamud installs into. Siblings under one root, so pointing it elsewhere or deleting it is
 /// one directory either way.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct DalamudPaths {
     /// Holds `Hooks/<assembly version>/`, one directory per release.
     pub addon: PathBuf,

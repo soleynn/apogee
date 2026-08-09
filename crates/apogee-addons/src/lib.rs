@@ -92,6 +92,7 @@ pub enum AddonError {
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     #[error("{verb}: the bytes fetched are not the ones it pins (expected {expected}, got {got})")]
+    #[non_exhaustive]
     IntegrityMismatch {
         verb: String,
         expected: String,
@@ -100,6 +101,7 @@ pub enum AddonError {
     /// A filesystem step failed. `what` names what was being set up and `step` which part of it: the
     /// io error underneath names a path and a kind, and nothing about why the launcher was there.
     #[error("{what}: could not {step}")]
+    #[non_exhaustive]
     Io {
         what: String,
         step: &'static str,
@@ -110,6 +112,7 @@ pub enum AddonError {
     /// the bytes already matched their pin, so what is wrong is the archive's shape or the layout
     /// declared for it, and retrying the download fixes neither.
     #[error("{what}: the archive did not unpack")]
+    #[non_exhaustive]
     Unpack {
         what: String,
         #[source]
@@ -128,6 +131,7 @@ pub enum AddonError {
     #[error(
         "{injectable} cannot redirect this launch: {redirector} already did, and a launch spawns one program"
     )]
+    #[non_exhaustive]
     LaunchAlreadyRedirected {
         /// The one refused.
         injectable: String,
@@ -138,28 +142,34 @@ pub enum AddonError {
     /// download failure: the bytes arrived, they just are not the shape the endpoint promises, which is
     /// an upstream change rather than a network problem.
     #[error("{injectable}'s distribution answered with something this launcher cannot read")]
+    #[non_exhaustive]
     Distribution {
         injectable: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("verb {verb} failed")]
+    #[non_exhaustive]
     VerbFailed {
         verb: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("addon {index} ({program:?}) cannot be run: {reason}")]
+    #[non_exhaustive]
     InvalidAddon {
         program: PathBuf,
         index: usize,
         reason: &'static str,
     },
     #[error("{program:?} runs inside a prefix, but this launch has no prefix")]
+    #[non_exhaustive]
     PrefixRequired { program: PathBuf },
     #[error("{program:?} asks for {field:?}, which this launcher does not support")]
+    #[non_exhaustive]
     UnsupportedField { program: PathBuf, field: String },
     #[error("failed to start {program:?}")]
+    #[non_exhaustive]
     ExternalSpawn {
         program: PathBuf,
         /// Boxed because the runtime's own taxonomy is wide, and this error type is carried in the
@@ -178,6 +188,7 @@ pub enum AddonError {
     #[error("cancelled")]
     Cancelled,
     #[error("unsupported: {what}")]
+    #[non_exhaustive]
     Unsupported { what: &'static str },
 }
 
@@ -313,6 +324,7 @@ pub trait Injectable: Send + Sync {
 /// copy of the signed catalog, and an injectable's own versioned trees), so it is one directory to
 /// point somewhere else and one to delete.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AddonPaths {
     /// Root for the verified catalog copy and the injectable trees.
     pub root: PathBuf,

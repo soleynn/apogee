@@ -159,7 +159,7 @@ async fn a_companion_asked_to_stay_is_left_running_while_its_sibling_stops() -> 
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let kept_pid = match session.report().outcomes[0].outcome {
-        Outcome::Started { pid } => pid,
+        Outcome::Started { pid, .. } => pid,
         ref other => panic!("expected a start, got {other:?}"),
     };
     session
@@ -199,7 +199,7 @@ async fn an_after_game_tool_runs_once_after_the_game() -> Result<(), Fallible> {
     assert_eq!(report.outcomes.len(), 1, "it ran once");
     assert!(matches!(
         report.outcomes[0].outcome,
-        Outcome::Completed { code: Some(0) }
+        Outcome::Completed { code: Some(0), .. }
     ));
     Ok(())
 }
@@ -227,7 +227,7 @@ async fn an_already_running_tool_is_recognized_and_left_alone() -> Result<(), Fa
     .await;
 
     match session.report().outcomes[0].outcome {
-        Outcome::AlreadyRunning { pid } => {
+        Outcome::AlreadyRunning { pid, .. } => {
             assert_eq!(pid, outside.id().cast_signed(), "the wrong process matched");
         }
         ref other => panic!("expected it to be recognized, got {other:?}"),
@@ -308,7 +308,7 @@ async fn a_broken_entry_does_not_stop_the_others() -> Result<(), Fallible> {
     // Not just that it failed: the reason a shell prints is a `String`, so whatever built it had to
     // walk the cause chain. "failed to start /x/not-here.sh" on its own tells a user nothing they did
     // not already know, and the part that says the file is missing lives two levels down.
-    let Outcome::Failed { reason } = &report.outcomes[0].outcome else {
+    let Outcome::Failed { reason, .. } = &report.outcomes[0].outcome else {
         panic!("the missing program has to fail: {:?}", report.outcomes[0]);
     };
     assert!(
@@ -440,7 +440,7 @@ async fn a_session_reports_whether_it_still_has_work() -> Result<(), Fallible> {
     .await;
     assert!(!keeps.has_work());
     let kept_pid = match keeps.report().outcomes[0].outcome {
-        Outcome::Started { pid } => pid,
+        Outcome::Started { pid, .. } => pid,
         ref other => panic!("expected a start, got {other:?}"),
     };
     keeps

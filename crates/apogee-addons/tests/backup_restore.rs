@@ -315,7 +315,7 @@ fn a_tampered_entry_is_caught_by_its_recorded_hash() -> Result<(), Fallible> {
 
     let target = live.path().join("config");
     match restore(&plan(&archive, &target), &CancellationToken::new()) {
-        Err(BackupError::ContentMismatch { entry }) => assert_eq!(entry, "user/FFXIV.cfg"),
+        Err(BackupError::ContentMismatch { entry, .. }) => assert_eq!(entry, "user/FFXIV.cfg"),
         other => panic!("expected a hash mismatch, got {other:?}"),
     }
     assert!(!target.exists());

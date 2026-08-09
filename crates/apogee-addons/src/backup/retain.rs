@@ -39,6 +39,7 @@ impl Retain {
 
 /// One of our archives, as identified by reading it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ArchiveRecord {
     pub path: PathBuf,
     /// From the record, never from the filename: an instant rendered into a name is a fragile
@@ -73,6 +74,7 @@ pub enum ForeignReason {
 
 /// What a prune would do, worked out without deleting anything.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PrunePlan {
     /// Ours, newest first by recorded instant, ties broken by filename bytes.
     pub ours: Vec<ArchiveRecord>,
@@ -87,6 +89,7 @@ pub struct PrunePlan {
 
 /// What a prune did.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PruneReport {
     pub deleted: Vec<PathBuf>,
     pub kept: usize,

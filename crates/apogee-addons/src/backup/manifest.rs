@@ -47,6 +47,7 @@ pub struct BackupManifest {
 
 /// What one source tree contributed, including every rule's match count.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RootRecord {
     pub label: RootLabel,
     /// The host path the tree came from, for a human choosing between archives. Restore never reads
@@ -63,6 +64,7 @@ pub struct RootRecord {
 /// One rule and how many entries it matched. A zero here is the point: it is how a rule that does
 /// nothing stays visible after the fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RuleRecord {
     pub rule: String,
     pub role: RuleRole,
@@ -71,6 +73,7 @@ pub struct RuleRecord {
 
 /// One entry as stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EntryRecord {
     pub name: String,
     pub kind: EntryKind,

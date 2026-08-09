@@ -20,6 +20,7 @@ use crate::AddonError;
 /// wait on) answers for the shapes a redirect happens to take rather than for the redirect. And a
 /// failure is narrated as it happens, but the caller still has to be able to count what went wrong.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct Preparation {
     /// The companion that became the program the launch spawns, by name, if one did.
     pub redirected_by: Option<String>,

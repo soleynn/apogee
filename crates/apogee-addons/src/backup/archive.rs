@@ -56,6 +56,7 @@ pub struct BackupSpec {
 
 /// What one backup captured.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BackupReport {
     /// Where the archive was written.
     pub archive: PathBuf,

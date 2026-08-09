@@ -50,6 +50,7 @@ pub struct RestorePlan {
 
 /// What a restore did.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RestoreReport {
     /// One per root that was restored.
     pub restored: Vec<RestoredRoot>,
@@ -59,6 +60,7 @@ pub struct RestoreReport {
 
 /// One root put back.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RestoredRoot {
     pub label: RootLabel,
     pub target: PathBuf,

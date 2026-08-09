@@ -2137,31 +2137,38 @@ fn render_notice(notice: &Notice) -> String {
 /// Render one companion-tool event as a plain line.
 fn render_addon(event: &AddonEvent) -> String {
     match event {
-        AddonEvent::Started { program, pid } => {
+        AddonEvent::Started { program, pid, .. } => {
             format!("addon: started {} (pid {pid})", program.display())
         }
-        AddonEvent::AlreadyRunning { program, pid } => {
+        AddonEvent::AlreadyRunning { program, pid, .. } => {
             format!("addon: {} already running (pid {pid})", program.display())
         }
-        AddonEvent::Stopped { program, pid } => {
+        AddonEvent::Stopped { program, pid, .. } => {
             format!("addon: stopped {} (pid {pid})", program.display())
         }
-        AddonEvent::Finished { program, outcome } => {
+        AddonEvent::Finished {
+            program, outcome, ..
+        } => {
             format!("addon: {} finished, {outcome}", program.display())
         }
-        AddonEvent::Failed { program, reason } => {
+        AddonEvent::Failed {
+            program, reason, ..
+        } => {
             format!("addon: {} failed: {reason}", program.display())
         }
-        AddonEvent::StillWaiting { program, seconds } => {
+        AddonEvent::StillWaiting {
+            program, seconds, ..
+        } => {
             format!("addon: still waiting on {} ({seconds}s)", program.display())
         }
-        AddonEvent::Loaded { what } => format!("addon: {what} loaded into the game"),
+        AddonEvent::Loaded { what, .. } => format!("addon: {what} loaded into the game"),
         // An absence of proof rather than a verdict, because that is what it is: the game is running,
         // it may still be starting, and the file is named so a reader can settle it themselves.
         AddonEvent::NotConfirmed {
             what,
             waited,
             evidence,
+            ..
         } => format!(
             "addon: no sign of {what} inside the game after {}s; {} is where it would have said why",
             waited.as_secs(),
