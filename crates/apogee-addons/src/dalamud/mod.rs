@@ -13,6 +13,11 @@
 //! alternative is a launcher that refuses to start the game because a companion is between releases,
 //! which is the wrong trade every time.
 
+// Off Linux the launch wrap is a stub that refuses, so everything only it uses (the paths it hands the
+// injector, the pack it passes through, the argv it composes) has no caller there. Unreachable on that
+// target rather than dead, and gating each item one by one would say the same thing in ten places.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 mod confirm;
 mod injector;
 mod integrity;
@@ -32,7 +37,9 @@ pub use injector::{ClientLanguage, LoadMode, PluginPolicy};
 pub(crate) use injector::{InjectorInvocation, injector_argv};
 pub use wire::Installed;
 
-use crate::launch::{Contribution, LaunchEdit, Redirect};
+#[cfg(target_os = "linux")]
+use crate::launch::Redirect;
+use crate::launch::{Contribution, LaunchEdit};
 use crate::manifest::{InjectableKind, VerifiedManifest};
 use crate::setup::{SetupEvent, SetupEvents};
 use crate::{AddonError, Injectable, Result, SupportTier};

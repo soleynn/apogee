@@ -4,11 +4,10 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport, Retain};
 // Restore is unix-only, and so is everything only it needs.
 #[cfg(unix)]
-use apogee_addons::backup::{ArchiveRecord, BackupError, BackupReport, PruneReport, Retain};
-#[cfg(unix)]
-use apogee_addons::backup::{RestorePlan, RestoreReport};
+use apogee_addons::backup::{BackupError, RestorePlan, RestoreReport};
 use apogee_addons::{AddonError, AddonPaths, Addons};
 
 use crate::addons::AddonBackend;
