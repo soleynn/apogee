@@ -2155,6 +2155,18 @@ fn render_addon(event: &AddonEvent) -> String {
         AddonEvent::StillWaiting { program, seconds } => {
             format!("addon: still waiting on {} ({seconds}s)", program.display())
         }
+        AddonEvent::Loaded { what } => format!("addon: {what} loaded into the game"),
+        // An absence of proof rather than a verdict, because that is what it is: the game is running,
+        // it may still be starting, and the file is named so a reader can settle it themselves.
+        AddonEvent::NotConfirmed {
+            what,
+            waited,
+            evidence,
+        } => format!(
+            "addon: no sign of {what} inside the game after {}s; {} is where it would have said why",
+            waited.as_secs(),
+            evidence.display()
+        ),
         _ => "addon: event".to_owned(),
     }
 }

@@ -36,6 +36,8 @@ pub(crate) enum AddonCall {
     },
     Started {
         game_pid: i32,
+        /// Whether the launch asked for proof that what redirected it came up.
+        confirming: bool,
         count: usize,
     },
     GameClosed,
@@ -173,11 +175,13 @@ impl AddonBackend for FakeAddons {
         game_pid: i32,
         _prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
+        redirected_at: Option<std::time::SystemTime>,
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         self.record(AddonCall::Started {
             game_pid,
+            confirming: redirected_at.is_some(),
             count: addons.len(),
         });
         if let Ok(mut started) = self.started.lock() {

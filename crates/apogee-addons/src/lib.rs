@@ -28,7 +28,9 @@ pub mod setup;
 mod tests;
 
 pub use backup::{BackupError, Selection};
-pub use dalamud::{ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadMode, PluginPolicy};
+pub use dalamud::{
+    ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadEvidence, LoadMode, PluginPolicy,
+};
 pub use external::{
     AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
     Outcome, RunIn, Running, Trigger,
@@ -486,6 +488,25 @@ impl Addons {
             entry,
             config,
         ))
+    }
+
+    /// What to watch for proof that whatever this launch was redirected through came up inside the
+    /// game.
+    ///
+    /// `since` is when the launch began. The boot log is appended to across sessions rather than
+    /// truncated, so only a write after that point belongs to this one.
+    ///
+    /// Named here rather than asked of the injectable, because the injectable is gone by the time the
+    /// answer arrives: it composes the launch and is dropped, the game starts seconds later, and this
+    /// layer is what still holds the paths. The returned value owns everything it needs, so a caller
+    /// can spawn it and forget it.
+    #[must_use]
+    pub fn dalamud_load_evidence(&self, since: std::time::SystemTime) -> LoadEvidence {
+        LoadEvidence::new(
+            dalamud::DALAMUD,
+            self.paths.dalamud().logs.join("dalamud.boot.log"),
+            since,
+        )
     }
 
     /// Install or update each injectable, returning what failed.
