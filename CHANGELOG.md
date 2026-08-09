@@ -31,6 +31,9 @@ is tagged with its change type. Versioning aims to follow
 - Receive a one-time code pushed to the local listener (#125) _(added)_
 - API freeze and documentation pass, bump to 1.0.0 (#161) _(miscellaneous)_
 
+### apogee-runtime
+- Report the exit status of a redirected launch's program (#165) _(fixed)_
+
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
 - Add a probe report example for sandbox runs (#105) _(testing)_
