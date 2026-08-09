@@ -236,8 +236,9 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
         .await
         .expect("first pass");
     std::fs::remove_dir_all(prefix.drive_c().join("apogee/checked")).expect("remove the effect");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let report = apply(&prefix, &manifest, &SetupEvents::none())
+    let report = apply(&prefix, &manifest, &SetupEvents::new(tx))
         .await
         .expect("second pass");
 
@@ -247,6 +248,18 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
         "the record does not stand in for an effect that is gone"
     );
     assert!(prefix.drive_c().join("apogee/checked/thing.dll").is_file());
+
+    // And it says why it came back rather than only that it ran. A verb reapplied every launch is what
+    // a wrong reading of the prefix looks like from outside, and the reading is what tells them apart.
+    let events = collect(&mut rx);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SetupEvent::Reapplying { verb, because }
+                if verb == "checked" && because.contains("thing.dll")
+        )),
+        "the pass stated the reading behind the reapply: {events:?}"
+    );
 }
 
 /// Asking what a prefix is missing is answerable without setting it up, and the answer is the one the
@@ -396,4 +409,169 @@ async fn a_manifest_with_no_verbs_does_nothing() {
 
     assert!(report.outcomes.is_empty());
     assert!(recorded(&prefix).is_empty());
+}
+
+// ---- the registry half of staleness -------------------------------------------------------------
+//
+// A verb whose whole effect is a registry value cannot be applied without a wine, but it can be
+// *decided* about without one, and the decision is the part that was unreachable: the shipped verb is
+// exactly this shape, so it was planned `AlreadyPresent` however long its value had been gone. The
+// prefix's own `user.reg` is written here in the shape wine writes one, which is what the decision
+// reads.
+
+/// The verb the hosted catalog ships: one registry write, and nothing on disk to name.
+fn registry_manifest() -> ComponentManifest {
+    let json = r#"{
+      "version": 1,
+      "verbs": [
+        { "name": "no-desktop-integration", "reason": "Keeps installs out of the host menu.",
+          "ops": [ { "registry": { "key": "HKCU\\Software\\Wine\\DllOverrides",
+                                   "name": "winemenubuilder.exe", "type": "disabled" } } ] }
+      ]
+    }"#;
+    ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses")
+}
+
+/// A `user.reg` holding the key the verb writes into, with `values` inside it.
+fn write_user_reg(prefix: &Prefix, values: &str) {
+    let hive = format!(
+        "WINE REGISTRY Version 2\n\
+         ;; All keys relative to REGISTRY\\\\User\\\\S-1-5-21-0-0-0-1000\n\
+         \n\
+         [Software\\\\Wine\\\\DllOverrides] 1785455678\n\
+         #time=1dd207ec7eef92c\n\
+         {values}"
+    );
+    std::fs::write(prefix.path().join("user.reg"), hive).expect("write the prefix's registry");
+}
+
+/// What a pass would do about a prefix that already records every verb the manifest defines, and the
+/// reading behind anything it would do again.
+///
+/// Goes through the same `plan_for` a launch and `prefix health` both use, over the prefix's own
+/// record, so what these check is the decision as it is actually reached.
+fn planned(manifest: &ComponentManifest, prefix: &Prefix) -> (Vec<StepAction>, Vec<String>) {
+    for verb in &manifest.verbs {
+        prefix.record_verb(&verb.name).expect("record the verb");
+    }
+    let planned = plan_for(manifest, prefix).expect("plan");
+    (
+        planned
+            .plan
+            .steps()
+            .iter()
+            .map(|step| step.action.clone())
+            .collect(),
+        planned
+            .stale
+            .iter()
+            .map(|verb| verb.because.clone())
+            .collect(),
+    )
+}
+
+/// The regression, and the shape of the failure it was found as: the value deleted out of the prefix
+/// with `wine reg delete`, which leaves the key behind, and the launcher then reporting the verb as
+/// already applied and leaving the value gone.
+#[test]
+fn a_registry_verb_whose_value_was_deleted_is_planned_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    write_user_reg(&prefix, "");
+
+    let (actions, because) = planned(&registry_manifest(), &prefix);
+
+    assert_eq!(actions, [StepAction::Apply]);
+    assert!(
+        because.iter().any(|r| r.contains("winemenubuilder.exe")),
+        "the decision carries the reading that says the effect is gone: {because:?}"
+    );
+}
+
+/// The other half, which is what stops the fix from being "apply it every launch": a value that is
+/// still there is still there, and the prefix is left alone.
+#[test]
+fn a_registry_verb_whose_value_is_intact_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    write_user_reg(&prefix, "\"winemenubuilder.exe\"=\"\"\n");
+
+    assert_eq!(
+        planned(&registry_manifest(), &prefix).0,
+        [StepAction::AlreadyPresent]
+    );
+}
+
+/// An overwrite undoes a verb as surely as a removal does, so the value is compared rather than
+/// looked for.
+#[test]
+fn a_registry_verb_whose_value_was_overwritten_is_planned_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    write_user_reg(&prefix, "\"winemenubuilder.exe\"=\"builtin\"\n");
+
+    assert_eq!(
+        planned(&registry_manifest(), &prefix).0,
+        [StepAction::Apply]
+    );
+}
+
+/// A prefix that cannot answer is not a prefix that answered "gone". Read as an absence it would
+/// reapply the verb on every launch, which under a Proton runner is a container brought up each time
+/// to rewrite a value that was never missing.
+#[test]
+fn a_prefix_whose_registry_cannot_be_read_leaves_the_record_standing() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+
+    // `scratch` lays down the wine skeleton, which has no `user.reg` in it.
+    assert!(!prefix.path().join("user.reg").exists());
+    let (actions, because) = planned(&registry_manifest(), &prefix);
+
+    assert_eq!(actions, [StepAction::AlreadyPresent]);
+    assert!(
+        because.is_empty(),
+        "nothing was read, so nothing is claimed about it: {because:?}"
+    );
+}
+
+/// A placement is answered by what the verb states and by nothing else. Its op names a destination
+/// directory rather than what belongs inside it, so deriving a check from the op would call a
+/// directory that outlived its contents intact, and call a verb that never had a directory to make
+/// stale.
+#[test]
+fn a_placement_contributes_no_check_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    // Nothing is fetched here, only planned, so the row needs a well-formed url rather than a live one.
+    let placing = |verify: &str| {
+        let json = format!(
+            r#"{{ "version": 1, "verbs": [
+              {{ "name": "places", "reason": "It lays a pinned tree under the prefix.",
+                 "verify": [{verify}],
+                 "ops": [ {{ "files": {{ "url": "https://example.invalid/files.zip",
+                                         "sha256": "{pin}",
+                                         "archive": {{ "format": "zip" }},
+                                         "into": "apogee/placed" }} }} ] }} ] }}"#,
+            pin = "0".repeat(64),
+        );
+        ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses")
+    };
+
+    // Stating nothing, with nothing of the verb on disk: the op names `apogee/placed`, and deriving a
+    // check from that would make every such verb permanently stale.
+    assert!(!prefix.drive_c().join("apogee/placed").exists());
+    assert_eq!(
+        planned(&placing(""), &prefix).0,
+        [StepAction::AlreadyPresent],
+        "with nothing stated there is nothing to check, whatever its op names"
+    );
+
+    // Stating a file, with the destination directory there and the file not: the directory does not
+    // stand in for what was supposed to be inside it.
+    std::fs::create_dir_all(prefix.drive_c().join("apogee/placed")).unwrap();
+    assert_eq!(
+        planned(&placing("\"apogee/placed/thing.dll\""), &prefix).0,
+        [StepAction::Apply]
+    );
 }

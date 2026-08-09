@@ -28,6 +28,13 @@ pub enum SetupEvent {
     AlreadyPresent { what: String },
     /// A prefix-setup verb is being applied, with the reason its row states.
     Applying { verb: String, reason: String },
+    /// A verb the prefix records is being applied again, because the effect it left was checked and is
+    /// gone. `because` is the reading that says so.
+    ///
+    /// Said out loud rather than kept to the plan, because a verb reapplied on every launch is what a
+    /// wrong reading looks like from outside, and the reading is the only thing that distinguishes it
+    /// from something in the prefix genuinely undoing the verb each time.
+    Reapplying { verb: String, because: String },
     /// A verb was applied and recorded.
     Applied { verb: String },
     /// Something the user needs to know about this now rather than later: the support tier it is on,
