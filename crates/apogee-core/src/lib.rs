@@ -37,7 +37,7 @@ pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{
     BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
-    SyncChoice,
+    ProgramStatus, SyncChoice,
 };
 #[cfg(unix)]
 pub use apogee_runtime::{
@@ -50,8 +50,8 @@ pub use apogee_secrets::{
     Passphrase, Sandbox, Secret, SecretKind, SecretStore, Secrets, SecretsError, Unprompted,
 };
 pub use command::{
-    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Notice, PrefixAction,
-    PrefixReport, Progress,
+    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, LaunchProgramExit,
+    Notice, PrefixAction, PrefixReport, Progress,
 };
 pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;

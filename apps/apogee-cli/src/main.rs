@@ -15,10 +15,10 @@ use apogee_core::{
     Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig, Deviation,
     EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore, ForeignKey,
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
-    KdfCost, ListenerConsent, ListenerSettings, ListenerSources, Notice, OtpDelivery, OtpSource,
-    Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile, Region, RunIn, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
-    SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, Notice,
+    OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile, Region,
+    RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend,
+    SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -2053,8 +2053,40 @@ fn render(event: &Event) -> String {
         Event::Frontier(_) => "frontier data received".to_owned(),
         Event::Prefix(report) => render_health(report),
         Event::Notice(notice) => render_notice(notice),
+        Event::LaunchProgramExited(exit) => render_launch_program_exit(exit),
         Event::Error(err) => format!("error: {err}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+/// Render what the loader a launch was redirected through reported on its way out.
+///
+/// Printed on the way past rather than counted as a failure: the game is running in every one of these
+/// cases, and a launcher that exited non-zero because a companion did would be reporting a session that
+/// went fine as a broken one.
+///
+/// Success is printed too. A companion that loaded and one that never ran look identical from outside
+/// the game, so the line that says which is the whole point; a report that only appeared when something
+/// went wrong would leave silence meaning both.
+///
+/// The code is shown and never translated. Which number means what belongs to the loader, and it says
+/// so in its own log; inventing a sentence for one here would be wrong the first time it renumbered.
+fn render_launch_program_exit(exit: &LaunchProgramExit) -> String {
+    // Split on both separators. The usual case is a Windows-form path, because a loader is named the
+    // way the runner that executes it reads one, and `Path::file_name` would hand back the whole string.
+    let name = exit
+        .program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&exit.program);
+    if exit.status.is_success() {
+        format!("launch: {name} finished and reported success")
+    } else {
+        format!(
+            "launch: {name} finished reporting failure ({}); the game is running, and whatever that \
+             program loads into it may not be. Its own log says which failure this is",
+            exit.status
+        )
     }
 }
 
@@ -2247,5 +2279,52 @@ mod tests {
         let unknown = render_health(&report(None));
         assert!(unknown.starts_with("prefix: 1 problem(s)"), "{unknown}");
         assert!(unknown.contains("could not be read"), "{unknown}");
+    }
+
+    fn exited(program: &str, status: apogee_core::ProgramStatus) -> LaunchProgramExit {
+        LaunchProgramExit {
+            program: program.to_owned(),
+            status,
+        }
+    }
+
+    /// A loader is named the way the runner that runs it reads a path, which is the Windows form. Split
+    /// on the unix separator alone and the whole path is the "name".
+    #[test]
+    fn a_loader_is_named_by_its_own_file_however_the_path_is_spelled() {
+        let windows = render_launch_program_exit(&exited(
+            "C:\\users\\p\\loader\\Loader.exe",
+            apogee_core::ProgramStatus::Code(0),
+        ));
+        assert!(windows.contains("Loader.exe"), "{windows}");
+        assert!(!windows.contains("users"), "{windows}");
+
+        let unix = render_launch_program_exit(&exited(
+            "/loader/Loader.exe",
+            apogee_core::ProgramStatus::Code(0),
+        ));
+        assert!(unix.contains("Loader.exe"), "{unix}");
+        assert!(!unix.contains('/'), "{unix}");
+    }
+
+    /// Success is said out loud, because a companion that loaded and one that never ran look identical
+    /// from outside the game. A failure names the number and nothing else: what it means is the loader's
+    /// to say, not this shell's to guess.
+    #[test]
+    fn a_failing_loader_reports_its_number_and_no_interpretation_of_it() {
+        let ok =
+            render_launch_program_exit(&exited("/l/L.exe", apogee_core::ProgramStatus::Code(0)));
+        assert!(ok.contains("success"), "{ok}");
+
+        let failed =
+            render_launch_program_exit(&exited("/l/L.exe", apogee_core::ProgramStatus::Code(3)));
+        assert!(failed.contains("exit code 3"), "{failed}");
+        assert!(failed.contains("the game is running"), "{failed}");
+
+        // A loader something else killed never reported anything, so it must not read as a code.
+        let signalled =
+            render_launch_program_exit(&exited("/l/L.exe", apogee_core::ProgramStatus::Signal(9)));
+        assert!(signalled.contains("signal 9"), "{signalled}");
+        assert!(!signalled.contains("exit code"), "{signalled}");
     }
 }

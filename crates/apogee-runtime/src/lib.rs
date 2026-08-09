@@ -78,7 +78,7 @@ pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{GameExit, GameSession, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
-pub use progress::{Progress, RuntimeEvent};
+pub use progress::{ProgramStatus, Progress, RuntimeEvent};
 pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
 #[cfg(target_os = "linux")]
 pub use session::{GameExit, GameSession};
@@ -116,6 +116,38 @@ pub async fn prefix_processes(
             path: PathBuf::from("/proc"),
             source,
         })
+}
+
+/// Reap the spawned program in the background and report its status on `progress`.
+///
+/// Detached rather than awaited, because when the status arrives is a property of what was spawned and
+/// not of the session. A loader that starts the game and returns exits seconds in, while a
+/// container-style runner holds its layers open for the whole session and reports only once the game is
+/// already gone; waiting on either would stall a launch that is up, and treating it as the end of the
+/// session is the mistake the `/proc` scanner was written to avoid from the other side.
+///
+/// A status nobody is left to read is dropped rather than held for, and deliberately: what it answers
+/// is whether the companion loaded, which is worth acting on while the session is running and worth
+/// nothing once it is over. Holding the launch open for a late one would delay every exit to deliver a
+/// sentence with nothing behind it.
+#[cfg(target_os = "linux")]
+fn report_launch_program(mut child: tokio::process::Child, program: String, progress: Progress) {
+    tokio::spawn(async move {
+        match child.wait().await {
+            Ok(status) => match ProgramStatus::from_exit(status) {
+                Some(status) => {
+                    progress.emit(RuntimeEvent::LaunchProgramExited { program, status });
+                }
+                // Unreachable: `wait` resolves only for a process that exited or was signalled. Said
+                // out loud rather than assumed, because the alternative is silence in the one place
+                // this whole path exists to end.
+                None => tracing::warn!(program, %status, "the launch program ended as neither"),
+            },
+            Err(source) => {
+                tracing::warn!(program, %source, "the launch program could not be reaped");
+            }
+        }
+    });
 }
 
 /// Where the runtime stores runners and prefixes.
@@ -375,9 +407,16 @@ impl Runtime {
         let wrapper_pid = child.id().map(|id| id as i32);
         match supervise::resolve_game(basename, prefix.path(), wrapper_pid, cancel).await {
             Ok(pid) => {
-                // Detach the wrapper; tokio reaps it on exit. The game is tracked by pid.
-                drop(child);
                 progress.emit(RuntimeEvent::GameResolved { pid });
+                // A plan that names another process to supervise is one something redirected, so the
+                // program that was spawned is a loader whose exit status is the only report it makes.
+                // Otherwise the spawned process is the runner's own loader: its job ends the moment the
+                // game is up and its status says nothing, so it is dropped and tokio reaps it.
+                if plan.supervised().is_some() {
+                    report_launch_program(child, program.clone(), progress.clone());
+                } else {
+                    drop(child);
+                }
                 Ok(GameSession::new(pid, basename.to_owned(), prefix.clone()))
             }
             Err(e) => {
