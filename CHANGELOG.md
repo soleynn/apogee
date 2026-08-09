@@ -8,6 +8,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-addons
 - Check a registry verb's effect, not only its stated paths (#164) _(fixed)_
+- Refuse a second companion redirecting the same launch (#166) _(fixed)_
 
 ### apogee-cli
 - Take the one-time code on stdin and stop the launcher being dumpable (#116) _(fixed)_
