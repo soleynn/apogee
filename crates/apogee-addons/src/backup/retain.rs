@@ -72,6 +72,28 @@ pub enum ForeignReason {
     CouldNotRead,
 }
 
+impl std::fmt::Display for ForeignReason {
+    /// Each reason as what the file turned out to be, so a line naming it reads as a sentence. This is
+    /// the answer to "why is that one still there", asked about a file the user can see, so the reason
+    /// is the whole of what is worth reading.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotARegularFile => f.write_str("it is not a plain file"),
+            Self::WrongExtension => f.write_str("it does not carry this launcher's extension"),
+            Self::NotAnArchive => f.write_str("it does not open as an archive"),
+            Self::NoRecord => f.write_str("it is an archive, but nothing in it is ours"),
+            Self::UnreadableRecord => f.write_str("its record is not one this build can read"),
+            Self::UnsupportedFormatVersion(found) => {
+                write!(
+                    f,
+                    "it was written in format version {found}, which is newer than this build"
+                )
+            }
+            Self::CouldNotRead => f.write_str("it could not be read at all"),
+        }
+    }
+}
+
 /// What a prune would do, worked out without deleting anything.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -93,7 +115,13 @@ pub struct PrunePlan {
 pub struct PruneReport {
     pub deleted: Vec<PathBuf>,
     pub kept: usize,
-    pub foreign: usize,
+    /// What was left alone and the check that rejected each one, carried through from the plan the
+    /// prune ran.
+    ///
+    /// Named rather than counted, because this is the answer to the question a prune provokes: the
+    /// directory still has files in it and the user wants to know which, and why this build would not
+    /// touch them. A count says "seven" to somebody who can already see seven.
+    pub foreign: Vec<(PathBuf, ForeignReason)>,
 }
 
 /// Work out what a prune of `dir` under `policy` would do. Reads, never writes.
@@ -167,7 +195,7 @@ pub fn prune(dir: &Path, policy: Retain) -> Result<PruneReport, BackupError> {
     Ok(PruneReport {
         deleted: plan.delete,
         kept: plan.keep.len(),
-        foreign: plan.foreign.len(),
+        foreign: plan.foreign,
     })
 }
 

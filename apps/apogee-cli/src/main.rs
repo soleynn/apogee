@@ -1860,8 +1860,13 @@ fn backup(core: &Core, action: BackupAction) -> Result<(), CliError> {
                 "kept {}, deleted {}, left {} file(s) alone",
                 report.kept,
                 report.deleted.len(),
-                report.foreign
+                report.foreign.len()
             );
+            // Each one by name and by the check that rejected it. "Left 7 files alone" says seven to
+            // somebody already looking at seven files, and the reason is the whole of what they want.
+            for (path, reason) in &report.foreign {
+                println!("  {}: {reason}", path.display());
+            }
             Ok(())
         }
     }

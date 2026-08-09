@@ -187,7 +187,20 @@ fn only_our_archives_are_candidates() -> Result<(), Fallible> {
             .map(|e| e.path())
             .collect::<Vec<_>>(),
     );
-    prune(dest.path(), keep(1))?;
+    let report = prune(dest.path(), keep(1))?;
+    // Reporting what it left alone, with the check that rejected each one. A prune that answered with
+    // a count would leave the user counting files they can already see, which is the question rather
+    // than the answer: these nine are here for nine different reasons.
+    // By path, because both come from their own directory listing and the order of one is not the
+    // order of the other.
+    let mut reported = report.foreign.clone();
+    let mut planned = plan.foreign.clone();
+    reported.sort_by(|a, b| a.0.cmp(&b.0));
+    planned.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        reported, planned,
+        "the prune reported something other than the plan it ran"
+    );
     let after: Vec<String> = names(
         &std::fs::read_dir(dest.path())?
             .filter_map(Result::ok)

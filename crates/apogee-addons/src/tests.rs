@@ -383,6 +383,41 @@ frozen!(
     }
 );
 
+/// The same for the reasons a prune left a file alone, which are read in the same place and by the same
+/// person: a directory that still has files in it after a prune, and a line per file saying why.
+#[test]
+fn every_foreign_reason_reads_as_a_sentence() {
+    use crate::backup::ForeignReason::{
+        CouldNotRead, NoRecord, NotARegularFile, NotAnArchive, UnreadableRecord,
+        UnsupportedFormatVersion, WrongExtension,
+    };
+    let mut rendered: Vec<String> = Vec::new();
+    for reason in [
+        NotARegularFile,
+        WrongExtension,
+        NotAnArchive,
+        NoRecord,
+        UnreadableRecord,
+        UnsupportedFormatVersion(9),
+        CouldNotRead,
+    ] {
+        let text = reason.to_string();
+        assert!(
+            text.contains(' ') && text != format!("{reason:?}"),
+            "{reason:?} renders as its own identifier rather than as prose: {text}"
+        );
+        rendered.push(text);
+    }
+    let mut unique = rendered.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        rendered.len(),
+        "two reasons share a sentence, so a prune cannot say which: {rendered:?}"
+    );
+}
+
 /// Every reject reason has a sentence of its own. The enum is interpolated into a refusal, so a variant
 /// added without one would render as an identifier in a message a user reads.
 #[test]
