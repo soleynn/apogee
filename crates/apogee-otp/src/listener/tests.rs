@@ -1,8 +1,8 @@
 //! The rules, driven without a socket.
 //!
-//! Everything section 3 of the design states lives in a module with no IO in it, which is why these
-//! are plain tests rather than a socket harness. What needs a real connection is in
-//! `tests/listener_wire.rs`; what needs a phone is the manual gate.
+//! Every rule the listener enforces lives in a module with no IO in it, which is why these are plain
+//! tests rather than a socket harness. What needs a real connection is in `tests/listener_wire.rs`;
+//! what needs a phone is checked by hand.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
@@ -36,8 +36,8 @@ fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
 
 /// What a companion app on a phone puts on the wire, accepted whole.
 ///
-/// **This request is constructed, not captured.** The 0.3 gate records what the real app sends, and
-/// that capture replaces this and becomes the authority for every "the app probably sends X" claim in
+/// **This request is constructed, not captured.** A capture of what the real app sends is still owed,
+/// and that capture replaces this and becomes the authority for every "the app probably sends X" claim in
 /// this module: the version token, the terminator, and whether a header block follows at all. The
 /// shape here is an ordinary Android HTTP client's, which is what the reference's own contract implies,
 /// and it is written out in full so the diff against a real capture is one file.
@@ -286,7 +286,7 @@ fn the_read_buffer_is_erased_when_it_drops() {
 
 // --- the limiter -------------------------------------------------------------------------------
 
-/// The budget the design fixes, exactly, at one instant.
+/// The attempt budget, exactly, at one instant.
 #[test]
 fn five_attempts_pass_and_the_sixth_does_not() {
     let now = Instant::now();
