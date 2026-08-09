@@ -444,7 +444,7 @@ async fn two_waits_in_a_row_can_take_the_same_port() -> Fallible {
 
 /// A flood never starves a second source.
 ///
-/// Section 4's hostile-LAN gate at crate level, and the reason the two budgets are separate. One
+/// The hostile-network case at crate level, and the reason the two budgets are separate. One
 /// address hammers the port with garbage and with well-formed wrong codes for as long as the wait
 /// lasts; the phone pushes from another address in the middle of it and its code still comes back.
 ///

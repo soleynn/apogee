@@ -1,6 +1,6 @@
 [package]
 name = "apogee-otp"
-version = "0.0.0"
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -42,3 +42,9 @@ fuzzing = []
 
 [lints]
 workspace = true
+
+# Renders the feature-gated fuzz entry points with a badge instead of hiding them, which is what makes
+# "off in every shipping build" visible from the documentation rather than only from this file.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -8,6 +8,17 @@ use std::time::SystemTime;
 /// a step count; this crate is not a verifier. It has to produce the one code the server expects, so
 /// "the clock is seven seconds fast" is the case that has to be representable, and a step count
 /// cannot hold it.
+///
+/// # Examples
+/// ```
+/// use apogee_otp::ClockSkew;
+///
+/// // The sign is the whole point: a step count could hold neither of these apart.
+/// assert_eq!(ClockSkew::from_seconds(7).seconds(), 7);
+/// assert_eq!(ClockSkew::from_seconds(-7).seconds(), -7);
+/// assert_eq!(ClockSkew::NONE.seconds(), 0);
+/// assert_eq!(ClockSkew::default(), ClockSkew::NONE);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClockSkew(i64);
 
@@ -30,6 +41,21 @@ impl ClockSkew {
     /// Saturating: an absurd pair of instants clamps rather than wrapping, so a machine whose clock
     /// reads a thousand years out produces a large offset instead of a small one with the sign
     /// flipped.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::time::{Duration, SystemTime};
+    ///
+    /// use apogee_otp::ClockSkew;
+    ///
+    /// let local = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    /// let server = local + Duration::from_secs(7);
+    ///
+    /// // Positive when the server is ahead, which is the argument order.
+    /// assert_eq!(ClockSkew::between(server, local).seconds(), 7);
+    /// assert_eq!(ClockSkew::between(local, server).seconds(), -7);
+    /// assert_eq!(ClockSkew::between(local, local), ClockSkew::NONE);
+    /// ```
     #[must_use]
     pub fn between(server: SystemTime, local: SystemTime) -> Self {
         match server.duration_since(local) {
@@ -48,6 +74,19 @@ impl ClockSkew {
     }
 
     /// Whether the offset is far enough out to be worth telling the user about.
+    ///
+    /// The threshold itself is admitted, not flagged: a drift of exactly [`ClockSkew::ADVISORY_SECONDS`]
+    /// is the largest one not worth a sentence, so a caller rendering on this does not start nagging
+    /// at the recommended tolerance.
+    ///
+    /// # Examples
+    /// ```
+    /// use apogee_otp::ClockSkew;
+    ///
+    /// assert!(!ClockSkew::from_seconds(10).is_advisory());
+    /// assert!(ClockSkew::from_seconds(11).is_advisory());
+    /// assert!(ClockSkew::from_seconds(-11).is_advisory());
+    /// ```
     #[must_use]
     pub const fn is_advisory(self) -> bool {
         self.0 > Self::ADVISORY_SECONDS || self.0 < -Self::ADVISORY_SECONDS
