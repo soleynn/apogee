@@ -8,14 +8,14 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, PrefixHealth, Progress,
-    RunnerKind, Runtime, RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, Progress, RunnerKind, Runtime,
+    RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{GameHandle, LaunchBackend, Prepared};
+use super::{Examined, GameHandle, LaunchBackend, Prepared};
 use crate::command::{Event, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
@@ -250,7 +250,7 @@ impl LaunchBackend for RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<PrefixHealth>, CoreError> {
+    ) -> Result<Option<Examined>, CoreError> {
         // A prefix that was never created has no drift, and building one to say so would be a
         // question about what is wrong creating the thing it asked about.
         if !prefix_exists(prefix_dir) {
@@ -263,7 +263,11 @@ impl LaunchBackend for RuntimeLauncher {
         let Some(prefix) = prepared.prefix else {
             return Ok(None);
         };
-        Ok(Some(self.runtime.check_prefix(&prefix).await?))
+        let health = self.runtime.check_prefix(&prefix).await?;
+        Ok(Some(Examined {
+            prefix: Some(prefix),
+            health,
+        }))
     }
 
     async fn fix_prefix(
@@ -272,7 +276,7 @@ impl LaunchBackend for RuntimeLauncher {
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Result<Option<PrefixHealth>, CoreError> {
+    ) -> Result<Option<Examined>, CoreError> {
         let progress = relay_progress(events);
         let prepared = self
             .prepare_prefix(runner, prefix_dir, cancel, &progress)
@@ -282,7 +286,10 @@ impl LaunchBackend for RuntimeLauncher {
         };
         let health = self.runtime.check_prefix(&prefix).await?;
         if health.is_healthy() {
-            return Ok(Some(health));
+            return Ok(Some(Examined {
+                prefix: Some(prefix),
+                health,
+            }));
         }
         if health
             .issues
@@ -292,11 +299,14 @@ impl LaunchBackend for RuntimeLauncher {
             self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), true, cancel, &progress)
                 .await?;
         }
-        Ok(Some(
-            self.runtime
-                .repair_prefix(&prefix, &health.issues, cancel, &progress)
-                .await?,
-        ))
+        let residual = self
+            .runtime
+            .repair_prefix(&prefix, &health.issues, cancel, &progress)
+            .await?;
+        Ok(Some(Examined {
+            prefix: Some(prefix),
+            health: residual,
+        }))
     }
 
     async fn recreate_prefix(

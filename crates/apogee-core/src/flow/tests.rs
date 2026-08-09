@@ -231,11 +231,11 @@ fn errors(events: &[Event]) -> Vec<String> {
 }
 
 /// The prefix reports a run emitted, in order.
-fn health_reports(events: &[Event]) -> Vec<apogee_runtime::PrefixHealth> {
+fn health_reports(events: &[Event]) -> Vec<crate::command::PrefixReport> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::PrefixHealth(health) => Some(health.clone()),
+            Event::Prefix(report) => Some(report.clone()),
             _ => None,
         })
         .collect()
@@ -1247,7 +1247,7 @@ async fn checking_a_prefix_reports_its_drift_and_changes_nothing() {
         "there was one to examine"
     );
     assert_eq!(health_reports(&events).len(), 1);
-    assert_eq!(health_reports(&events)[0].issues.len(), 1);
+    assert_eq!(health_reports(&events)[0].health.issues.len(), 1);
     assert!(!launch.was_fixed(), "a check fixes nothing");
     assert!(!launch.was_recreated(), "a check destroys nothing");
 }
@@ -1335,7 +1335,7 @@ async fn fixing_a_prefix_reports_what_is_left_and_never_recreates() {
     let residual = health_reports(&events);
     assert_eq!(residual.len(), 1);
     assert_eq!(
-        residual[0].issues.len(),
+        residual[0].health.issues.len(),
         1,
         "what no targeted fix covers is still reported"
     );
@@ -1435,38 +1435,149 @@ async fn a_prefix_built_on_its_own_gets_the_setup_a_launch_would_apply(
     );
 }
 
-/// The two that answer a question about a prefix answer it about the prefix as it is. Applying setup
-/// while reporting drift would change what is being reported, and a fix that quietly installed what
-/// no health check names would be doing it out of sight of both.
-#[rstest::rstest]
-#[case(PrefixAction::Check)]
-#[case(PrefixAction::Fix)]
-#[tokio::test]
-async fn examining_a_prefix_applies_no_setup(#[case] action: PrefixAction) {
-    let h = harness(false);
-    let addons = Arc::new(FakeAddons::new());
-    let ctx = context_with_addons(
-        &h,
+/// A prefix examined against a catalog it has none of, so the check has both halves to report and the
+/// fix has something to apply.
+fn missing_setup_context(
+    h: &Harness,
+    addons: Arc<FakeAddons>,
+    launch: Arc<FakeLaunchBackend>,
+) -> FlowContext {
+    context_with_addons(
+        h,
         Arc::new(FixtureTransport::new(vec![])),
         Arc::new(FakePatchBackend::new()),
-        Arc::new(FakeLaunchBackend::exiting()),
-        addons.clone(),
+        launch,
+        addons,
         NOW,
+    )
+}
+
+/// A prefix intact in every way the runtime can see, missing every verb the catalog publishes. The
+/// bug this is here for: the runtime's half is the only half that used to be reported, so a prefix
+/// with none of its setup came back as nothing wrong.
+#[tokio::test]
+async fn a_prefix_missing_the_published_setup_is_not_reported_as_healthy() {
+    let h = harness(false);
+    let intact = apogee_runtime::PrefixHealth::default();
+    let addons = Arc::new(FakeAddons::new().missing_setup(&["no-desktop-integration"], &[]));
+    let ctx = missing_setup_context(
+        &h,
+        addons,
+        Arc::new(FakeLaunchBackend::exiting().with_health(intact.clone(), intact)),
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Check,
+        },
+    )
+    .await;
+
+    let report = &health_reports(&events)[0];
+    assert!(report.health.is_healthy(), "nothing structural is wrong");
+    assert_eq!(
+        report.missing_setup.as_deref(),
+        Some(["no-desktop-integration".to_owned()].as_slice())
+    );
+    assert!(
+        !report.nothing_wrong(),
+        "a prefix with none of its setup is not a prefix with nothing wrong"
+    );
+}
+
+/// A catalog nobody could read is a question left open, not an answer of "none". Reporting the
+/// unanswered half as an empty one is the same bug in a smaller place: a check that could not look
+/// coming back as a clean bill.
+#[tokio::test]
+async fn a_catalog_that_could_not_be_read_is_not_a_clean_bill() {
+    let h = harness(false);
+    let intact = apogee_runtime::PrefixHealth::default();
+    let ctx = missing_setup_context(
+        &h,
+        Arc::new(FakeAddons::new().without_a_catalog()),
+        Arc::new(FakeLaunchBackend::exiting().with_health(intact.clone(), intact)),
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Check,
+        },
+    )
+    .await;
+
+    let report = &health_reports(&events)[0];
+    assert!(report.missing_setup.is_none());
+    assert!(!report.nothing_wrong());
+}
+
+/// A check answers the question about the prefix as it is. Applying setup while reporting what is
+/// missing would change what is being reported, and the answer would be about a prefix that no longer
+/// exists by the time the user reads it.
+#[tokio::test]
+async fn examining_a_prefix_applies_no_setup() {
+    let h = harness(false);
+    let intact = apogee_runtime::PrefixHealth::default();
+    let addons = Arc::new(FakeAddons::new().missing_setup(&["no-desktop-integration"], &[]));
+    let ctx = missing_setup_context(
+        &h,
+        addons.clone(),
+        Arc::new(FakeLaunchBackend::exiting().with_health(intact.clone(), intact)),
     );
 
     run(
         ctx,
         Command::Prefix {
             profile: h.profile,
-            action,
+            action: PrefixAction::Check,
         },
     )
     .await;
 
-    assert!(
-        addons.calls().is_empty(),
-        "a question about a prefix changed it: {:?}",
-        addons.calls()
+    assert_eq!(
+        addons.calls(),
+        [AddonCall::SetupExamined { prefix: false }],
+        "a question about a prefix changed it"
+    );
+}
+
+/// The fix applies what the check reports. A problem named by one command and untouched by the one
+/// that exists to resolve it is a report a user cannot act on, and the setup half was exactly that
+/// until the check started naming it.
+#[tokio::test]
+async fn fixing_a_prefix_applies_the_setup_the_check_reports_missing() {
+    let h = harness(false);
+    let intact = apogee_runtime::PrefixHealth::default();
+    // One verb applies, the other cannot: what a fix could not resolve is still in front of the user.
+    let addons = Arc::new(FakeAddons::new().missing_setup(&["applies", "cannot"], &["cannot"]));
+    let ctx = missing_setup_context(
+        &h,
+        addons.clone(),
+        Arc::new(FakeLaunchBackend::exiting().with_health(intact.clone(), intact)),
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Fix,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        addons.calls(),
+        [AddonCall::SetupApplied { prefix: false }],
+        "the fix did not apply the setup the check names"
+    );
+    let report = &health_reports(&events)[0];
+    assert_eq!(
+        report.missing_setup.as_deref(),
+        Some(["cannot".to_owned()].as_slice()),
+        "what the fix could not apply is still reported"
     );
 }
 

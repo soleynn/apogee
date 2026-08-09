@@ -407,6 +407,24 @@ impl Addons {
         .await
     }
 
+    /// The prefix-setup verbs the manifest defines that `prefix` does not have.
+    ///
+    /// The same decision [`Self::apply_setup`] acts on, taken without acting on it, so a caller can
+    /// report what a prefix is missing without setting it up. A verb whose effect has gone is missing
+    /// however the prefix's record reads.
+    ///
+    /// # Errors
+    /// [`AddonError::Io`] if the prefix's record cannot be read, which is the same refusal
+    /// [`Self::apply_setup`] makes: with no record there is no telling setup that is needed from setup
+    /// that is not.
+    pub fn missing_setup(
+        &self,
+        manifest: &ComponentManifest,
+        prefix: &Prefix,
+    ) -> Result<Vec<String>> {
+        setup::missing_verbs(manifest, prefix)
+    }
+
     /// The Dalamud injectable behind the launch setting, or `None` when the manifest offers no row for
     /// it.
     ///

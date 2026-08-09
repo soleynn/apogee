@@ -77,12 +77,33 @@ pub(crate) trait AddonBackend: Send + Sync {
     ///
     /// Infallible for the same reason as `prepare_launch`, and `prefix` of `None` is likewise nothing
     /// to do.
+    ///
+    /// Returns what is *still* missing afterwards, which is the pass's own account of the verbs it
+    /// could not apply rather than a second look at the prefix. `None` carries the same meaning it
+    /// does on [`Self::missing_setup`]: nothing could be read, so nothing can be claimed.
     async fn apply_setup(
         &self,
         prefix: Option<Prefix>,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    );
+    ) -> Option<Vec<String>>;
+
+    /// The setup the signed catalog publishes that `prefix` does not have, reading it and changing
+    /// nothing.
+    ///
+    /// `None` is the catalog being unreachable and nothing usable cached, so what a prefix is missing
+    /// is unknown rather than empty. Why is narrated on `events` by the layer itself, as it is for a
+    /// launch.
+    ///
+    /// `prefix` of `None` answers `None` too: with nothing to read the record of, what is missing is
+    /// unknown, and saying "nothing" about a prefix that is not there is the one answer that would be
+    /// wrong.
+    async fn missing_setup(
+        &self,
+        prefix: Option<Prefix>,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Option<Vec<String>>;
 
     /// Start the profile's companions for a game that is already running.
     ///

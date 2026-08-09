@@ -28,7 +28,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::addons::AddonBackend;
-use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
+use crate::command::{Command, Event, FlowState, Notice, PrefixAction, PrefixReport};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
@@ -1203,22 +1203,40 @@ async fn prefix(
                 .check_prefix(&profile.runner, &prefix_dir, cancel, tx)
                 .await?
             {
-                Some(health) => {
-                    let _ = tx.send(Event::PrefixHealth(health));
+                Some(examined) => {
+                    // Both halves are read, neither is applied. A prefix whose structure is intact but
+                    // which has none of the setup the catalog publishes is a prefix with something
+                    // wrong, and reporting only the runtime's half is how it reads as fine.
+                    let missing = ctx.addons.missing_setup(examined.prefix, cancel, tx).await;
+                    let _ = tx.send(Event::Prefix(PrefixReport {
+                        health: examined.health,
+                        missing_setup: missing,
+                    }));
                 }
                 None => emit(tx, FlowState::NoPrefix),
             }
         }
         PrefixAction::Fix => {
             emit(tx, FlowState::FixingPrefix);
-            if let Some(residual) = ctx
+            if let Some(examined) = ctx
                 .launch
                 .fix_prefix(&profile.runner, &prefix_dir, cancel, tx)
                 .await?
             {
+                // The setup goes on after the targeted fixes, in that order because a verb is applied
+                // by running a program inside the prefix and the fixes are what put the prefix back in
+                // a state that can run one.
+                //
+                // Applied at all because this is the action that resolves what a check reports, and a
+                // check reports both halves: leaving the setup out would name something as wrong in one
+                // command and refuse to act on it in the one that exists to act.
+                let missing = ctx.addons.apply_setup(examined.prefix, cancel, tx).await;
                 // What is left after the fix, which is what a user has to decide about. An empty
                 // report is the fix having resolved everything.
-                let _ = tx.send(Event::PrefixHealth(residual));
+                let _ = tx.send(Event::Prefix(PrefixReport {
+                    health: examined.health,
+                    missing_setup: missing,
+                }));
             }
         }
         PrefixAction::Recreate => {
