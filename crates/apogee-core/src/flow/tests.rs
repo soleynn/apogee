@@ -1394,6 +1394,82 @@ async fn creating_a_prefix_prepares_it_without_launching() {
     assert_eq!(launch.launch_count(), 0, "nothing was launched");
 }
 
+/// Preparing a prefix ahead of time has to leave it where a launch would leave it. Bringing up the
+/// runner is only half of that: what the signed catalog publishes is the other half, and a prefix
+/// that has one without the other is a state no launch ever produces, waiting to be finished off by
+/// the first launch that was supposed to have nothing left to do.
+#[rstest::rstest]
+#[case(PrefixAction::Create)]
+#[case(PrefixAction::Recreate)]
+#[tokio::test]
+async fn a_prefix_built_on_its_own_gets_the_setup_a_launch_would_apply(
+    #[case] action: PrefixAction,
+) {
+    let h = harness(false);
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action,
+        },
+    )
+    .await;
+
+    assert!(
+        addons
+            .calls()
+            .iter()
+            .any(|call| matches!(call, AddonCall::SetupApplied { .. })),
+        "the catalog's setup was never applied: {:?}",
+        addons.calls()
+    );
+}
+
+/// The two that answer a question about a prefix answer it about the prefix as it is. Applying setup
+/// while reporting drift would change what is being reported, and a fix that quietly installed what
+/// no health check names would be doing it out of sight of both.
+#[rstest::rstest]
+#[case(PrefixAction::Check)]
+#[case(PrefixAction::Fix)]
+#[tokio::test]
+async fn examining_a_prefix_applies_no_setup(#[case] action: PrefixAction) {
+    let h = harness(false);
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        addons.clone(),
+        NOW,
+    );
+
+    run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action,
+        },
+    )
+    .await;
+
+    assert!(
+        addons.calls().is_empty(),
+        "a question about a prefix changed it: {:?}",
+        addons.calls()
+    );
+}
+
 /// A prefix that has graphics translation installed launches with the overrides that activate it,
 /// and with its shader cache pointed somewhere prefix-specific. Placing the files is one half; a
 /// launch that does not override the libraries to them loads the prefix's built-in ones instead.
