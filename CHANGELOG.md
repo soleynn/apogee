@@ -98,6 +98,7 @@ is tagged with its change type. Versioning aims to follow
 - Unblock the two permanent deletion dead ends in the secrets lifecycle (#153) _(fixed)_
 - Require the Secret Service job, widen the unsafe gate to examples (#157) _(ci)_
 - Gate the in-memory secret store out of the shipping launcher (#159) _(ci)_
+- Report whether a companion actually loaded into the game (#167) _(added)_
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
