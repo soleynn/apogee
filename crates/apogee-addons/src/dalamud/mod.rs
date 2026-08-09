@@ -19,7 +19,7 @@ mod integrity;
 mod wire;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use apogee_fetch::{DownloadSpec, Fetcher, Validator};
 use apogee_runtime::{LaunchPlan, Prefix};
@@ -676,6 +676,18 @@ impl Injectable for Dalamud {
             return decline("this launch has no prefix to translate paths against");
         };
         self.wrap(&prefix, &installed, plan).map(Contribution::Edit)
+    }
+
+    /// The injector's own boot log, which is written from inside the game once Dalamud is up.
+    ///
+    /// The one report every runner can produce. A loader's exit status is unreachable behind a
+    /// container-style runner, and the log is written by the code whose being there is the question.
+    fn load_evidence(&self, since: SystemTime) -> Option<LoadEvidence> {
+        Some(LoadEvidence::new(
+            DALAMUD,
+            self.paths.logs.join("dalamud.boot.log"),
+            since,
+        ))
     }
 }
 

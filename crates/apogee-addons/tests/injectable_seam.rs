@@ -210,8 +210,12 @@ async fn a_new_injectable_and_dalamud_go_through_the_same_calls() -> Result<(), 
     );
 
     let mut plan = plan(&prefix);
-    let failures = addons.prepare_launch(&both, &mut plan, &sink);
-    assert!(failures.is_empty(), "{failures:?}");
+    let prepared = addons.prepare_launch(&both, &mut plan, &sink);
+    assert!(prepared.failures.is_empty(), "{:?}", prepared.failures);
+    assert_eq!(
+        prepared.redirected_by, None,
+        "neither of them became the program the launch spawns"
+    );
     assert_eq!(
         plan.env().get("APOGEE_FRAMEWORK").map(String::as_str),
         Some("1"),
@@ -238,18 +242,19 @@ async fn an_injectable_that_fails_is_reported_with_its_tier_and_does_not_stop_th
     let (sink, rx) = events();
     let mut plan = plan(&prefix);
 
-    let failures = addons.prepare_launch(&only, &mut plan, &sink);
+    let prepared = addons.prepare_launch(&only, &mut plan, &sink);
 
     assert!(
         matches!(
-            failures.as_slice(),
+            prepared.failures.as_slice(),
             [AddonError::Inject {
                 injectable,
                 tier: SupportTier::FirstClass,
                 ..
             }] if injectable == "Framework"
         ),
-        "the failure names the companion and its tier: {failures:?}"
+        "the failure names the companion and its tier: {:?}",
+        prepared.failures
     );
     assert_eq!(
         plan.program(),
@@ -287,17 +292,23 @@ async fn a_second_companion_cannot_redirect_a_launch_that_is_already_redirected(
     let (sink, rx) = events();
     let mut plan = plan(&prefix);
 
-    let failures = addons.prepare_launch(&both, &mut plan, &sink);
+    let prepared = addons.prepare_launch(&both, &mut plan, &sink);
 
     assert!(
         matches!(
-            failures.as_slice(),
+            prepared.failures.as_slice(),
             [AddonError::LaunchAlreadyRedirected {
                 injectable,
                 redirector,
             }] if injectable == "Injector" && redirector == "Loader"
         ),
-        "the second is refused, and the failure names both: {failures:?}"
+        "the second is refused, and the failure names both: {:?}",
+        prepared.failures
+    );
+    assert_eq!(
+        prepared.redirected_by.as_deref(),
+        Some("Loader"),
+        "the pass reports who holds the launch, which is not readable from the plan"
     );
     assert_eq!(
         plan.program(),

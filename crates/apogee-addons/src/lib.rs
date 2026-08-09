@@ -11,6 +11,7 @@
 //! in the prefix's own `prefix.json`, which is what makes a second pass a no-op.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -36,7 +37,7 @@ pub use external::{
     AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
     Outcome, RunIn, Running, Trigger,
 };
-pub use launch::{Contribution, LaunchEdit, Redirect};
+pub use launch::{Contribution, LaunchEdit, Preparation, Redirect};
 pub use manifest::{
     Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
     InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
@@ -288,6 +289,22 @@ pub trait Injectable: Send + Sync {
     /// # Errors
     /// Whatever the companion raises while composing its invocation.
     fn prepare_launch(&self, plan: &LaunchPlan, events: &SetupEvents) -> Result<Contribution>;
+
+    /// What to watch for proof that this companion came up inside the game, if it leaves any.
+    ///
+    /// `since` is when the launch began. A companion writes its proof into a file that outlives the
+    /// session, so only a write after that point belongs to this launch.
+    ///
+    /// Asked while the companion is still here, because it is dropped once the launch is composed and
+    /// the proof lands seconds later. What comes back owns everything it needs, so a caller can spawn
+    /// it and forget it.
+    ///
+    /// Defaulted to `None`: a companion that leaves no trace of loading is not a companion that failed
+    /// to, and a launcher that has nothing to watch says nothing rather than reporting an absence.
+    fn load_evidence(&self, since: SystemTime) -> Option<LoadEvidence> {
+        let _ = since;
+        None
+    }
 }
 
 /// Where the companion layer keeps what it installs outside a prefix.
@@ -501,25 +518,6 @@ impl Addons {
         ))
     }
 
-    /// What to watch for proof that whatever this launch was redirected through came up inside the
-    /// game.
-    ///
-    /// `since` is when the launch began. The boot log is appended to across sessions rather than
-    /// truncated, so only a write after that point belongs to this one.
-    ///
-    /// Named here rather than asked of the injectable, because the injectable is gone by the time the
-    /// answer arrives: it composes the launch and is dropped, the game starts seconds later, and this
-    /// layer is what still holds the paths. The returned value owns everything it needs, so a caller
-    /// can spawn it and forget it.
-    #[must_use]
-    pub fn dalamud_load_evidence(&self, since: std::time::SystemTime) -> LoadEvidence {
-        LoadEvidence::new(
-            dalamud::DALAMUD,
-            self.paths.dalamud().logs.join("dalamud.boot.log"),
-            since,
-        )
-    }
-
     /// Install or update each injectable, returning what failed.
     ///
     /// Never fails as a whole. An injectable that cannot be installed is reported and the launch goes
@@ -554,12 +552,15 @@ impl Addons {
         failures
     }
 
-    /// Let each injectable contribute to `plan`, in order, returning what failed.
+    /// Let each injectable contribute to `plan`, in order, returning what the pass came to.
     ///
     /// The same list and the same loop as [`Self::ensure_injectables`], so nothing about a launch knows
     /// which companion it is composing. Each is offered the launch as the ones before it left it, and
     /// what it hands back is applied here: one failing contributes nothing at all and the launch
     /// proceeds.
+    ///
+    /// [`Preparation::redirected_by`] names the companion that took the launch over, which is the one
+    /// thing about this pass a caller cannot read back off the plan afterwards.
     ///
     /// A launch spawns one program, so the first companion to redirect it keeps it and a second is
     /// refused with [`AddonError::LaunchAlreadyRedirected`], reported by name like any other companion
@@ -576,14 +577,14 @@ impl Addons {
         injectables: &[&dyn Injectable],
         plan: &mut LaunchPlan,
         events: &SetupEvents,
-    ) -> Vec<AddonError> {
+    ) -> Preparation {
         let mut failures = Vec::new();
         // The companion that became the program, so a second one asking for the same slot is refused
         // rather than silently overwriting it. Kept here rather than as a flag on the plan because the
         // rule is about companions: `apogee-runtime` does not know they exist, and a plan that refused
         // its own redirect would raise inside whichever injectable happened to compose it, leaving
         // every implementor to map and narrate a rule that belongs to the one loop that runs them.
-        let mut redirector: Option<String> = None;
+        let mut redirected_by: Option<String> = None;
         for injectable in injectables {
             let edit = match injectable.prepare_launch(plan, events) {
                 Ok(Contribution::Edit(edit)) => edit,
@@ -594,7 +595,7 @@ impl Addons {
                 }
             };
             if edit.redirects() {
-                if let Some(holder) = redirector.as_deref() {
+                if let Some(holder) = redirected_by.as_deref() {
                     let refused = AddonError::LaunchAlreadyRedirected {
                         injectable: injectable.name().to_owned(),
                         redirector: holder.to_owned(),
@@ -602,11 +603,14 @@ impl Addons {
                     report(&mut failures, events, injectable.name(), refused);
                     continue;
                 }
-                redirector = Some(injectable.name().to_owned());
+                redirected_by = Some(injectable.name().to_owned());
             }
             edit.apply(plan);
         }
-        failures
+        Preparation {
+            redirected_by,
+            failures,
+        }
     }
 
     /// Start the companions that run alongside a game that is already up.

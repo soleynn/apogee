@@ -1025,7 +1025,12 @@ async fn launch_game(
     if let Some(prefix) = &prepared.prefix {
         plan = plan.prefix(prefix);
     }
-    ctx.addons
+    // Comes back with the proof to watch for when something took the launch over, which is the
+    // companion layer's answer rather than something read back off the plan: what a redirect leaves in
+    // a plan is the shape one happened to take, and the companion that composed it is gone by the time
+    // the proof lands.
+    let confirming = ctx
+        .addons
         .prepare_launch(
             prepared.prefix,
             dalamud_config(profile, session, &settings),
@@ -1034,12 +1039,6 @@ async fn launch_game(
             tx,
         )
         .await;
-
-    // Read before the plan is spawned, because the plan is moved into the spawn and because the
-    // question is about this launch: a companion writes its proof of coming up seconds from now, into
-    // a file that survives previous sessions, so a moment from before the spawn is what tells this
-    // launch's evidence from the last one's.
-    let redirected_at = plan.supervised().is_some().then(SystemTime::now);
 
     emit(tx, FlowState::Launching);
     let handle = ctx.launch.launch(plan, cancel, tx).await?;
@@ -1053,7 +1052,7 @@ async fn launch_game(
             handle.game_pid(),
             handle.prefix(),
             profile.external.clone(),
-            redirected_at,
+            confirming,
             cancel,
             tx,
         )

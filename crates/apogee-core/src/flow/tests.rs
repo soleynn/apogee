@@ -2828,7 +2828,7 @@ async fn what_an_injectable_composes_reaches_the_spawn() {
         Arc::new(FixtureTransport::new(play_then_current())),
         Arc::new(FakePatchBackend::new()),
         launch.clone(),
-        addons,
+        addons.clone(),
         NOW,
     );
 
@@ -2839,6 +2839,20 @@ async fn what_an_injectable_composes_reaches_the_spawn() {
     assert!(
         plan.args().starts_with("//**sqex0003"),
         "the game's own argument string is still there and still last"
+    );
+    // The other half of the same seam. What proves the companion came up is the companion layer's
+    // answer to composing the launch, so a flow that dropped it would leave every launch unconfirmed
+    // with nothing failing.
+    assert!(
+        addons.calls().iter().any(|call| matches!(
+            call,
+            AddonCall::Started {
+                confirming: true,
+                ..
+            }
+        )),
+        "the launch started without the proof to watch for: {:?}",
+        addons.calls()
     );
 }
 

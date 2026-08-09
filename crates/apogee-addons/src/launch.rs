@@ -10,6 +10,23 @@ use std::collections::BTreeMap;
 
 use apogee_runtime::LaunchPlan;
 
+use crate::AddonError;
+
+/// What one pass over a launch's companions left behind.
+///
+/// Two things a caller cannot work out from the plan it handed over. Which companion took the launch
+/// over is not readable from the program, since only the companion that composed the invocation knows
+/// it is in there, and reading it back off a side effect (a program that changed, a process named to
+/// wait on) answers for the shapes a redirect happens to take rather than for the redirect. And a
+/// failure is narrated as it happens, but the caller still has to be able to count what went wrong.
+#[derive(Debug, Default)]
+pub struct Preparation {
+    /// The companion that became the program the launch spawns, by name, if one did.
+    pub redirected_by: Option<String>,
+    /// What failed, in the order it failed. Each is already on the setup stream.
+    pub failures: Vec<AddonError>,
+}
+
 /// What an injectable does with the launch it is offered.
 #[derive(Debug, Clone)]
 pub enum Contribution {

@@ -6,7 +6,7 @@
 
 use apogee_addons::{
     AddonEvents, AddonReport, AddonSession, Addons, ComponentManifest, DalamudConfig,
-    ExternalAddon, GameContext, Injectable, Outcome, SetupEvent, SetupEvents,
+    ExternalAddon, GameContext, Injectable, LoadEvidence, Outcome, SetupEvent, SetupEvents,
 };
 use std::time::SystemTime;
 
@@ -49,21 +49,23 @@ impl AddonBackend for AddonsBackend {
         plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) {
-        let Some(prefix) = prefix else {
-            return;
-        };
+    ) -> Option<LoadEvidence> {
+        let prefix = prefix?;
         let (setup, relay) = relay_setup(events);
         let Some(manifest) = self.setup_pass(&prefix, cancel, &setup).await.manifest else {
             finish(setup, relay).await;
-            return;
+            return None;
         };
 
-        if let Some(config) = dalamud {
-            self.inject(&manifest, &prefix, config, plan, cancel, &setup)
-                .await;
-        }
+        let confirming = match dalamud {
+            Some(config) => {
+                self.inject(&manifest, &prefix, config, plan, cancel, &setup)
+                    .await
+            }
+            None => None,
+        };
         finish(setup, relay).await;
+        confirming
     }
 
     async fn apply_setup(
@@ -111,15 +113,14 @@ impl AddonBackend for AddonsBackend {
         game_pid: i32,
         prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
-        redirected_at: Option<SystemTime>,
+        confirming: Option<LoadEvidence>,
         _cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         let (addon_events, relay) = relay(events);
         // Spawned rather than awaited: the proof lands seconds after the game does, and a launch that
         // waited for it would hold the flow at the point it is supposed to report the game running.
-        let confirming = redirected_at.map(|since| {
-            let evidence = self.addons.dalamud_load_evidence(since);
+        let confirming = confirming.map(|evidence| {
             let events = addon_events.clone();
             tokio::spawn(evidence.watch(events))
         });
@@ -199,7 +200,8 @@ impl AddonsBackend {
         }
     }
 
-    /// Install whatever this launch loads into the game, and let it compose the launch.
+    /// Install whatever this launch loads into the game, let it compose the launch, and come back with
+    /// the proof to watch for if it left one.
     ///
     /// Failures are narrated by the addon layer as they happen and dropped here. Turning one into an
     /// [`Event::Error`] would make a shell exit non-zero for a game that started perfectly well without
@@ -212,12 +214,10 @@ impl AddonsBackend {
         plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         setup: &SetupEvents,
-    ) {
+    ) -> Option<LoadEvidence> {
         // The layer narrates its own `None`: which row is missing and what that costs is its sentence
         // to write, and a shell that had to invent one would be writing about a decision it did not make.
-        let Some(dalamud) = self.addons.dalamud(manifest, config, setup) else {
-            return;
-        };
+        let dalamud = self.addons.dalamud(manifest, config, setup)?;
         let enabled: [&dyn Injectable; 1] = [&dalamud];
         for err in self
             .addons
@@ -226,12 +226,22 @@ impl AddonsBackend {
         {
             tracing::warn!(reason = err.chain(), "an injectable could not be installed");
         }
-        for err in self.addons.prepare_launch(&enabled, plan, setup) {
+        let prepared = self.addons.prepare_launch(&enabled, plan, setup);
+        for err in &prepared.failures {
             tracing::warn!(
                 reason = err.chain(),
                 "an injectable could not join the launch"
             );
         }
+        // Asked of the companion that took the launch over, and asked now: it is dropped at the end of
+        // this pass, and the moment is read before the spawn because the proof lands seconds from now
+        // in a file that survives previous sessions. A moment from before this launch started is what
+        // tells this session's proof from the last one's.
+        let redirected_by = prepared.redirected_by?;
+        enabled
+            .iter()
+            .find(|injectable| injectable.name() == redirected_by)?
+            .load_evidence(SystemTime::now())
     }
 
     /// The manifest to read a prefix's setup from: the hosted one, or the last one a fetch verified
@@ -451,12 +461,17 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // A launch something redirected, watching a file nothing will ever write.
+        let evidence = LoadEvidence::new(
+            "Companion",
+            std::path::Path::new("/nonexistent/never-written.log"),
+            SystemTime::now(),
+        );
         let lifecycle = backend
             .start(
                 std::process::id().cast_signed(),
                 None,
                 Vec::new(),
-                Some(SystemTime::now()),
+                Some(evidence),
                 &cancel,
                 &tx,
             )
@@ -508,7 +523,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new());
 
-        backend
+        let confirming = backend
             .prepare_launch(
                 None,
                 Some(DalamudConfig::default()),
@@ -518,6 +533,10 @@ mod tests {
             )
             .await;
 
+        assert!(
+            confirming.is_none(),
+            "nothing composed this launch, so there is nothing to confirm"
+        );
         assert!(plan.inserted_args().is_empty());
         assert_eq!(plan.program(), "ffxiv_dx11.exe");
         Ok(())

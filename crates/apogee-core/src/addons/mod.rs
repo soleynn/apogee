@@ -12,9 +12,7 @@ pub(crate) mod addons_backend;
 #[cfg(test)]
 pub(crate) mod fake;
 
-use std::time::SystemTime;
-
-use apogee_addons::{DalamudConfig, ExternalAddon};
+use apogee_addons::{DalamudConfig, ExternalAddon, LoadEvidence};
 use apogee_runtime::{LaunchPlan, Prefix};
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -60,6 +58,11 @@ pub(crate) trait AddonBackend: Send + Sync {
     /// to run the game over prefix hygiene is worse than one that runs it without.
     ///
     /// `prefix` of `None` is nothing to do, which is what the test double hands back.
+    ///
+    /// Returns what to watch for proof that whatever took the launch over came up inside the game, or
+    /// `None` when nothing did or what did leaves no proof. Taken here rather than after the spawn
+    /// because the companion that composed the launch is what knows where its proof lands, and it is
+    /// dropped when this pass ends.
     async fn prepare_launch(
         &self,
         prefix: Option<Prefix>,
@@ -67,7 +70,7 @@ pub(crate) trait AddonBackend: Send + Sync {
         plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    );
+    ) -> Option<LoadEvidence>;
 
     /// Bring `prefix` up to the setup the signed catalog publishes, with no launch around it.
     ///
@@ -112,17 +115,16 @@ pub(crate) trait AddonBackend: Send + Sync {
     /// Infallible by design: a helper tool that cannot start is reported on `events` and in the
     /// returned lifecycle's failures, never as an error that would fail a launch already in progress.
     ///
-    /// `redirected_at` is `Some` when something took over the launch's program, carrying the moment the
-    /// launch began. That is what lets this layer watch for proof the thing came up inside the game,
-    /// which is the only such report every runner can produce: a loader's own exit status is unreachable
-    /// behind a container-style runner. `None` is an ordinary launch, where the spawned program is the
-    /// game's own loader and there is nothing to confirm.
+    /// `confirming` is what [`Self::prepare_launch`] came back with: the proof to watch for, from
+    /// whatever took the launch over. Watching is the only such report every runner can produce, since
+    /// a loader's own exit status is unreachable behind a container-style runner. `None` is an ordinary
+    /// launch, or one whose companion leaves nothing to confirm.
     async fn start(
         &self,
         game_pid: i32,
         prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
-        redirected_at: Option<SystemTime>,
+        confirming: Option<LoadEvidence>,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle>;
