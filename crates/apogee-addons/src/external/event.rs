@@ -5,6 +5,7 @@
 //! composition root translates, which is what it already does for the runtime's own stream.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -27,6 +28,24 @@ pub enum AddonEvent {
     /// Still waiting on a companion that runs after the game, so a launcher that has not exited can
     /// say why rather than appearing to hang.
     StillWaiting { program: PathBuf, seconds: u64 },
+    /// Something loaded into the game left proof it came up: a file it writes from *inside* the game
+    /// process was written after this launch began.
+    ///
+    /// The only report of its kind every runner can produce. A loader's own exit status says what it
+    /// believed on its way out, and is unreachable behind a container-style runner where what the
+    /// launcher spawned is the runner rather than the loader.
+    Loaded { what: String },
+    /// No such proof yet, after waiting.
+    ///
+    /// Deliberately not "it failed". Absence is not evidence here, because the game may still be
+    /// starting, and a launcher that announced a failure on a slow machine would be wrong in the one
+    /// direction that costs a user their trust in the report. `evidence` is the file that was watched,
+    /// so whoever reads this can look for themselves.
+    NotConfirmed {
+        what: String,
+        waited: Duration,
+        evidence: PathBuf,
+    },
 }
 
 /// Where addon events go. Cloneable and cheap, like the runtime's own.
