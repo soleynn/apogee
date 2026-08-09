@@ -47,12 +47,14 @@ pub(super) async fn install(
     let named = what.to_owned();
     let entries = tokio::task::spawn_blocking(move || extract(&archive, &layout, &target, &named))
         .await
-        .map_err(|_| unpack_failed(what, "the extraction task panicked"))??;
+        .map_err(|source| AddonError::Unpack {
+            what: what.to_owned(),
+            source: Box::new(source),
+        })??;
     if entries == 0 {
-        return Err(unpack_failed(
-            what,
-            "the archive held nothing under the layout the manifest describes",
-        ));
+        return Err(AddonError::EmptyArchive {
+            what: what.to_owned(),
+        });
     }
     let _ = tokio::fs::remove_file(&cache).await;
     Ok(entries)
@@ -137,17 +139,10 @@ async fn download(
     drop(tx);
     let _ = relay.await;
 
-    match outcome {
-        Ok(verified) => Ok(verified),
-        // A pin that does not match is its own thing, not a download problem: the bytes arrived, they
-        // are just not the bytes the signed manifest promised.
-        Err(FetchError::FileVerifyFailed { expected, got }) => Err(AddonError::IntegrityMismatch {
-            verb: what.to_owned(),
-            expected,
-            got,
-        }),
-        Err(other) => Err(other.into()),
-    }
+    // A pin that does not match is its own thing, not a download problem: the bytes arrived, they are
+    // just not the bytes the signed manifest promised. `from_fetch` is where that is decided, for this
+    // call and every other one.
+    outcome.map_err(|source| AddonError::from_fetch(source, what, dest))
 }
 
 fn is_transient(e: &FetchError) -> bool {
@@ -157,16 +152,8 @@ fn is_transient(e: &FetchError) -> bool {
     )
 }
 
-/// An archive that arrived intact and still did not produce files.
-pub(super) fn unpack_failed(what: &str, detail: impl Into<String>) -> AddonError {
-    AddonError::Unpack {
-        what: what.to_owned(),
-        source: Box::new(std::io::Error::other(detail.into())),
-    }
-}
-
-/// A filesystem step, with the path folded into the source: `io::Error` names a kind and nothing
-/// about which file raised it, and the path is the first thing anyone reading this wants.
+/// A filesystem step, with the path beside the error the filesystem raised rather than folded into a
+/// replacement for it: `io::Error` names a kind and nothing about which file raised it.
 pub(super) fn io_failed(
     what: &str,
     step: &'static str,
@@ -176,10 +163,8 @@ pub(super) fn io_failed(
     AddonError::Io {
         what: what.to_owned(),
         step,
-        source: Box::new(std::io::Error::new(
-            source.kind(),
-            format!("{}: {source}", path.display()),
-        )),
+        path: path.to_path_buf(),
+        source: Box::new(source),
     }
 }
 

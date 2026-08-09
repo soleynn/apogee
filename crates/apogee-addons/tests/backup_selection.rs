@@ -8,8 +8,7 @@ use std::io;
 use std::path::Path;
 
 use apogee_addons::backup::{
-    BackupError, CompanionConfigOpts, GameConfigOpts, Presence, Rule, RuleRole, Selected,
-    Selection, SelectionRoot,
+    BackupError, GameConfigOpts, Presence, RuleRole, Selected, Selection, SelectionRoot,
 };
 
 /// The fourteen settings files a character directory holds, uppercase as the game writes them.
@@ -173,29 +172,6 @@ fn opting_in_brings_back_exactly_what_was_pruned() -> Result<(), BackupError> {
     Ok(())
 }
 
-/// A rule that matches nothing is the failure this selection exists to make impossible to miss. On
-/// an allowlist root, where a misspelling would silently shrink the archive, it stops the backup.
-#[test]
-fn a_required_rule_that_matches_nothing_fails_the_backup() {
-    let tmp = tempfile::tempdir().unwrap();
-    let companion = tmp.path().join("companion");
-    write(&companion.join("dalamudUI.ini"), "ui").unwrap();
-
-    let err = Selection::new()
-        .with_root(SelectionRoot::companion_config(
-            &companion,
-            CompanionConfigOpts::default(),
-        ))
-        .and_then(|s| s.resolve());
-
-    match err {
-        Err(BackupError::RuleMatchedNothing { rule, .. }) => {
-            assert_eq!(rule, "file dalamudConfig.json");
-        }
-        other => panic!("expected the missing rule to be named, got {other:?}"),
-    }
-}
-
 /// An optional rule that matches nothing still reports, because a zero is something a reader can
 /// act on and an absent row is not.
 #[test]
@@ -297,31 +273,6 @@ fn a_tree_that_yields_nothing_fails_instead_of_succeeding_empty() {
     assert!(matches!(err, Err(BackupError::NothingSelected)));
 }
 
-/// A config directory the game has been pointed at but never written into is a real state, and it is
-/// recorded rather than treated as a fault.
-#[test]
-fn an_absent_optional_root_is_recorded_beside_a_populated_one() -> Result<(), BackupError> {
-    let tmp = tempfile::tempdir().unwrap();
-    game_tree(tmp.path()).unwrap();
-
-    let selected = Selection::new()
-        .with_root(SelectionRoot::game_config(
-            tmp.path(),
-            GameConfigOpts::default(),
-        ))?
-        .with_root(SelectionRoot::companion_config(
-            tmp.path().join("never-written"),
-            CompanionConfigOpts::default(),
-        ))?
-        .resolve()?;
-
-    assert_eq!(selected.roots().len(), 2);
-    assert!(selected.roots()[0].present());
-    assert!(!selected.roots()[1].present());
-    assert_eq!(selected.roots()[1].files(), 0);
-    Ok(())
-}
-
 /// Order comes from the archive names, not from the order the filesystem hands entries back, so two
 /// trees with the same contents built in different orders select identically.
 #[test]
@@ -387,72 +338,6 @@ fn the_order_does_not_depend_on_the_order_the_tree_was_built() -> Result<(), Bac
     Ok(())
 }
 
-/// A directory selected at the root level brings its whole subtree, which is what makes the include
-/// side free of directory literals.
-#[test]
-fn selecting_a_directory_takes_everything_under_it() -> Result<(), BackupError> {
-    let tmp = tempfile::tempdir().unwrap();
-    let companion = tmp.path().join("companion");
-    write(&companion.join("dalamudConfig.json"), "{}").unwrap();
-    write(&companion.join("pluginConfigs").join("cadence.json"), "{}").unwrap();
-    write(
-        &companion
-            .join("pluginConfigs")
-            .join("cadence")
-            .join("policy-pack")
-            .join("blm-pack.json"),
-        "{}",
-    )
-    .unwrap();
-    // Recorded telemetry sits under the same directory as the settings and is pruned by name.
-    write(
-        &companion
-            .join("pluginConfigs")
-            .join("cadence")
-            .join("captures")
-            .join("tick-000001.json"),
-        "{}",
-    )
-    .unwrap();
-    // A sibling that is not on the allowlist is not swept in.
-    write(&companion.join("runtime").join("dotnet.exe"), "binary").unwrap();
-
-    let selected = Selection::new()
-        .with_root(SelectionRoot::companion_config(
-            &companion,
-            CompanionConfigOpts::default(),
-        ))?
-        .resolve()?;
-    let names = names(&selected);
-
-    assert!(has(&names, "roaming/pluginConfigs/cadence.json"));
-    assert!(has(
-        &names,
-        "roaming/pluginConfigs/cadence/policy-pack/blm-pack.json"
-    ));
-    assert!(!names.iter().any(|n| n.contains("captures")));
-    assert!(!names.iter().any(|n| n.contains("runtime")));
-    Ok(())
-}
-
-/// The deny list is crate policy rather than a caller's choice, so it is worth pinning that it names
-/// what it is meant to name.
-#[test]
-fn the_deny_list_covers_the_launcher_identity_files() {
-    let rendered: Vec<String> = Selection::deny_rules()
-        .iter()
-        .map(Rule::to_string)
-        .collect();
-    for want in [
-        "file accounts.json",
-        "file accountsList.json",
-        "file launcher.ini",
-        "file launcherConfigV3.json",
-    ] {
-        assert!(rendered.iter().any(|r| r == want), "{want} not denied");
-    }
-}
-
 /// A required root that is absent is a fault, because the caller asked for a tree that is not there.
 #[test]
 fn a_missing_required_root_fails() {
@@ -463,14 +348,10 @@ fn a_missing_required_root_fails() {
 
 /// Presence is part of the root's contract, so it is readable back off the root.
 #[test]
-fn the_game_root_is_required_and_the_companion_root_is_not() {
+fn the_game_root_is_required() {
     assert_eq!(
         SelectionRoot::game_config("/tmp/x", GameConfigOpts::default()).presence(),
         Presence::Required
-    );
-    assert_eq!(
-        SelectionRoot::companion_config("/tmp/x", CompanionConfigOpts::default()).presence(),
-        Presence::Optional
     );
 }
 

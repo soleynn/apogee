@@ -13,13 +13,18 @@
 //! alternative is a launcher that refuses to start the game because a companion is between releases,
 //! which is the wrong trade every time.
 
+// Off Linux the launch wrap is a stub that refuses, so everything only it uses (the paths it hands the
+// injector, the pack it passes through, the argv it composes) has no caller there. Unreachable on that
+// target rather than dead, and gating each item one by one would say the same thing in ten places.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 mod confirm;
 mod injector;
 mod integrity;
 mod wire;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use apogee_fetch::{DownloadSpec, Fetcher, Validator};
 use apogee_runtime::{LaunchPlan, Prefix};
@@ -28,10 +33,14 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub use confirm::LoadEvidence;
-pub use injector::{ClientLanguage, InjectorInvocation, LoadMode, PluginPolicy, injector_argv};
+pub use injector::{ClientLanguage, LoadMode, PluginPolicy};
+pub(crate) use injector::{InjectorInvocation, injector_argv};
 pub use wire::Installed;
 
-use crate::manifest::InjectableEntry;
+#[cfg(target_os = "linux")]
+use crate::launch::Redirect;
+use crate::launch::{Contribution, LaunchEdit};
+use crate::manifest::{InjectableKind, VerifiedManifest};
 use crate::setup::{SetupEvent, SetupEvents};
 use crate::{AddonError, Injectable, Result, SupportTier};
 use integrity::Digest;
@@ -48,6 +57,7 @@ const EMPTY_TROUBLESHOOTING_PACK: &str = "e30=";
 /// The trees Dalamud installs into. Siblings under one root, so pointing it elsewhere or deleting it is
 /// one directory either way.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct DalamudPaths {
     /// Holds `Hooks/<assembly version>/`, one directory per release.
     pub addon: PathBuf,
@@ -198,6 +208,10 @@ impl Endpoints {
 pub struct Dalamud {
     paths: DalamudPaths,
     fetcher: Fetcher,
+    /// The row's own pointer, kept so a failure to derive the endpoints from it can name it. Deriving
+    /// happens once at construction, and by the time it has failed the `None` says nothing about what
+    /// it was derived from.
+    distribution: Url,
     endpoints: Option<Endpoints>,
     tier: SupportTier,
     caveats: Vec<String>,
@@ -205,22 +219,30 @@ pub struct Dalamud {
 }
 
 impl Dalamud {
-    /// Build it from the manifest row that points at its distribution.
+    /// Build it from the row a verified manifest carries, or `None` when it carries none.
+    ///
+    /// The manifest rather than the row, because the row on its own is not proof of anything: it is a
+    /// struct a parse produces, and this constructor is what turns one into downloads from the URL it
+    /// names and files laid into a prefix. Taking a [`VerifiedManifest`] is what keeps the gate on
+    /// [`Addons::apply_setup`](crate::Addons::apply_setup) from being one that only the setup half of
+    /// the catalog passes through.
     #[must_use]
     pub fn new(
         paths: DalamudPaths,
         fetcher: Fetcher,
-        entry: &InjectableEntry,
+        manifest: &VerifiedManifest,
         config: DalamudConfig,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let entry = manifest.rows().injectable(InjectableKind::Dalamud)?;
+        Some(Self {
             paths,
             fetcher,
+            distribution: entry.distribution.clone(),
             endpoints: Endpoints::derive(&entry.distribution),
             tier: entry.tier.clone(),
             caveats: entry.caveats.clone(),
             config,
-        }
+        })
     }
 
     /// Point it at endpoints assembled by hand, so a test can serve each one separately.
@@ -241,13 +263,12 @@ impl Dalamud {
     }
 
     fn endpoints(&self) -> Result<&Endpoints> {
-        self.endpoints.as_ref().ok_or_else(|| AddonError::Inject {
-            injectable: DALAMUD.to_owned(),
-            tier: self.tier.clone(),
-            source: Box::new(std::io::Error::other(
-                "the manifest's distribution pointer is not a shape the other endpoints hang off",
-            )),
-        })
+        self.endpoints
+            .as_ref()
+            .ok_or_else(|| AddonError::BadDistribution {
+                injectable: DALAMUD.to_owned(),
+                pointer: self.distribution.clone(),
+            })
     }
 
     /// Say what this row's own caveats are, and what the runner in front of it costs, before anything is
@@ -277,7 +298,7 @@ impl Dalamud {
             .await?;
 
         let version_dir = self.paths.version_dir(&info.assembly_version);
-        if !self.tree_is_intact(&version_dir) {
+        if self.version_fault(&version_dir).is_some() {
             events.emit(SetupEvent::Installing {
                 what: DALAMUD.to_owned(),
                 version: info.assembly_version.clone(),
@@ -285,10 +306,10 @@ impl Dalamud {
             let url = self.absolute(&info.download_url)?;
             self.lay_down(&url, &version_dir, DALAMUD, events, cancel)
                 .await?;
-            if !self.tree_is_intact(&version_dir) {
-                return Err(
-                    self.failed("the version that was downloaded does not match its own hashes")
-                );
+            // The same reading, now as a failure: before the download it says whether to fetch, after
+            // it says which file the distribution served wrong.
+            if let Some(fault) = self.version_fault(&version_dir) {
+                return Err(fault);
             }
         }
 
@@ -323,18 +344,33 @@ impl Dalamud {
         Ok(())
     }
 
-    /// Whether a version directory is complete and matches the digest map it ships with.
-    fn tree_is_intact(&self, version_dir: &Path) -> bool {
-        if !integrity::required_files_present(version_dir) {
-            return false;
+    /// What is wrong with a version directory, or `None` when it is complete and matches the digest
+    /// map it ships with.
+    ///
+    /// One reading serving two callers: before a download it decides whether to fetch, after one it is
+    /// the failure. A predicate could only serve the first, and the second is where somebody needs to
+    /// know which file.
+    fn version_fault(&self, version_dir: &Path) -> Option<AddonError> {
+        if let Some(fault) = integrity::missing_required(version_dir) {
+            return Some(Self::tree_fault(DALAMUD, fault));
         }
-        let Ok(bytes) = std::fs::read(version_dir.join("hashes.json")) else {
+        let map = version_dir.join("hashes.json");
+        let bytes = match std::fs::read(&map) {
+            Ok(bytes) => bytes,
             // The map ships inside the archive, so its absence is an incomplete tree rather than a
             // distribution that declined to publish one.
-            return false;
+            Err(source) => {
+                return Some(self.io_failed("read the digest map it shipped with", &map, source));
+            }
         };
-        serde_json::from_slice::<HashManifest>(&bytes)
-            .is_ok_and(|manifest| integrity::verify_tree(version_dir, &manifest, Digest::Md5))
+        match serde_json::from_slice::<HashManifest>(&bytes) {
+            Ok(manifest) => integrity::first_fault(version_dir, &manifest, Digest::Md5)
+                .map(|fault| Self::tree_fault(DALAMUD, fault)),
+            Err(source) => Some(AddonError::Distribution {
+                injectable: DALAMUD.to_owned(),
+                source: Box::new(source),
+            }),
+        }
     }
 
     /// Bring the bundled runtime to `version`, which is two archives overlaid into one tree.
@@ -361,9 +397,13 @@ impl Dalamud {
             return Ok(());
         }
         let endpoints = self.endpoints()?;
-        let (dotnet, desktop) = endpoints
-            .runtime_archives(version)
-            .ok_or_else(|| self.failed("the runtime endpoints cannot be derived"))?;
+        let (dotnet, desktop) =
+            endpoints
+                .runtime_archives(version)
+                .ok_or_else(|| AddonError::BadDistribution {
+                    injectable: DALAMUD.to_owned(),
+                    pointer: endpoints.release_base.clone(),
+                })?;
         events.emit(SetupEvent::Installing {
             what: "Dalamud runtime".to_owned(),
             version: version.to_owned(),
@@ -379,54 +419,57 @@ impl Dalamud {
         // distribution lists `version` as an entry whose digest is the version string's, so a tree
         // without it is a tree that is one file short. Written with no trailing newline for the same
         // reason, since the digest is over the bare string.
-        write_atomic(&marker, version.as_bytes()).map_err(|source| AddonError::Io {
-            what: DALAMUD.to_owned(),
-            step: "seal the runtime",
-            source: Box::new(source),
-        })?;
-        if !self.runtime_matches(version, cancel).await {
+        write_atomic(&marker, version.as_bytes())
+            .map_err(|source| self.io_failed("seal the runtime", &marker, source))?;
+        if let Some(fault) = self.runtime_fault(version, cancel).await {
             // Unsealed rather than left behind: the next pass lays it down again instead of trusting a
             // marker for a tree that did not verify.
             let _ = std::fs::remove_file(&marker);
-            return Err(
-                self.failed("the runtime that was downloaded does not match its own hashes")
-            );
+            return Err(fault);
         }
         Ok(())
     }
 
-    /// Whether the runtime on disk matches the digest map published for `version`.
+    /// What is wrong with the runtime on disk against the digest map published for `version`, or
+    /// `None` when it matches.
     ///
     /// The map is cached beside the tree so a re-install costs no second request. A map that cannot be
-    /// fetched and was never cached answers "no", which refuses the seal: there is no third answer, and
-    /// an unsealed tree is laid down again next pass rather than trusted.
-    async fn runtime_matches(&self, version: &str, cancel: &CancellationToken) -> bool {
+    /// fetched and was never cached is itself the fault, and it is the fetch's own failure rather than
+    /// a verdict on the tree: nothing was checked, so nothing can be claimed, and an unsealed tree is
+    /// laid down again next pass rather than trusted.
+    async fn runtime_fault(&self, version: &str, cancel: &CancellationToken) -> Option<AddonError> {
+        const WHAT: &str = "Dalamud runtime";
+
         let cache = self.paths.runtime.join(format!("hashes-{version}.json"));
+        // A cache that cannot be read or parsed is not a fault: the answer to it is the fetch below,
+        // which is what the next branch does.
         let cached = std::fs::read(&cache)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<HashManifest>(&bytes).ok());
         let manifest = match cached {
             Some(manifest) => manifest,
             None => {
-                let Ok(endpoints) = self.endpoints() else {
-                    return false;
+                let endpoints = match self.endpoints() {
+                    Ok(endpoints) => endpoints,
+                    Err(err) => return Some(err),
                 };
-                let Some(url) = endpoints.runtime_hashes(version) else {
-                    return false;
-                };
-                let Ok(fetched) = self
+                let url = endpoints.runtime_hashes(version)?;
+                match self
                     .fetch_json::<HashManifest>(&url, "runtime hashes", cancel)
                     .await
-                else {
-                    return false;
-                };
-                if let Ok(bytes) = serde_json::to_vec(&fetched) {
-                    let _ = write_atomic(&cache, &bytes);
+                {
+                    Ok(fetched) => {
+                        if let Ok(bytes) = serde_json::to_vec(&fetched) {
+                            let _ = write_atomic(&cache, &bytes);
+                        }
+                        fetched
+                    }
+                    Err(err) => return Some(err),
                 }
-                fetched
             }
         };
-        integrity::verify_tree(&self.paths.runtime, &manifest, Digest::Md5)
+        integrity::first_fault(&self.paths.runtime, &manifest, Digest::Md5)
+            .map(|fault| Self::tree_fault(WHAT, fault))
     }
 
     /// Bring the asset set current, returning the version now on disk.
@@ -445,7 +488,7 @@ impl Dalamud {
             .and_then(|text| text.trim().parse::<u32>().ok())
             .unwrap_or(0);
 
-        if meta.version <= local && self.assets_are_intact(&dir, &meta) {
+        if meta.version <= local && self.assets_fault(&dir, &meta).is_none() {
             return Ok(meta.version);
         }
         events.emit(SetupEvent::Installing {
@@ -455,32 +498,40 @@ impl Dalamud {
         let url = self.absolute(&meta.package_url)?;
         self.lay_down(&url, &dir, "Dalamud assets", events, cancel)
             .await?;
-        if !self.assets_are_intact(&dir, &meta) {
-            return Err(
-                self.failed("the assets that were downloaded do not match their own digests")
-            );
+        if let Some(fault) = self.assets_fault(&dir, &meta) {
+            return Err(fault);
         }
-        write_atomic(
-            &self.paths.assets.join("asset.ver"),
-            meta.version.to_string().as_bytes(),
-        )
-        .map_err(|source| AddonError::Io {
-            what: DALAMUD.to_owned(),
-            step: "record the asset version",
-            source: Box::new(source),
-        })?;
+        let stamp = self.paths.assets.join("asset.ver");
+        write_atomic(&stamp, meta.version.to_string().as_bytes())
+            .map_err(|source| self.io_failed("record the asset version", &stamp, source))?;
         Ok(meta.version)
     }
 
-    fn assets_are_intact(&self, dir: &Path, meta: &AssetMeta) -> bool {
-        meta.assets.iter().all(|asset| {
-            let path = integrity::resolve(dir, &asset.file_name);
-            match asset.digest() {
-                Some(expected) => {
-                    integrity::hash_file(&path, Digest::Sha1).is_ok_and(|found| found == expected)
-                }
-                None => path.is_file(),
-            }
+    /// The first asset that is not what the metadata says it is, or `None` when every one is.
+    ///
+    /// An asset the metadata carries no digest for is checked for being there and nothing more, which
+    /// is all the distribution said about it.
+    fn assets_fault(&self, dir: &Path, meta: &AssetMeta) -> Option<AddonError> {
+        const WHAT: &str = "Dalamud assets";
+
+        meta.assets.iter().find_map(|asset| {
+            let file = integrity::resolve(dir, &asset.file_name);
+            let fault = match asset.digest() {
+                Some(expected) => match integrity::hash_file(&file, Digest::Sha1) {
+                    Ok(found) if found == expected => return None,
+                    Ok(found) => integrity::TreeFault::Mismatch {
+                        file,
+                        expected: expected.to_owned(),
+                        found,
+                    },
+                    Err(source) => integrity::TreeFault::Unreadable { file, source },
+                },
+                None => integrity::TreeFault::Unreadable {
+                    source: std::fs::File::open(&file).err()?,
+                    file,
+                },
+            };
+            Some(Self::tree_fault(WHAT, fault))
         })
     }
 
@@ -539,10 +590,15 @@ impl Dalamud {
         let named = what.to_owned();
         let entries = tokio::task::spawn_blocking(move || extract(&archive, &target, &named))
             .await
-            .map_err(|_| self.failed("the extraction task did not finish"))??;
+            .map_err(|source| AddonError::Unpack {
+                what: what.to_owned(),
+                source: Box::new(source),
+            })??;
         let _ = tokio::fs::remove_dir_all(&staging).await;
         if entries == 0 {
-            return Err(self.failed("the archive that was served held nothing"));
+            return Err(AddonError::EmptyArchive {
+                what: what.to_owned(),
+            });
         }
         Ok(())
     }
@@ -583,21 +639,20 @@ impl Dalamud {
             .await;
         drop(tx);
         let _ = relay.await;
-        outcome?;
+        outcome.map_err(|source| AddonError::from_fetch(source, what, dest))?;
         Ok(())
     }
 
     fn write_record(&self, record: &Installed) -> Result<()> {
+        let record_path = self.paths.record();
         let bytes = serde_json::to_vec_pretty(record).map_err(|source| AddonError::Io {
             what: DALAMUD.to_owned(),
             step: "record what it installed",
+            path: record_path.clone(),
             source: Box::new(source),
         })?;
-        write_atomic(&self.paths.record(), &bytes).map_err(|source| AddonError::Io {
-            what: DALAMUD.to_owned(),
-            step: "record what it installed",
-            source: Box::new(source),
-        })
+        write_atomic(&record_path, &bytes)
+            .map_err(|source| self.io_failed("record what it installed", &record_path, source))
     }
 
     /// One URL the distribution served, parsed at the point of use so a response that is not a URL is
@@ -609,11 +664,27 @@ impl Dalamud {
         })
     }
 
-    fn failed(&self, detail: &'static str) -> AddonError {
-        AddonError::Inject {
-            injectable: DALAMUD.to_owned(),
-            tier: self.tier.clone(),
-            source: Box::new(std::io::Error::other(detail)),
+    /// One file that proves a tree wrong, in the taxonomy's own terms: a file that could not be read
+    /// is a filesystem failure and a file that read as other bytes is an integrity failure, and the
+    /// two send a reader to different places.
+    fn tree_fault(what: &str, fault: integrity::TreeFault) -> AddonError {
+        match fault {
+            integrity::TreeFault::Unreadable { file, source } => AddonError::Io {
+                what: what.to_owned(),
+                step: "read a file the digest map names",
+                path: file,
+                source: Box::new(source),
+            },
+            integrity::TreeFault::Mismatch {
+                file,
+                expected,
+                found,
+            } => AddonError::IntegrityMismatch {
+                what: what.to_owned(),
+                file,
+                expected,
+                got: found,
+            },
         }
     }
 
@@ -621,10 +692,8 @@ impl Dalamud {
         AddonError::Io {
             what: DALAMUD.to_owned(),
             step,
-            source: Box::new(std::io::Error::new(
-                source.kind(),
-                format!("{}: {source}", path.display()),
-            )),
+            path: path.to_path_buf(),
+            source: Box::new(source),
         }
     }
 }
@@ -652,42 +721,57 @@ impl Injectable for Dalamud {
         self.install(events, cancel).await
     }
 
-    fn prepare_launch(&self, plan: &mut LaunchPlan, events: &SetupEvents) -> Result<()> {
+    fn prepare_launch(&self, plan: &LaunchPlan, events: &SetupEvents) -> Result<Contribution> {
         let decline = |note: &str| {
             events.emit(SetupEvent::Caveat {
                 what: DALAMUD.to_owned(),
                 note: format!("not loading into this launch: {note}"),
             });
+            Ok(Contribution::Declined)
         };
         let Some(installed) = self.installed() else {
-            decline("nothing is installed");
-            return Ok(());
+            return decline("nothing is installed");
         };
         // The one hard gate. Dalamud reads the client's memory at offsets it was built for, so loading
         // it into another version is not a degraded experience, it is a crash.
         if installed.supported_game_ver != self.config.game_version {
-            decline(&format!(
+            return decline(&format!(
                 "the installed release targets game version {}, and this install is {}",
                 installed.supported_game_ver, self.config.game_version
             ));
-            return Ok(());
         }
         let Some(prefix) = plan.prefix_of().cloned() else {
-            decline("this launch has no prefix to translate paths against");
-            return Ok(());
+            return decline("this launch has no prefix to translate paths against");
         };
-        self.wrap(&prefix, &installed, plan)
+        self.wrap(&prefix, &installed, plan).map(Contribution::Edit)
+    }
+
+    /// The injector's own boot log, which is written from inside the game once Dalamud is up.
+    ///
+    /// The one report every runner can produce. A loader's exit status is unreachable behind a
+    /// container-style runner, and the log is written by the code whose being there is the question.
+    fn load_evidence(&self, since: SystemTime) -> Option<LoadEvidence> {
+        Some(LoadEvidence::new(
+            DALAMUD,
+            self.paths.logs.join("dalamud.boot.log"),
+            since,
+        ))
     }
 }
 
 impl Dalamud {
-    /// Redirect `plan` through the injector, with every path in the form the injector reads.
+    /// The edit that redirects `plan` through the injector, with every path in the form the injector
+    /// reads.
     ///
     /// Translation is in-process against the prefix's own drive map, not seven `winepath` subprocesses
-    /// on the launch path. The injector itself is named by its host path, since the runner is what
-    /// executes it and a Windows path there would be one indirection for nothing.
+    /// on the launch path.
     #[cfg(target_os = "linux")]
-    fn wrap(&self, prefix: &Prefix, installed: &Installed, plan: &mut LaunchPlan) -> Result<()> {
+    fn wrap(
+        &self,
+        prefix: &Prefix,
+        installed: &Installed,
+        plan: &LaunchPlan,
+    ) -> Result<LaunchEdit> {
         let drives = prefix.drive_map().map_err(|source| AddonError::Inject {
             injectable: DALAMUD.to_owned(),
             tier: self.tier.clone(),
@@ -719,45 +803,50 @@ impl Dalamud {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
 
-        plan.set_inserted_args(injector_argv(&InjectorInvocation {
-            mode: self.config.mode,
-            game: &game,
-            working_directory: &working_directory,
-            configuration_path: &configuration_path,
-            logging_path: &logging_path,
-            plugin_directory: &plugin_directory,
-            asset_directory: &asset_directory,
-            client_language: self.config.language,
-            delay_initialize_ms: self
-                .config
-                .delay_initialize
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            troubleshooting_b64: EMPTY_TROUBLESHOOTING_PACK,
-            plugins: self.config.plugins,
-        }));
-        // In Windows form, like every other path handed to the injector. A host path works only
-        // because plain wine happens to accept one; a Proton runner sees a path that is not its own
-        // and routes the program through a launch helper rather than starting it directly, and the
+        // The injector is named in Windows form, like every other path handed to it. A host path works
+        // only because plain wine happens to accept one; a Proton runner sees a path that is not its
+        // own and routes the program through a launch helper rather than starting it directly, and the
         // injector's handoff to the game does not survive that. This is the one path whose reader is
         // the runner rather than the injector, which is the argument for spelling it the way every
         // runner reads rather than the way one of them tolerates.
-        plan.set_program(to_windows(&version_dir.join("Dalamud.Injector.exe"))?);
+        let mut redirect = Redirect::to(to_windows(&version_dir.join("Dalamud.Injector.exe"))?)
+            .with_args(injector_argv(&InjectorInvocation {
+                mode: self.config.mode,
+                game: &game,
+                working_directory: &working_directory,
+                configuration_path: &configuration_path,
+                logging_path: &logging_path,
+                plugin_directory: &plugin_directory,
+                asset_directory: &asset_directory,
+                client_language: self.config.language,
+                delay_initialize_ms: self
+                    .config
+                    .delay_initialize
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                troubleshooting_b64: EMPTY_TROUBLESHOOTING_PACK,
+                plugins: self.config.plugins,
+            }));
         if let Some(basename) = supervised {
-            plan.set_supervised(basename);
+            redirect = redirect.supervising(basename);
         }
-        // Both, and both in Windows form: the injector reads one and the runtime it starts reads the
-        // other, and a Unix path in either is a runtime that does not resolve.
-        let env = plan.env_mut();
-        env.insert("DALAMUD_RUNTIME".to_owned(), runtime.clone());
-        env.insert("DOTNET_ROOT".to_owned(), runtime);
-        env.insert("DALAMUD_BRANCH".to_owned(), installed.track.clone());
-        Ok(())
+        // Both variables, and both in Windows form: the injector reads one and the runtime it starts
+        // reads the other, and a Unix path in either is a runtime that does not resolve.
+        Ok(LaunchEdit::new()
+            .redirect(redirect)
+            .env("DALAMUD_RUNTIME", runtime.clone())
+            .env("DOTNET_ROOT", runtime)
+            .env("DALAMUD_BRANCH", installed.track.clone()))
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn wrap(&self, _prefix: &Prefix, _installed: &Installed, _plan: &mut LaunchPlan) -> Result<()> {
+    fn wrap(
+        &self,
+        _prefix: &Prefix,
+        _installed: &Installed,
+        _plan: &LaunchPlan,
+    ) -> Result<LaunchEdit> {
         Err(AddonError::Unsupported {
             what: "redirecting a launch through an injector is Linux-only",
         })

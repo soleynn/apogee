@@ -18,7 +18,9 @@ use apogee_runtime::{CompanionSpec, Prefix, Runtime};
 
 pub use addon::{ExternalAddon, RunIn, Trigger};
 pub use event::{AddonEvent, AddonEvents};
-pub use identity::Running;
+// Not public: every function that produces one is crate-private, so a caller outside could name the
+// type and never obtain one.
+pub(crate) use identity::Running;
 pub use session::{AddonOutcome, AddonReport, AddonSession, Outcome};
 
 use crate::{AddonError, Result};
@@ -240,10 +242,15 @@ fn child_env(game: &GameContext) -> std::collections::BTreeMap<String, String> {
 
 /// Run one after-game tool to completion, reporting if it takes long enough that a launcher still
 /// sitting there would otherwise look stuck.
+///
+/// The tool is somebody else's program and may never exit, so `cancel` is the only thing that bounds
+/// this. A cancelled wait stops the tool rather than walking away from it: the launcher is what
+/// started it, and nothing else is left that knows it is there.
 pub(crate) async fn run_to_completion(
     runtime: &Runtime,
     game_prefix: Option<&std::path::Path>,
     addon: &ExternalAddon,
+    cancel: &tokio_util::sync::CancellationToken,
     events: &AddonEvents,
 ) -> Outcome {
     let program = addon.program().to_path_buf();
@@ -274,24 +281,37 @@ pub(crate) async fn run_to_completion(
         }
     };
 
-    let wait = companion.wait_group();
-    tokio::pin!(wait);
-    let mut elapsed = 0_u64;
-    loop {
-        tokio::select! {
-            result = &mut wait => {
-                return match result {
-                    Ok(exit) => Outcome::Completed { code: exit.code },
-                    Err(err) => Outcome::Failed { reason: crate::chain_of(&err) },
-                };
+    // Scoped so the wait's borrow of the companion ends before the tool is stopped below.
+    let waited = {
+        let wait = companion.wait_group();
+        tokio::pin!(wait);
+        let mut elapsed = 0_u64;
+        loop {
+            tokio::select! {
+                result = &mut wait => break Some(result),
+                () = cancel.cancelled() => break None,
+                () = tokio::time::sleep(STILL_WAITING_AFTER) => {
+                    elapsed += STILL_WAITING_AFTER.as_secs();
+                    events.emit(AddonEvent::StillWaiting {
+                        program: program.clone(),
+                        seconds: elapsed,
+                    });
+                }
             }
-            () = tokio::time::sleep(STILL_WAITING_AFTER) => {
-                elapsed += STILL_WAITING_AFTER.as_secs();
-                events.emit(AddonEvent::StillWaiting {
-                    program: program.clone(),
-                    seconds: elapsed,
-                });
-            }
+        }
+    };
+
+    match waited {
+        Some(Ok(exit)) => Outcome::Completed { code: exit.code },
+        Some(Err(err)) => Outcome::Failed {
+            reason: crate::chain_of(&err),
+        },
+        // Stopped rather than left behind, and the failure to stop it is dropped: what a caller asked
+        // for is to stop waiting, and a tool that ignores a signal is not something to report as a
+        // teardown failure to somebody who is already quitting.
+        None => {
+            let _ = companion.stop(session::STOP_GRACE).await;
+            Outcome::Cancelled
         }
     }
 }

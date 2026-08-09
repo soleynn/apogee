@@ -11,20 +11,19 @@ use apogee_fetch::Fetcher;
 use apogee_runtime::{LaunchPlan, Prefix, RunnerKind};
 
 use super::*;
-use crate::manifest::ComponentManifest;
+use crate::manifest::{ComponentManifest, VerifiedManifest};
 
 const GAME_VERSION: &str = "2026.06.18.0000.0000";
 
-fn entry() -> InjectableEntry {
+fn catalog() -> VerifiedManifest {
     let json = r#"{ "version": 1, "injectables": [
         { "name": "Dalamud", "kind": "dalamud",
           "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
           "tier": "best_effort", "note": "Best with the wine-xiv runner.",
           "caveats": ["Third-party code is loaded into the game client."] } ] }"#;
-    ComponentManifest::from_json_bytes(json.as_bytes())
-        .expect("fixture parses")
-        .injectables
-        .remove(0)
+    VerifiedManifest::minted_for_tests(
+        ComponentManifest::from_json_bytes(json.as_bytes()).expect("fixture parses"),
+    )
 }
 
 fn dalamud(root: &Path, runner: &str) -> (Dalamud, Prefix) {
@@ -43,9 +42,10 @@ fn dalamud(root: &Path, runner: &str) -> (Dalamud, Prefix) {
     let dalamud = Dalamud::new(
         DalamudPaths::under(root.join("dalamud")),
         Fetcher::builder().build().expect("fetcher"),
-        &entry(),
+        &catalog(),
         config,
-    );
+    )
+    .expect("the fixture carries a Dalamud row");
     (dalamud, prefix)
 }
 
@@ -74,6 +74,18 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
     .prefix(prefix)
 }
 
+/// Prepare a launch and apply what came back, which is the pass the loop makes over one companion.
+///
+/// A decline leaves the plan as it was built, so a test that expects an edit catches one through the
+/// assertions it was going to make anyway.
+fn applied(dalamud: &Dalamud, prefix: &Prefix, events: &SetupEvents) -> LaunchPlan {
+    let mut plan = plan(prefix);
+    if let Contribution::Edit(edit) = dalamud.prepare_launch(&plan, events).expect("prepare") {
+        edit.apply(&mut plan);
+    }
+    plan
+}
+
 fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<SetupEvent>) -> Vec<SetupEvent> {
     let mut out = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -99,11 +111,8 @@ fn wrapping_a_launch_keeps_the_game_as_the_supervised_process() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
     pretend_installed(&dalamud, GAME_VERSION);
-    let mut plan = plan(&prefix);
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::none())
-        .expect("prepare");
+    let plan = applied(&dalamud, &prefix, &SetupEvents::none());
 
     assert!(
         plan.program().ends_with("Dalamud.Injector.exe"),
@@ -145,11 +154,8 @@ fn the_runtime_reaches_the_child_as_a_windows_path_in_both_variables() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
     pretend_installed(&dalamud, GAME_VERSION);
-    let mut plan = plan(&prefix);
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::none())
-        .expect("prepare");
+    let plan = applied(&dalamud, &prefix, &SetupEvents::none());
 
     let runtime = plan.env().get("DALAMUD_RUNTIME").expect("DALAMUD_RUNTIME");
     assert_eq!(
@@ -175,16 +181,17 @@ fn a_release_built_for_another_game_version_leaves_the_launch_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
     pretend_installed(&dalamud, "2020.01.01.0000.0000");
-    let mut plan = plan(&prefix);
+    let plan = plan(&prefix);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::new(tx))
+    let contribution = dalamud
+        .prepare_launch(&plan, &SetupEvents::new(tx))
         .expect("declining is not a failure");
 
-    assert_eq!(plan.program(), "/games/ffxiv/game/ffxiv_dx11.exe");
-    assert!(plan.inserted_args().is_empty());
-    assert!(plan.supervised().is_none());
+    assert!(
+        matches!(contribution, Contribution::Declined),
+        "a release for another game version contributes nothing to the launch"
+    );
     assert!(
         notes(&drain(&mut rx))
             .iter()
@@ -199,13 +206,16 @@ fn a_release_built_for_another_game_version_leaves_the_launch_alone() {
 fn nothing_installed_leaves_the_launch_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (dalamud, prefix) = dalamud(tmp.path(), "wine-xiv-staging");
-    let mut plan = plan(&prefix);
+    let plan = plan(&prefix);
 
-    dalamud
-        .prepare_launch(&mut plan, &SetupEvents::none())
+    let contribution = dalamud
+        .prepare_launch(&plan, &SetupEvents::none())
         .expect("declining is not a failure");
-    assert_eq!(plan.program(), "/games/ffxiv/game/ffxiv_dx11.exe");
-    assert!(plan.inserted_args().is_empty());
+
+    assert!(
+        matches!(contribution, Contribution::Declined),
+        "nothing installed contributes nothing to the launch"
+    );
 }
 
 /// The row's caveats are stated every time, before anything is fetched.
@@ -261,7 +271,8 @@ fn no_runner_draws_a_warning_of_its_own() {
 /// Every endpoint is a sibling of the pointer the manifest carries, so one row describes the service.
 #[test]
 fn the_endpoints_are_derived_from_the_one_pointer_the_row_carries() {
-    let endpoints = Endpoints::derive(&entry().distribution).expect("derive");
+    let endpoints =
+        Endpoints::derive(&catalog().rows().injectables[0].distribution).expect("derive");
     assert_eq!(
         endpoints.asset_meta.as_str(),
         "https://kamori.goats.dev/Dalamud/Asset/Meta"
@@ -288,7 +299,8 @@ fn the_endpoints_are_derived_from_the_one_pointer_the_row_carries() {
 /// the same release.
 #[test]
 fn the_release_request_names_the_track_and_a_fixed_bucket() {
-    let endpoints = Endpoints::derive(&entry().distribution).expect("derive");
+    let endpoints =
+        Endpoints::derive(&catalog().rows().injectables[0].distribution).expect("derive");
     let query = endpoints.release_query();
     let pairs: Vec<(String, String)> = query
         .query_pairs()
@@ -314,7 +326,7 @@ fn a_version_directory_without_its_hash_map_is_not_intact() {
     for name in integrity::REQUIRED {
         std::fs::write(dir.join(name), b"MZ").expect("write");
     }
-    assert!(!dalamud.tree_is_intact(&dir));
+    assert!(dalamud.version_fault(&dir).is_some());
 
     let hashes: BTreeMap<String, String> = integrity::REQUIRED
         .iter()
@@ -330,5 +342,93 @@ fn a_version_directory_without_its_hash_map_is_not_intact() {
         serde_json::to_vec(&hashes).expect("serialize"),
     )
     .expect("write");
-    assert!(dalamud.tree_is_intact(&dir));
+    assert!(dalamud.version_fault(&dir).is_none());
+}
+
+/// A tree whose bytes moved is an integrity failure that names the file and both digests, not a
+/// sentence about the tree.
+///
+/// This is the reading somebody does when an install keeps failing: "it does not match its own hashes"
+/// is true of a distribution that served a bad build and of a disk that corrupted one file, and the
+/// file plus the two digests is what tells them apart. The check that produces this used to answer with
+/// a bool, so there was nothing to say either way.
+#[test]
+fn a_file_whose_bytes_moved_is_named_with_both_digests() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dalamud, _prefix) = dalamud(tmp.path(), "wine-xiv-staging");
+    let dir = dalamud.paths.version_dir("15.0.2.3");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    for name in integrity::REQUIRED {
+        std::fs::write(dir.join(name), b"MZ").expect("write");
+    }
+    // A map that describes the tree correctly except for one file, which is what a partly-corrupted
+    // download looks like from here.
+    let mut hashes: BTreeMap<String, String> = integrity::REQUIRED
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                integrity::hash_file(&dir.join(name), Digest::Md5).expect("hash"),
+            )
+        })
+        .collect();
+    let moved = integrity::REQUIRED[0];
+    let stated = "0".repeat(32);
+    hashes.insert(moved.to_owned(), stated.clone());
+    std::fs::write(
+        dir.join("hashes.json"),
+        serde_json::to_vec(&hashes).expect("serialize"),
+    )
+    .expect("write");
+
+    let fault = dalamud.version_fault(&dir).expect("the tree is not intact");
+
+    let AddonError::IntegrityMismatch {
+        file,
+        expected,
+        got,
+        ..
+    } = &fault
+    else {
+        panic!("bytes that arrived and do not match are an integrity failure, not: {fault:?}");
+    };
+    assert!(file.ends_with(moved), "{file:?}");
+    assert_eq!(*expected, stated);
+    assert_eq!(
+        *got,
+        integrity::hash_file(&dir.join(moved), Digest::Md5).expect("hash"),
+        "the digest the file actually has"
+    );
+}
+
+/// And a file the map names that is not there at all is a filesystem failure carrying the path and what
+/// the open said, rather than the same integrity sentence: one of them is the distribution's fault and
+/// the other is this machine's.
+#[test]
+fn a_file_the_map_names_and_the_tree_lacks_is_a_filesystem_failure() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dalamud, _prefix) = dalamud(tmp.path(), "wine-xiv-staging");
+    let dir = dalamud.paths.version_dir("15.0.2.3");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    for name in integrity::REQUIRED {
+        std::fs::write(dir.join(name), b"MZ").expect("write");
+    }
+    let mut hashes: BTreeMap<String, String> = BTreeMap::new();
+    hashes.insert("absent.dll".to_owned(), "0".repeat(32));
+    std::fs::write(
+        dir.join("hashes.json"),
+        serde_json::to_vec(&hashes).expect("serialize"),
+    )
+    .expect("write");
+
+    let fault = dalamud.version_fault(&dir).expect("the tree is not intact");
+
+    let AddonError::Io { path, source, .. } = &fault else {
+        panic!("a file that cannot be read is a filesystem failure, not: {fault:?}");
+    };
+    assert!(path.ends_with("absent.dll"), "{path:?}");
+    assert!(
+        source.to_string().to_lowercase().contains("no such file"),
+        "the error the filesystem raised is the one carried: {source}"
+    );
 }

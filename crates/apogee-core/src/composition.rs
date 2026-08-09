@@ -4,13 +4,10 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport, Retain};
 // Restore is unix-only, and so is everything only it needs.
 #[cfg(unix)]
-use std::collections::BTreeMap;
-
-use apogee_addons::backup::{ArchiveRecord, BackupError, BackupReport, PruneReport, Retain};
-#[cfg(unix)]
-use apogee_addons::backup::{RestorePlan, RestoreReport, RootLabel};
+use apogee_addons::backup::{BackupError, RestorePlan, RestoreReport};
 use apogee_addons::{AddonError, AddonPaths, Addons};
 
 use crate::addons::AddonBackend;
@@ -892,6 +889,11 @@ impl Core {
             kept,
             (self.clock)(),
             note,
+            // Nothing here to stop it with. This is a command a caller makes and waits for, unlike the
+            // capture on the launch path, which is one step of something a user can abandon. A token a
+            // caller could fire belongs on this method, and it is owed the day a shell offers a way to
+            // press cancel.
+            &CancellationToken::new(),
         )
     }
 
@@ -938,13 +940,15 @@ impl Core {
                     path: prefix.clone(),
                 }))
             })?;
-        let mut targets = BTreeMap::new();
-        targets.insert(RootLabel::User, target);
-        let plan = RestorePlan {
-            archive: archive.to_path_buf(),
-            targets,
-        };
-        Ok(apogee_addons::backup::restore(&plan).map_err(AddonError::Backup)?)
+        // Derived from the archive's own record rather than stated here: a map this layer wrote would
+        // be a guess at which roots the archive holds, and a guess that misses one restores less than
+        // the archive has while returning like it restored everything.
+        let plan = RestorePlan::into_dir(archive, target).map_err(AddonError::Backup)?;
+        // Uncancellable for the same reason as the capture above.
+        Ok(
+            apogee_addons::backup::restore(&plan, &CancellationToken::new())
+                .map_err(AddonError::Backup)?,
+        )
     }
 
     /// Prune `profile`'s backups to `keep`, deleting only archives this launcher wrote.

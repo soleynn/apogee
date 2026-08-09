@@ -38,8 +38,14 @@ pub use manifest::{
 #[cfg(unix)]
 pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
 pub use retain::{ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, plan_prune, prune};
-pub use root::{CompanionConfigOpts, GameConfigOpts, Presence, RootLabel, SelectionRoot};
-pub use rule::{EntryKind, Expect, NameMatch, Rule};
+pub use root::{GameConfigOpts, Presence, RootLabel, SelectionRoot};
+pub use rule::EntryKind;
+
+// The vocabulary a rule is written in. Crate-private, because nothing outside authors rules: the
+// selection this layer captures is the launcher's decision about what a config backup covers, not a
+// list a caller composes, and publishing the words for it would make that an extension point every
+// later release has to keep working.
+pub(crate) use rule::{Expect, NameMatch, Rule};
 
 /// Where a rule sits in the order each entry is tested in.
 // Exhaustive for the same reason as `RootLabel`: it is part of the archive record.
@@ -88,7 +94,6 @@ pub struct SelectedEntry {
     name: String,
     source: PathBuf,
     kind: EntryKind,
-    size: u64,
 }
 
 impl SelectedEntry {
@@ -108,12 +113,6 @@ impl SelectedEntry {
     #[must_use]
     pub fn kind(&self) -> EntryKind {
         self.kind
-    }
-
-    /// The file's size in bytes, or zero for a directory.
-    #[must_use]
-    pub fn size(&self) -> u64 {
-        self.size
     }
 }
 
@@ -318,12 +317,6 @@ impl Selection {
         Ok(self)
     }
 
-    /// The roots, in the order they were added.
-    #[must_use]
-    pub fn roots(&self) -> &[SelectionRoot] {
-        &self.roots
-    }
-
     /// The rules applied to every root at every depth, which no caller can switch off.
     ///
     /// These are the launcher identity files: an account name, a last-used one-time password, host
@@ -331,7 +324,7 @@ impl Selection {
     /// keeps a caller who points a root at a launcher home from sweeping them into an archive that
     /// gets shared.
     #[must_use]
-    pub fn deny_rules() -> Vec<Rule> {
+    pub(crate) fn deny_rules() -> Vec<Rule> {
         [
             "accounts.json",
             "accountsList.json",
@@ -368,5 +361,103 @@ impl Selection {
         // its name is their prefix.
         entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
         Ok(Selected { entries, roots })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! What the rule vocabulary does, which is in here because the vocabulary is.
+    //!
+    //! These three used to live beside the selection tests in `tests/`, and moved when `Rule` and its
+    //! words stopped being public. The rest of that file drives the presets, which are still the whole
+    //! of what a caller outside can ask for.
+
+    use super::*;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(path, body).expect("write");
+    }
+
+    fn allowlist(root: &Path, include: Vec<Rule>) -> Result<Selection, BackupError> {
+        Selection::new().with_root(SelectionRoot::new(
+            RootLabel::User,
+            root,
+            include,
+            vec![],
+            Presence::Required,
+        )?)
+    }
+
+    /// A rule that matches nothing is the failure this selection exists to make impossible to miss. On
+    /// an allowlist root, where a misspelling would silently shrink the archive, it stops the backup.
+    #[test]
+    fn a_required_rule_that_matches_nothing_fails_the_backup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("tree");
+        write(&root.join("present.cfg"), "here");
+
+        let err = allowlist(
+            &root,
+            vec![
+                Rule::file(NameMatch::Exact("present.cfg".into()), Expect::Required),
+                Rule::file(NameMatch::Exact("absent.cfg".into()), Expect::Required),
+            ],
+        )
+        .and_then(|selection| selection.resolve());
+
+        match err {
+            Err(BackupError::RuleMatchedNothing { rule, .. }) => {
+                assert_eq!(rule, "file absent.cfg");
+            }
+            other => panic!("expected the missing rule to be named, got {other:?}"),
+        }
+    }
+
+    /// A root the game has been pointed at and has never written into is the ordinary state before a
+    /// first launch, so it is recorded rather than treated as a fault, and the populated root beside it
+    /// is still captured.
+    #[test]
+    fn an_absent_optional_root_is_recorded_beside_a_populated_one() -> Result<(), BackupError> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let populated = tmp.path().join("written");
+        write(&populated.join("FFXIV.cfg"), "cfg");
+
+        let selected = allowlist(
+            &populated,
+            vec![Rule::file(NameMatch::Any, Expect::Optional)],
+        )?
+        .with_root(SelectionRoot::new(
+            RootLabel::User,
+            tmp.path().join("never-written"),
+            vec![Rule::file(NameMatch::Any, Expect::Optional)],
+            vec![],
+            Presence::Optional,
+        )?)?
+        .resolve()?;
+
+        assert_eq!(selected.roots().len(), 2);
+        assert!(selected.roots()[0].present());
+        assert!(!selected.roots()[1].present());
+        assert_eq!(selected.roots()[1].files(), 0);
+        Ok(())
+    }
+
+    /// The deny list is crate policy rather than a caller's choice, so it is worth pinning that it
+    /// names what it is meant to name.
+    #[test]
+    fn the_deny_list_covers_the_launcher_identity_files() {
+        let rendered: Vec<String> = Selection::deny_rules()
+            .iter()
+            .map(Rule::to_string)
+            .collect();
+        for want in [
+            "file accounts.json",
+            "file accountsList.json",
+            "file launcher.ini",
+            "file launcherConfigV3.json",
+        ] {
+            assert!(rendered.iter().any(|r| r == want), "{want} not denied");
+        }
     }
 }

@@ -91,8 +91,12 @@ impl fmt::Display for ClientLanguage {
 ///
 /// Borrowed rather than owned so the caller keeps the translated strings it just produced; this type
 /// exists to be turned straight into argv.
+///
+/// Internal, because it is a description of somebody else's command line. Every field is a flag
+/// upstream chose and may rename, so publishing it would make this launcher's public API a promise
+/// about the injector's, and nothing outside this crate composes that command line.
 #[derive(Debug, Clone, Copy)]
-pub struct InjectorInvocation<'a> {
+pub(crate) struct InjectorInvocation<'a> {
     pub mode: LoadMode,
     /// The game executable, as a Windows path.
     pub game: &'a str,
@@ -118,8 +122,10 @@ pub struct InjectorInvocation<'a> {
 ///
 /// The game argument is *not* included: it stays the launch plan's opaque string, which nothing here is
 /// entitled to read or reshape.
+///
+/// Internal for the same reason as [`InjectorInvocation`].
 #[must_use]
-pub fn injector_argv(inv: &InjectorInvocation<'_>) -> Vec<String> {
+pub(crate) fn injector_argv(inv: &InjectorInvocation<'_>) -> Vec<String> {
     let mut argv = vec![
         "launch".to_owned(),
         format!("--mode={}", inv.mode.as_flag_value()),

@@ -9,28 +9,39 @@
 use std::time::Duration;
 
 use apogee_runtime::{Companion, Runtime};
+use tokio_util::sync::CancellationToken;
 
 use super::addon::{ExternalAddon, Trigger};
 use super::event::{AddonEvent, AddonEvents};
 
 /// How long a companion is given to stop on its own before it is ended.
-const STOP_GRACE: Duration = Duration::from_secs(5);
+pub(super) const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// What became of one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {
     /// Started, and running under the given process id.
+    #[non_exhaustive]
     Started { pid: i32 },
     /// Not started because it was already running, under the given process id.
     ///
     /// Whoever started it owns it: a launch that finds a companion it did not start never stops it.
+    #[non_exhaustive]
     AlreadyRunning { pid: i32 },
     /// Not started because the entry is switched off.
     Disabled,
     /// Ran after the game exited and finished with this status.
+    #[non_exhaustive]
     Completed { code: Option<i32> },
+    /// Stopped, or never started, because the teardown was cancelled.
+    ///
+    /// Its own outcome rather than a failure: nothing went wrong, somebody quit. Reporting a tool the
+    /// user interrupted as failed is the same mistake as reporting a cancelled download as one, and a
+    /// shell counting failures would act on it.
+    Cancelled,
     /// Could not be run. The rest of the launch is unaffected.
+    #[non_exhaustive]
     Failed { reason: String },
 }
 
@@ -44,6 +55,7 @@ impl std::fmt::Display for Outcome {
             Self::Disabled => f.write_str("switched off"),
             Self::Completed { code: Some(code) } => write!(f, "exited with status {code}"),
             Self::Completed { code: None } => f.write_str("exited"),
+            Self::Cancelled => f.write_str("cancelled"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
         }
     }
@@ -51,6 +63,7 @@ impl std::fmt::Display for Outcome {
 
 /// One entry and what became of it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AddonOutcome {
     /// Its position in the configured list, so a message can point at the entry.
     pub index: usize,
@@ -62,6 +75,7 @@ pub struct AddonOutcome {
 
 /// Everything that happened to a launch's companions.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AddonReport {
     /// One per configured entry, in order.
     pub outcomes: Vec<AddonOutcome>,
@@ -162,21 +176,39 @@ impl AddonSession {
     /// Consuming `self` is what makes this happen at most once. The order matters: a tool that syncs
     /// what the game wrote should see a stopped game and stopped siblings.
     ///
+    /// `cancel` bounds the waiting, never the stopping. An after-game tool is somebody else's program
+    /// and may never exit, so without a token this waits forever and the launcher looks hung with no
+    /// way out. What the token must not do is skip the stopping: a teardown that returned early over
+    /// companions it started is the leak this type exists to prevent, and those stops are bounded by
+    /// [`STOP_GRACE`] anyway.
+    ///
     /// # Errors
     /// Never fails as a whole. A companion that cannot be stopped or run is recorded in the returned
     /// report; a helper tool does not fail a launch that already succeeded.
-    pub async fn game_closed(mut self, events: &AddonEvents) -> AddonReport {
+    pub async fn game_closed(
+        mut self,
+        cancel: &CancellationToken,
+        events: &AddonEvents,
+    ) -> AddonReport {
         for held in std::mem::take(&mut self.held) {
             Self::stop_one(held, events, &mut self.report).await;
         }
         for (index, addon) in std::mem::take(&mut self.on_close) {
-            let outcome = super::run_to_completion(
-                &self.runtime,
-                self.game_prefix.as_deref(),
-                &addon,
-                events,
-            )
-            .await;
+            // Checked before each one rather than only inside the wait: a cancelled teardown must not
+            // start the tools it has not reached yet, and one that runs in a millisecond would slip
+            // past a token that is only consulted while waiting.
+            let outcome = if cancel.is_cancelled() {
+                Outcome::Cancelled
+            } else {
+                super::run_to_completion(
+                    &self.runtime,
+                    self.game_prefix.as_deref(),
+                    &addon,
+                    cancel,
+                    events,
+                )
+                .await
+            };
             events.emit(AddonEvent::Finished {
                 program: addon.program().to_path_buf(),
                 outcome: outcome.clone(),
@@ -194,7 +226,17 @@ impl AddonSession {
     ///
     /// Used when the launch itself failed, where running a tool that expects the game to have played
     /// would be wrong.
-    pub async fn abandon(mut self, events: &AddonEvents) -> AddonReport {
+    ///
+    /// `cancel` is taken and not consulted, which is the honest signature rather than an oversight:
+    /// this path runs nothing that could go on indefinitely, and stopping is what a cancelled teardown
+    /// still has to do. Taking it keeps the two teardowns callable through one seam and keeps a caller
+    /// from having to know which of them can be interrupted.
+    pub async fn abandon(
+        mut self,
+        cancel: &CancellationToken,
+        events: &AddonEvents,
+    ) -> AddonReport {
+        let _ = cancel;
         for held in std::mem::take(&mut self.held) {
             Self::stop_one(held, events, &mut self.report).await;
         }

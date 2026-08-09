@@ -100,19 +100,41 @@ frozen!(
         ),
         AddonError::IntegrityMismatch { .. } => (
             AddonError::IntegrityMismatch {
-                verb: "a-verb".to_owned(),
+                what: "a-verb".to_owned(),
+                file: path(),
                 expected: "aa".to_owned(),
                 got: "bb".to_owned(),
             },
-            "a-verb: the bytes fetched are not the ones it pins (expected aa, got bb)",
+            "a-verb: \"/tmp/a\" is not the bytes it was published as (expected aa, got bb)",
         ),
+        // The path is the first thing anybody reading a filesystem failure looks for, and an io error
+        // does not carry one.
         AddonError::Io { .. } => (
             AddonError::Io {
                 what: "the signed catalog".to_owned(),
                 step: "make a staging directory",
+                path: path(),
                 source: cause("read-only file system"),
             },
-            "the signed catalog: could not make a staging directory: read-only file system",
+            "the signed catalog: could not make a staging directory at \"/tmp/a\": read-only file system",
+        ),
+        AddonError::EmptyArchive { .. } => (
+            AddonError::EmptyArchive { what: "a-verb".to_owned() },
+            "a-verb: the archive that was served held nothing under the layout declared for it",
+        ),
+        AddonError::BadDistribution { .. } => (
+            AddonError::BadDistribution {
+                injectable: "Dalamud".to_owned(),
+                pointer: url::Url::parse("https://example.invalid/x").expect("a url"),
+            },
+            "Dalamud: https://example.invalid/x is not a pointer its other endpoints can be derived from",
+        ),
+        AddonError::VerbIncomplete { .. } => (
+            AddonError::VerbIncomplete {
+                verb: "a-verb".to_owned(),
+                missing: path(),
+            },
+            "verb a-verb finished without producing \"/tmp/a\"",
         ),
         AddonError::Unpack { .. } => (
             AddonError::Unpack {
@@ -377,8 +399,46 @@ frozen!(
             BackupError::ContentMismatch { entry: "user/FFXIV.cfg".to_owned() },
             "archive entry user/FFXIV.cfg does not match the hash the archive recorded for it",
         ),
+        // One word, like the crate's own cancellation: there is no path, entry or limit to name,
+        // because nothing about the work is wrong.
+        BackupError::Cancelled => (BackupError::Cancelled, "cancelled"),
     }
 );
+
+/// The same for the reasons a prune left a file alone, which are read in the same place and by the same
+/// person: a directory that still has files in it after a prune, and a line per file saying why.
+#[test]
+fn every_foreign_reason_reads_as_a_sentence() {
+    use crate::backup::ForeignReason::{
+        CouldNotRead, NoRecord, NotARegularFile, NotAnArchive, UnreadableRecord,
+        UnsupportedFormatVersion, WrongExtension,
+    };
+    let mut rendered: Vec<String> = Vec::new();
+    for reason in [
+        NotARegularFile,
+        WrongExtension,
+        NotAnArchive,
+        NoRecord,
+        UnreadableRecord,
+        UnsupportedFormatVersion(9),
+        CouldNotRead,
+    ] {
+        let text = reason.to_string();
+        assert!(
+            text.contains(' ') && text != format!("{reason:?}"),
+            "{reason:?} renders as its own identifier rather than as prose: {text}"
+        );
+        rendered.push(text);
+    }
+    let mut unique = rendered.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        rendered.len(),
+        "two reasons share a sentence, so a prune cannot say which: {rendered:?}"
+    );
+}
 
 /// Every reject reason has a sentence of its own. The enum is interpolated into a refusal, so a variant
 /// added without one would render as an identifier in a message a user reads.
@@ -418,4 +478,38 @@ fn every_reject_reason_reads_as_a_sentence() {
         rendered.len(),
         "two reject reasons share a sentence, so a refusal cannot say which: {rendered:?}"
     );
+}
+
+/// A verify failure has a home of its own, and the conversion is what puts it there.
+///
+/// This is why [`AddonError::Download`] carries no `#[from]`. The impl one generates is invisible at the
+/// call site: a `?` on a fetch, written by somebody who never thought about integrity, would flatten a
+/// pin that did not match into "download failed" and lose both digests. Every fetch in this crate is
+/// unpinned today, so the arm below is unreachable; a `From` that is wrong only once a validator is
+/// added is a `From` that will be wrong quietly.
+#[test]
+fn a_verify_failure_converts_to_the_integrity_arm_and_the_rest_pass_through() {
+    let verify = AddonError::from_fetch(
+        apogee_fetch::FetchError::FileVerifyFailed {
+            expected: "aa".to_owned(),
+            got: "bb".to_owned(),
+        },
+        "a-verb",
+        &path(),
+    );
+    assert!(
+        matches!(&verify, AddonError::IntegrityMismatch { file, expected, got, .. }
+            if *file == path() && expected == "aa" && got == "bb"),
+        "{verify:?}"
+    );
+
+    let stalled = AddonError::from_fetch(
+        apogee_fetch::FetchError::LengthMismatch {
+            expected: 10,
+            got: 9,
+        },
+        "a-verb",
+        &path(),
+    );
+    assert!(matches!(stalled, AddonError::Download(_)), "{stalled:?}");
 }

@@ -11,16 +11,22 @@
 //! in the prefix's own `prefix.json`, which is what makes a second pass a no-op.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use thiserror::Error;
 
 use apogee_fetch::{FetchError, Fetcher};
 use apogee_runtime::{LaunchPlan, Prefix, Runtime};
+use url::Url;
+
+use crate::launch::Preparation;
+use crate::setup::SetupReport;
 
 pub mod backup;
 pub mod dalamud;
 pub mod external;
+pub mod launch;
 pub mod manifest;
 pub mod setup;
 
@@ -28,18 +34,18 @@ pub mod setup;
 mod tests;
 
 pub use backup::{BackupError, Selection};
-pub use dalamud::{
-    ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadEvidence, LoadMode, PluginPolicy,
-};
+
+// What is re-exported here is what a consumer imports from the crate root. The rest keeps its module
+// path and nothing else: a name reachable at two paths that nobody spells at either is two things to
+// keep working rather than one.
+pub use dalamud::{ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadEvidence};
 pub use external::{
     AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
-    Outcome, RunIn, Running, Trigger,
+    Outcome, RunIn, Trigger,
 };
-pub use manifest::{
-    Artifact, COMPONENT_MANIFEST_VERSION, COMPONENT_PUBLIC_KEYS, ComponentManifest, ComponentPath,
-    InjectableEntry, InjectableKind, ManifestError, TrustedKey, Verb, VerbOp,
-};
-pub use setup::{SetupEvent, SetupEvents, SetupOutcome, SetupReport, SetupState};
+pub use launch::{Contribution, LaunchEdit, Redirect};
+pub use manifest::{ComponentManifest, ManifestError, VerifiedManifest};
+pub use setup::{SetupEvent, SetupEvents, SetupState};
 
 /// Crate result over [`AddonError`].
 pub type Result<T> = std::result::Result<T, AddonError>;
@@ -79,8 +85,12 @@ impl std::fmt::Display for SupportTier {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AddonError {
+    /// Deliberately no `#[from]`. The conversion it generates would map every fetch failure onto this
+    /// arm, including [`FetchError::FileVerifyFailed`], which is the one this crate has a typed home
+    /// for and would be flattened into "download failed" by a `?` nobody wrote. Every caller converts
+    /// through [`AddonError::from_fetch`], which routes that one and passes the rest through.
     #[error("download failed")]
-    Download(#[from] FetchError),
+    Download(#[source] FetchError),
     #[error("invalid download request")]
     Spec(#[from] apogee_fetch::SpecError),
     /// The signed catalog was refused. Transparent, because the reason is the inner variant and an
@@ -88,18 +98,32 @@ pub enum AddonError {
     /// signature at once, which reads as tampering either way.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
-    #[error("{verb}: the bytes fetched are not the ones it pins (expected {expected}, got {got})")]
+    /// Bytes that arrived intact and are not the bytes they were published as.
+    ///
+    /// Names the file, because a component is a tree of them: "it does not match its own hashes" is
+    /// the part a reader already knows by the time they are reading this.
+    #[error(
+        "{what}: {file:?} is not the bytes it was published as (expected {expected}, got {got})"
+    )]
+    #[non_exhaustive]
     IntegrityMismatch {
-        verb: String,
+        what: String,
+        file: PathBuf,
         expected: String,
         got: String,
     },
-    /// A filesystem step failed. `what` names what was being set up and `step` which part of it: the
-    /// io error underneath names a path and a kind, and nothing about why the launcher was there.
-    #[error("{what}: could not {step}")]
+    /// A filesystem step failed. `what` names what was being set up, `step` which part of it, and
+    /// `path` what it was working on.
+    ///
+    /// The path is a field rather than something folded into the message, because an `io::Error`
+    /// carries a kind and no path: folding one in means building a second error to hold the string and
+    /// dropping the one the filesystem raised.
+    #[error("{what}: could not {step} at {path:?}")]
+    #[non_exhaustive]
     Io {
         what: String,
         step: &'static str,
+        path: PathBuf,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -107,11 +131,25 @@ pub enum AddonError {
     /// the bytes already matched their pin, so what is wrong is the archive's shape or the layout
     /// declared for it, and retrying the download fixes neither.
     #[error("{what}: the archive did not unpack")]
+    #[non_exhaustive]
     Unpack {
         what: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// An archive that unpacked and produced nothing. Separate from [`Self::Unpack`], which carries the
+    /// failure underneath it: here the extraction succeeded and the layout declared for the archive
+    /// selected none of what it held, so there is no error to carry and inventing one to hold that
+    /// sentence would render the sentence as a cause.
+    #[error("{what}: the archive that was served held nothing under the layout declared for it")]
+    #[non_exhaustive]
+    EmptyArchive { what: String },
+    /// A pointer the catalog carries that the endpoints around it cannot be derived from. No `source`
+    /// for the same reason as [`Self::EmptyArchive`], and it names the pointer because that is the row
+    /// somebody has to correct.
+    #[error("{injectable}: {pointer} is not a pointer its other endpoints can be derived from")]
+    #[non_exhaustive]
+    BadDistribution { injectable: String, pointer: Url },
     #[error("injection of {injectable} failed ({tier} tier)")]
     Inject {
         injectable: String,
@@ -125,6 +163,7 @@ pub enum AddonError {
     #[error(
         "{injectable} cannot redirect this launch: {redirector} already did, and a launch spawns one program"
     )]
+    #[non_exhaustive]
     LaunchAlreadyRedirected {
         /// The one refused.
         injectable: String,
@@ -135,28 +174,40 @@ pub enum AddonError {
     /// download failure: the bytes arrived, they just are not the shape the endpoint promises, which is
     /// an upstream change rather than a network problem.
     #[error("{injectable}'s distribution answered with something this launcher cannot read")]
+    #[non_exhaustive]
     Distribution {
         injectable: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[error("verb {verb} failed")]
+    #[non_exhaustive]
     VerbFailed {
         verb: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Every op a verb declares ran and something it promised is still not there. Separate from
+    /// [`Self::VerbFailed`], which carries the op that raised: nothing raised here, so what there is to
+    /// say is the path that was promised, and it is a path rather than a sentence about one.
+    #[error("verb {verb} finished without producing {missing:?}")]
+    #[non_exhaustive]
+    VerbIncomplete { verb: String, missing: PathBuf },
     #[error("addon {index} ({program:?}) cannot be run: {reason}")]
+    #[non_exhaustive]
     InvalidAddon {
         program: PathBuf,
         index: usize,
         reason: &'static str,
     },
     #[error("{program:?} runs inside a prefix, but this launch has no prefix")]
+    #[non_exhaustive]
     PrefixRequired { program: PathBuf },
     #[error("{program:?} asks for {field:?}, which this launcher does not support")]
+    #[non_exhaustive]
     UnsupportedField { program: PathBuf, field: String },
     #[error("failed to start {program:?}")]
+    #[non_exhaustive]
     ExternalSpawn {
         program: PathBuf,
         /// Boxed because the runtime's own taxonomy is wide, and this error type is carried in the
@@ -175,10 +226,33 @@ pub enum AddonError {
     #[error("cancelled")]
     Cancelled,
     #[error("unsupported: {what}")]
+    #[non_exhaustive]
     Unsupported { what: &'static str },
 }
 
 impl AddonError {
+    /// A fetch failure in this crate's taxonomy, with the one arm that has a home of its own routed
+    /// into it.
+    ///
+    /// A named conversion rather than a `From`, for two reasons. It needs to be told what was being
+    /// fetched and where it landed, which a `From` cannot be. And a `From` puts the flattening one
+    /// unwritten `?` away: any call site added later would turn a verify failure into "download
+    /// failed" without anybody choosing that.
+    #[must_use]
+    pub fn from_fetch(source: FetchError, what: &str, file: &std::path::Path) -> Self {
+        match source {
+            // The bytes arrived and are not the bytes that were promised, which is not a download
+            // problem: retrying fetches the same wrong file.
+            FetchError::FileVerifyFailed { expected, got } => Self::IntegrityMismatch {
+                what: what.to_owned(),
+                file: file.to_path_buf(),
+                expected,
+                got,
+            },
+            other => Self::Download(other),
+        }
+    }
+
     /// This failure and its causes as one line.
     ///
     /// The outer message is routinely the least specific part of a chain: "could not stage a download"
@@ -263,20 +337,45 @@ pub trait Injectable: Send + Sync {
         events: &SetupEvents,
     ) -> Result<()>;
 
-    /// Contribute to the launch before it is spawned: redirect the program, insert argv, add env.
+    /// What to add to the launch before it is spawned: redirect the program, insert argv, add env, add
+    /// a wrapper.
+    ///
+    /// Composed and handed back rather than written into `plan`, which is read-only here for two
+    /// reasons. A companion whose own work fails partway through contributes nothing rather than the
+    /// half it had already written. And what a companion may change is then the three things a
+    /// [`LaunchEdit`] can express, rather than every field of a launch it did not compose.
+    ///
+    /// `plan` is the launch as the injectables before it left it, to read the program and the prefix
+    /// from.
     ///
     /// A companion that finds itself inapplicable (not installed, built for another game version) says
-    /// so on `events`, leaves `plan` untouched, and returns `Ok(())`. Failing here would fail a launch
-    /// that is otherwise fine.
+    /// so on `events` and returns [`Contribution::Declined`]. Failing here would fail a launch that is
+    /// otherwise fine.
     ///
-    /// Redirecting the program is the one contribution a launch has room for once: a second one in the
-    /// same pass is refused and undone by
+    /// Redirecting the program is the one contribution a launch has room for once: a second
+    /// [`Redirect`] in the same pass is refused whole by
     /// [`Addons::prepare_launch`](crate::Addons::prepare_launch), so an implementor composes its own
     /// invocation without checking what ran before it.
     ///
     /// # Errors
     /// Whatever the companion raises while composing its invocation.
-    fn prepare_launch(&self, plan: &mut LaunchPlan, events: &SetupEvents) -> Result<()>;
+    fn prepare_launch(&self, plan: &LaunchPlan, events: &SetupEvents) -> Result<Contribution>;
+
+    /// What to watch for proof that this companion came up inside the game, if it leaves any.
+    ///
+    /// `since` is when the launch began. A companion writes its proof into a file that outlives the
+    /// session, so only a write after that point belongs to this launch.
+    ///
+    /// Asked while the companion is still here, because it is dropped once the launch is composed and
+    /// the proof lands seconds later. What comes back owns everything it needs, so a caller can spawn
+    /// it and forget it.
+    ///
+    /// Defaulted to `None`: a companion that leaves no trace of loading is not a companion that failed
+    /// to, and a launcher that has nothing to watch says nothing rather than reporting an absence.
+    fn load_evidence(&self, since: SystemTime) -> Option<LoadEvidence> {
+        let _ = since;
+        None
+    }
 }
 
 /// Where the companion layer keeps what it installs outside a prefix.
@@ -285,6 +384,7 @@ pub trait Injectable: Send + Sync {
 /// copy of the signed catalog, and an injectable's own versioned trees), so it is one directory to
 /// point somewhere else and one to delete.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AddonPaths {
     /// Root for the verified catalog copy and the injectable trees.
     pub root: PathBuf,
@@ -344,13 +444,13 @@ impl Addons {
         manifest_url: &url::Url,
         signature_url: &url::Url,
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<ComponentManifest> {
+    ) -> Result<VerifiedManifest> {
         setup::fetch_manifest(
             &self.fetcher,
             manifest_url,
             signature_url,
             &self.paths.catalog_cache(),
-            &manifest::default_keys()?,
+            manifest::default_keys(),
             cancel,
         )
         .await
@@ -371,9 +471,9 @@ impl Addons {
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
-        keys: &[ed25519_dalek::VerifyingKey],
+        keys: &[[u8; 32]],
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<ComponentManifest> {
+    ) -> Result<VerifiedManifest> {
         setup::fetch_manifest(
             &self.fetcher,
             manifest_url,
@@ -396,8 +496,8 @@ impl Addons {
     /// # Errors
     /// [`AddonError::Manifest`] if a cached copy is present but no longer verifies, which is a corrupt
     /// cache rather than an absent one.
-    pub async fn cached_manifest(&self) -> Result<Option<ComponentManifest>> {
-        setup::cached_manifest(&self.paths.catalog_cache(), &manifest::default_keys()?).await
+    pub async fn cached_manifest(&self) -> Result<Option<VerifiedManifest>> {
+        setup::cached_manifest(&self.paths.catalog_cache(), manifest::default_keys()).await
     }
 
     /// The same read, verified against `keys`, so a test can read back what a test-key fetch published.
@@ -407,8 +507,8 @@ impl Addons {
     #[cfg(feature = "testing")]
     pub async fn cached_manifest_for_testing(
         &self,
-        keys: &[ed25519_dalek::VerifyingKey],
-    ) -> Result<Option<ComponentManifest>> {
+        keys: &[[u8; 32]],
+    ) -> Result<Option<VerifiedManifest>> {
         setup::cached_manifest(&self.paths.catalog_cache(), keys).await
     }
 
@@ -423,7 +523,7 @@ impl Addons {
     /// the token fired. A single verb failing is in the report rather than the error.
     pub async fn apply_setup(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         prefix: &Prefix,
         cancel: &tokio_util::sync::CancellationToken,
         events: &SetupEvents,
@@ -451,7 +551,7 @@ impl Addons {
     /// that is not.
     pub fn missing_setup(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         prefix: &Prefix,
     ) -> Result<Vec<String>> {
         setup::missing_verbs(manifest, prefix)
@@ -470,43 +570,19 @@ impl Addons {
     #[must_use]
     pub fn dalamud(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         config: DalamudConfig,
         events: &SetupEvents,
     ) -> Option<Dalamud> {
-        let Some(entry) = manifest.injectable(InjectableKind::Dalamud) else {
+        let built = Dalamud::new(self.paths.dalamud(), self.fetcher.clone(), manifest, config);
+        if built.is_none() {
             events.emit(SetupEvent::Failed {
                 what: dalamud::DALAMUD.to_owned(),
                 reason: "the catalog carries no row for it, so there is nowhere to fetch it from"
                     .to_owned(),
             });
-            return None;
-        };
-        Some(Dalamud::new(
-            self.paths.dalamud(),
-            self.fetcher.clone(),
-            entry,
-            config,
-        ))
-    }
-
-    /// What to watch for proof that whatever this launch was redirected through came up inside the
-    /// game.
-    ///
-    /// `since` is when the launch began. The boot log is appended to across sessions rather than
-    /// truncated, so only a write after that point belongs to this one.
-    ///
-    /// Named here rather than asked of the injectable, because the injectable is gone by the time the
-    /// answer arrives: it composes the launch and is dropped, the game starts seconds later, and this
-    /// layer is what still holds the paths. The returned value owns everything it needs, so a caller
-    /// can spawn it and forget it.
-    #[must_use]
-    pub fn dalamud_load_evidence(&self, since: std::time::SystemTime) -> LoadEvidence {
-        LoadEvidence::new(
-            dalamud::DALAMUD,
-            self.paths.dalamud().logs.join("dalamud.boot.log"),
-            since,
-        )
+        }
+        built
     }
 
     /// Install or update each injectable, returning what failed.
@@ -543,65 +619,65 @@ impl Addons {
         failures
     }
 
-    /// Let each injectable contribute to `plan`, in order, returning what failed.
+    /// Let each injectable contribute to `plan`, in order, returning what the pass came to.
     ///
     /// The same list and the same loop as [`Self::ensure_injectables`], so nothing about a launch knows
-    /// which companion it is composing. One failing leaves the plan as the previous ones left it and the
-    /// launch proceeds.
+    /// which companion it is composing. Each is offered the launch as the ones before it left it, and
+    /// what it hands back is applied here: one failing contributes nothing at all and the launch
+    /// proceeds.
+    ///
+    /// [`Preparation::redirected_by`] names the companion that took the launch over, which is the one
+    /// thing about this pass a caller cannot read back off the plan afterwards.
     ///
     /// A launch spawns one program, so the first companion to redirect it keeps it and a second is
     /// refused with [`AddonError::LaunchAlreadyRedirected`], reported by name like any other companion
-    /// failure. The refused one's contribution is undone rather than left around a program it does not
-    /// wrap, and the launch proceeds with the first one's.
+    /// failure. The refusal is of the whole contribution rather than of the redirect alone: a plan
+    /// carrying one companion's env and argv around another's program is a launch neither of them
+    /// composed, which is worse than one companion cleanly absent.
+    ///
+    /// *First* wins, and what claims the slot is asking for a [`Redirect`] rather than changing the
+    /// program to something new, so a companion that redirects a launch to the program it already names
+    /// still holds it.
     #[must_use]
     pub fn prepare_launch(
         &self,
         injectables: &[&dyn Injectable],
         plan: &mut LaunchPlan,
         events: &SetupEvents,
-    ) -> Vec<AddonError> {
+    ) -> Preparation {
         let mut failures = Vec::new();
         // The companion that became the program, so a second one asking for the same slot is refused
         // rather than silently overwriting it. Kept here rather than as a flag on the plan because the
         // rule is about companions: `apogee-runtime` does not know they exist, and a plan that refused
-        // its own `set_program` would raise inside whichever injectable happened to call it, leaving
+        // its own redirect would raise inside whichever injectable happened to compose it, leaving
         // every implementor to map and narrate a rule that belongs to the one loop that runs them.
-        let mut redirector: Option<String> = None;
+        let mut redirected_by: Option<String> = None;
         for injectable in injectables {
-            let program = plan.program().to_owned();
-            // Who holds the slot and the plan as it stands, taken only once someone does, since that
-            // is the only pass a refusal has to undo.
-            let held = redirector
-                .as_ref()
-                .map(|holder| (holder.clone(), plan.clone()));
-
-            if let Err(err) = injectable.prepare_launch(plan, events) {
-                report(&mut failures, events, injectable.name(), err);
-                continue;
-            }
-            if plan.program() == program {
-                continue;
-            }
-            let Some((holder, restore)) = held else {
-                redirector = Some(injectable.name().to_owned());
-                continue;
+            let edit = match injectable.prepare_launch(plan, events) {
+                Ok(Contribution::Edit(edit)) => edit,
+                Ok(Contribution::Declined) => continue,
+                Err(err) => {
+                    report(&mut failures, events, injectable.name(), err);
+                    continue;
+                }
             };
-            // First wins, and the loser is put back rather than left half-applied. The plan only ever
-            // accumulates what earlier injectables put in it, so letting a later one overwrite the
-            // program would keep the env and argv of a companion whose program is gone: two companions
-            // each in part of a launch neither of them composed, which is worse than one absent.
-            *plan = restore;
-            report(
-                &mut failures,
-                events,
-                injectable.name(),
-                AddonError::LaunchAlreadyRedirected {
-                    injectable: injectable.name().to_owned(),
-                    redirector: holder,
-                },
-            );
+            if edit.redirects() {
+                if let Some(holder) = redirected_by.as_deref() {
+                    let refused = AddonError::LaunchAlreadyRedirected {
+                        injectable: injectable.name().to_owned(),
+                        redirector: holder.to_owned(),
+                    };
+                    report(&mut failures, events, injectable.name(), refused);
+                    continue;
+                }
+                redirected_by = Some(injectable.name().to_owned());
+            }
+            edit.apply(plan);
         }
-        failures
+        Preparation {
+            redirected_by,
+            failures,
+        }
     }
 
     /// Start the companions that run alongside a game that is already up.
