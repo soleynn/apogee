@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::error::BackupError;
 use super::rule::{Expect, NameMatch, Rule};
 
@@ -15,8 +16,6 @@ use super::rule::{Expect, NameMatch, Rule};
 pub enum RootLabel {
     /// The game's own config tree.
     User,
-    /// A companion tool's config tree.
-    Roaming,
 }
 
 impl RootLabel {
@@ -25,7 +24,6 @@ impl RootLabel {
     pub fn prefix(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::Roaming => "roaming",
         }
     }
 }
@@ -57,14 +55,6 @@ pub struct GameConfigOpts {
     pub game_restore_blob: bool,
 }
 
-/// Parts of a companion tree beyond its settings.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CompanionConfigOpts {
-    /// Keep installed plugin binaries, which are redownloadable. Plugin *configuration* is kept
-    /// either way and outlives installation, so leaving this off loses no settings.
-    pub plugin_binaries: bool,
-}
-
 /// One source tree and the rules that carve it up.
 #[derive(Debug, Clone)]
 pub struct SelectionRoot {
@@ -79,10 +69,15 @@ impl SelectionRoot {
     /// A root whose immediate children are tested against `include`, with `prune` applied at every
     /// depth.
     ///
+    /// The duplicate check the presets are held to. `cfg(test)` because that is where it is exercised:
+    /// the presets are built by [`Self::assembled`] and asserted here to satisfy this, and there is no
+    /// caller composing a root at runtime for it to guard.
+    ///
     /// # Errors
     /// [`BackupError::DuplicateRule`] if two rules in either list render identically, which would
     /// make their match counts impossible to tell apart in the report.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         label: RootLabel,
         path: impl Into<PathBuf>,
         include: Vec<Rule>,
@@ -150,38 +145,6 @@ impl SelectionRoot {
         )
     }
 
-    /// A companion tool's config tree: an allowlist, because the siblings of these entries in a real
-    /// companion home hold a redownloadable runtime, an extracted prefix, and recorded telemetry
-    /// that dwarf the settings.
-    #[must_use]
-    pub fn companion_config(path: impl Into<PathBuf>, opts: CompanionConfigOpts) -> Self {
-        let mut include = vec![
-            Rule::file(
-                NameMatch::Exact("dalamudConfig.json".into()),
-                Expect::Required,
-            ),
-            Rule::file(NameMatch::Exact("dalamudUI.ini".into()), Expect::Optional),
-            Rule::file(NameMatch::Exact("dalamudVfs.db".into()), Expect::Optional),
-            Rule::dir(NameMatch::Exact("pluginConfigs".into()), Expect::Optional),
-        ];
-        if opts.plugin_binaries {
-            include.push(Rule::dir(
-                NameMatch::Exact("installedPlugins".into()),
-                Expect::Optional,
-            ));
-        }
-        Self::assembled(
-            RootLabel::Roaming,
-            path,
-            include,
-            vec![Rule::dir(
-                NameMatch::Exact("captures".into()),
-                Expect::Optional,
-            )],
-            Presence::Optional,
-        )
-    }
-
     /// The namespace this root's entries sit under.
     #[must_use]
     pub fn label(&self) -> RootLabel {
@@ -202,13 +165,13 @@ impl SelectionRoot {
 
     /// The rules tested against the root's immediate children.
     #[must_use]
-    pub fn include(&self) -> &[Rule] {
+    pub(crate) fn include(&self) -> &[Rule] {
         &self.include
     }
 
     /// The rules that drop an entry at any depth.
     #[must_use]
-    pub fn prune(&self) -> &[Rule] {
+    pub(crate) fn prune(&self) -> &[Rule] {
         &self.prune
     }
 
@@ -245,20 +208,6 @@ mod tests {
         };
         for opts in [GameConfigOpts::default(), all_on] {
             let preset = SelectionRoot::game_config("/tmp/x", opts);
-            assert!(
-                SelectionRoot::new(
-                    preset.label,
-                    preset.path.clone(),
-                    preset.include.clone(),
-                    preset.prune.clone(),
-                    preset.presence,
-                )
-                .is_ok()
-            );
-        }
-        for plugin_binaries in [false, true] {
-            let preset =
-                SelectionRoot::companion_config("/tmp/x", CompanionConfigOpts { plugin_binaries });
             assert!(
                 SelectionRoot::new(
                     preset.label,

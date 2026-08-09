@@ -717,7 +717,7 @@ async fn patch_to_current(
     let mut patching_announced = false;
 
     if mode == InstallMode::FromNothing {
-        announce_patching(ctx, profile, tx, &mut patching_announced);
+        announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
     }
 
     // Boot is brought current before the first registration rather than in reaction to one. A
@@ -755,7 +755,7 @@ async fn patch_to_current(
                     ctx.store.save_uid_cache(profile.account, &session)?;
                     return Ok(Some(session));
                 }
-                announce_patching(ctx, profile, tx, &mut patching_announced);
+                announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
                 install_game_patches(
                     ctx,
                     profile,
@@ -800,7 +800,7 @@ async fn ensure_boot_current(
     if patches.is_empty() {
         return Ok(false);
     }
-    announce_patching(ctx, profile, tx, announced);
+    announce_patching(ctx, profile, tx, cancel, announced);
     let request = InstallRequest {
         repo: Repo::Boot,
         game_root: profile.game_path.clone(),
@@ -847,6 +847,7 @@ fn announce_patching(
     ctx: &FlowContext,
     profile: &Profile,
     tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
     announced: &mut bool,
 ) {
     if *announced {
@@ -871,6 +872,7 @@ fn announce_patching(
             settings.backups_kept,
             (ctx.clock)(),
             Some("before patching".to_owned()),
+            cancel,
         ) {
             Ok((report, _)) => {
                 tracing::debug!(archive = ?report.archive, "captured the game settings");
@@ -1025,7 +1027,12 @@ async fn launch_game(
     if let Some(prefix) = &prepared.prefix {
         plan = plan.prefix(prefix);
     }
-    ctx.addons
+    // Comes back with the proof to watch for when something took the launch over, which is the
+    // companion layer's answer rather than something read back off the plan: what a redirect leaves in
+    // a plan is the shape one happened to take, and the companion that composed it is gone by the time
+    // the proof lands.
+    let confirming = ctx
+        .addons
         .prepare_launch(
             prepared.prefix,
             dalamud_config(profile, session, &settings),
@@ -1034,12 +1041,6 @@ async fn launch_game(
             tx,
         )
         .await;
-
-    // Read before the plan is spawned, because the plan is moved into the spawn and because the
-    // question is about this launch: a companion writes its proof of coming up seconds from now, into
-    // a file that survives previous sessions, so a moment from before the spawn is what tells this
-    // launch's evidence from the last one's.
-    let redirected_at = plan.supervised().is_some().then(SystemTime::now);
 
     emit(tx, FlowState::Launching);
     let handle = ctx.launch.launch(plan, cancel, tx).await?;
@@ -1053,7 +1054,7 @@ async fn launch_game(
             handle.game_pid(),
             handle.prefix(),
             profile.external.clone(),
-            redirected_at,
+            confirming,
             cancel,
             tx,
         )

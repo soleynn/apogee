@@ -48,17 +48,59 @@ pub struct RestorePlan {
     pub targets: BTreeMap<RootLabel, PathBuf>,
 }
 
+impl RestorePlan {
+    /// Restore what `archive` records, into `dir`.
+    ///
+    /// Reads the archive's own list of roots rather than making the caller state one. A caller that
+    /// writes the map itself is guessing which labels the archive holds, and a guess that is missing
+    /// one is not an error: the entries under it match no target and are passed over, so a restore
+    /// that put back less than the archive holds returns exactly like one that put back everything.
+    ///
+    /// Every recorded root lands in `dir`, which is the shape of every archive this launcher writes.
+    /// A label whose tree belongs somewhere else needs a constructor that says where, rather than this
+    /// one quietly overlaying two trees in one directory.
+    ///
+    /// # Errors
+    /// Whatever [`inspect`] raises about the archive: it is opened and its record read here, so a
+    /// plan cannot name roots an unreadable archive was never asked about.
+    pub fn into_dir(
+        archive: impl Into<PathBuf>,
+        dir: impl Into<PathBuf>,
+    ) -> Result<Self, BackupError> {
+        let archive = archive.into();
+        let dir = dir.into();
+        let manifest = inspect(&archive)?;
+        Ok(Self {
+            targets: manifest
+                .roots
+                .iter()
+                .map(|root| (root.label, dir.clone()))
+                .collect(),
+            archive,
+        })
+    }
+}
+
 /// What a restore did.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RestoreReport {
     /// One per root that was restored.
     pub restored: Vec<RestoredRoot>,
     /// Roots the archive holds that the plan did not name.
     pub skipped: Vec<RootLabel>,
+    /// Roots the plan named that the archive does not hold.
+    ///
+    /// The other side of [`Self::skipped`], and the one that costs something: a caller asking for a
+    /// root an archive never had gets a restore that writes nothing, and without this it reads exactly
+    /// like one that wrote everything. The person on the end of it is recovering settings they cannot
+    /// otherwise get back, so "nothing happened" has to be sayable.
+    pub absent: Vec<RootLabel>,
 }
 
 /// One root put back.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RestoredRoot {
     pub label: RootLabel,
     pub target: PathBuf,
@@ -72,12 +114,21 @@ pub struct RestoredRoot {
 
 /// Restore the roots `plan` names.
 ///
+/// Blocking, and unbounded in the size of the archive, so `cancel` is checked between entries. A
+/// stopped restore leaves the live tree exactly as it was: everything is assembled in a staging tree
+/// and only moved into place once the whole archive has been read, and cancelling takes the same path
+/// out as a refused entry.
+///
 /// # Errors
 /// [`BackupError::NotAnArchive`] or [`BackupError::UnsupportedFormat`] if the archive is not one this
 /// build can read, [`BackupError::RejectedEntry`] if any entry name or content fails its checks,
 /// [`BackupError::TooLarge`] or [`BackupError::TooManyEntries`] if it exceeds what a restore may
-/// write, and [`BackupError::Io`] from the filesystem. The live tree is untouched in every case.
-pub fn restore(plan: &RestorePlan) -> Result<RestoreReport, BackupError> {
+/// write, [`BackupError::Cancelled`] if the token fired, and [`BackupError::Io`] from the filesystem.
+/// The live tree is untouched in every case.
+pub fn restore(
+    plan: &RestorePlan,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RestoreReport, BackupError> {
     let size = std::fs::metadata(&plan.archive)
         .map_err(|source| BackupError::Io {
             path: plan.archive.clone(),
@@ -118,6 +169,12 @@ pub fn restore(plan: &RestorePlan) -> Result<RestoreReport, BackupError> {
 
     let outcome = (|| -> Result<(), BackupError> {
         for i in 0..zip.len() {
+            // Between entries, which is also where the staging trees are still discardable: the exit
+            // below is the one a refused entry takes, so a stopped restore and a refused one leave the
+            // live tree in the same state.
+            if cancel.is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
             let mut entry = zip.by_index(i).map_err(|_| BackupError::NotAnArchive {
                 path: plan.archive.clone(),
             })?;
@@ -184,7 +241,20 @@ pub fn restore(plan: &RestorePlan) -> Result<RestoreReport, BackupError> {
         .map(|r| r.label)
         .filter(|l| !plan.targets.contains_key(l))
         .collect();
-    Ok(RestoreReport { restored, skipped })
+    // Read off what was actually put back rather than off the archive's record: the record is what a
+    // writer claimed, and what a caller needs to know is whether anything landed under the label it
+    // asked for.
+    let absent = plan
+        .targets
+        .keys()
+        .copied()
+        .filter(|label| !restored.iter().any(|root| root.label == *label))
+        .collect();
+    Ok(RestoreReport {
+        restored,
+        skipped,
+        absent,
+    })
 }
 
 /// One root being assembled next to where it will land.

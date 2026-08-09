@@ -5,8 +5,8 @@
 //! launch is over.
 
 use apogee_addons::{
-    AddonEvents, AddonReport, AddonSession, Addons, ComponentManifest, DalamudConfig,
-    ExternalAddon, GameContext, Injectable, Outcome, SetupEvent, SetupEvents,
+    AddonEvents, AddonReport, AddonSession, Addons, DalamudConfig, ExternalAddon, GameContext,
+    Injectable, LoadEvidence, Outcome, SetupEvent, SetupEvents, VerifiedManifest,
 };
 use std::time::SystemTime;
 
@@ -49,21 +49,23 @@ impl AddonBackend for AddonsBackend {
         plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) {
-        let Some(prefix) = prefix else {
-            return;
-        };
+    ) -> Option<LoadEvidence> {
+        let prefix = prefix?;
         let (setup, relay) = relay_setup(events);
         let Some(manifest) = self.setup_pass(&prefix, cancel, &setup).await.manifest else {
             finish(setup, relay).await;
-            return;
+            return None;
         };
 
-        if let Some(config) = dalamud {
-            self.inject(&manifest, &prefix, config, plan, cancel, &setup)
-                .await;
-        }
+        let confirming = match dalamud {
+            Some(config) => {
+                self.inject(&manifest, &prefix, config, plan, cancel, &setup)
+                    .await
+            }
+            None => None,
+        };
         finish(setup, relay).await;
+        confirming
     }
 
     async fn apply_setup(
@@ -111,17 +113,18 @@ impl AddonBackend for AddonsBackend {
         game_pid: i32,
         prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
-        redirected_at: Option<SystemTime>,
-        _cancel: &CancellationToken,
+        confirming: Option<LoadEvidence>,
+        cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         let (addon_events, relay) = relay(events);
         // Spawned rather than awaited: the proof lands seconds after the game does, and a launch that
         // waited for it would hold the flow at the point it is supposed to report the game running.
-        let confirming = redirected_at.map(|since| {
-            let evidence = self.addons.dalamud_load_evidence(since);
+        // The token ends it on the path where the launch is stopped; the teardown below ends it on the
+        // path where the game simply exited, which is not a cancellation of anything.
+        let confirming = confirming.map(|evidence| {
             let events = addon_events.clone();
-            tokio::spawn(evidence.watch(events))
+            tokio::spawn(evidence.watch(cancel.clone(), events))
         });
         // A pid the runtime reported cannot be zero or negative, but building the context is
         // fallible, and a launch is not worth failing over a helper: an unusable context simply
@@ -156,7 +159,7 @@ struct SetupPass {
     /// The catalog the pass read, so a launch that needs the row for what it loads into the game does
     /// not fetch and re-verify the same signed file twice, and cannot get a different answer the
     /// second time.
-    manifest: Option<ComponentManifest>,
+    manifest: Option<VerifiedManifest>,
     /// The verbs the pass did not leave the prefix with, or `None` when it could not tell.
     still_missing: Option<Vec<String>>,
 }
@@ -199,25 +202,24 @@ impl AddonsBackend {
         }
     }
 
-    /// Install whatever this launch loads into the game, and let it compose the launch.
+    /// Install whatever this launch loads into the game, let it compose the launch, and come back with
+    /// the proof to watch for if it left one.
     ///
     /// Failures are narrated by the addon layer as they happen and dropped here. Turning one into an
     /// [`Event::Error`] would make a shell exit non-zero for a game that started perfectly well without
     /// its companion, which is exactly the report a best-effort tier exists to avoid.
     async fn inject(
         &self,
-        manifest: &ComponentManifest,
+        manifest: &VerifiedManifest,
         prefix: &Prefix,
         config: DalamudConfig,
         plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         setup: &SetupEvents,
-    ) {
+    ) -> Option<LoadEvidence> {
         // The layer narrates its own `None`: which row is missing and what that costs is its sentence
         // to write, and a shell that had to invent one would be writing about a decision it did not make.
-        let Some(dalamud) = self.addons.dalamud(manifest, config, setup) else {
-            return;
-        };
+        let dalamud = self.addons.dalamud(manifest, config, setup)?;
         let enabled: [&dyn Injectable; 1] = [&dalamud];
         for err in self
             .addons
@@ -226,12 +228,22 @@ impl AddonsBackend {
         {
             tracing::warn!(reason = err.chain(), "an injectable could not be installed");
         }
-        for err in self.addons.prepare_launch(&enabled, plan, setup) {
+        let prepared = self.addons.prepare_launch(&enabled, plan, setup);
+        for err in &prepared.failures {
             tracing::warn!(
                 reason = err.chain(),
                 "an injectable could not join the launch"
             );
         }
+        // Asked of the companion that took the launch over, and asked now: it is dropped at the end of
+        // this pass, and the moment is read before the spawn because the proof lands seconds from now
+        // in a file that survives previous sessions. A moment from before this launch started is what
+        // tells this session's proof from the last one's.
+        let redirected_by = prepared.redirected_by?;
+        enabled
+            .iter()
+            .find(|injectable| injectable.name() == redirected_by)?
+            .load_evidence(SystemTime::now())
     }
 
     /// The manifest to read a prefix's setup from: the hosted one, or the last one a fetch verified
@@ -245,7 +257,7 @@ impl AddonsBackend {
         &self,
         cancel: &CancellationToken,
         setup: &SetupEvents,
-    ) -> Option<ComponentManifest> {
+    ) -> Option<VerifiedManifest> {
         let fetch_error = match self.catalog_urls() {
             Ok((manifest_url, signature_url)) => match self
                 .addons
@@ -304,9 +316,9 @@ impl RunningAddons {
     /// The sender is moved out and dropped here rather than cloned. The relay ends when the channel
     /// closes, and the channel closes only when the last sender is gone, so holding a second one
     /// across the await would wait forever.
-    async fn finish<F>(mut self, teardown: F) -> Vec<CoreError>
+    async fn finish<F>(mut self, cancel: &CancellationToken, teardown: F) -> Vec<CoreError>
     where
-        F: AsyncFnOnce(AddonSession, &AddonEvents) -> AddonReport,
+        F: AsyncFnOnce(AddonSession, &CancellationToken, &AddonEvents) -> AddonReport,
     {
         // Stopped first, and waited for, because it holds a sender. The relay below ends only when the
         // last sender is gone, so a watch still polling would hold the teardown open for the rest of
@@ -319,7 +331,7 @@ impl RunningAddons {
         }
         let events = self.addon_events.take().unwrap_or_else(AddonEvents::none);
         let report = match self.session.take() {
-            Some(session) => teardown(session, &events).await,
+            Some(session) => teardown(session, cancel, &events).await,
             None => AddonReport::default(),
         };
         let failures = failures(&report);
@@ -335,15 +347,19 @@ impl AddonLifecycle for RunningAddons {
         self.session.as_ref().is_some_and(AddonSession::has_work)
     }
 
-    async fn game_closed(self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
+    async fn game_closed(self: Box<Self>, cancel: &CancellationToken) -> Vec<CoreError> {
         (*self)
-            .finish(async |session, events| session.game_closed(events).await)
+            .finish(cancel, async |session, cancel, events| {
+                session.game_closed(cancel, events).await
+            })
             .await
     }
 
-    async fn abandon(self: Box<Self>, _cancel: &CancellationToken) -> Vec<CoreError> {
+    async fn abandon(self: Box<Self>, cancel: &CancellationToken) -> Vec<CoreError> {
         (*self)
-            .finish(async |session, events| session.abandon(events).await)
+            .finish(cancel, async |session, cancel, events| {
+                session.abandon(cancel, events).await
+            })
             .await
     }
 }
@@ -355,7 +371,7 @@ fn failures(report: &AddonReport) -> Vec<CoreError> {
         .outcomes
         .iter()
         .filter_map(|outcome| match &outcome.outcome {
-            Outcome::Failed { reason } => Some(CoreError::Addon {
+            Outcome::Failed { reason, .. } => Some(CoreError::Addon {
                 program: outcome.program.clone(),
                 reason: reason.clone(),
             }),
@@ -451,12 +467,17 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // A launch something redirected, watching a file nothing will ever write.
+        let evidence = LoadEvidence::new(
+            "Companion",
+            std::path::Path::new("/nonexistent/never-written.log"),
+            SystemTime::now(),
+        );
         let lifecycle = backend
             .start(
                 std::process::id().cast_signed(),
                 None,
                 Vec::new(),
-                Some(SystemTime::now()),
+                Some(evidence),
                 &cancel,
                 &tx,
             )
@@ -508,7 +529,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new());
 
-        backend
+        let confirming = backend
             .prepare_launch(
                 None,
                 Some(DalamudConfig::default()),
@@ -518,6 +539,10 @@ mod tests {
             )
             .await;
 
+        assert!(
+            confirming.is_none(),
+            "nothing composed this launch, so there is nothing to confirm"
+        );
         assert!(plan.inserted_args().is_empty());
         assert_eq!(plan.program(), "ffxiv_dx11.exe");
         Ok(())

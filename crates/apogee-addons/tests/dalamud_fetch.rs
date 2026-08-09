@@ -18,7 +18,7 @@ use std::path::Path;
 
 use apogee_addons::dalamud::Endpoints;
 use apogee_addons::{
-    AddonPaths, ComponentManifest, Dalamud, DalamudConfig, DalamudPaths, Injectable, SetupEvents,
+    AddonPaths, Dalamud, DalamudConfig, DalamudPaths, Injectable, SetupEvents, VerifiedManifest,
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, RunnerKind};
@@ -151,13 +151,17 @@ impl Distribution {
 
 /// The manifest row behind the launch setting. Its distribution pointer is overridden per test, since
 /// each endpoint has to live on a different host here.
-fn entry() -> Result<apogee_addons::InjectableEntry, Box<dyn Error>> {
-    let json = r#"{ "version": 1, "injectables": [
+fn catalog() -> Result<VerifiedManifest, Box<dyn Error>> {
+    let json = br#"{ "version": 1, "injectables": [
         { "name": "Dalamud", "kind": "dalamud",
           "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
           "tier": "best_effort", "note": "Best with the wine-xiv runner." } ] }"#;
-    let mut manifest = ComponentManifest::from_json_bytes(json.as_bytes())?;
-    Ok(manifest.injectables.remove(0))
+    let signature = apogee_test_support::catalog_sign::sign_manifest(json);
+    Ok(VerifiedManifest::verify(
+        json,
+        &signature,
+        &[apogee_test_support::catalog_sign::test_verifying_key_bytes()],
+    )?)
 }
 
 fn dalamud(root: &Path, dist: &Distribution) -> Result<Dalamud, Box<dyn Error>> {
@@ -168,9 +172,10 @@ fn dalamud(root: &Path, dist: &Distribution) -> Result<Dalamud, Box<dyn Error>> 
     Ok(Dalamud::new(
         AddonPaths::new(root).dalamud(),
         dist.fetcher()?,
-        &entry()?,
+        &catalog()?,
         config,
     )
+    .ok_or("the fixture carries a Dalamud row")?
     .with_endpoints(dist.endpoints()))
 }
 
@@ -395,10 +400,10 @@ async fn preparing_a_launch_on_its_own_contacts_nothing() -> Result<(), Box<dyn 
     let dist = Distribution::start(false, 432).await?;
     let dalamud = dalamud(root.path(), &dist)?;
     let prefix = prefix(&root.path().join("prefix"))?;
-    let mut plan =
+    let plan =
         apogee_runtime::LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
 
-    dalamud.prepare_launch(&mut plan, &SetupEvents::none())?;
+    dalamud.prepare_launch(&plan, &SetupEvents::none())?;
 
     for server in dist.servers() {
         assert_eq!(

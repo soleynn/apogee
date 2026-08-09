@@ -173,7 +173,6 @@ fn descend(
                     name: archive_name,
                     source: entry.path(),
                     kind,
-                    size,
                 });
             }
             EntryKind::Dir => {
@@ -186,7 +185,6 @@ fn descend(
                     name: format!("{archive_name}/"),
                     source: entry.path(),
                     kind,
-                    size: 0,
                 });
                 descend(
                     &entry.path(),

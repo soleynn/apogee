@@ -54,8 +54,32 @@ pub struct BackupSpec {
     pub note: Option<String>,
 }
 
+impl BackupSpec {
+    /// Capture `selection` into `dest_dir`, stamped `created_at`.
+    ///
+    /// The instant is an argument rather than a reading of the clock, so an archive is a function of
+    /// its inputs and two runs over an unchanged tree can be compared byte for byte.
+    #[must_use]
+    pub fn new(selection: Selection, dest_dir: impl Into<PathBuf>, created_at: SystemTime) -> Self {
+        Self {
+            selection,
+            dest_dir: dest_dir.into(),
+            created_at,
+            note: None,
+        }
+    }
+
+    /// Carry a free-text label into the manifest, for a reader deciding which archive to put back.
+    #[must_use]
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+}
+
 /// What one backup captured.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BackupReport {
     /// Where the archive was written.
     pub archive: PathBuf,
@@ -67,11 +91,19 @@ pub struct BackupReport {
 
 /// Write `spec`'s selection into a new archive.
 ///
+/// Blocking, and unbounded in the size of what it copies, so `cancel` is checked between entries.
+/// Nothing is left behind by a stopped run: the archive is written to a temporary file and only named
+/// once it is complete, so an interrupted capture takes its half-written bytes with it.
+///
 /// # Errors
 /// Anything [`Selection::resolve`] raises, [`BackupError::TooManyEntries`] or
-/// [`BackupError::TooLarge`] if the selection exceeds what an archive may hold, and
-/// [`BackupError::Io`] or [`BackupError::Archive`] from the write.
-pub fn create(spec: &BackupSpec) -> Result<BackupReport, BackupError> {
+/// [`BackupError::TooLarge`] if the selection exceeds what an archive may hold,
+/// [`BackupError::Io`] or [`BackupError::Archive`] from the write, and [`BackupError::Cancelled`] if
+/// the token fired part way through.
+pub fn create(
+    spec: &BackupSpec,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<BackupReport, BackupError> {
     let selected = spec.selection.resolve()?;
     check_limits(&selected)?;
 
@@ -92,6 +124,11 @@ pub fn create(spec: &BackupSpec) -> Result<BackupReport, BackupError> {
     let mut records = Vec::with_capacity(selected.entries().len());
 
     for entry in selected.entries() {
+        // Between entries rather than inside a copy: one file's bytes are the smallest unit that
+        // leaves the archive readable, and a check per entry is already per-file on a config tree.
+        if cancel.is_cancelled() {
+            return Err(BackupError::Cancelled);
+        }
         match entry.kind() {
             EntryKind::Dir => {
                 writer

@@ -16,11 +16,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use apogee_addons::{
-    AddonError, AddonPaths, Addons, ComponentManifest, DalamudConfig, Injectable, SetupEvent,
-    SetupEvents, SupportTier,
+    AddonError, AddonPaths, Addons, Contribution, DalamudConfig, Injectable, LaunchEdit, Redirect,
+    SetupEvent, SetupEvents, SupportTier, VerifiedManifest,
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{LaunchPlan, Prefix, RunnerKind, Runtime, RuntimePaths};
+use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key_bytes};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -64,10 +65,15 @@ impl Injectable for Framework {
 
     fn prepare_launch(
         &self,
-        plan: &mut LaunchPlan,
+        _plan: &LaunchPlan,
         _events: &SetupEvents,
-    ) -> Result<(), AddonError> {
+    ) -> Result<Contribution, AddonError> {
+        let edit = LaunchEdit::new()
+            .env("APOGEE_FRAMEWORK", "1")
+            .wrapper("frameworkrun");
         if self.fail_prepare {
+            // Composed and then dropped with the error, which is the shape of every implementor that
+            // does fallible work: what it had built cannot reach the launch.
             return Err(AddonError::Inject {
                 injectable: "Framework".to_owned(),
                 tier: SupportTier::FirstClass,
@@ -76,9 +82,7 @@ impl Injectable for Framework {
                 )),
             });
         }
-        plan.env_mut()
-            .insert("APOGEE_FRAMEWORK".to_owned(), "1".to_owned());
-        Ok(())
+        Ok(edit.into())
     }
 }
 
@@ -110,22 +114,18 @@ impl Injectable for Loader {
 
     fn prepare_launch(
         &self,
-        plan: &mut LaunchPlan,
+        plan: &LaunchPlan,
         _events: &SetupEvents,
-    ) -> Result<(), AddonError> {
-        let supervised = Path::new(plan.program())
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        plan.set_inserted_args(vec![format!("--loader={}", self.name)]);
-        plan.set_program(format!("C:\\{}\\loader.exe", self.name));
-        if let Some(basename) = supervised {
-            plan.set_supervised(basename);
+    ) -> Result<Contribution, AddonError> {
+        let mut redirect = Redirect::to(format!("C:\\{}\\loader.exe", self.name))
+            .with_args(vec![format!("--loader={}", self.name)]);
+        if let Some(basename) = Path::new(plan.program()).file_name() {
+            redirect = redirect.supervising(basename.to_string_lossy().into_owned());
         }
-        plan.env_mut().insert(
-            format!("APOGEE_{}", self.name.to_uppercase()),
-            "1".to_owned(),
-        );
-        Ok(())
+        Ok(LaunchEdit::new()
+            .redirect(redirect)
+            .env(format!("APOGEE_{}", self.name.to_uppercase()), "1")
+            .into())
     }
 }
 
@@ -134,12 +134,23 @@ impl Injectable for Loader {
 /// Deliberately not the real distribution. What is under test is the loop, not the download, and a test
 /// that reached goatcorp would pull a real release over the network on every CI run while claiming to be
 /// hermetic. `.invalid` is reserved for exactly this and never resolves.
-fn manifest() -> Result<ComponentManifest, Box<dyn Error>> {
-    let json = r#"{ "version": 1, "injectables": [
+fn manifest() -> Result<VerifiedManifest, Box<dyn Error>> {
+    let json = br#"{ "version": 1, "injectables": [
         { "name": "Dalamud", "kind": "dalamud",
           "distribution": "https://dalamud.invalid/Dalamud/Release/VersionInfo",
           "tier": "best_effort", "note": "Best with the wine-xiv runner." } ] }"#;
-    Ok(ComponentManifest::from_json_bytes(json.as_bytes())?)
+    verified(json)
+}
+
+/// A manifest that verified, built the only way there is one: signed with a key this test made and
+/// checked against it. There is no mint to reach for, which is the point of the type.
+fn verified(json: &[u8]) -> Result<VerifiedManifest, Box<dyn Error>> {
+    let signature = sign_manifest(json);
+    Ok(VerifiedManifest::verify(
+        json,
+        &signature,
+        &[test_verifying_key_bytes()],
+    )?)
 }
 
 fn addons(root: &Path) -> Result<Addons, Box<dyn Error>> {
@@ -163,6 +174,8 @@ fn prefix(root: &Path) -> Result<Prefix, Box<dyn Error>> {
     ))
 }
 
+/// A launch that already carries a wrapper of the launcher's own, so what a companion adds to that
+/// list is visible against something.
 fn plan(prefix: &Prefix) -> LaunchPlan {
     LaunchPlan::new(
         "/games/ffxiv/game/ffxiv_dx11.exe",
@@ -170,6 +183,7 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
         BTreeMap::new(),
     )
     .prefix(prefix)
+    .with_wrappers(vec!["gamemoderun".to_owned()])
 }
 
 fn events() -> (
@@ -208,13 +222,20 @@ async fn a_new_injectable_and_dalamud_go_through_the_same_calls() -> Result<(), 
     );
 
     let mut plan = plan(&prefix);
-    let failures = addons.prepare_launch(&both, &mut plan, &sink);
-    assert!(failures.is_empty(), "{failures:?}");
+    let prepared = addons.prepare_launch(&both, &mut plan, &sink);
+    assert!(prepared.failures.is_empty(), "{:?}", prepared.failures);
+    assert_eq!(
+        prepared.redirected_by, None,
+        "neither of them became the program the launch spawns"
+    );
     assert_eq!(
         plan.env().get("APOGEE_FRAMEWORK").map(String::as_str),
         Some("1"),
         "the first-class companion contributed to the launch"
     );
+    // A companion composes what it needs around the launch rather than deciding what wraps it, so its
+    // wrapper goes inside the launcher's own instead of replacing the list.
+    assert_eq!(plan.wrappers(), ["gamemoderun", "frameworkrun"]);
     // Dalamud declined because nothing is installed, and declining is not a failure.
     assert!(plan.inserted_args().is_empty());
     Ok(())
@@ -233,24 +254,29 @@ async fn an_injectable_that_fails_is_reported_with_its_tier_and_does_not_stop_th
     let (sink, rx) = events();
     let mut plan = plan(&prefix);
 
-    let failures = addons.prepare_launch(&only, &mut plan, &sink);
+    let prepared = addons.prepare_launch(&only, &mut plan, &sink);
 
     assert!(
         matches!(
-            failures.as_slice(),
+            prepared.failures.as_slice(),
             [AddonError::Inject {
                 injectable,
                 tier: SupportTier::FirstClass,
                 ..
             }] if injectable == "Framework"
         ),
-        "the failure names the companion and its tier: {failures:?}"
+        "the failure names the companion and its tier: {:?}",
+        prepared.failures
     );
     assert_eq!(
         plan.program(),
         "/games/ffxiv/game/ffxiv_dx11.exe",
         "the launch is untouched by a companion that could not compose one"
     );
+    // Not even the part it had already composed: the edit went with the error, so a failure halfway
+    // through cannot leave a launch carrying half a companion.
+    assert_eq!(plan.env().get("APOGEE_FRAMEWORK"), None);
+    assert_eq!(plan.wrappers(), ["gamemoderun"]);
     let mut rx = rx.into_inner()?;
     let mut reported = false;
     while let Ok(event) = rx.try_recv() {
@@ -278,17 +304,24 @@ async fn a_second_companion_cannot_redirect_a_launch_that_is_already_redirected(
     let (sink, rx) = events();
     let mut plan = plan(&prefix);
 
-    let failures = addons.prepare_launch(&both, &mut plan, &sink);
+    let prepared = addons.prepare_launch(&both, &mut plan, &sink);
 
     assert!(
         matches!(
-            failures.as_slice(),
+            prepared.failures.as_slice(),
             [AddonError::LaunchAlreadyRedirected {
                 injectable,
                 redirector,
+                ..
             }] if injectable == "Injector" && redirector == "Loader"
         ),
-        "the second is refused, and the failure names both: {failures:?}"
+        "the second is refused, and the failure names both: {:?}",
+        prepared.failures
+    );
+    assert_eq!(
+        prepared.redirected_by.as_deref(),
+        Some("Loader"),
+        "the pass reports who holds the launch, which is not readable from the plan"
     );
     assert_eq!(
         plan.program(),
@@ -338,7 +371,7 @@ async fn a_second_companion_cannot_redirect_a_launch_that_is_already_redirected(
 async fn a_catalog_with_no_row_declines_and_says_so() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let addons = addons(root.path())?;
-    let empty = ComponentManifest::from_json_bytes(br#"{ "version": 1 }"#)?;
+    let empty = verified(br#"{ "version": 1 }"#)?;
     let (sink, rx) = events();
 
     let declined = addons.dalamud(&empty, DalamudConfig::default(), &sink);

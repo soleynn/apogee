@@ -51,12 +51,9 @@ pub(super) async fn apply(
         run_op(runtime, fetcher, prefix, verb, op, work, cancel, events).await?;
     }
     if let Some(missing) = missing(prefix, verb) {
-        return Err(AddonError::VerbFailed {
+        return Err(AddonError::VerbIncomplete {
             verb: verb.name.clone(),
-            source: Box::new(std::io::Error::other(format!(
-                "it finished without producing {}",
-                missing.display()
-            ))),
+            missing: missing.to_path_buf(),
         });
     }
     Ok(())

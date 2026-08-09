@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use apogee_addons::{DalamudConfig, ExternalAddon};
+use apogee_addons::{DalamudConfig, ExternalAddon, LoadEvidence};
 use apogee_runtime::LaunchPlan;
 
 use super::{AddonBackend, AddonLifecycle};
@@ -136,14 +136,22 @@ impl AddonBackend for FakeAddons {
         plan: &mut LaunchPlan,
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
-    ) {
+    ) -> Option<LoadEvidence> {
         self.record(AddonCall::Prepared {
             prefix: prefix.is_some(),
             dalamud: dalamud.is_some(),
         });
-        if !self.inserted_args.is_empty() {
-            plan.set_inserted_args(self.inserted_args.clone());
+        if self.inserted_args.is_empty() {
+            return None;
         }
+        plan.set_inserted_args(self.inserted_args.clone());
+        // A companion that composed itself into the launch is one there is something to confirm about.
+        // The path is never read: what a flow test asks is whether the proof reached the start.
+        Some(LoadEvidence::new(
+            "Fake",
+            std::path::Path::new("/nonexistent/fake.log"),
+            std::time::SystemTime::now(),
+        ))
     }
 
     async fn apply_setup(
@@ -175,13 +183,13 @@ impl AddonBackend for FakeAddons {
         game_pid: i32,
         _prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
-        redirected_at: Option<std::time::SystemTime>,
+        confirming: Option<LoadEvidence>,
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         self.record(AddonCall::Started {
             game_pid,
-            confirming: redirected_at.is_some(),
+            confirming: confirming.is_some(),
             count: addons.len(),
         });
         if let Ok(mut started) = self.started.lock() {
