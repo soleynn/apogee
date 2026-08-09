@@ -8,6 +8,8 @@ use apogee_addons::{
     AddonEvents, AddonReport, AddonSession, Addons, ComponentManifest, DalamudConfig,
     ExternalAddon, GameContext, Injectable, Outcome, SetupEvent, SetupEvents,
 };
+use std::time::SystemTime;
+
 use apogee_runtime::{LaunchPlan, Prefix};
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -109,10 +111,18 @@ impl AddonBackend for AddonsBackend {
         game_pid: i32,
         prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
+        redirected_at: Option<SystemTime>,
         _cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         let (addon_events, relay) = relay(events);
+        // Spawned rather than awaited: the proof lands seconds after the game does, and a launch that
+        // waited for it would hold the flow at the point it is supposed to report the game running.
+        let confirming = redirected_at.map(|since| {
+            let evidence = self.addons.dalamud_load_evidence(since);
+            let events = addon_events.clone();
+            tokio::spawn(evidence.watch(events))
+        });
         // A pid the runtime reported cannot be zero or negative, but building the context is
         // fallible, and a launch is not worth failing over a helper: an unusable context simply
         // means no companion runs.
@@ -134,6 +144,7 @@ impl AddonBackend for AddonsBackend {
         Box::new(RunningAddons {
             session,
             addon_events: Some(addon_events),
+            confirming,
             relay,
         })
     }
@@ -281,6 +292,8 @@ struct RunningAddons {
     session: Option<AddonSession>,
     /// Dropped before the relay is awaited, which is what lets the relay task finish.
     addon_events: Option<AddonEvents>,
+    /// The wait for proof the redirected launch came up, if there was one to watch for.
+    confirming: Option<JoinHandle<()>>,
     relay: JoinHandle<()>,
 }
 
@@ -295,6 +308,15 @@ impl RunningAddons {
     where
         F: AsyncFnOnce(AddonSession, &AddonEvents) -> AddonReport,
     {
+        // Stopped first, and waited for, because it holds a sender. The relay below ends only when the
+        // last sender is gone, so a watch still polling would hold the teardown open for the rest of
+        // its window: a user who quits a minute in would sit looking at a launcher that had nothing
+        // left to do. Stopping it also *is* the right answer rather than a concession, since what it
+        // would report is only worth knowing while the session is still running.
+        if let Some(confirming) = self.confirming.take() {
+            confirming.abort();
+            let _ = confirming.await;
+        }
         let events = self.addon_events.take().unwrap_or_else(AddonEvents::none);
         let report = match self.session.take() {
             Some(session) => teardown(session, &events).await,
@@ -399,6 +421,7 @@ mod tests {
                 std::process::id().cast_signed(),
                 None,
                 Vec::new(),
+                None,
                 &cancel,
                 &tx,
             )
@@ -410,6 +433,41 @@ mod tests {
         )
         .await
         .map_err(|_| "the teardown never finished")?;
+        Ok(())
+    }
+
+    /// And the same when a launch is waiting for proof its companion came up.
+    ///
+    /// That wait holds a sender, and its window is a minute and a half of a session a user may quit
+    /// twenty seconds into. Left running it would hold the channel open, the relay would never end,
+    /// and the teardown would sit there: the launcher would look hung for the rest of the window with
+    /// nothing left to do. The wait is stopped rather than waited out, which is also the honest
+    /// answer, since what it would report is only worth knowing while the session is still running.
+    #[tokio::test]
+    async fn the_teardown_does_not_wait_out_a_confirmation_that_will_never_land()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backend = backend()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+
+        // A launch something redirected, watching a file nothing will ever write.
+        let lifecycle = backend
+            .start(
+                std::process::id().cast_signed(),
+                None,
+                Vec::new(),
+                Some(SystemTime::now()),
+                &cancel,
+                &tx,
+            )
+            .await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lifecycle.game_closed(&cancel),
+        )
+        .await
+        .map_err(|_| "the teardown waited for the confirmation window")?;
         Ok(())
     }
 
@@ -425,6 +483,7 @@ mod tests {
                 std::process::id().cast_signed(),
                 None,
                 Vec::new(),
+                None,
                 &cancel,
                 &tx,
             )

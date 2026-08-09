@@ -12,6 +12,8 @@ pub(crate) mod addons_backend;
 #[cfg(test)]
 pub(crate) mod fake;
 
+use std::time::SystemTime;
+
 use apogee_addons::{DalamudConfig, ExternalAddon};
 use apogee_runtime::{LaunchPlan, Prefix};
 use async_trait::async_trait;
@@ -109,11 +111,18 @@ pub(crate) trait AddonBackend: Send + Sync {
     ///
     /// Infallible by design: a helper tool that cannot start is reported on `events` and in the
     /// returned lifecycle's failures, never as an error that would fail a launch already in progress.
+    ///
+    /// `redirected_at` is `Some` when something took over the launch's program, carrying the moment the
+    /// launch began. That is what lets this layer watch for proof the thing came up inside the game,
+    /// which is the only such report every runner can produce: a loader's own exit status is unreachable
+    /// behind a container-style runner. `None` is an ordinary launch, where the spawned program is the
+    /// game's own loader and there is nothing to confirm.
     async fn start(
         &self,
         game_pid: i32,
         prefix: Option<Prefix>,
         addons: Vec<ExternalAddon>,
+        redirected_at: Option<SystemTime>,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle>;

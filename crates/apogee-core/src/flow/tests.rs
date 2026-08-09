@@ -1889,6 +1889,8 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
             },
             AddonCall::Started {
                 game_pid: std::process::id().cast_signed(),
+                // Nothing redirected this launch, so there is no companion to confirm.
+                confirming: false,
                 count: 1,
             },
             AddonCall::GameClosed,
