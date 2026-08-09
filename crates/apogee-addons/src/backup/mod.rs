@@ -94,7 +94,6 @@ pub struct SelectedEntry {
     name: String,
     source: PathBuf,
     kind: EntryKind,
-    size: u64,
 }
 
 impl SelectedEntry {
@@ -114,12 +113,6 @@ impl SelectedEntry {
     #[must_use]
     pub fn kind(&self) -> EntryKind {
         self.kind
-    }
-
-    /// The file's size in bytes, or zero for a directory.
-    #[must_use]
-    pub fn size(&self) -> u64 {
-        self.size
     }
 }
 
@@ -322,12 +315,6 @@ impl Selection {
         self.resolved.push(resolved);
         self.roots.push(root);
         Ok(self)
-    }
-
-    /// The roots, in the order they were added.
-    #[must_use]
-    pub fn roots(&self) -> &[SelectionRoot] {
-        &self.roots
     }
 
     /// The rules applied to every root at every depth, which no caller can switch off.
