@@ -249,6 +249,73 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
     assert!(prefix.drive_c().join("apogee/checked/thing.dll").is_file());
 }
 
+/// Asking what a prefix is missing is answerable without setting it up, and the answer is the one the
+/// apply then acts on. Two readings of the same prefix that could disagree would let a report name
+/// setup a fix does not apply, or a fix apply setup no report named.
+#[tokio::test]
+async fn what_a_prefix_is_missing_is_what_a_pass_then_applies() {
+    let (server, pin) = served().await;
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    let manifest = only(&manifest(&server, &pin), "checked");
+
+    let missing = missing_verbs(&manifest, &prefix).expect("read the record");
+
+    assert_eq!(missing, ["checked"]);
+    assert_eq!(
+        server.stats().requests(),
+        0,
+        "asking what is missing downloads nothing"
+    );
+    assert!(
+        recorded(&prefix).is_empty() && !prefix.drive_c().join("apogee").exists(),
+        "asking what is missing changed the prefix"
+    );
+
+    let report = apply(&prefix, &manifest, &SetupEvents::none())
+        .await
+        .expect("apply");
+
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .filter(|o| o.state == SetupState::Applied)
+            .map(|o| o.name.as_str())
+            .collect::<Vec<_>>(),
+        missing,
+        "the pass applied exactly what was named as missing"
+    );
+    assert!(
+        missing_verbs(&manifest, &prefix)
+            .expect("read the record")
+            .is_empty(),
+        "nothing is missing once it has been applied"
+    );
+}
+
+/// The record is not the evidence. A verb whose effect has gone is missing again, which is what makes a
+/// report of what a prefix needs survive a runner upgrade undoing what a verb wrote.
+#[tokio::test]
+async fn a_verb_whose_effect_was_removed_is_missing_again() {
+    let (server, pin) = served().await;
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    let manifest = only(&manifest(&server, &pin), "checked");
+
+    apply(&prefix, &manifest, &SetupEvents::none())
+        .await
+        .expect("apply");
+    std::fs::remove_dir_all(prefix.drive_c().join("apogee/checked")).expect("remove the effect");
+
+    assert_eq!(
+        missing_verbs(&manifest, &prefix).expect("read the record"),
+        ["checked"],
+        "the prefix still records it, and it is still missing"
+    );
+    assert_eq!(recorded(&prefix), ["checked"]);
+}
+
 /// One verb failing costs the prefix that verb. A launch that is otherwise fine should not be stopped by
 /// one piece of hygiene, and the rest of the setup still has to happen.
 #[tokio::test]
