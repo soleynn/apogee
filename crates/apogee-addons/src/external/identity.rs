@@ -1,22 +1,22 @@
 //! Recognizing a companion that is already running.
 //!
 //! The point of this check is the tool the user opened themselves, or left over from the last
-//! session, so it has to look at the machine rather than at a list of what this launcher started.
-//! What it must not do is collapse different tools together: matching on a bare file name means an
-//! unrelated `updater.exe` anywhere on the box suppresses yours, and two tools with the same name in
-//! different directories become one.
+//! session, so it looks at the machine rather than at a list of what this launcher started. What it
+//! must not do is collapse different tools together: matching on a bare file name means an unrelated
+//! `updater.exe` anywhere on the box suppresses yours, and two tools with the same name in different
+//! directories become one.
 //!
 //! So identity is the whole program. For a host tool that is the executable behind `/proc`, or the
 //! script an interpreter was handed. For a prefix tool the process table can only be searched by a
-//! name the kernel truncates to 15 bytes, so that search is a candidate set and the full path in the
-//! process's own arguments is what narrows it.
+//! name the kernel truncates to 15 bytes, so that search yields a candidate set and the full path in
+//! the process's own arguments is what narrows it.
 //!
 //! Every check is scoped to processes the launching user owns. Process arguments are world-readable,
 //! so without that a second account on the machine could suppress a tool permanently by running
 //! anything with the right path in its command line.
 //!
-//! The check fails open. When nothing can be established the companion starts: a duplicate is a
-//! smaller harm than a tool that silently never runs, and these tools are usually singletons anyway.
+//! The check fails open: when nothing can be established the companion starts, because a duplicate
+//! is a smaller harm than a tool that silently never runs.
 
 use std::path::Path;
 #[cfg(target_os = "linux")]
@@ -161,11 +161,14 @@ pub(crate) fn find_in_prefix(
         .map(|pid| Running { pid })
 }
 
+/// Nothing off Linux: every probe here reads `/proc`, so the check fails open and the companion
+/// starts.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn find_host(_program: &Path) -> Option<Running> {
     None
 }
 
+/// Nothing off Linux, as [`find_host`].
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn find_in_prefix(
     _candidates: &[i32],

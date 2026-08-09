@@ -4,10 +4,9 @@
 //! byte-identical. Everything that would otherwise vary is pinned rather than inherited: entry order
 //! comes from the names instead of from directory order, timestamps and permissions are fixed
 //! constants instead of copies of the source, and the compression level is stated rather than
-//! defaulted. Two inputs do move the bytes and both are deliberate: the instant, which is a
-//! caller-supplied parameter rather than a clock read, and the source paths, which the record keeps
-//! so a human can tell two archives apart. Injecting the instant is what makes the property testable
-//! in a hermetic run.
+//! defaulted. Only two inputs move the bytes, and both are deliberate: the instant, which the caller
+//! supplies instead of this module reading a clock, and the source paths, which the record keeps so a
+//! human can tell two archives apart.
 //!
 //! The archive is written to a temporary in the destination directory and renamed into place, so an
 //! interrupted run leaves an ignorable temporary rather than a truncated file whose central directory
@@ -48,17 +47,14 @@ pub struct BackupSpec {
     /// Directory the archive lands in, which is also the directory retention later scans.
     pub dest_dir: PathBuf,
     /// Supplied rather than read from the clock, so an archive is a function of its inputs and two
-    /// runs can be compared byte for byte.
+    /// runs over an unchanged tree can be compared byte for byte.
     pub created_at: SystemTime,
     /// Free-text label carried into the manifest.
     pub note: Option<String>,
 }
 
 impl BackupSpec {
-    /// Capture `selection` into `dest_dir`, stamped `created_at`.
-    ///
-    /// The instant is an argument rather than a reading of the clock, so an archive is a function of
-    /// its inputs and two runs over an unchanged tree can be compared byte for byte.
+    /// A spec capturing `selection` into `dest_dir`, stamped `created_at`.
     #[must_use]
     pub fn new(selection: Selection, dest_dir: impl Into<PathBuf>, created_at: SystemTime) -> Self {
         Self {
@@ -97,9 +93,32 @@ pub struct BackupReport {
 ///
 /// # Errors
 /// Anything [`Selection::resolve`] raises, [`BackupError::TooManyEntries`] or
-/// [`BackupError::TooLarge`] if the selection exceeds what an archive may hold,
-/// [`BackupError::Io`] or [`BackupError::Archive`] from the write, and [`BackupError::Cancelled`] if
-/// the token fired part way through.
+/// [`BackupError::TooLarge`] if the selection exceeds what an archive may hold, [`BackupError::Io`]
+/// or [`BackupError::Archive`] from the write, and [`BackupError::Cancelled`] if the token fired part
+/// way through.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use std::time::SystemTime;
+/// # use tokio_util::sync::CancellationToken;
+/// # use apogee_addons::backup::{
+/// #     BackupError, BackupSpec, GameConfigOpts, Selection, SelectionRoot, create,
+/// # };
+/// # fn demo(
+/// #     config_tree: &Path,
+/// #     dest: &Path,
+/// #     cancel: &CancellationToken,
+/// # ) -> Result<(), BackupError> {
+/// let selection = Selection::new()
+///     .with_root(SelectionRoot::game_config(config_tree, GameConfigOpts::default()))?;
+/// let spec = BackupSpec::new(selection, dest, SystemTime::now()).note("before a patch");
+/// let report = create(&spec, cancel)?;
+/// # let _ = (report.archive, report.archive_bytes);
+/// # Ok(())
+/// # }
+/// ```
 pub fn create(
     spec: &BackupSpec,
     cancel: &tokio_util::sync::CancellationToken,
@@ -208,6 +227,19 @@ pub fn create(
 /// [`BackupError::Io`] if it cannot be opened, [`BackupError::NotAnArchive`] if it is not a zip or
 /// carries no manifest, [`BackupError::Manifest`] if the manifest does not parse, and
 /// [`BackupError::UnsupportedFormat`] if it was written by a newer format than this reader knows.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use apogee_addons::backup::{BackupError, inspect};
+/// # fn demo(archive: &Path) -> Result<(), BackupError> {
+/// let manifest = inspect(archive)?;
+/// let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
+/// # let _ = (names, manifest.created_at);
+/// # Ok(())
+/// # }
+/// ```
 pub fn inspect(archive: &Path) -> Result<BackupManifest, BackupError> {
     let file = File::open(archive).map_err(|source| BackupError::Io {
         path: archive.to_path_buf(),
@@ -264,8 +296,9 @@ fn check_limits(selected: &Selected) -> Result<(), BackupError> {
     Ok(())
 }
 
-/// Options shared by every entry. Derived from the associated constant rather than `default()`,
-/// which reads the clock when the crate's time support is compiled in.
+/// Options shared by every entry.
+// Derived from the associated constant rather than `default()`, which reads the clock when the zip
+// crate's time support is compiled in.
 fn base_options() -> SimpleFileOptions {
     SimpleFileOptions::DEFAULT
         .compression_method(CompressionMethod::Deflated)
@@ -274,9 +307,10 @@ fn base_options() -> SimpleFileOptions {
         .large_file(false)
 }
 
-/// A fixed mode, never the source file's: the real tree mixes modes depending on whether the game
-/// rotated a file or wrote it in place, and permissions are applied to every entry or none so the
-/// recorded originating system stays uniform.
+/// A fixed mode, never the source file's.
+// The real tree mixes modes depending on whether the game rotated a file or wrote it in place, and
+// permissions are applied to every entry or to none, so the recorded originating system stays
+// uniform.
 fn file_options() -> SimpleFileOptions {
     base_options().unix_permissions(0o644)
 }
@@ -317,8 +351,8 @@ fn copy_hashed<W: Write + std::io::Seek>(
     Ok((size, hex(&hasher.finalize())))
 }
 
-/// Move the finished temporary to its final name, which is the first free one. `create_new` in the
-/// loop means two backups in the same second cannot land on each other.
+/// Move the finished temporary to its final name, which is the first free one.
+// `create_new` in the loop means two backups in the same second cannot land on each other.
 fn persist(
     temp: tempfile::NamedTempFile,
     dest_dir: &Path,
@@ -366,8 +400,9 @@ fn persist(
     })
 }
 
-/// `YYYYMMDDTHHMMSSZ` from unix seconds, computed rather than formatted by a date library since the
-/// only consumer is a filename that has to sort.
+/// `YYYYMMDDTHHMMSSZ` from unix seconds.
+// Computed rather than formatted by a date library, since the only consumer is a filename that has to
+// sort.
 fn stamp(unix: u64) -> String {
     let (days, secs) = (unix / 86_400, unix % 86_400);
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
@@ -421,6 +456,8 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The stamp is the archive's filename and therefore its sort key, so it has to be a real UTC
+    /// instant across the calendar cases the hand-rolled conversion could get wrong.
     #[test]
     fn the_stamp_is_a_sortable_utc_instant() {
         assert_eq!(stamp(0), "19700101T000000Z");

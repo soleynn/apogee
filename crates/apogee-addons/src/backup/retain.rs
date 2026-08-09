@@ -1,15 +1,15 @@
 //! Keeping the newest N archives and removing the rest.
 //!
 //! This is the only code here that deletes, and what it deletes is the user's only copy of settings
-//! they cannot otherwise recover. The cost of the two mistakes is nothing alike: leaving one stale
-//! archive behind costs disk, while removing one file that was not ours is unrecoverable. So an
-//! archive has to prove it is ours before it is a candidate, and everything that fails to prove it is
-//! reported with the check that rejected it rather than passed over.
+//! they cannot otherwise recover. The two mistakes do not cost the same: leaving a stale archive
+//! behind costs disk, while removing one file that was not ours is unrecoverable. So an archive has
+//! to prove it is ours before it is a candidate, and everything that fails to prove it is reported
+//! with the check that rejected it rather than passed over.
 //!
-//! A filename is not proof. Anyone can rename a file to the extension, nothing reserves it, a
-//! truncated file keeps its name, and a name cannot carry the format version that says whether this
-//! build understands what it would be deleting. The extension is a prefilter so a directory of large
-//! unrelated files is not opened one by one; the record inside decides.
+//! A filename is not proof: anyone can rename a file to the extension, a truncated file keeps its
+//! name, and a name cannot carry the format version that says whether this build understands what it
+//! would be deleting. The extension is a prefilter so a directory of large unrelated files is not
+//! opened one by one; the record inside decides.
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -23,8 +23,23 @@ use super::manifest::BACKUP_EXTENSION;
 pub struct Retain(NonZeroUsize);
 
 impl Retain {
-    /// Keep the newest `n`. Takes a [`NonZeroUsize`] because keeping zero is a request to delete
-    /// every backup there is, which no retention policy should be able to express.
+    /// Keep the newest `n`.
+    ///
+    /// Takes a [`NonZeroUsize`] because keeping zero is a request to delete every backup there is,
+    /// which no retention policy should be able to express.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), std::num::TryFromIntError> {
+    /// use std::num::NonZeroUsize;
+    /// use apogee_addons::backup::Retain;
+    ///
+    /// let policy = Retain::keep(NonZeroUsize::try_from(5_usize)?);
+    /// assert_eq!(policy.count(), 5);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn keep(n: NonZeroUsize) -> Self {
         Self(n)
@@ -66,16 +81,16 @@ pub enum ForeignReason {
     /// Written by a newer build than this one. Deleting an archive we cannot read is the one
     /// unrecoverable mistake available here, so a version we do not understand is left alone.
     UnsupportedFormatVersion(u32),
-    /// Could not be examined at all: an open or a read that failed. Its own reason rather than "not an
-    /// archive", which would send whoever reads the plan to look at the file when the answer is its
-    /// permissions or the disk under it.
+    /// Could not be examined at all: an open or a read that failed. Its own reason rather than "not
+    /// an archive", which would send whoever reads the plan to look at the file when the answer is
+    /// its permissions or the disk under it.
     CouldNotRead,
 }
 
 impl std::fmt::Display for ForeignReason {
-    /// Each reason as what the file turned out to be, so a line naming it reads as a sentence. This is
-    /// the answer to "why is that one still there", asked about a file the user can see, so the reason
-    /// is the whole of what is worth reading.
+    /// Each reason as what the file turned out to be, so a line naming it reads as a sentence.
+    // This is the answer to "why is that one still there", asked about a file the user can see, so the
+    // reason is the whole of what is worth reading.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotARegularFile => f.write_str("it is not a plain file"),
@@ -118,9 +133,8 @@ pub struct PruneReport {
     /// What was left alone and the check that rejected each one, carried through from the plan the
     /// prune ran.
     ///
-    /// Named rather than counted, because this is the answer to the question a prune provokes: the
-    /// directory still has files in it and the user wants to know which, and why this build would not
-    /// touch them. A count says "seven" to somebody who can already see seven.
+    /// Named rather than counted: the directory still has files in it, and the question a prune
+    /// provokes is which ones and why this build would not touch them.
     pub foreign: Vec<(PathBuf, ForeignReason)>,
 }
 
@@ -128,6 +142,21 @@ pub struct PruneReport {
 ///
 /// # Errors
 /// [`BackupError::Io`] if the directory cannot be listed.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use apogee_addons::backup::{BackupError, Retain, plan_prune};
+/// # fn demo(dir: &Path, policy: Retain) -> Result<(), BackupError> {
+/// let plan = plan_prune(dir, policy)?;
+/// assert_eq!(plan.keep.len() + plan.delete.len(), plan.ours.len());
+/// for (path, why) in &plan.foreign {
+///     let _left_alone = format!("{}: {why}", path.display());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub fn plan_prune(dir: &Path, policy: Retain) -> Result<PrunePlan, BackupError> {
     let listing = std::fs::read_dir(dir).map_err(|source| BackupError::Io {
         path: dir.to_path_buf(),

@@ -1,8 +1,9 @@
 //! The record an archive carries about itself.
 //!
-//! Written as the last entry so it can only be complete, and read back by name out of the central
-//! directory, which costs a few kilobytes rather than inflating the payload. It is also what proves
-//! an archive is ours: retention deletes on the strength of this record, never on a filename.
+//! Written as the last entry, so it can only ever describe a complete archive, and read back by name
+//! out of the central directory, which costs a few kilobytes rather than inflating the payload. It is
+//! also what proves an archive is ours: retention deletes on the strength of this record, never on a
+//! filename.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +14,10 @@ use super::{RootLabel, RuleRole};
 /// origin.
 pub const BACKUP_FORMAT: &str = "apogee-config-backup";
 
-/// Bumped when the entry-name or manifest layout changes. A reader refuses anything higher, because
-/// deleting an archive it cannot read is the one unrecoverable mistake retention could make.
+/// Bumped when the entry-name or manifest layout changes.
+///
+/// A reader refuses anything higher, because deleting an archive it cannot read is the one
+/// unrecoverable mistake retention could make.
 pub const BACKUP_FORMAT_VERSION: u32 = 1;
 
 /// Entry name the manifest is written under, at the archive root.
@@ -40,8 +43,8 @@ pub struct BackupManifest {
     pub note: Option<String>,
     /// One record per source tree.
     pub roots: Vec<RootRecord>,
-    /// Every payload entry in archive order, so contents can be listed and checked without
-    /// inflating anything but this.
+    /// Every payload entry in archive order, so contents can be listed and checked without inflating
+    /// anything but this.
     pub entries: Vec<EntryRecord>,
 }
 
@@ -61,8 +64,9 @@ pub struct RootRecord {
     pub specials_skipped: u64,
 }
 
-/// One rule and how many entries it matched. A zero here is the point: it is how a rule that does
-/// nothing stays visible after the fact.
+/// One rule and how many entries it matched.
+///
+/// A zero here is the point: it is how a rule that does nothing stays visible after the fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RuleRecord {

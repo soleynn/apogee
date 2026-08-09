@@ -20,6 +20,14 @@ pub enum RootLabel {
 
 impl RootLabel {
     /// The archive path component every entry from this root sits under.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::backup::RootLabel;
+    ///
+    /// assert_eq!(RootLabel::User.prefix(), "user");
+    /// ```
     #[must_use]
     pub fn prefix(self) -> &'static str {
         match self {
@@ -40,7 +48,9 @@ pub enum Presence {
 }
 
 /// Parts of the game tree that are large, regenerable, or redundant, and are dropped unless asked
-/// for. Everything else in the tree is taken without being named.
+/// for.
+///
+/// Everything else in the tree is taken without being named.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GameConfigOpts {
     /// Keep the per-character `log` directories: chat scrollback, unbounded, and tens of megabytes
@@ -69,13 +79,14 @@ impl SelectionRoot {
     /// A root whose immediate children are tested against `include`, with `prune` applied at every
     /// depth.
     ///
-    /// The duplicate check the presets are held to. `cfg(test)` because that is where it is exercised:
-    /// the presets are built by [`Self::assembled`] and asserted here to satisfy this, and there is no
-    /// caller composing a root at runtime for it to guard.
+    /// The duplicate check the presets are held to. Behind `cfg(test)` because that is where it is
+    /// exercised: the presets skip it and are asserted here to satisfy it, and no caller composes a
+    /// root at runtime for it to guard.
     ///
     /// # Errors
-    /// [`BackupError::DuplicateRule`] if two rules in either list render identically, which would
-    /// make their match counts impossible to tell apart in the report.
+    /// [`BackupError::DuplicateRule`](crate::backup::BackupError::DuplicateRule) if two rules in
+    /// either list render identically, which would make their match counts impossible to tell apart
+    /// in the report.
     #[cfg(test)]
     pub(crate) fn new(
         label: RootLabel,
@@ -106,9 +117,19 @@ impl SelectionRoot {
     /// The game's config tree: everything, less the noise `opts` leaves switched off.
     ///
     /// Inclusion names no directory, which is the point. A name that is never spelled cannot be
-    /// misspelled, and a directory a future game patch adds is carried by default rather than
-    /// dropped by default. That puts every literal in this root on the prune side, where getting one
-    /// wrong makes the archive bigger instead of losing settings.
+    /// misspelled, and a directory a future game patch adds is carried by default rather than dropped
+    /// by default, which puts every literal in this root on the prune side.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_addons::backup::{GameConfigOpts, SelectionRoot};
+    ///
+    /// // The defaults leave chat logs, screenshots, rotations and the game's restore blob out.
+    /// let tree = SelectionRoot::game_config("/tmp/config", GameConfigOpts::default());
+    /// assert_eq!(tree.label().prefix(), "user");
+    /// assert_eq!(tree.path(), std::path::Path::new("/tmp/config"));
+    /// ```
     #[must_use]
     pub fn game_config(path: impl Into<PathBuf>, opts: GameConfigOpts) -> Self {
         let mut prune = Vec::new();

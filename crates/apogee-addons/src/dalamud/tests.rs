@@ -1,7 +1,7 @@
 //! Dalamud against a scratch prefix and a hand-written install record.
 //!
 //! No wine and no network. What is checked here is the half that decides whether a launch is touched at
-//! all and, when it is, that the game stays the process the launcher waits on: the injector's own
+//! all and, when it is, that the game stays the process the launcher waits on. The injector's own
 //! command line is pinned in `injector.rs`, and the download pipeline in `tests/dalamud_fetch.rs`.
 
 use std::collections::BTreeMap;
@@ -220,10 +220,6 @@ fn nothing_installed_leaves_the_launch_alone() {
 
 /// The row's caveats are stated every time, before anything is fetched.
 ///
-/// Nothing is said about the runner. A compiled-in caveat used to name one runner as the supported
-/// bet; measured against the real client it loads behind the host's own wine, wine-xiv and Proton
-/// alike, so the claim was false and what a runner costs is the published row's to say.
-///
 /// The tier note is not among them and must not be: it is said for every injectable by the loop that
 /// installs them, and said twice it reads as two different warnings.
 #[test]
@@ -248,8 +244,10 @@ fn the_caveats_are_stated_before_anything_is_fetched() {
     );
 }
 
-/// No runner draws a warning any more, whichever one it is, because the launcher no longer holds an
-/// opinion about which runner this works behind. The row does.
+/// No runner draws a warning any more, whichever one it is. A compiled-in caveat used to name one
+/// runner as the supported bet; measured against the real client it loads behind the host's own wine,
+/// wine-xiv and Proton alike, so the claim was false and what a runner costs is the published row's to
+/// say.
 #[test]
 fn no_runner_draws_a_warning_of_its_own() {
     for runner in ["system-wine", "wine-xiv-staging-10.8", "GE-Proton"] {
@@ -348,10 +346,9 @@ fn a_version_directory_without_its_hash_map_is_not_intact() {
 /// A tree whose bytes moved is an integrity failure that names the file and both digests, not a
 /// sentence about the tree.
 ///
-/// This is the reading somebody does when an install keeps failing: "it does not match its own hashes"
-/// is true of a distribution that served a bad build and of a disk that corrupted one file, and the
-/// file plus the two digests is what tells them apart. The check that produces this used to answer with
-/// a bool, so there was nothing to say either way.
+/// "It does not match its own hashes" is true of a distribution that served a bad build and of a disk
+/// that corrupted one file, and the file plus the two digests is what tells them apart. The check that
+/// produces this used to answer with a bool, so there was nothing to say either way.
 #[test]
 fn a_file_whose_bytes_moved_is_named_with_both_digests() {
     let tmp = tempfile::tempdir().expect("tempdir");

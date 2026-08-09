@@ -1,15 +1,15 @@
 //! Checking a downloaded tree against the hash manifest that describes it.
 //!
-//! Dalamud's bytes are not `sha256`-pinned by Apogee's own manifest, because their version is upstream's
-//! to choose and a pin has to describe bytes somebody keeps serving. What stands in for a pin is the
-//! digest map the distribution publishes: the tree's own `hashes.json`, shipped inside the archive, and
-//! a per-asset digest in the asset metadata.
+//! Dalamud's bytes carry no `sha256` pin of Apogee's own, because their version is upstream's to choose
+//! and a pin has to describe bytes somebody keeps serving. What stands in for one is the digest map the
+//! distribution publishes: the tree's own `hashes.json`, shipped inside the release archive, and a
+//! per-asset digest in the asset metadata.
 //!
-//! Two rules are copied deliberately rather than improved on. The check walks the *manifest*, never the
-//! directory, so a file the map does not list is not a failure: the distribution adds files it does not
-//! track, and refusing them would make every update look corrupt. And one mismatch fails the whole
-//! tree, because there is no per-file repair to fall back to: the answer is always to lay the version
-//! down again.
+//! Two of the distribution's rules are copied deliberately rather than improved on. The check walks the
+//! *manifest*, never the directory, so a file the map does not list is not a failure: the distribution
+//! ships files it does not track, and refusing them would make every update look corrupt. And one
+//! mismatch fails the whole tree, because there is no per-file repair to fall back to: the answer is
+//! always to lay the version down again.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -156,7 +156,8 @@ mod tests {
         (tmp, root)
     }
 
-    /// The digest of `payload`, uppercase, so the fixtures do not depend on a hashing helper under test.
+    /// The digest of the payload, uppercase, so the fixtures do not depend on a hashing helper the
+    /// tests are not exercising.
     fn payload_md5(root: &Path) -> String {
         hash_file(&root.join("sub/thing.dll"), Digest::Md5).expect("hash")
     }
