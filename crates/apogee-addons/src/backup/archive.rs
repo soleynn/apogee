@@ -54,6 +54,29 @@ pub struct BackupSpec {
     pub note: Option<String>,
 }
 
+impl BackupSpec {
+    /// Capture `selection` into `dest_dir`, stamped `created_at`.
+    ///
+    /// The instant is an argument rather than a reading of the clock, so an archive is a function of
+    /// its inputs and two runs over an unchanged tree can be compared byte for byte.
+    #[must_use]
+    pub fn new(selection: Selection, dest_dir: impl Into<PathBuf>, created_at: SystemTime) -> Self {
+        Self {
+            selection,
+            dest_dir: dest_dir.into(),
+            created_at,
+            note: None,
+        }
+    }
+
+    /// Carry a free-text label into the manifest, for a reader deciding which archive to put back.
+    #[must_use]
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+}
+
 /// What one backup captured.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

@@ -6,11 +6,9 @@ use std::sync::Arc;
 
 // Restore is unix-only, and so is everything only it needs.
 #[cfg(unix)]
-use std::collections::BTreeMap;
-
 use apogee_addons::backup::{ArchiveRecord, BackupError, BackupReport, PruneReport, Retain};
 #[cfg(unix)]
-use apogee_addons::backup::{RestorePlan, RestoreReport, RootLabel};
+use apogee_addons::backup::{RestorePlan, RestoreReport};
 use apogee_addons::{AddonError, AddonPaths, Addons};
 
 use crate::addons::AddonBackend;
@@ -943,12 +941,10 @@ impl Core {
                     path: prefix.clone(),
                 }))
             })?;
-        let mut targets = BTreeMap::new();
-        targets.insert(RootLabel::User, target);
-        let plan = RestorePlan {
-            archive: archive.to_path_buf(),
-            targets,
-        };
+        // Derived from the archive's own record rather than stated here: a map this layer wrote would
+        // be a guess at which roots the archive holds, and a guess that misses one restores less than
+        // the archive has while returning like it restored everything.
+        let plan = RestorePlan::into_dir(archive, target).map_err(AddonError::Backup)?;
         // Uncancellable for the same reason as the capture above.
         Ok(
             apogee_addons::backup::restore(&plan, &CancellationToken::new())

@@ -1851,6 +1851,14 @@ fn backup(core: &Core, action: BackupAction) -> Result<(), CliError> {
                     println!("  the tree that was there is at {}", aside.display());
                 }
             }
+            // A restore that put nothing back has to say so. Silence here reads as success to somebody
+            // recovering settings they cannot otherwise get back.
+            for label in &report.absent {
+                println!(
+                    "the archive holds nothing under {}, so nothing was put back for it",
+                    label.prefix()
+                );
+            }
             Ok(())
         }
         BackupAction::Prune(args) => {

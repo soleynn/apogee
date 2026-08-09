@@ -410,3 +410,65 @@ fn restoring_twice_keeps_both_previous_trees() -> Result<(), Fallible> {
     assert_eq!(std::fs::read(a.join("original.txt"))?, b"first");
     Ok(())
 }
+
+/// A plan derived from the archive targets every root the archive holds, which is the part a caller
+/// writing the map itself gets wrong: a label it forgets is not an error, its entries simply match no
+/// target and are passed over.
+#[test]
+fn a_plan_derived_from_the_archive_targets_what_the_archive_holds() -> Result<(), Fallible> {
+    let source = tempfile::tempdir()?;
+    let dest = tempfile::tempdir()?;
+    game_tree(source.path())?;
+    let archive = back_up(source.path(), dest.path())?;
+    let live = tempfile::tempdir()?;
+    let target = live.path().join("config");
+
+    let derived = RestorePlan::into_dir(&archive, &target)?;
+
+    assert_eq!(
+        derived.targets.keys().copied().collect::<Vec<_>>(),
+        apogee_addons::backup::inspect(&archive)?
+            .roots
+            .iter()
+            .map(|root| root.label)
+            .collect::<Vec<_>>(),
+        "every root the archive records has somewhere to land"
+    );
+    let report = restore(&derived, &CancellationToken::new())?;
+    assert_eq!(report.restored.len(), derived.targets.len());
+    assert!(report.absent.is_empty(), "{:?}", report.absent);
+
+    // And it puts back exactly what a caller writing the map by hand would, which is the whole claim:
+    // the derivation is not a different restore, it is the same one with nothing left to get wrong.
+    let stated = live.path().join("stated");
+    restore(&plan(&archive, &stated), &CancellationToken::new())?;
+    assert_eq!(snapshot(&target)?, snapshot(&stated)?);
+    Ok(())
+}
+
+/// A restore that put nothing back says so. Without it the report reads exactly like one that put
+/// everything back: the label lands in neither list, the call returns `Ok`, and the person on the end
+/// of it is recovering settings they cannot otherwise get back.
+#[test]
+fn a_targeted_root_the_archive_holds_nothing_for_is_reported_absent() -> Result<(), Fallible> {
+    let dir = tempfile::tempdir()?;
+    let archive = dir.path().join("empty.apbk");
+    hostile_archive(&archive, &[], &[])?;
+    let live = tempfile::tempdir()?;
+    let target = live.path().join("config");
+
+    let report = restore(&plan(&archive, &target), &CancellationToken::new())?;
+
+    assert!(report.restored.is_empty());
+    assert!(report.skipped.is_empty());
+    assert_eq!(
+        report.absent,
+        [RootLabel::User],
+        "the root that was asked for and never arrived"
+    );
+    assert!(
+        !target.exists(),
+        "and nothing was written where it would go"
+    );
+    Ok(())
+}

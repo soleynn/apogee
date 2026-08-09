@@ -39,17 +39,21 @@ pub(crate) fn create(
     }
     let source = trees.remove(0);
     let dest = profile_dir(backups_dir, profile);
-    let spec = BackupSpec {
-        selection: Selection::new()
-            .with_root(SelectionRoot::game_config(
-                &source,
-                GameConfigOpts::default(),
-            ))
-            .map_err(AddonError::Backup)?,
-        dest_dir: dest.clone(),
-        // Supplied rather than read from the clock here, so two runs are comparable in a test.
-        created_at: UNIX_EPOCH + Duration::from_secs(created_at),
-        note,
+    let selection = Selection::new()
+        .with_root(SelectionRoot::game_config(
+            &source,
+            GameConfigOpts::default(),
+        ))
+        .map_err(AddonError::Backup)?;
+    // The instant is supplied rather than read from the clock here, so two runs are comparable in a test.
+    let spec = BackupSpec::new(
+        selection,
+        dest.clone(),
+        UNIX_EPOCH + Duration::from_secs(created_at),
+    );
+    let spec = match note {
+        Some(note) => spec.note(note),
+        None => spec,
     };
     let report = apogee_addons::backup::create(&spec, cancel).map_err(AddonError::Backup)?;
     if let Some(keep) = std::num::NonZeroUsize::new(kept as usize) {
