@@ -1035,6 +1035,12 @@ async fn launch_game(
         )
         .await;
 
+    // Read before the plan is spawned, because the plan is moved into the spawn and because the
+    // question is about this launch: a companion writes its proof of coming up seconds from now, into
+    // a file that survives previous sessions, so a moment from before the spawn is what tells this
+    // launch's evidence from the last one's.
+    let redirected_at = plan.supervised().is_some().then(SystemTime::now);
+
     emit(tx, FlowState::Launching);
     let handle = ctx.launch.launch(plan, cancel, tx).await?;
     tracing::debug!(pid = handle.game_pid(), "game process running");
@@ -1047,6 +1053,7 @@ async fn launch_game(
             handle.game_pid(),
             handle.prefix(),
             profile.external.clone(),
+            redirected_at,
             cancel,
             tx,
         )

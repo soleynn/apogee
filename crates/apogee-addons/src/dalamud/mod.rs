@@ -13,6 +13,7 @@
 //! alternative is a launcher that refuses to start the game because a companion is between releases,
 //! which is the wrong trade every time.
 
+mod confirm;
 mod injector;
 mod integrity;
 mod wire;
@@ -26,6 +27,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+pub use confirm::LoadEvidence;
 pub use injector::{ClientLanguage, InjectorInvocation, LoadMode, PluginPolicy, injector_argv};
 pub use wire::Installed;
 
