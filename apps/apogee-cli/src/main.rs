@@ -2143,6 +2143,9 @@ fn render_setup(event: &SetupEvent) -> String {
         SetupEvent::Installed { what } => format!("setup: installed {what}"),
         SetupEvent::AlreadyPresent { what } => format!("setup: {what} is already applied"),
         SetupEvent::Applying { verb, reason } => format!("setup: applying {verb} ({reason})"),
+        SetupEvent::Reapplying { verb, because } => {
+            format!("setup: {verb} was applied before but {because}")
+        }
         SetupEvent::Applied { verb } => format!("setup: applied {verb}"),
         SetupEvent::Caveat { what, note } => format!("setup: {what} note: {note}"),
         SetupEvent::Failed { what, reason } => format!("setup: {what} failed: {reason}"),

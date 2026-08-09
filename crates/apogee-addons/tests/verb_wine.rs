@@ -6,6 +6,11 @@
 //! other half: the verb the hosted manifest actually ships, applied to a `wineboot`-initialized prefix,
 //! three times over. What it proves is the gate's property: that applying a verb again is a no-op that
 //! succeeds rather than a program waiting on a prompt, and that the prefix records it once either way.
+//!
+//! And the other direction, which no hermetic test reaches: the value taken back out of a real prefix
+//! and the next pass noticing. The hermetic tests write a `user.reg` themselves, so what they check is
+//! the decision over a file of their own making; this checks it over one a wine wrote, after a real
+//! `reg delete`.
 
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
@@ -183,5 +188,117 @@ async fn the_shipped_verb_applies_to_a_real_prefix_and_re_applies_as_a_no_op() {
             .await
             .expect("query after re-applying"),
         "the value is still there"
+    );
+}
+
+/// Take the override back out of the prefix the way anything else on the host would, with the runner's
+/// own `reg`. This is the live repro: the value is removed while the prefix's record still claims the
+/// verb, and the key it lived in stays behind.
+async fn delete_override(runtime: &Runtime, prefix: &Prefix) -> Result<(), Box<dyn Error>> {
+    let delete = ProgramInPrefix::new(
+        "reg",
+        vec![
+            "delete".to_owned(),
+            r"HKCU\Software\Wine\DllOverrides".to_owned(),
+            "/v".to_owned(),
+            "winemenubuilder.exe".to_owned(),
+            "/f".to_owned(),
+        ],
+    );
+    let run = runtime
+        .run_in_prefix(prefix, &delete, &CancellationToken::new())
+        .await?;
+    if run.ok() {
+        return Ok(());
+    }
+    Err(format!("reg delete did not remove the value: {}", run.diagnostic()).into())
+}
+
+/// Wait, bounded, for the prefix's registry file to catch up with a write.
+///
+/// Wine persists the registry on an idle wineserver shutdown some time after the program that wrote it
+/// exits, so a file read taken straight afterwards still shows the old contents. On the launch path
+/// this never arises, because setup is planned before anything has run in the prefix; here the write
+/// and the read are seconds apart, so the wait has to be explicit.
+///
+/// Reads the raw file rather than going through the reader under test, so what it waits for is the
+/// on-disk state itself.
+fn await_flush(prefix: &Prefix, still_there: bool) -> Result<(), Box<dyn Error>> {
+    let hive = prefix.path().join("user.reg");
+    for _ in 0..300 {
+        let text = std::fs::read_to_string(&hive).unwrap_or_default();
+        if text.contains("\"winemenubuilder.exe\"") == still_there {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!("{} never caught up with the write", hive.display()).into())
+}
+
+/// The failure this reaches for: the value removed from under the launcher, the prefix still recording
+/// the verb, and the next pass having to notice rather than report it as already applied.
+///
+/// Proved by hand before it was fixed, by deleting the value and launching again: the launcher said
+/// `no-desktop-integration` was already applied and left the value gone. Nothing on disk names it, so
+/// the record was the only evidence there was and the record was wrong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn a_recorded_verb_whose_registry_value_was_deleted_is_applied_again() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (runtime, addons, prefix) = prepared(root.path()).await.expect("prepare under wine");
+    let manifest = hosted().expect("the hosted manifest verifies");
+    let cancel = CancellationToken::new();
+    let events = SetupEvents::none();
+
+    addons
+        .apply_setup(&manifest, &prefix, &cancel, &events)
+        .await
+        .expect("first apply");
+    assert_eq!(
+        recorded(&prefix).expect("record"),
+        ["no-desktop-integration"]
+    );
+    await_flush(&prefix, true).expect("the value reaches the file");
+
+    delete_override(&runtime, &prefix)
+        .await
+        .expect("remove the value");
+    assert!(
+        !override_present(&runtime, &prefix)
+            .await
+            .expect("query after deleting"),
+        "the value really is gone, by the runner's own reading of it"
+    );
+    await_flush(&prefix, false).expect("the removal reaches the file");
+    assert_eq!(
+        recorded(&prefix).expect("record"),
+        ["no-desktop-integration"],
+        "and the prefix still claims the verb, which is what makes this the failing case"
+    );
+
+    let report = addons
+        .apply_setup(&manifest, &prefix, &cancel, &events)
+        .await
+        .expect("apply over a prefix whose value was removed");
+
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .map(|o| o.state.clone())
+            .collect::<Vec<_>>(),
+        [SetupState::Applied],
+        "the record does not stand in for a registry value that is gone: {report:?}"
+    );
+    assert!(
+        override_present(&runtime, &prefix)
+            .await
+            .expect("query after re-applying"),
+        "and the value is back"
+    );
+    assert_eq!(
+        recorded(&prefix).expect("record"),
+        ["no-desktop-integration"],
+        "reapplying does not record the verb twice"
     );
 }

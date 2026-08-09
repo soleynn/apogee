@@ -308,8 +308,11 @@ pub struct Verb {
     /// applied again, which is how something a runner upgrade removed from under us comes back. And it is
     /// the same evidence a health check would want.
     ///
-    /// Empty is allowed and means "the record is the only evidence there is", which is the honest answer
-    /// for a verb whose whole effect is a registry value: there is no file to look for.
+    /// Empty is allowed, and is what a verb whose whole effect is a registry value states: there is no
+    /// file to look for. Such a verb is not thereby unchecked. Its ops already declare the key, name and
+    /// value, so the setup layer derives the question from the op and reads the prefix's own registry
+    /// files, and this field is for the effects that cannot be derived that way: what a placement put
+    /// somewhere, which its op names only the destination directory of.
     pub verify: Vec<ComponentPath>,
     pub ops: Vec<VerbOp>,
 }
@@ -1075,7 +1078,7 @@ mod tests {
     }
 
     /// A verb whose whole effect is a registry value has nothing on disk to look for, so it names
-    /// nothing to verify and the prefix's record is the only evidence there is.
+    /// nothing to verify. What checks it is its own op, which already says what it wrote.
     #[test]
     fn a_verb_whose_effect_is_a_registry_value_names_nothing_to_verify() {
         let parsed = parse(&manifest()).expect("parse");

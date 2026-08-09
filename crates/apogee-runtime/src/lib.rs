@@ -23,6 +23,7 @@ mod error;
 mod exec;
 #[cfg(target_os = "linux")]
 mod extract;
+mod hive;
 #[cfg(target_os = "linux")]
 mod install;
 #[cfg(target_os = "linux")]
@@ -68,6 +69,7 @@ pub use error::{
 pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
+pub use hive::RegistryEffect;
 pub use metadata::{
     DxvkRef, InstalledComponent, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord,
 };
