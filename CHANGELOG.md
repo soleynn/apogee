@@ -30,6 +30,7 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
 - Back off between retries and honor a clamped Retry-After (#172) _(added)_
+- Cap and vet the redirects the download client will follow (#173) _(added)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
