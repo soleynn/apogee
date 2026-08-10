@@ -1,11 +1,17 @@
-//! The segmented multi-connection transfer engine and the single/segmented dispatch.
+//! The segmented transfer engine and the single/segmented dispatch.
 //!
-//! A file of known length whose host serves ranges is divided into segments and pulled by a pool of
-//! connection workers writing at their own offsets into one preallocated `.part`. A work queue plus
-//! that pool is the whole mechanism: a stalled or dropped connection re-queues the *remaining* bytes
-//! of its segment (nothing already durable is lost), and the completed-interval journal lets the
-//! whole transfer resume across a restart. When the length is unknown, the file is small, or the host
+//! A file of known length whose host serves ranges is divided into segments, each pulled by its own
+//! worker writing at its own offset into one preallocated `.part`. A work queue plus that pool of
+//! workers is the whole mechanism: a segment that stalls or drops re-queues the *remaining* bytes of
+//! its own range (nothing already durable is lost), and the completed-interval journal lets the whole
+//! transfer resume across a restart. When the length is unknown, the file is small, or the host
 //! ignores ranges, the transfer falls back to the single-connection engine in [`crate::download`].
+//!
+//! **What a segment costs in sockets is the server's decision, not this engine's.** Over HTTP/1.1
+//! each concurrent segment needs a connection of its own; an h2 host multiplexes every one of them
+//! onto a single connection, where they are streams sharing one congestion window. So the caps and
+//! slots named for connections, here and on the scheduler, bound *concurrent segment requests*, which
+//! is the same number as connections only in the first case.
 //!
 //! Re-queued work does not have to go back to the source that failed it. Every unit of work carries
 //! the source it was asked from, and every failure of it - a refused connection, a dropped body, a

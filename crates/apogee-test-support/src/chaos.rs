@@ -70,9 +70,10 @@ impl Stats {
         self.requests.load(Ordering::SeqCst)
     }
 
-    /// The high-water mark of response bodies streaming at once, i.e. the peak number of concurrent
-    /// connections the client opened. A segmented download drives this above 1; a demoted one holds
-    /// it at 1, and it never exceeds the connection cap.
+    /// The high-water mark of response bodies streaming at once. This server speaks HTTP/1.1 only, so
+    /// that is also the peak number of connections the client opened; against an h2 host the two part
+    /// company and this counter stays the useful one. A segmented download drives it above 1; a
+    /// demoted one holds it at 1, and it never exceeds the client's concurrency cap.
     #[must_use]
     pub fn peak_concurrency(&self) -> u64 {
         self.peak_concurrency.load(Ordering::SeqCst)

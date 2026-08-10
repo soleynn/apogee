@@ -3,8 +3,10 @@
 //! Two independent caps. A **job** admission gate bounds how many downloads run at once and, unlike a
 //! FIFO semaphore, admits a waiting higher-priority job (a boot patch) ahead of a lower one (game
 //! data, then optional assets) when a slot frees. A global **connection** semaphore bounds how many
-//! sockets are open across every job at once. One [`Scheduler`] is shared by every clone of the
-//! `Fetcher`, so the caps hold across concurrently submitted jobs.
+//! transfer requests are in flight across every job at once: one socket each against an HTTP/1.1
+//! source, and streams on that host's single connection against an h2 one, so what this cap holds
+//! steady is the request count rather than the socket count. One [`Scheduler`] is shared by every
+//! clone of the `Fetcher`, so the caps hold across concurrently submitted jobs.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -53,7 +55,8 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    /// A scheduler admitting `max_files` jobs at once and `max_connections_total` sockets across them.
+    /// A scheduler admitting `max_files` jobs at once and `max_connections_total` concurrent transfer
+    /// requests across them.
     pub(crate) fn new(max_files: usize, max_connections_total: usize) -> Self {
         Self {
             admission: Mutex::new(Admission {
