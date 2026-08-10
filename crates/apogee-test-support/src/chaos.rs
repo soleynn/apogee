@@ -57,6 +57,7 @@ pub struct Stats {
     requests: AtomicU64,
     bytes_served: AtomicU64,
     served_ranges: Mutex<Vec<Range<u64>>>,
+    requested_starts: Mutex<Vec<u64>>,
     request_headers: Mutex<Vec<RequestHeaders>>,
     active: AtomicU64,
     peak_concurrency: AtomicU64,
@@ -77,16 +78,22 @@ impl Stats {
         self.peak_concurrency.load(Ordering::SeqCst)
     }
 
-    /// How many body bytes the server has written across all responses. The waste-budget assertion:
-    /// a resumed download must not re-fetch more than the interrupted tail.
+    /// How many body bytes the server has handed to the connection across all responses.
     ///
-    /// A chunk counts once the body task has handed it over, so bytes a client never took are never
-    /// counted. That makes the tally exact for any response a client reads to the end, and racy for
-    /// one it abandons: if the connection goes away before the body task is scheduled, the bytes are
-    /// generated, never sent, and never counted. A client that abandons a response on purpose (a
-    /// `bytes=0-0` range-capability probe, say) must therefore treat that body as a tolerance in an
-    /// exact byte count, and lean on [`requests`](Self::requests) - taken on the request path, before
-    /// any body - for the exact half of the claim.
+    /// Exact for a response a client reads to the end, and **not** a measure of what an abandoned one
+    /// delivered. A chunk counts once the body task has passed it on, which is only the first stage
+    /// of a pipeline: the frame channel, the connection's own buffer, the kernel send buffer, then
+    /// the peer's receive buffer. A client that walks away leaves everything already in that pipeline
+    /// counted and unread, so the tally runs *over* by however much fit, which on loopback is the
+    /// socket buffers rather than a chunk or two (`tcp_wmem` alone auto-tunes into the megabytes). It
+    /// can also run *under*, when the connection goes away before the body task is scheduled at all
+    /// and the bytes are never generated.
+    ///
+    /// So it measures what a completed transfer moved. It cannot bound what a cancelled or resumed
+    /// one wasted, because the overshoot is a property of the host's socket buffers and its
+    /// scheduling rather than of the client under test. Measure the client for that instead: the
+    /// start of each [served range](Self::served_ranges) is the offset the client asked to resume
+    /// from, which it chose before any of this buffering existed.
     #[must_use]
     pub fn bytes_served(&self) -> u64 {
         self.bytes_served.load(Ordering::SeqCst)
@@ -145,6 +152,31 @@ impl Stats {
             .iter()
             .map(|h| h.referer.clone())
             .collect()
+    }
+
+    /// The offset every request asked to start at, in arrival order: a `Range` header's start, or `0`
+    /// for a request that carried none.
+    ///
+    /// Taken on the request path like [`requests`](Self::requests), so it is ordered and exact.
+    /// [`served_ranges`](Self::served_ranges) answers a different question and cannot substitute: it
+    /// is appended by the body task when that body ends, so a response a client abandoned can be
+    /// recorded after the *next* request has already arrived, and a test that splits it into
+    /// per-request groups will attribute it to the wrong one.
+    #[must_use]
+    pub fn requested_starts(&self) -> Vec<u64> {
+        self.requested_starts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Record the offset one request asked to start at.
+    fn record_requested_start(&self, headers: &hyper::HeaderMap) {
+        let start = parse_range_start(headers.get(RANGE)).unwrap_or(0);
+        self.requested_starts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(start);
     }
 
     /// Capture the headers a policy test cares about from one request.
@@ -679,6 +711,7 @@ async fn handle(
     stats: Arc<Stats>,
 ) -> Result<Response<ChaosBody>, Infallible> {
     let request_index = stats.requests.fetch_add(1, Ordering::SeqCst) + 1;
+    stats.record_requested_start(req.headers());
     stats.record_request_headers(req.headers());
 
     if req.method() != Method::GET {
