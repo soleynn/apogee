@@ -27,6 +27,7 @@ is tagged with its change type. Versioning aims to follow
 - Apply the catalog's prefix setup outside a launch (#162) _(fixed)_
 - Report the setup a prefix is missing in its health check (#163) _(fixed)_
 - Refuse every redirect on the client that carries a credential (#174) _(added)_
+- Make the TLS escape hatch reach this machine's trust store (#184) _(fixed)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
