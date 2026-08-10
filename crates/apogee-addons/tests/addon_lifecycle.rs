@@ -636,3 +636,31 @@ async fn a_teardown_cancelled_first_never_starts_the_tools_it_has_left() -> Resu
     assert!(!marker.exists(), "the tool ran anyway");
     Ok(())
 }
+
+/// The check a launch makes is readable without one, so a shell can show a broken entry while the user
+/// is still editing it rather than at the moment the game starts.
+#[test]
+fn an_entry_says_why_it_cannot_be_run_before_a_launch_asks() -> Result<(), Fallible> {
+    let relative = ExternalAddon::new(Path::new("tool.sh"), vec![], RunIn::Host, Trigger::OnClose);
+    assert!(
+        relative.is_err(),
+        "a relative program is refused on the way in"
+    );
+
+    let in_prefix = ExternalAddon::new(
+        Path::new("/opt/tool.exe"),
+        vec![],
+        RunIn::Prefix,
+        Trigger::OnClose,
+    )?;
+    // The same entry is a problem for one launch and not for another, so the reading takes what the
+    // launch it would join will have rather than answering for entries in the abstract.
+    assert!(in_prefix.problem(0, true).is_none());
+    let refused = in_prefix.problem(0, false).expect("no prefix to run in");
+    assert!(
+        refused.chain().contains("runs inside a prefix"),
+        "{}",
+        refused.chain()
+    );
+    Ok(())
+}

@@ -70,7 +70,7 @@ impl LoadEvidence {
     /// The default is 90 seconds: the game's own start-up time on a cold prefix plus room to spare,
     /// measured against a real client rather than guessed.
     #[must_use]
-    pub fn within(mut self, window: Duration) -> Self {
+    pub const fn within(mut self, window: Duration) -> Self {
         self.window = window;
         self
     }

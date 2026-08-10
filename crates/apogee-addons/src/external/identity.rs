@@ -40,8 +40,7 @@ pub(crate) struct Running {
 fn owned_by_us(pid: i32) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(format!("/proc/{pid}"))
-        .map(|m| m.uid() == rustix::process::geteuid().as_raw())
-        .unwrap_or(false)
+        .is_ok_and(|m| m.uid() == rustix::process::geteuid().as_raw())
 }
 
 /// The argument vector of `pid`, split on the separator the kernel uses.

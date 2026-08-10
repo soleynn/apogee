@@ -861,8 +861,8 @@ fn announce_patching(
     // would tell the user a backup was attempted, and reporting it would fail an install that is
     // going perfectly well.
     let has_config =
-        !apogee_addons::backup::game_config_dirs(&ctx.prefixes_dir.join(prefix_name(profile)))
-            .is_empty();
+        apogee_addons::backup::game_config_trees(&ctx.prefixes_dir.join(prefix_name(profile)))
+            .is_ok();
     if settings.backup_before_patch && has_config {
         emit(tx, FlowState::BackingUp);
         match crate::backup::create(

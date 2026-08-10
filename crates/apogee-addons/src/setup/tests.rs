@@ -246,11 +246,18 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
         .await
         .expect("second pass");
 
-    assert_eq!(
-        report.outcomes.iter().map(|o| &o.state).collect::<Vec<_>>(),
-        [&SetupState::Applied],
-        "the record does not stand in for an effect that is gone"
+    // Reapplied rather than Applied: the report says the same thing the stream does, so a caller
+    // reading only the report can still tell setup that was missing from setup that came back.
+    assert!(
+        matches!(
+            report.outcomes.as_slice(),
+            [SetupOutcome { state: SetupState::Reapplied { because }, .. }]
+                if because.contains("thing.dll")
+        ),
+        "the record does not stand in for an effect that is gone: {:?}",
+        report.outcomes
     );
+    assert_eq!(report.present(), ["checked"], "and it counts as present");
     assert!(prefix.drive_c().join("apogee/checked/thing.dll").is_file());
 
     // And it says why it came back rather than only that it ran. A verb reapplied every launch is what

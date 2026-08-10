@@ -142,13 +142,13 @@ impl GameContext {
     /// executable's own name and hands off, so this can be the pre-handoff loader, correct when it
     /// was read and expected to die.
     #[must_use]
-    pub fn game_pid(&self) -> i32 {
+    pub const fn game_pid(&self) -> i32 {
         self.pid
     }
 
     /// The prefix, if the launch has one.
     #[must_use]
-    pub fn prefix(&self) -> Option<&Prefix> {
+    pub const fn prefix(&self) -> Option<&Prefix> {
         self.prefix.as_ref()
     }
 }

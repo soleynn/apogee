@@ -280,14 +280,19 @@ async fn a_recorded_verb_whose_registry_value_was_deleted_is_applied_again() {
         .await
         .expect("apply over a prefix whose value was removed");
 
-    assert_eq!(
-        report
-            .outcomes
-            .iter()
-            .map(|o| o.state.clone())
-            .collect::<Vec<_>>(),
-        [SetupState::Applied],
-        "the record does not stand in for a registry value that is gone: {report:?}"
+    // `Reapplied` rather than `Applied`, and the distinction is the point: the prefix recorded this
+    // verb, so what happened is setup coming back rather than setup that was missing, and the reason
+    // is the reading that says so.
+    let [outcome] = report.outcomes.as_slice() else {
+        panic!("one verb ran, so one outcome: {report:?}");
+    };
+    let SetupState::Reapplied { because, .. } = &outcome.state else {
+        panic!("the record does not stand in for a registry value that is gone: {report:?}");
+    };
+    assert!(
+        because.contains("winemenubuilder.exe"),
+        "the reason names the value that was read, so a reapply on every launch can be told from a \
+         wrong reading: {because:?}"
     );
     assert!(
         override_present(&runtime, &prefix)

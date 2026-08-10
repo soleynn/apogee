@@ -85,7 +85,7 @@ pub(crate) struct Rule {
 impl Rule {
     /// A rule that can only ever match a directory.
     #[must_use]
-    pub(crate) fn dir(name: NameMatch, expect: Expect) -> Self {
+    pub(crate) const fn dir(name: NameMatch, expect: Expect) -> Self {
         Self {
             kind: EntryKind::Dir,
             name,
@@ -95,7 +95,7 @@ impl Rule {
 
     /// A rule that can only ever match a regular file.
     #[must_use]
-    pub(crate) fn file(name: NameMatch, expect: Expect) -> Self {
+    pub(crate) const fn file(name: NameMatch, expect: Expect) -> Self {
         Self {
             kind: EntryKind::File,
             name,
@@ -105,7 +105,7 @@ impl Rule {
 
     /// What zero matches means for this rule.
     #[must_use]
-    pub(crate) fn expect(&self) -> Expect {
+    pub(crate) const fn expect(&self) -> Expect {
         self.expect
     }
 

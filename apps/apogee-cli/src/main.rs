@@ -322,7 +322,6 @@ enum BackupAction {
     /// List a profile's backups, newest first.
     List(TargetArgs),
     /// Put a backup back. The tree it replaces is set aside, not deleted.
-    #[cfg(unix)]
     Restore(BackupRestoreArgs),
     /// Delete all but the newest N backups. Only archives this launcher wrote are considered.
     Prune(BackupPruneArgs),
@@ -338,7 +337,6 @@ struct BackupCreateArgs {
     note: Option<String>,
 }
 
-#[cfg(unix)]
 #[derive(Args)]
 struct BackupRestoreArgs {
     /// Profile id or unique name.
@@ -1830,14 +1828,13 @@ fn backup(core: &Core, action: BackupAction) -> Result<(), CliError> {
             for record in records {
                 println!(
                     "{:>10}  {:>9}  {}",
-                    record.created_at,
+                    unix_seconds(record.created_at),
                     record.bytes,
                     record.path.display()
                 );
             }
             Ok(())
         }
-        #[cfg(unix)]
         BackupAction::Restore(args) => {
             let profile = resolve_profile(core, &args.profile)?;
             let report = core.restore_config(profile.id, &args.archive)?;
@@ -2191,6 +2188,13 @@ fn render_addon(event: &AddonEvent) -> String {
     }
 }
 
+/// An instant as whole seconds since the epoch, which is what a listing column shows.
+fn unix_seconds(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
+}
+
 /// Render one prefix-setup event as a plain line. A caveat is printed like everything else rather than
 /// saved for a summary, because being read while the thing is being set up is its whole purpose.
 fn render_setup(event: &SetupEvent) -> String {
@@ -2213,6 +2217,9 @@ fn render_setup(event: &SetupEvent) -> String {
         SetupEvent::Applied { verb } => format!("setup: applied {verb}"),
         SetupEvent::Caveat { what, note } => format!("setup: {what} note: {note}"),
         SetupEvent::Failed { what, reason } => format!("setup: {what} failed: {reason}"),
+        SetupEvent::Stopped { applied, .. } => {
+            format!("setup: stopped after {applied} verb(s)")
+        }
         SetupEvent::CatalogUnavailable {
             detail,
             using_cached,

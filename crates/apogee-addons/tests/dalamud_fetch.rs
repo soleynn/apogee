@@ -81,6 +81,10 @@ struct Distribution {
 }
 
 impl Distribution {
+    // `Box<dyn Error>` is not `Send`, which is only a problem for a future handed to a multi-threaded
+    // executor. `#[tokio::test]` runs this one single-threaded, and `Box<dyn Error>` is the ordinary
+    // idiom for a test's own error type.
+    #[allow(clippy::future_not_send)]
     async fn start(runtime_required: bool, asset_version: u32) -> Result<Self, Box<dyn Error>> {
         let release = ChaosServer::serving(release_zip()?).tls().start().await?;
         let assets = ChaosServer::serving(asset_zip()?).tls().start().await?;
@@ -119,7 +123,7 @@ impl Distribution {
         })
     }
 
-    fn servers(&self) -> [&ChaosServer; 5] {
+    const fn servers(&self) -> [&ChaosServer; 5] {
         [
             &self.version,
             &self.release,

@@ -6,7 +6,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use apogee_addons::AddonError;
 use apogee_addons::backup::{
-    BackupError, BackupReport, BackupSpec, GameConfigOpts, Retain, Selection, SelectionRoot,
+    BackupReport, BackupSpec, GameConfigOpts, Retain, Selection, SelectionRoot,
 };
 
 use crate::error::CoreError;
@@ -31,13 +31,8 @@ pub(crate) fn create(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(BackupReport, Vec<PathBuf>), CoreError> {
     let prefix = prefixes_dir.join(crate::flow::prefix_name(profile));
-    let mut trees = apogee_addons::backup::game_config_dirs(&prefix);
-    if trees.is_empty() {
-        return Err(CoreError::Addons(AddonError::Backup(
-            BackupError::MissingRoot { path: prefix },
-        )));
-    }
-    let source = trees.remove(0);
+    let trees = apogee_addons::backup::game_config_trees(&prefix).map_err(AddonError::Backup)?;
+    let source = trees.live().to_path_buf();
     let dest = profile_dir(backups_dir, profile);
     let selection = Selection::new()
         .with_root(SelectionRoot::game_config(
@@ -61,7 +56,7 @@ pub(crate) fn create(
         // one safe.
         apogee_addons::backup::prune(&dest, Retain::keep(keep)).map_err(AddonError::Backup)?;
     }
-    Ok((report, trees))
+    Ok((report, trees.others().to_vec()))
 }
 
 /// Where one profile's archives live.

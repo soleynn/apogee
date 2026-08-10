@@ -13,6 +13,7 @@
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::archive::inspect;
 use super::error::BackupError;
@@ -41,13 +42,13 @@ impl Retain {
     /// # }
     /// ```
     #[must_use]
-    pub fn keep(n: NonZeroUsize) -> Self {
+    pub const fn keep(n: NonZeroUsize) -> Self {
         Self(n)
     }
 
     /// How many are kept.
     #[must_use]
-    pub fn count(self) -> usize {
+    pub const fn count(self) -> usize {
         self.0.get()
     }
 }
@@ -56,11 +57,18 @@ impl Retain {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ArchiveRecord {
+    /// The archive file.
     pub path: PathBuf,
     /// From the record, never from the filename: an instant rendered into a name is a fragile
     /// ordering key, and two backups in one second share a stamp.
-    pub created_at: u64,
+    ///
+    /// The same type [`BackupSpec::created_at`](super::BackupSpec) is given, which is the point: one
+    /// of these is what a capture was stamped with and the other is what a listing reads back, and a
+    /// bare count of seconds on one side of that round trip is a unit nothing states.
+    pub created_at: SystemTime,
+    /// The format version the archive declares, which is what a reader checks before deleting it.
     pub format_version: u32,
+    /// The archive file's size on disk.
     pub bytes: u64,
 }
 
@@ -128,7 +136,9 @@ pub struct PrunePlan {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PruneReport {
+    /// The archives that were removed.
     pub deleted: Vec<PathBuf>,
+    /// How many of ours were kept.
     pub kept: usize,
     /// What was left alone and the check that rejected each one, carried through from the plan the
     /// prune ran.
@@ -136,6 +146,31 @@ pub struct PruneReport {
     /// Named rather than counted: the directory still has files in it, and the question a prune
     /// provokes is which ones and why this build would not touch them.
     pub foreign: Vec<(PathBuf, ForeignReason)>,
+}
+
+/// Our archives in `dir`, newest first, identified by reading each one's own record.
+///
+/// The same identification a prune makes, so what a caller lists and what a prune would delete cannot
+/// disagree. Anything the directory holds that is not ours is left out; [`plan_prune`] is the shape
+/// that says which of those there were and why.
+///
+/// # Errors
+/// [`BackupError::Io`] if the directory cannot be listed.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use apogee_addons::backup::{BackupError, archives};
+/// # fn demo(dir: &Path) -> Result<(), BackupError> {
+/// for record in archives(dir)? {
+///     let (when, size) = (record.created_at, record.bytes);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn archives(dir: &Path) -> Result<Vec<ArchiveRecord>, BackupError> {
+    Ok(scan(dir)?.0)
 }
 
 /// Work out what a prune of `dir` under `policy` would do. Reads, never writes.
@@ -158,35 +193,7 @@ pub struct PruneReport {
 /// # }
 /// ```
 pub fn plan_prune(dir: &Path, policy: Retain) -> Result<PrunePlan, BackupError> {
-    let listing = std::fs::read_dir(dir).map_err(|source| BackupError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-
-    let mut ours = Vec::new();
-    let mut foreign = Vec::new();
-    for entry in listing {
-        let entry = entry.map_err(|source| BackupError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        match identify(&entry, &path) {
-            Ok(record) => ours.push(record),
-            Err(reason) => foreign.push((path, reason)),
-        }
-    }
-
-    // Newest first. The tie-break on the name keeps the order total, so a plan is the same on every
-    // run over an unchanged directory.
-    ours.sort_by(|a, b| {
-        b.created_at.cmp(&a.created_at).then_with(|| {
-            a.path
-                .as_os_str()
-                .as_encoded_bytes()
-                .cmp(b.path.as_os_str().as_encoded_bytes())
-        })
-    });
+    let (ours, foreign) = scan(dir)?;
     let keep: Vec<PathBuf> = ours
         .iter()
         .take(policy.count())
@@ -228,6 +235,47 @@ pub fn prune(dir: &Path, policy: Retain) -> Result<PruneReport, BackupError> {
     })
 }
 
+/// What one reading of a backup directory found: ours, newest first, and everything else with the
+/// check that rejected it.
+type Scanned = (Vec<ArchiveRecord>, Vec<(PathBuf, ForeignReason)>);
+
+/// Read `dir` once: ours, newest first, and everything else with the check that rejected it.
+///
+/// One walk behind both the listing and the plan, so the two cannot come to different conclusions
+/// about the same directory.
+fn scan(dir: &Path) -> Result<Scanned, BackupError> {
+    let listing = std::fs::read_dir(dir).map_err(|source| BackupError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+
+    let mut ours = Vec::new();
+    let mut foreign = Vec::new();
+    for entry in listing {
+        let entry = entry.map_err(|source| BackupError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        match identify(&entry, &path) {
+            Ok(record) => ours.push(record),
+            Err(reason) => foreign.push((path, reason)),
+        }
+    }
+
+    // Newest first. The tie-break on the name keeps the order total, so a reading is the same on
+    // every run over an unchanged directory.
+    ours.sort_by(|a, b| {
+        b.created_at.cmp(&a.created_at).then_with(|| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+        })
+    });
+    Ok((ours, foreign))
+}
+
 /// Decide whether one directory entry is one of ours, cheapest check first.
 fn identify(entry: &std::fs::DirEntry, path: &Path) -> Result<ArchiveRecord, ForeignReason> {
     let meta = entry
@@ -244,7 +292,7 @@ fn identify(entry: &std::fs::DirEntry, path: &Path) -> Result<ArchiveRecord, For
     match inspect(path) {
         Ok(manifest) => Ok(ArchiveRecord {
             path: path.to_path_buf(),
-            created_at: manifest.created_at,
+            created_at: UNIX_EPOCH + Duration::from_secs(manifest.created_at),
             format_version: manifest.format_version,
             bytes: meta.len(),
         }),
@@ -266,14 +314,11 @@ fn classify_unreadable(path: &Path) -> ForeignReason {
     let Ok(file) = std::fs::File::open(path) else {
         return ForeignReason::NotAnArchive;
     };
-    match zip::ZipArchive::new(file) {
-        Ok(mut zip) => {
-            if zip.by_name(super::manifest::MANIFEST_ENTRY).is_ok() {
-                ForeignReason::UnreadableRecord
-            } else {
-                ForeignReason::NoRecord
-            }
+    zip::ZipArchive::new(file).map_or(ForeignReason::NotAnArchive, |mut zip| {
+        if zip.by_name(super::manifest::MANIFEST_ENTRY).is_ok() {
+            ForeignReason::UnreadableRecord
+        } else {
+            ForeignReason::NoRecord
         }
-        Err(_) => ForeignReason::NotAnArchive,
-    }
+    })
 }

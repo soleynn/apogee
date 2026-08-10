@@ -103,12 +103,12 @@ fn undone(prefix: &Prefix, op: &VerbOp) -> Option<String> {
     match op {
         VerbOp::Registry(edit) => gone(prefix.registry_effect(edit))
             .then(|| format!("{}\\{} no longer holds what it wrote", edit.key, edit.name)),
-        VerbOp::RegistryDelete(delete) => {
-            gone(prefix.registry_removal_effect(delete)).then(|| match &delete.name {
-                Some(name) => format!("{}\\{name} is back in the registry", delete.key),
-                None => format!("{} is back in the registry", delete.key),
-            })
-        }
+        VerbOp::RegistryDelete(delete) => gone(prefix.registry_removal_effect(delete)).then(|| {
+            delete.name.as_ref().map_or_else(
+                || format!("{} is back in the registry", delete.key),
+                |name| format!("{}\\{name} is back in the registry", delete.key),
+            )
+        }),
         VerbOp::Files { .. } => None,
     }
 }

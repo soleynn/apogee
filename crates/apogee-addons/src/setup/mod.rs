@@ -75,18 +75,34 @@ use crate::{AddonError, Result};
 pub enum SetupState {
     /// Applied now, and recorded in the prefix.
     Applied,
+    /// Applied now, over a record that already claimed it, because its effect had gone.
+    ///
+    /// Distinct from [`Self::Applied`] because the two mean different things about the prefix: one is
+    /// setup that was missing, the other is setup that came back. A verb in this state on every pass
+    /// is either something in the prefix undoing it each time or a reading of the prefix that is
+    /// wrong, and a report that called it `Applied` would show neither.
+    #[non_exhaustive]
+    Reapplied {
+        /// The reading that says the effect had gone.
+        because: String,
+    },
     /// The prefix already recorded it, so nothing was done.
     AlreadyPresent,
     /// It could not be applied. The rest of the pass is unaffected.
     #[non_exhaustive]
-    Failed { reason: String },
+    Failed {
+        /// The failure and its causes, as one line.
+        reason: String,
+    },
 }
 
 /// One verb and what became of it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SetupOutcome {
+    /// The verb, by the name the manifest gives it.
     pub name: String,
+    /// What became of it.
     pub state: SetupState,
 }
 
@@ -123,7 +139,12 @@ impl SetupReport {
     pub fn present(&self) -> Vec<&str> {
         self.outcomes
             .iter()
-            .filter(|o| matches!(o.state, SetupState::Applied | SetupState::AlreadyPresent))
+            .filter(|o| {
+                matches!(
+                    o.state,
+                    SetupState::Applied | SetupState::Reapplied { .. } | SetupState::AlreadyPresent
+                )
+            })
             .map(|o| o.name.as_str())
             .collect()
     }
@@ -339,10 +360,14 @@ pub(crate) async fn apply_verbs(
                 // outside, and the reading is the only thing that tells it from something in the
                 // prefix genuinely undoing the verb each time. Inside the loop rather than beside the
                 // plan, so a pass that stops early does not announce work it never reached.
-                if let Some(entry) = stale.iter().find(|s| s.name == step.verb.name) {
+                let stale_because = stale
+                    .iter()
+                    .find(|s| s.name == step.verb.name)
+                    .map(|entry| entry.because.clone());
+                if let Some(because) = &stale_because {
                     events.emit(SetupEvent::Reapplying {
-                        verb: entry.name.clone(),
-                        because: entry.because.clone(),
+                        verb: step.verb.name.clone(),
+                        because: because.clone(),
                     });
                 }
                 let outcome =
@@ -365,7 +390,9 @@ pub(crate) async fn apply_verbs(
                     break;
                 }
                 let state = match outcome {
-                    Ok(()) => SetupState::Applied,
+                    Ok(()) => stale_because.map_or(SetupState::Applied, |because| {
+                        SetupState::Reapplied { because }
+                    }),
                     Err(err) => {
                         let reason = err.chain();
                         events.emit(SetupEvent::Failed {
@@ -387,6 +414,11 @@ pub(crate) async fn apply_verbs(
     // that finished.
     artifact::clear_work_dirs(prefix.path()).await;
     if cancelled {
+        // Said on the stream as well as returned, because the two reach different places: the error
+        // goes to whoever called this, and the stream is what a user is watching.
+        events.emit(SetupEvent::Stopped {
+            applied: report.outcomes.len(),
+        });
         return Err(AddonError::Cancelled);
     }
     Ok(report)

@@ -33,17 +33,26 @@ pub(super) const STOP_GRACE: Duration = Duration::from_secs(5);
 pub enum Outcome {
     /// Started, and running under the given process id.
     #[non_exhaustive]
-    Started { pid: i32 },
+    Started {
+        /// The process id it was started under.
+        pid: i32,
+    },
     /// Not started because it was already running, under the given process id.
     ///
     /// Whoever started it owns it: a launch that finds a companion it did not start never stops it.
     #[non_exhaustive]
-    AlreadyRunning { pid: i32 },
+    AlreadyRunning {
+        /// The process id of the copy that was found.
+        pid: i32,
+    },
     /// Not started because the entry is switched off.
     Disabled,
     /// Ran after the game exited and finished with this status.
     #[non_exhaustive]
-    Completed { code: Option<i32> },
+    Completed {
+        /// Its exit code, or `None` when a signal ended it.
+        code: Option<i32>,
+    },
     /// Stopped, or never started, because the teardown was cancelled.
     ///
     /// Its own outcome rather than a failure: nothing went wrong, somebody quit. A shell counting
@@ -51,7 +60,10 @@ pub enum Outcome {
     Cancelled,
     /// Could not be run. The rest of the launch is unaffected.
     #[non_exhaustive]
-    Failed { reason: String },
+    Failed {
+        /// The failure and its causes, as one line.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Outcome {
@@ -122,7 +134,7 @@ pub(super) struct Held {
 
 impl Held {
     /// Hold a started companion, reading its stop policy out of `trigger` once.
-    pub(super) fn new(
+    pub(super) const fn new(
         index: usize,
         program: std::path::PathBuf,
         companion: Companion,
@@ -184,7 +196,7 @@ pub struct AddonSession {
 
 impl AddonSession {
     /// Take ownership of what one launch started.
-    pub(super) fn new(
+    pub(super) const fn new(
         runtime: Runtime,
         game_prefix: Option<std::path::PathBuf>,
         held: Vec<Held>,
@@ -202,7 +214,7 @@ impl AddonSession {
 
     /// What happened when the companions started.
     #[must_use]
-    pub fn report(&self) -> &AddonReport {
+    pub const fn report(&self) -> &AddonReport {
         &self.report
     }
 
@@ -326,6 +338,9 @@ impl Drop for AddonSession {
     }
 }
 
+// Deliberately partial: counts rather than contents, since a session also holds a runtime handle and
+// other people's programs, neither of which reads as anything useful in a log line.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for AddonSession {
     /// Counts rather than contents: a session holds a runtime handle and other people's programs,
     /// neither of which reads as anything useful in a log line.

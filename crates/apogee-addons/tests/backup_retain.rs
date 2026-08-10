@@ -78,7 +78,10 @@ fn the_newest_are_kept_and_the_oldest_are_removed() -> Result<(), Fallible> {
     assert_eq!(plan.delete.len(), 3);
     assert!(plan.foreign.is_empty());
     // Newest first, so the two kept are the last two written.
-    assert_eq!(plan.ours[0].created_at, 1_785_000_400);
+    assert_eq!(
+        plan.ours[0].created_at,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_785_000_400)
+    );
     assert_eq!(plan.keep, vec![made[4].clone(), made[3].clone()]);
 
     let report = prune(dest.path(), keep(2))?;
@@ -193,8 +196,8 @@ fn only_our_archives_are_candidates() -> Result<(), Fallible> {
     // than the answer: these nine are here for nine different reasons.
     // By path, because both come from their own directory listing and the order of one is not the
     // order of the other.
-    let mut reported = report.foreign.clone();
-    let mut planned = plan.foreign.clone();
+    let mut reported = report.foreign;
+    let mut planned = plan.foreign;
     reported.sort_by(|a, b| a.0.cmp(&b.0));
     planned.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
@@ -292,5 +295,36 @@ fn archives_sharing_an_instant_order_deterministically() -> Result<(), Fallible>
     assert_eq!(a.keep, b.keep);
     assert_eq!(a.delete, b.delete);
     assert_eq!(a.delete.len(), 1);
+    Ok(())
+}
+
+/// A listing and a prune agree about what a directory holds, because one walk answers both.
+///
+/// The listing exists so a caller stops asking a prune planner what is there: `plan_prune` with a
+/// retention of everything answers the question, and reads as a prune that was talked out of deleting.
+#[test]
+fn a_listing_is_the_archives_a_prune_would_consider() -> Result<(), Fallible> {
+    let source = tempfile::tempdir()?;
+    let dest = tempfile::tempdir()?;
+    game_tree(source.path())?;
+    for offset in [0, 100, 200] {
+        archive_at(source.path(), dest.path(), 1_785_000_000 + offset)?;
+    }
+    // Something of somebody else's, which a listing must leave out rather than report as ours.
+    write(&dest.path().join("notes.txt"), "unrelated")?;
+
+    let listed = apogee_addons::backup::archives(dest.path())?;
+    let planned = plan_prune(dest.path(), keep(1))?;
+
+    assert_eq!(
+        listed.iter().map(|r| &r.path).collect::<Vec<_>>(),
+        planned.ours.iter().map(|r| &r.path).collect::<Vec<_>>(),
+        "the same archives, in the same order"
+    );
+    assert_eq!(listed.len(), 3);
+    assert!(
+        listed[0].created_at > listed[1].created_at,
+        "newest first, by the record rather than the name"
+    );
     Ok(())
 }

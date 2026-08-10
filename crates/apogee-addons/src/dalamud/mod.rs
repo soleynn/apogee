@@ -234,15 +234,15 @@ impl Endpoints {
             .ok()
     }
 
-    fn runtime_archives(&self, version: &str) -> Option<(Url, Url)> {
-        Some((
+    fn runtime_archives(&self, version: &str) -> Option<[Url; 2]> {
+        Some([
             self.release_base
                 .join(&format!("Runtime/DotNet/{version}"))
                 .ok()?,
             self.release_base
                 .join(&format!("Runtime/WindowsDesktop/{version}"))
                 .ok()?,
-        ))
+        ])
     }
 
     /// The version-info request for the release track.
@@ -481,7 +481,7 @@ impl Dalamud {
             return Ok(());
         }
         let endpoints = self.endpoints()?;
-        let (dotnet, desktop) =
+        let archives =
             endpoints
                 .runtime_archives(version)
                 .ok_or_else(|| AddonError::BadDistribution {
@@ -495,7 +495,7 @@ impl Dalamud {
         // The marker goes first, so a pass interrupted anywhere below leaves a tree that reads as
         // unsealed rather than as one that verified.
         let _ = std::fs::remove_file(&marker);
-        for url in [dotnet, desktop] {
+        for url in archives {
             self.lay_down(&url, &self.paths.runtime, "Dalamud runtime", events, cancel)
                 .await?;
         }
@@ -530,26 +530,25 @@ impl Dalamud {
         let cached = std::fs::read(&cache)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<HashManifest>(&bytes).ok());
-        let manifest = match cached {
-            Some(manifest) => manifest,
-            None => {
-                let endpoints = match self.endpoints() {
-                    Ok(endpoints) => endpoints,
-                    Err(err) => return Some(err),
-                };
-                let url = endpoints.runtime_hashes(version)?;
-                match self
-                    .fetch_json::<HashManifest>(&url, "runtime hashes", cancel)
-                    .await
-                {
-                    Ok(fetched) => {
-                        if let Ok(bytes) = serde_json::to_vec(&fetched) {
-                            let _ = write_atomic(&cache, &bytes);
-                        }
-                        fetched
+        let manifest = if let Some(manifest) = cached {
+            manifest
+        } else {
+            let endpoints = match self.endpoints() {
+                Ok(endpoints) => endpoints,
+                Err(err) => return Some(err),
+            };
+            let url = endpoints.runtime_hashes(version)?;
+            match self
+                .fetch_json::<HashManifest>(&url, "runtime hashes", cancel)
+                .await
+            {
+                Ok(fetched) => {
+                    if let Ok(bytes) = serde_json::to_vec(&fetched) {
+                        let _ = write_atomic(&cache, &bytes);
                     }
-                    Err(err) => return Some(err),
+                    fetched
                 }
+                Err(err) => return Some(err),
             }
         };
         integrity::first_fault(&self.paths.runtime, &manifest, Digest::Md5)
@@ -595,6 +594,9 @@ impl Dalamud {
     ///
     /// An asset the metadata carries no digest for is checked for being there and nothing more, which
     /// is all the distribution said about it.
+    // `&self` for the calling convention every sibling helper in this impl shares, not because this
+    // one reads `self`.
+    #[allow(clippy::unused_self)]
     fn assets_fault(&self, dir: &Path, meta: &AssetMeta) -> Option<AddonError> {
         const WHAT: &str = "Dalamud assets";
 
@@ -740,6 +742,9 @@ impl Dalamud {
 
     /// One URL the distribution served, parsed at the point of use so a response that is not a URL is
     /// this crate's typed error rather than a deserializer's.
+    // `&self` for the calling convention every sibling helper in this impl shares, not because this
+    // one reads `self`.
+    #[allow(clippy::unused_self)]
     fn absolute(&self, raw: &str) -> Result<Url> {
         Url::parse(raw).map_err(|source| AddonError::Distribution {
             injectable: DALAMUD.to_owned(),
@@ -771,6 +776,9 @@ impl Dalamud {
         }
     }
 
+    /// `&self` for the calling convention every sibling helper in this impl shares, not because this
+    /// one reads `self`.
+    #[allow(clippy::unused_self)]
     fn io_failed(&self, step: &'static str, path: &Path, source: std::io::Error) -> AddonError {
         AddonError::Io {
             what: DALAMUD.to_owned(),
