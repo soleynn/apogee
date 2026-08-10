@@ -159,4 +159,8 @@ async fn a_source_that_changed_since_the_journal_is_caught_on_resume() {
         !sidecar(&dest, ".apdl").exists(),
         "the stale journal is dropped so a retry restarts clean",
     );
+    assert!(
+        err.is_transient(),
+        "dropping the journal is what makes the restart worth asking for: {err:?}",
+    );
 }
