@@ -34,6 +34,7 @@ is tagged with its change type. Versioning aims to follow
 - Cap and vet the redirects the download client will follow (#173) _(added)_
 - Hand a range no source will serve to the next one (#175) _(added)_
 - Inject a real disk-full into the preallocation path (#176) _(testing)_
+- Fail over on the single-connection engine too (#177) _(added)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
