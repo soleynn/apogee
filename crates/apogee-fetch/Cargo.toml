@@ -56,5 +56,9 @@ serde_json.workspace = true
 name = "none_over_tls"
 required-features = ["testing"]
 
+[[test]]
+name = "redirect_tls"
+required-features = ["testing"]
+
 [lints]
 workspace = true

@@ -32,7 +32,9 @@ use crate::journal::{self, Identity, Journal};
 use crate::prealloc::preallocate;
 use crate::probe::{Capability, classify};
 use crate::progress::{Phase, Progress};
-use crate::retry::{Class, Jitter, RetryPolicy, classify_status, retry_after, sleep_or_cancel};
+use crate::retry::{
+    Class, Jitter, RetryPolicy, classify_send_error, classify_status, retry_after, sleep_or_cancel,
+};
 use crate::spec::DownloadSpec;
 use crate::util::lock;
 use crate::validator::VerifiedFile;
@@ -178,6 +180,9 @@ async fn probe(
                     });
                 }
             },
+            Err(e) if classify_send_error(&e) == Class::Fatal => {
+                return Err(download::connect_error(spec.url(), e));
+            }
             Err(e) => (download::connect_error(spec.url(), e), None),
         };
         attempts += 1;
@@ -712,7 +717,12 @@ async fn stream_segment(
         () = state.done.cancelled() => return SegmentResult::Stop,
         sent = request.send() => match sent {
             Ok(resp) => resp,
-            // A connect error is transient: re-queue the whole range.
+            // A connect error is transient: re-queue the whole range. A redirect this client's policy
+            // refused is not - the source keeps pointing where it points - so it fails the transfer
+            // rather than spending the range's whole attempt budget on the same refusal.
+            Err(e) if classify_send_error(&e) == Class::Fatal => {
+                return SegmentResult::Fatal(download::connect_error(url, e));
+            }
             Err(_) => return SegmentResult::Requeue { range, asked: None },
         },
     };
