@@ -24,7 +24,6 @@ mod transport;
 mod trust;
 
 pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
-#[cfg(unix)]
 pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
 // Under its own name: the addon layer already has a public `AddonOutcome`, and re-exporting a second,
 // different type under that name gives a shell two things it cannot tell apart from the import alone.

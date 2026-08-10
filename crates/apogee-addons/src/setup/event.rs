@@ -50,6 +50,14 @@ pub enum SetupEvent {
     /// failed exit for a game that started fine. It still has to be said out loud, because which
     /// build of a companion started is exactly what somebody debugging one needs to know.
     CatalogUnavailable { detail: String, using_cached: bool },
+    /// The pass stopped because it was asked to, with `applied` verbs behind it and the rest not
+    /// reached.
+    ///
+    /// The one ending that produces no per-verb event of its own: everything else a pass does is
+    /// narrated as it happens, and a stream that simply stopped is indistinguishable from a stream
+    /// that finished.
+    #[non_exhaustive]
+    Stopped { applied: usize },
 }
 
 /// Where setup events go. Cloneable and cheap, like the crate's other event stream.

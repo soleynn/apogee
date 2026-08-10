@@ -84,6 +84,17 @@ pub enum BackupError {
     #[error("archive entry {entry} does not match the hash the archive recorded for it")]
     #[non_exhaustive]
     ContentMismatch { entry: String },
+    /// A root was handed over with no include rules, so it would have walked its tree and admitted
+    /// none of it.
+    #[error("{path:?} has no include rules, so it would cover nothing")]
+    #[non_exhaustive]
+    NoIncludeRules { path: PathBuf },
+    /// The operation is not one this platform can do. Restore opens every target against a directory
+    /// descriptor and refuses symlinks along the way, which is unix-only by construction: there is no
+    /// safe fallback to offer, so it is a refusal rather than a missing function.
+    #[error("{what} is not supported on this platform")]
+    #[non_exhaustive]
+    Unsupported { what: &'static str },
     /// The token fired, so the work stopped where it was.
     ///
     /// Its own variant rather than an I/O failure: a caller counts what went wrong to decide whether

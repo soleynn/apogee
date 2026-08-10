@@ -85,6 +85,31 @@ pub struct BackupReport {
     pub roots: Vec<RootReport>,
 }
 
+impl BackupReport {
+    /// How many files the archive holds, across every root.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::backup::BackupReport;
+    /// # fn demo(report: &BackupReport) {
+    /// if report.files() == 0 {
+    ///     // Nothing was captured, which a caller should say rather than report a success.
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn files(&self) -> usize {
+        self.roots.iter().map(RootReport::files).sum()
+    }
+
+    /// The total length of those files, which is what was read rather than what was written.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.roots.iter().map(RootReport::bytes).sum()
+    }
+}
+
 /// Write `spec`'s selection into a new archive.
 ///
 /// Blocking, and unbounded in the size of what it copies, so `cancel` is checked between entries.

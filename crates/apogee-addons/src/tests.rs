@@ -381,6 +381,16 @@ frozen!(
             BackupError::ContentMismatch { entry: "user/FFXIV.cfg".to_owned() },
             "archive entry user/FFXIV.cfg does not match the hash the archive recorded for it",
         ),
+        BackupError::NoIncludeRules { .. } => (
+            BackupError::NoIncludeRules { path: path() },
+            "\"/tmp/a\" has no include rules, so it would cover nothing",
+        ),
+        // Names the operation rather than the platform: which platforms can do it is this build's
+        // business, and what the reader asked for is the part they can act on.
+        BackupError::Unsupported { .. } => (
+            BackupError::Unsupported { what: "restoring a backup" },
+            "restoring a backup is not supported on this platform",
+        ),
         // One word, like the crate's own cancellation: there is no path, entry or limit to name,
         // because nothing about the work is wrong.
         BackupError::Cancelled => (BackupError::Cancelled, "cancelled"),

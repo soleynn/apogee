@@ -1,6 +1,9 @@
 //! Putting an archive's contents back, one root at a time.
 //!
-//! Unix only: every target is opened against a directory descriptor this module holds.
+//! The plan and the report are shapes any platform can build and read. Carrying one out is unix only,
+//! because every target is opened against a directory descriptor this module holds, and on a platform
+//! without that [`restore`] refuses rather than being absent: a caller that cannot name the operation
+//! cannot tell a launcher that will not do it from one that has never heard of it.
 //!
 //! Restore is the only operation here that writes into a live tree, so it is arranged so that a
 //! failure at any point leaves that tree exactly as it was. Each root is extracted and verified into
@@ -16,28 +19,61 @@
 //! with symlinks refused. No path is ever re-resolved from a string, so neither a planted link nor a
 //! change between checking and opening can redirect a write.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Read;
-use std::os::fd::OwnedFd;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use rustix::fs::{Mode, OFlags};
-use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::path::Path;
 
 use super::archive::inspect;
-use super::confine::{ConfinedName, RejectReason, entry_name};
 use super::error::BackupError;
-use super::manifest::{EntryRecord, MANIFEST_ENTRY};
 use super::root::RootLabel;
 
+#[cfg(unix)]
+use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+use super::confine::{ConfinedName, RejectReason, entry_name};
+#[cfg(unix)]
+use super::manifest::{EntryRecord, MANIFEST_ENTRY};
+
+/// The same call where a restore cannot be done, so a caller can name the operation and be told no.
+///
+/// # Errors
+/// Always [`BackupError::Unsupported`].
+#[cfg(not(unix))]
+pub fn restore(
+    plan: &RestorePlan,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RestoreReport, BackupError> {
+    let _ = (plan, cancel);
+    Err(BackupError::Unsupported {
+        what: "restoring a backup",
+    })
+}
+
+#[cfg(unix)]
 /// Bytes an archive file may be before it is refused unopened.
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(unix)]
 /// Bytes one restore may write in total, counted as they leave the decompressor.
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+#[cfg(unix)]
 /// Bytes one entry may write.
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(unix)]
 /// Entries one archive may hold.
 const MAX_ENTRIES: usize = 4096;
+#[cfg(unix)]
 /// Copy buffer, shared by the hash and the write.
 const COPY_BUF: usize = 256 * 1024;
 
@@ -140,7 +176,9 @@ pub struct RestoredRoot {
 /// [`BackupError::ContentMismatch`] if an entry's bytes are not what the record says,
 /// [`BackupError::TooLarge`] or [`BackupError::TooManyEntries`] if it exceeds what a restore may
 /// write, [`BackupError::Cancelled`] if the token fired, and [`BackupError::Io`] from the filesystem.
-/// The live tree is untouched in every case.
+/// [`BackupError::Unsupported`] where a restore cannot be carried out safely. The live tree is
+/// untouched in every case.
+#[cfg(unix)]
 pub fn restore(
     plan: &RestorePlan,
     cancel: &tokio_util::sync::CancellationToken,
@@ -274,6 +312,7 @@ pub fn restore(
 }
 
 /// One root being assembled next to where it will land.
+#[cfg(unix)]
 struct Staged {
     target: PathBuf,
     staging: PathBuf,
@@ -285,6 +324,7 @@ struct Staged {
     bytes: u64,
 }
 
+#[cfg(unix)]
 impl Staged {
     /// Create the staging directory as a sibling of the target, so the final move is a rename on one
     /// filesystem rather than a copy.
@@ -450,6 +490,7 @@ impl Staged {
 }
 
 /// Split a relative path into its parent and its final component.
+#[cfg(unix)]
 fn split(rel: &Path) -> Result<(PathBuf, String), BackupError> {
     let leaf = rel
         .file_name()
@@ -460,6 +501,7 @@ fn split(rel: &Path) -> Result<(PathBuf, String), BackupError> {
 }
 
 /// A sibling name that does not exist yet, so a second restore cannot land on the first's leftovers.
+#[cfg(unix)]
 fn unique_sibling(target: &Path, suffix: &str) -> Result<PathBuf, BackupError> {
     let base = target.as_os_str().to_string_lossy().into_owned();
     for n in 0..1024 {
@@ -475,6 +517,7 @@ fn unique_sibling(target: &Path, suffix: &str) -> Result<PathBuf, BackupError> {
     Err(io_err(target))
 }
 
+#[cfg(unix)]
 fn open_dir(path: &Path) -> Result<OwnedFd, BackupError> {
     rustix::fs::open(
         path,
@@ -487,6 +530,7 @@ fn open_dir(path: &Path) -> Result<OwnedFd, BackupError> {
     })
 }
 
+#[cfg(unix)]
 fn io_err(path: &Path) -> BackupError {
     BackupError::Io {
         path: path.to_path_buf(),
@@ -494,6 +538,7 @@ fn io_err(path: &Path) -> BackupError {
     }
 }
 
+#[cfg(unix)]
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut out, b| {

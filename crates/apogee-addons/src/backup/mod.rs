@@ -53,8 +53,6 @@ mod archive;
 mod confine;
 mod error;
 mod manifest;
-// Opens every target against a directory descriptor, so it is unix-only by construction.
-#[cfg(unix)]
 mod restore;
 mod retain;
 mod root;
@@ -72,9 +70,10 @@ pub use manifest::{
     BACKUP_EXTENSION, BACKUP_FORMAT, BACKUP_FORMAT_VERSION, BackupManifest, EntryRecord,
     MANIFEST_ENTRY, RootRecord, RuleRecord,
 };
-#[cfg(unix)]
 pub use restore::{RestorePlan, RestoreReport, RestoredRoot, restore};
-pub use retain::{ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, plan_prune, prune};
+pub use retain::{
+    ArchiveRecord, ForeignReason, PrunePlan, PruneReport, Retain, archives, plan_prune, prune,
+};
 pub use root::{GameConfigOpts, Presence, RootLabel, SelectionRoot};
 pub use rule::EntryKind;
 
@@ -282,6 +281,75 @@ const NOT_A_USER: &[&str] = &["Public"];
 /// # Ok(())
 /// # }
 /// ```
+/// The config trees in `prefix`, as the decision a caller actually has to make.
+///
+/// [`game_config_dirs`] hands back a list and leaves every caller to re-derive the same three things
+/// from it: that the first is the live one, that the rest are uncovered, and that none at all is a
+/// refusal rather than an empty capture. Each of those is a chance to get it wrong differently.
+///
+/// # Errors
+/// [`BackupError::MissingRoot`] when the game has never written a config into this prefix, which is
+/// the ordinary state of one that has only been prepared, and is not something to capture an empty
+/// archive over.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use apogee_addons::backup::{BackupError, game_config_trees};
+/// # fn demo(prefix: &Path) -> Result<(), BackupError> {
+/// let trees = game_config_trees(prefix)?;
+/// let capture = trees.live();
+/// for uncovered in trees.others() {
+///     // A prefix run under two runners holds a full set of settings under each.
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn game_config_trees(prefix: &Path) -> Result<GameConfigTrees, BackupError> {
+    let mut found = game_config_dirs(prefix);
+    if found.is_empty() {
+        return Err(BackupError::MissingRoot {
+            path: prefix.to_path_buf(),
+        });
+    }
+    Ok(GameConfigTrees {
+        live: found.remove(0),
+        others: found,
+    })
+}
+
+/// The config trees one prefix holds, live one first.
+#[derive(Debug, Clone)]
+pub struct GameConfigTrees {
+    live: PathBuf,
+    others: Vec<PathBuf>,
+}
+
+impl GameConfigTrees {
+    /// The tree the game wrote to last, which is the one it is using.
+    #[must_use]
+    pub fn live(&self) -> &Path {
+        &self.live
+    }
+
+    /// The rest, which a capture of the live tree does not cover.
+    ///
+    /// Named rather than dropped: on a prefix run under two runners both hold a full set of settings,
+    /// and a caller that says nothing about the second is telling the user their settings are backed
+    /// up when half of them are not.
+    #[must_use]
+    pub fn others(&self) -> &[PathBuf] {
+        &self.others
+    }
+
+    /// The live tree, giving up the rest.
+    #[must_use]
+    pub fn into_live(self) -> PathBuf {
+        self.live
+    }
+}
+
 #[must_use]
 pub fn game_config_dirs(prefix: &Path) -> Vec<PathBuf> {
     let mut found: Vec<(std::time::SystemTime, PathBuf, PathBuf)> = Vec::new();
@@ -351,8 +419,18 @@ impl Selection {
     /// copy of the settings and four.
     ///
     /// # Errors
-    /// [`BackupError::DuplicateRoot`] if it resolves to a directory already added.
+    /// [`BackupError::DuplicateRoot`] if it resolves to a directory already added, and
+    /// [`BackupError::NoIncludeRules`] if the root admits nothing.
     pub fn with_root(mut self, root: SelectionRoot) -> Result<Self, BackupError> {
+        // A root whose include list is empty walks its tree and admits none of it, which is the exact
+        // shape of failure this layer exists to make impossible: an archive that reports success and
+        // covers nothing. Refused here rather than at the walk, because it is a property of the root
+        // rather than of what happened to be on disk.
+        if root.include().is_empty() {
+            return Err(BackupError::NoIncludeRules {
+                path: root.path().to_path_buf(),
+            });
+        }
         // An absent optional root cannot be resolved, so it stands in for itself; two absent roots
         // at the same literal path are still caught.
         let resolved = std::fs::canonicalize(root.path()).unwrap_or_else(|_| root.path().into());
@@ -489,6 +567,32 @@ mod tests {
         assert!(!selected.roots()[1].present());
         assert_eq!(selected.roots()[1].files(), 0);
         Ok(())
+    }
+
+    /// A root that admits nothing is refused when it is added, rather than walking its tree and
+    /// putting none of it in the archive.
+    ///
+    /// This is the shape of failure the whole selection is arranged against: a capture that reports
+    /// success and covers nothing. An empty include list is the one way to reach it that no rule can
+    /// catch, because there is no rule there to report a zero.
+    #[test]
+    fn a_root_that_admits_nothing_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let refused = Selection::new().with_root(
+            SelectionRoot::new(
+                RootLabel::User,
+                tmp.path(),
+                vec![],
+                vec![],
+                Presence::Required,
+            )
+            .expect("a root with no rules has no duplicate rules"),
+        );
+
+        assert!(
+            matches!(refused, Err(BackupError::NoIncludeRules { .. })),
+            "{refused:?}"
+        );
     }
 
     /// The deny list is crate policy rather than a caller's choice, so it is worth pinning that it
