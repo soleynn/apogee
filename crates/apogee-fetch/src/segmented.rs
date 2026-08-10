@@ -607,11 +607,16 @@ fn spawn_hash(
     let want = verify.expected(i);
     let limit = state.hash_limit.clone();
     tokio::spawn(async move {
-        // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also uses.
-        let Ok(_permit) = limit.acquire_owned().await else {
-            return; // the semaphore is never closed; this only guards a shutdown race
+        // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also
+        // uses. The permit is scoped to the hash itself: reporting a verdict does no hashing, and a
+        // dirty block's verdict waits out a backoff, so holding it any longer would park the whole
+        // verification pipeline behind however long a repair was told to wait.
+        let hashed = {
+            let Ok(_permit) = limit.acquire_owned().await else {
+                return; // the semaphore is never closed; this only guards a shutdown race
+            };
+            tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await
         };
-        let hashed = tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await;
         match hashed {
             Ok(Ok(got)) if got == want => on_verified(&state, &verify, i, &cancel),
             Ok(Ok(_)) => on_dirty(&state, &verify, i, &cancel).await,
