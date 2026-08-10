@@ -20,6 +20,9 @@ use crate::validator::{Validator, VerifiedFile};
 /// The default connection-inactivity timeout before a transfer is re-queued.
 const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The HTTP/2 flow-control window advertised for a connection and for each stream on it.
+const H2_WINDOW: u32 = 16 * 1024 * 1024;
+
 /// State shared by every clone of a [`Fetcher`]: the job/connection scheduler, the speed limiter, the
 /// per-host capability cache, the retry policy and its jitter source, and the segmentation config.
 /// Cloning the fetcher is cheap and shares all of it, so the caps and the cache hold across
@@ -304,6 +307,21 @@ impl FetcherBuilder {
             .deflate(false)
             // Keep enough idle connections alive to reuse across a file's segments.
             .pool_max_idle_per_host(self.max_connections_per_file)
+            // Advertise a 16 MiB flow-control window, well past hyper's 5 MiB connection and 2 MiB
+            // stream defaults. Everything fetched over TLS negotiates HTTP/2, and a download whose
+            // length the caller does not declare runs on the single-connection engine, so its whole
+            // body arrives on one stream and that 2 MiB window, rather than the link, is what sets
+            // its speed: on a 1 Gb/s line 15 ms from the host's edge, a 532 MB release asset landed
+            // at 50-52 MiB/s through this builder on the defaults and 70-74 MiB/s at 16 MiB, and a
+            // 59 MB asset on an unrelated CDN moved the same way. The size is where the window stops
+            // being the limit rather than a guess: discarding the same body instead of writing it,
+            // 16 MiB reaches 71-89 MiB/s against the 82-86 MiB/s the identical transfer gets over
+            // HTTP/1.1, which has no window at all, and 64 MiB measures no better while promising to
+            // buffer four times as much unread body per connection. Letting the window retune itself
+            // is the other way to raise it and is not taken: it swung run to run. Cleartext transfers
+            // are HTTP/1.1 and none of this reaches them.
+            .http2_initial_stream_window_size(H2_WINDOW)
+            .http2_initial_connection_window_size(H2_WINDOW)
             // Neither `timeout` nor `connect_timeout` is set here, and both are deliberate. The first
             // covers the response body, so it would cut a multi-gigabyte transfer off at a fixed
             // duration rather than at a fixed silence. The second would bound only what
