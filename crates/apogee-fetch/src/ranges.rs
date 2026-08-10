@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use url::Url;
 
-use crate::download::{connect_error, transport_error};
+use crate::download::{self, connect_error, transport_error};
 use crate::error::FetchError;
 use crate::fetcher::Shared;
 use crate::headers::{HeaderPolicy, apply_headers};
@@ -139,8 +139,19 @@ where
     let _conn = engine.shared.scheduler.acquire_connection().await;
     let req =
         apply_headers(engine.client.get(url.clone()), policy).header(RANGE, range_header(group));
-    let resp = req.send().await.map_err(|e| connect_error(url, e))?;
     let shared = engine.shared;
+    // A single attempt is still a bounded one. Recovery belongs to the caller, but only if it is ever
+    // handed back control: a host that takes the request and answers nothing would otherwise park a
+    // repair inside this `send` with no body to time out and no attempt budget to spend.
+    let resp = match download::send_bounded(req, shared.stall_timeout).await {
+        Ok(sent) => sent.map_err(|e| connect_error(url, e))?,
+        Err(_elapsed) => {
+            return Err(FetchError::Stalled {
+                url: url.clone(),
+                at_bytes: group.first().map_or(0, |r| r.start),
+            });
+        }
+    };
 
     // Tally the requested bytes actually delivered: a server that answers fewer ranges than asked (a
     // single 206 covering only the first range, or a multipart body missing parts) is a detectable

@@ -199,12 +199,21 @@ async fn probe(
         let sent = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(FetchError::Cancelled),
-            sent = request.send() => sent,
+            sent = download::send_bounded(request, shared.stall_timeout) => sent,
         };
         // Each arm yields the failure to report if this is the last attempt, plus the pause the
         // server asked for; a usable response returns straight out.
         let (failure, asked) = match sent {
-            Ok(resp) => match resp.status().as_u16() {
+            // No headers within the deadline. The probe has no bytes of its own to be short of, so
+            // the stall it reports is at zero: the transfer never started.
+            Err(_elapsed) => (
+                FetchError::Stalled {
+                    url: url.clone(),
+                    at_bytes: 0,
+                },
+                None,
+            ),
+            Ok(Ok(resp)) => match resp.status().as_u16() {
                 200 | 206 => {
                     return Ok(Probe {
                         etag: download::header_bytes(&resp, &ETAG),
@@ -227,10 +236,10 @@ async fn probe(
                     });
                 }
             },
-            Err(e) if classify_send_error(&e) == Class::Fatal => {
+            Ok(Err(e)) if classify_send_error(&e) == Class::Fatal => {
                 return Err(download::connect_error(url, e));
             }
-            Err(e) => (download::connect_error(url, e), None),
+            Ok(Err(e)) => (download::connect_error(url, e), None),
         };
         attempts += 1;
         if !shared.retry.may_retry(attempts) {
@@ -850,15 +859,20 @@ async fn stream_segment(
         biased;
         () = cancel.cancelled() => return SegmentResult::Stop,
         () = state.done.cancelled() => return SegmentResult::Stop,
-        sent = request.send() => match sent {
-            Ok(resp) => resp,
+        sent = download::send_bounded(request, state.stall_timeout) => match sent {
+            Ok(Ok(resp)) => resp,
+            // A source that takes the request and sends no headers has not delivered these bytes, so
+            // the segment goes back on the queue and rotates, exactly as a dropped body does. Without
+            // this the worker parked here forever, holding its connection slot, and the transfer's
+            // stall detection never saw it because no body had begun.
+            Err(_elapsed) => return SegmentResult::Requeue { range, asked: None },
             // A connect error is transient: re-queue the whole range. A redirect this client's policy
             // refused is not - the source keeps pointing where it points - so it fails the transfer
             // rather than spending the range's whole attempt budget on the same refusal.
-            Err(e) if classify_send_error(&e) == Class::Fatal => {
+            Ok(Err(e)) if classify_send_error(&e) == Class::Fatal => {
                 return SegmentResult::Fatal(download::connect_error(url, e));
             }
-            Err(_) => return SegmentResult::Requeue { range, asked: None },
+            Ok(Err(_)) => return SegmentResult::Requeue { range, asked: None },
         },
     };
     match resp.status().as_u16() {
