@@ -20,8 +20,28 @@ pub enum RuntimeError {
     Catalog(#[from] CatalogError),
     #[error("invalid download request")]
     Spec(#[from] apogee_fetch::SpecError),
+    /// A download did not arrive.
+    // Deliberately no `#[from]`. The conversion it generates would map every fetch failure onto this
+    // arm, including the full disk that has a typed home of its own below; an unwritten `?` would
+    // flatten it into "runner download failed". Every caller goes through `from_fetch`.
     #[error("runner download failed")]
-    Download(#[from] FetchError),
+    Download(#[source] FetchError),
+    /// The disk filled while a runner, DXVK build, or catalog was being written.
+    ///
+    /// Its own arm rather than a [`Download`](Self::Download) with the reason buried in the chain: a
+    /// runner tarball is the one download here big enough to fill a volume, and it is the only
+    /// failure the user can fix without touching the launcher. Names the path the filesystem
+    /// refused, which is what says whether the cache or the prefix is the full one.
+    ///
+    /// The source is the `ENOSPC` itself rather than the [`FetchError`] it came wrapped in, which
+    /// holds this same path and nothing else besides. Same shape as [`Io`](Self::Io), so a consumer
+    /// rendering a filesystem failure treats them alike.
+    #[error("out of disk space at {path:?}")]
+    OutOfSpace {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("filesystem error at {path:?}")]
     Io {
         path: PathBuf,
@@ -90,6 +110,37 @@ pub(crate) const CANCELLED_REASON: &str = "cancelled";
 pub struct StepCancelled;
 
 impl RuntimeError {
+    /// A fetch failure in this crate's taxonomy, with a full disk routed to [`Self::OutOfSpace`] and
+    /// everything else to [`Self::Download`].
+    ///
+    /// A named conversion rather than a `From`, so the routing cannot be skipped by an unwritten
+    /// `?`. Which failures are a full disk is [`FetchError::into_out_of_space`]'s to answer, so this
+    /// stays correct if the fetcher ever raises `ENOSPC` from a second place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_fetch::FetchError;
+    /// use apogee_runtime::RuntimeError;
+    ///
+    /// let full = FetchError::Io {
+    ///     path: "/cache/GE-Proton.tar.gz.part".into(),
+    ///     source: std::io::ErrorKind::StorageFull.into(),
+    /// };
+    /// assert!(matches!(RuntimeError::from_fetch(full), RuntimeError::OutOfSpace { .. }));
+    /// assert!(matches!(
+    ///     RuntimeError::from_fetch(FetchError::Cancelled),
+    ///     RuntimeError::Download(FetchError::Cancelled),
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn from_fetch(source: FetchError) -> Self {
+        match source.into_out_of_space() {
+            Ok((path, source)) => Self::OutOfSpace { path, source },
+            Err(other) => Self::Download(other),
+        }
+    }
+
     /// Whether this is the run stopping because it was asked to, rather than something going wrong.
     ///
     /// Cancellation reaches this taxonomy by four routes: a runner download the token stopped, a

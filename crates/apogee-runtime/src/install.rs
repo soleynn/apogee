@@ -174,7 +174,7 @@ pub(crate) async fn download_verified(
     // Drop our sender so the relay observes the closed channel and finishes.
     drop(tx);
     let _ = relay.await;
-    Ok(outcome?)
+    outcome.map_err(RuntimeError::from_fetch)
 }
 
 /// The names a fetched catalog and its detached signature are cached under.
@@ -253,7 +253,10 @@ async fn download_unverified(
     let spec = DownloadSpec::builder(url.clone(), dest, Validator::None)
         .allow_unverified()
         .build()?;
-    fetcher.download(&spec, None, cancel.clone()).await?;
+    fetcher
+        .download(&spec, None, cancel.clone())
+        .await
+        .map_err(RuntimeError::from_fetch)?;
     Ok(())
 }
 
