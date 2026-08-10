@@ -234,6 +234,11 @@ struct Config {
     /// server RST after the last byte), so the client commits every byte and then sees an error - the
     /// empty-remainder path that must still complete the download.
     reset_after_range: bool,
+    /// After serving a range in full, hold the connection open with no further data and no EOF (a
+    /// half-open connection whose peer went away after the last byte). Like
+    /// [`Config::reset_after_range`] this leaves the client an empty remainder, but the client
+    /// reaches it through its no-progress timeout, and no reset can discard bytes still in flight.
+    stall_after_range: bool,
     /// The boundary string for a `multipart/byteranges` response (a request with several ranges).
     boundary: String,
     throttle: Option<Duration>,
@@ -282,6 +287,7 @@ impl ChaosServer {
                 slow_ranges: Vec::new(),
                 fired: Arc::new(Mutex::new(HashSet::new())),
                 reset_after_range: false,
+                stall_after_range: false,
                 boundary: "chaos_boundary".to_string(),
                 throttle: None,
                 chunk: 64 * 1024,
@@ -546,6 +552,20 @@ impl ChaosServerBuilder {
     #[must_use]
     pub fn reset_after_range(mut self) -> Self {
         self.cfg.reset_after_range = true;
+        self
+    }
+
+    /// Hold every fully-served range open with no further data and no EOF, so the client reaches the
+    /// same empty remainder through its no-progress timeout instead of an error.
+    ///
+    /// Prefer this over [`reset_after_range`](Self::reset_after_range) for a range larger than a
+    /// socket buffer: a reset discards whatever is still in flight, so the client sees a *truncated*
+    /// range rather than a complete one, and the empty-remainder path is never reached. A stall
+    /// discards nothing. Pair with [`omit_content_length`](Self::omit_content_length), or the client
+    /// ends the body on the declared byte count and never waits.
+    #[must_use]
+    pub fn stall_after_range(mut self) -> Self {
+        self.cfg.stall_after_range = true;
         self
     }
 
@@ -817,6 +837,13 @@ async fn handle(
             served += this as u64;
         }
         body_stats.record_range(start..off);
+        // A full range served, then silence: no more frames and no EOF, so the client holds every
+        // byte and reaches its empty remainder through the no-progress timeout. Nothing is discarded
+        // on the way, which a reset cannot promise once the range outgrows a socket buffer.
+        if body_cfg.stall_after_range {
+            tx.closed().await;
+            return;
+        }
         // A full range served, then a reset instead of a clean EOF: the client has every byte but its
         // stream ends with an error, so its remaining range is empty.
         if body_cfg.reset_after_range {
