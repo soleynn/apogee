@@ -451,3 +451,52 @@ async fn a_permanently_silent_single_connection_body_fails_as_stalled() {
     );
     assert!(!dest.exists());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_segment_that_goes_quiet_after_its_last_byte_is_not_a_stuck_segment() {
+    // The segmented counterpart to the reset case above. A segment that commits its last byte and
+    // only then loses its connection reports a remainder of zero bytes, which is not stuck work:
+    // there is nothing left to ask for. Charging it an attempt spends the budget of the *next*
+    // segment (the ranges are contiguous, so the empty remainder starts exactly where that one
+    // does), and a budget already spent there fails a transfer whose bytes all arrived intact.
+    //
+    // `max_attempts(1)` is what makes that deterministic rather than a race: it puts every offset one
+    // charge away from exhaustion, which a flaky link reaches on its own. The server goes quiet
+    // rather than resetting so the whole range survives (a reset discards what is still in flight at
+    // this size), and omits the length so the client cannot end the body on a byte count.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 9 * MIB;
+    let server = ChaosServer::builder(52, len)
+        .stall_after_range()
+        .omit_content_length()
+        .chunk(256 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = sha_spec(&server, &dest, 52, len).build().unwrap();
+
+    let verified = tokio::time::timeout(
+        Duration::from_secs(30),
+        Fetcher::builder()
+            .max_connections_per_file(4)
+            .stall_timeout(Duration::from_millis(200))
+            .retry_policy(instant_retries().max_attempts(1))
+            .build()
+            .unwrap()
+            .download(&spec, None, CancellationToken::new()),
+    )
+    .await
+    .expect("a completed segment must not hang the transfer")
+    .unwrap();
+
+    assert_eq!(
+        sha256_of(&tokio::fs::read(verified.path()).await.unwrap()),
+        body_sha256(52, len),
+    );
+    assert_eq!(
+        server.stats().requests(),
+        3,
+        "one capability probe and two complete segments, with nothing re-asked",
+    );
+}

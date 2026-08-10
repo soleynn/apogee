@@ -519,6 +519,13 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
         let source = task.source;
         match stream_segment(&state, task, &cancel).await {
             SegmentResult::Done => {}
+            // An empty remainder is a finished segment, not a stuck one: the connection went after the
+            // last byte was already durable, so there is nothing left to ask for. It falls through to
+            // the completion check below rather than being charged an attempt and a backoff. The
+            // charge would land on the *next* segment's budget (the ranges are contiguous, so the
+            // remainder starts exactly where that one does) and could fail a transfer whose bytes all
+            // arrived.
+            SegmentResult::Requeue { range, .. } if range.is_empty() => {}
             SegmentResult::Requeue {
                 range: remaining,
                 asked,
