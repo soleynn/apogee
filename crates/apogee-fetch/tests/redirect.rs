@@ -236,6 +236,42 @@ async fn a_refused_redirect_is_not_retried_on_the_segment_path() {
 }
 
 #[tokio::test]
+async fn a_location_reqwest_will_not_resolve_fails_the_transfer_rather_than_succeeding() {
+    // Measured, and the reason the scheme check cannot be left to reqwest. A `Location` with no
+    // authority (`file:`, `data:`) is one reqwest cannot resolve into a request, so the policy is
+    // never consulted and the `3xx` itself comes back as the response. The floor still holds: `302`
+    // is not a status any engine can use, so the transfer fails on it and is not asked again.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 32 * 1024;
+    let server = ChaosServer::builder(78, len)
+        .redirect_to(302, "file:///etc/passwd")
+        .start()
+        .await
+        .unwrap();
+
+    let spec = sha_spec(server.url("f.bin"), &dest, 78, len)
+        .build()
+        .unwrap();
+    let err = fetcher(1)
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        server.stats().requests(),
+        1,
+        "a fatal status was asked again"
+    );
+    assert!(
+        matches!(&err, FetchError::Http { status: 302, .. }),
+        "got {err:?}",
+    );
+    assert!(!dest.exists(), "nothing was published");
+}
+
+#[tokio::test]
 async fn a_redirect_target_is_not_told_the_origin_url() {
     // reqwest attaches a `Referer` carrying the previous URL by default, handing a third-party host
     // the full path a transfer started from. The client turns it off.
