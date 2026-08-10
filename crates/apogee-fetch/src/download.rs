@@ -788,8 +788,15 @@ pub(crate) async fn sync_parent_dir(path: &Path) {
     }
 }
 
-/// A failure establishing the connection.
+/// A failure establishing the connection, or the client's redirect policy declining to follow one.
+/// Both arrive from the same `send`, and only the cause chain tells them apart.
 pub(crate) fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
+    if let Some(detail) = crate::redirect::refusal(&source) {
+        return FetchError::RedirectRefused {
+            url: url.clone(),
+            detail,
+        };
+    }
     FetchError::Connect {
         host: url.host_str().unwrap_or_default().to_owned(),
         source: std::io::Error::other(source),
