@@ -537,11 +537,14 @@ async fn all_corrupt_sources_exhaust_the_block_budget_and_fail() {
     assert!(!dest.exists());
 }
 
-// A mirror that ignores ranges cannot serve a block re-fetch: it answers the ranged request with a
-// full 200, which the engine currently treats as a changed source and fails the whole download. This
-// pins that (suboptimal) behavior; a future improvement could skip a range-incapable mirror instead.
+// A mirror that ignores ranges cannot serve a block re-fetch: it answers the ranged request with the
+// whole body. That is a verdict on the mirror, not on the file, so it takes that mirror out of the
+// rotation and the repair carries on against the sources that are left. Here the only one left is
+// the always-corrupt primary, so the block still fails - on its own hash, after spending its own
+// budget, rather than on a mirror's capability. The mirror's request count is the other half: the
+// verdict is taken once and remembered, not re-learned for every later attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_range_ignoring_mirror_on_repair_fails_as_a_changed_source() {
+async fn a_range_ignoring_mirror_on_repair_is_dropped_from_the_rotation() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.bin");
     let (len, block_size) = (48 * MIB, 4 * MIB as u32);
@@ -560,17 +563,34 @@ async fn a_range_ignoring_mirror_on_repair_fails_as_a_changed_source() {
         .build()
         .unwrap();
 
-    let err = Fetcher::builder()
-        .max_connections_per_file(4)
-        .build()
-        .unwrap()
-        .download(&spec, None, CancellationToken::new())
-        .await
-        .unwrap_err();
+    let err = tokio::time::timeout(
+        Duration::from_secs(60),
+        Fetcher::builder()
+            .max_connections_per_file(4)
+            .retry_policy(
+                RetryPolicy::default()
+                    .max_attempts(6)
+                    .base_delay(Duration::from_millis(1)),
+            )
+            .build()
+            .unwrap()
+            .download(&spec, None, CancellationToken::new()),
+    )
+    .await
+    .expect("a range-ignoring mirror must be passed over, not hang")
+    .unwrap_err();
+
     assert!(
-        matches!(err, FetchError::ServerFileChanged { .. }),
+        matches!(err, FetchError::BlockVerifyFailed { block: 5, offset, .. } if offset == 20 * MIB),
         "got {err:?}"
     );
+    assert_eq!(
+        mirror.stats().requests(),
+        1,
+        "the mirror was asked once and then never again: {:?}",
+        mirror.stats().served_ranges(),
+    );
+    assert!(!dest.exists());
 }
 
 #[tokio::test]

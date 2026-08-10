@@ -6,8 +6,15 @@
 //! of its segment (nothing already durable is lost), and the completed-interval journal lets the
 //! whole transfer resume across a restart. When the length is unknown, the file is small, or the host
 //! ignores ranges, the transfer falls back to the single-connection engine in [`crate::download`].
+//!
+//! Re-queued work does not have to go back to the source that failed it. Every unit of work carries
+//! the source it was asked from, and every failure of it - a refused connection, a dropped body, a
+//! silence past the stall timeout, a throttling status, a block that failed its hash - steps that
+//! choice along the spec's source list by the same rule ([`rotate`]). A mirror that turns out not to
+//! serve ranges at all is taken out of the rotation for the rest of the transfer rather than being
+//! re-asked for every later block.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -54,10 +61,27 @@ fn hash_concurrency() -> usize {
 }
 
 /// One unit of transfer work: a byte range and which source to fetch it from (`0` is the primary,
-/// higher indices are mirrors). Re-queues carry their source; a dirty block's re-fetch may rotate it.
+/// higher indices are mirrors). A re-queue re-picks the source from the work's own attempt count.
 struct Task {
     range: Range<u64>,
     source: usize,
+}
+
+/// Which source a unit of work goes to on its next try, given how many times it has already failed:
+/// the same source once more, then one step further along the list per failure after that.
+///
+/// The one free retry absorbs the common transient blip without giving up a warm connection, and
+/// every failure past it steps on, so a dead host costs one range two attempts instead of its whole
+/// budget. Which failure it was does not matter: a refused connection, a body that dropped, a
+/// silence past the stall timeout, a throttling status and a block that failed its hash all rotate
+/// the same way, because all of them mean "this source did not deliver these bytes".
+///
+/// Rotation is a pure function of the attempt count and never a step of its own, so failing over can
+/// only ever spend an attempt the retry budget already paid for. That is what keeps the work queue
+/// finite: no path through it moves work to another source without also moving the counter that
+/// bounds it.
+fn rotate(failures: u32, sources: usize) -> usize {
+    (failures as usize).saturating_sub(1) % sources.max(1)
 }
 
 /// Decide single vs segmented and run the transfer. The single-connection engine owns the
@@ -91,32 +115,55 @@ pub(crate) async fn dispatch(
         return Ok(verified);
     }
 
-    // A cache hit knows only the capability, not the URL's validators (which are per-URL, not per-host),
-    // so a fresh cache-hit download records no validators; a resume then relies on the whole-file hash
-    // to catch a changed source.
-    let (capability, etag, last_modified) = match shared.capabilities.get(spec.url()) {
-        Some(cap) => (cap, None, None),
+    let probed = match shared.capabilities.get(spec.url()) {
+        // The cache is keyed per host, so a hit is always the primary's own verdict. It knows only
+        // the capability though, not the URL's validators (which are per-URL, not per-host), so a
+        // cache-hit download records none; a resume then relies on the whole-file hash to catch a
+        // changed source.
+        Some(capability) => Probe {
+            capability,
+            source: 0,
+            etag: None,
+            last_modified: None,
+        },
         None => {
-            let probe = probe(client, spec, &cancel, shared).await?;
-            shared.capabilities.set(spec.url(), probe.capability);
-            (probe.capability, probe.etag, probe.last_modified)
+            let probed = probe(client, spec, &cancel, shared).await?;
+            shared
+                .capabilities
+                .set(&spec.sources()[probed.source], probed.capability);
+            // Validators are per URL, not per host, so only the primary's own probe records them: a
+            // probe answered by a mirror describes that mirror's copy, and offering it back to the
+            // primary as an `If-Range` would invite a changed-source verdict on a source that never
+            // changed.
+            match probed.source {
+                0 => probed,
+                _ => Probe {
+                    etag: None,
+                    last_modified: None,
+                    ..probed
+                },
+            }
         }
     };
-    match capability {
+    let from_primary = probed.source == 0;
+    match probed.capability {
         // A range-ignoring host cannot serve a block re-fetch; the single-connection engine verifies
-        // block mode from disk after streaming the whole file (no targeted repair).
-        Capability::SingleConnection => {
+        // block mode from disk after streaming the whole file (no targeted repair). Only the primary's
+        // own verdict demotes: that engine streams the primary and nothing else, so demoting on a
+        // mirror's answer would settle a question about the wrong host. The segmented engine handles a
+        // range-ignoring mirror itself, by passing over it.
+        Capability::SingleConnection if from_primary => {
             download::run(client, spec, verify, progress, cancel, shared).await
         }
-        Capability::Segmentable => {
+        Capability::SingleConnection | Capability::Segmentable => {
             transfer(
                 client,
                 spec,
                 len,
                 seg_size,
                 verify,
-                etag,
-                last_modified,
+                probed.etag,
+                probed.last_modified,
                 progress,
                 cancel,
                 shared,
@@ -126,9 +173,12 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// A probe's verdict plus the server validators to record for a later resume's `If-Range`.
+/// A probe's verdict, which source gave it, and the server validators to record for a later resume's
+/// `If-Range`.
 struct Probe {
     capability: Capability,
+    /// The source that answered: `0` for the primary, higher for a mirror the probe fell through to.
+    source: usize,
     etag: Option<Vec<u8>>,
     last_modified: Option<Vec<u8>>,
 }
@@ -139,17 +189,22 @@ struct Probe {
 ///
 /// The probe is the transfer's first request, so a throttled or restarting host would otherwise fail
 /// a whole job before a byte was asked for: a connect failure or a retryable status backs off here
-/// under the same policy the segment workers use.
+/// under the same policy the segment workers use, and rotates through the sources by the same rule,
+/// so a primary that is down cannot fail a job the mirrors could have served. Exhausting the budget
+/// reports the last source's own failure, which names a host and carries the cause.
 async fn probe(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     cancel: &CancellationToken,
     shared: &Shared,
 ) -> Result<Probe, FetchError> {
+    let sources = spec.sources();
     let mut attempts = 0u32;
     loop {
-        let request = apply_headers(client.get(spec.url().clone()), spec.header_policy())
-            .header(RANGE, "bytes=0-0");
+        let source = rotate(attempts, sources.len());
+        let url = &sources[source];
+        let request =
+            apply_headers(client.get(url.clone()), spec.header_policy()).header(RANGE, "bytes=0-0");
         let sent = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(FetchError::Cancelled),
@@ -164,26 +219,27 @@ async fn probe(
                         etag: download::header_bytes(&resp, &ETAG),
                         last_modified: download::header_bytes(&resp, &LAST_MODIFIED),
                         capability: classify(&resp),
+                        source,
                     });
                 }
                 status if classify_status(status) == Class::Retryable => (
                     FetchError::Http {
                         status,
-                        url: spec.url().clone(),
+                        url: url.clone(),
                     },
                     retry_after(resp.headers()),
                 ),
                 status => {
                     return Err(FetchError::Http {
                         status,
-                        url: spec.url().clone(),
+                        url: url.clone(),
                     });
                 }
             },
             Err(e) if classify_send_error(&e) == Class::Fatal => {
-                return Err(download::connect_error(spec.url(), e));
+                return Err(download::connect_error(url, e));
             }
-            Err(e) => (download::connect_error(spec.url(), e), None),
+            Err(e) => (download::connect_error(url, e), None),
         };
         attempts += 1;
         if !shared.retry.may_retry(attempts) {
@@ -223,6 +279,13 @@ struct TransferState {
     /// block is cleared. Its length always equals `durable`.
     covered: Mutex<IntervalSet>,
     attempts: Mutex<HashMap<u64, u32>>,
+    /// Sources found unable to serve byte ranges, by index. A mirror that answers a ranged request
+    /// with a whole body cannot serve a segment or a block repair, and it will answer the next one
+    /// the same way, so the verdict is taken once and holds for the rest of the transfer instead of
+    /// costing every later block a wasted request. Index `0` is never in here: a whole body from the
+    /// primary is a changed source, not a capability, and that is what leaves at least one source
+    /// always eligible.
+    ranges_ignored: Mutex<HashSet<usize>>,
     journal: tokio::sync::Mutex<Option<Journal>>,
     /// Present only in block mode: the per-block verification state and its wake channel.
     verify: Option<Arc<BlockVerify>>,
@@ -280,11 +343,60 @@ impl TransferState {
     }
 
     /// Increment and return the attempt count for a stuck offset.
+    ///
+    /// The key is the offset the re-queued range starts at, so the count measures consecutive
+    /// failures that gained *no bytes*: a source that delivered part of a segment moves the key
+    /// along, which resets both the budget and the rotation back to the primary. Only work that is
+    /// genuinely stuck escalates through the source list.
     fn bump_attempt(&self, start: u64) -> u32 {
         let mut attempts = lock(&self.attempts);
         let counter = attempts.entry(start).or_insert(0);
         *counter += 1;
         *counter
+    }
+
+    /// Record that `source` answered a ranged request with a whole body, so later picks pass over it.
+    /// `true` when this call is what recorded it, `false` for a worker that raced to the same verdict.
+    fn mark_ranges_ignored(&self, source: usize) -> bool {
+        lock(&self.ranges_ignored).insert(source)
+    }
+
+    /// The first source at or after `from`, wrapping, that has not been found unable to serve ranges.
+    /// Total: the primary is never marked, so the walk always lands somewhere within one lap.
+    fn eligible_from(&self, from: usize) -> usize {
+        let count = self.sources.len();
+        let ignored = lock(&self.ranges_ignored);
+        (0..count)
+            .map(|step| (from + step) % count)
+            .find(|source| !ignored.contains(source))
+            .unwrap_or(0)
+    }
+
+    /// Which source to ask for work that has failed `attempts` times.
+    fn next_source(&self, attempts: u32) -> usize {
+        self.eligible_from(rotate(attempts, self.sources.len()))
+    }
+
+    /// The failure to report for a range whose attempt budget ran out.
+    ///
+    /// A transfer with mirrors has spent that budget across its whole source list, so it reports the
+    /// failover it exhausted; one with a single source had nowhere to go, so the stall of the one
+    /// source it had is still the whole story.
+    fn exhausted(&self, attempts: u32) -> FetchError {
+        let at_bytes = self.durable.load(Ordering::SeqCst);
+        if self.sources.len() > 1 {
+            FetchError::AllSourcesFailed {
+                url: self.primary().clone(),
+                sources: self.sources.len(),
+                attempts,
+                at_bytes,
+            }
+        } else {
+            FetchError::Stalled {
+                url: self.primary().clone(),
+                at_bytes,
+            }
+        }
     }
 
     /// Wait out the backoff for work that has failed `attempts` times, honoring a server-named pause.
@@ -433,6 +545,7 @@ async fn transfer(
             durable: AtomicU64::new(already),
             covered: Mutex::new(covered),
             attempts: Mutex::new(HashMap::new()),
+            ranges_ignored: Mutex::new(HashSet::new()),
             journal: tokio::sync::Mutex::new(journal),
             verify: block_verify,
             hash_limit: Arc::new(Semaphore::new(hash_concurrency())),
@@ -510,8 +623,11 @@ enum SegmentResult {
         range: Range<u64>,
         asked: Option<Duration>,
     },
-    /// The server returned a `200` where a `206` was expected (the source changed under us).
+    /// The primary returned a `200` where a `206` was expected (the source changed under us).
     SourceChanged,
+    /// A mirror returned a `200` where a `206` was expected: it will not serve ranges, so it can
+    /// serve neither a segment nor a block repair. Costs the transfer that one source, not the job.
+    RangesIgnored { range: Range<u64> },
     /// The transfer is ending (finished or cancelled); stop working.
     Stop,
     /// An unrecoverable failure for the whole job.
@@ -535,21 +651,24 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
                 range: remaining,
                 asked,
             } => {
-                let attempts = state.bump_attempt(remaining.start);
-                if !state.retry.may_retry(attempts) {
-                    state.finish(Err(FetchError::Stalled {
-                        url: state.primary().clone(),
-                        at_bytes: state.durable.load(Ordering::SeqCst),
-                    }));
-                } else if state.backoff(attempts, asked, &cancel).await {
-                    // A transport stall keeps the same source; block-level mirror rotation is driven by
-                    // the verifier, not by a dropped connection.
-                    state.push_task(Task {
-                        range: remaining,
-                        source,
-                    });
-                } else {
+                if !requeue(&state, remaining, asked, &cancel).await {
                     return; // the transfer ended or was cancelled during the backoff
+                }
+            }
+            SegmentResult::RangesIgnored { range } => {
+                // The worker that learns a mirror will not serve ranges moves the range on for free:
+                // nothing was served and nothing is worth waiting for, and the verdict is recorded
+                // once for the whole transfer, so the free moves are capped at one per mirror. A
+                // worker that raced to the same verdict finds it already recorded and is charged an
+                // attempt like any other failure. Between them, no source can hand out an unbudgeted
+                // lap of the work queue.
+                if state.mark_ranges_ignored(source) {
+                    state.push_task(Task {
+                        source: state.eligible_from(source + 1),
+                        range,
+                    });
+                } else if !requeue(&state, range, None, &cancel).await {
+                    return;
                 }
             }
             SegmentResult::SourceChanged => {
@@ -575,6 +694,37 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
             return;
         }
     }
+}
+
+/// Charge a failed range one attempt and put it back on the queue, or fail the transfer once its
+/// budget is gone. Returns whether the worker may carry on with its loop: `false` only when the
+/// transfer ended or a cancel landed while the range was waiting out its backoff.
+///
+/// Exhausting the budget records the outcome and returns `true`, leaving the worker's own completion
+/// check to notice the transfer has finished, exactly as every other terminal path here does.
+async fn requeue(
+    state: &TransferState,
+    range: Range<u64>,
+    asked: Option<Duration>,
+    cancel: &CancellationToken,
+) -> bool {
+    let attempts = state.bump_attempt(range.start);
+    if !state.retry.may_retry(attempts) {
+        state.finish(Err(state.exhausted(attempts)));
+        return true;
+    }
+    if !state.backoff(attempts, asked, cancel).await {
+        return false;
+    }
+    // The re-queued range goes wherever the rotation names, which is the source that just failed for
+    // one more try and then each of the others in turn. A dead or silent host therefore costs this
+    // range a couple of attempts rather than every one of them, which is the whole point of carrying
+    // mirrors: before this, only a block that failed its hash could reach one.
+    state.push_task(Task {
+        source: state.next_source(attempts),
+        range,
+    });
+    true
 }
 
 /// The block verifier: as bytes become durable, hash each newly-complete block off the transfer path
@@ -675,14 +825,8 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
     if !state.backoff(attempts, None, cancel).await {
         return; // the transfer ended or was cancelled during the backoff
     }
-    let source = mirror_source(state, attempts);
+    let source = state.next_source(attempts);
     state.push_task(Task { range, source });
-}
-
-/// Which source to re-fetch a dirty block from, given how many times it has failed: the primary first,
-/// then each mirror in turn. With no mirrors this is always the primary.
-fn mirror_source(state: &TransferState, attempts: u32) -> usize {
-    (attempts as usize).saturating_sub(1) % state.sources.len()
 }
 
 /// Stream one segment's range into the preallocated `.part` at its offset, journaling each durable
@@ -727,7 +871,14 @@ async fn stream_segment(
         },
     };
     match resp.status().as_u16() {
-        200 => return SegmentResult::SourceChanged,
+        // A whole body where a range was asked for means different things by source. From the primary
+        // it is the source changing under a conditional range, which is only ever answered by
+        // restarting clean. From a mirror it says one thing and no more: this mirror will not serve
+        // ranges. That is a verdict on the mirror, so it costs the transfer that source and nothing
+        // else. Reading it as a changed source instead would let any range-ignoring mirror fail a
+        // download the primary was serving perfectly well.
+        200 if task.source == 0 => return SegmentResult::SourceChanged,
+        200 => return SegmentResult::RangesIgnored { range },
         206 => {}
         // A throttling or overload answer is not a verdict on the request, so the range goes back on
         // the queue and waits instead of failing the job.

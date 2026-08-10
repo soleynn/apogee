@@ -54,7 +54,7 @@ impl DownloadSpec {
         &self.url
     }
 
-    /// The alternate source URLs, tried in order when a block repeatedly fails from the primary.
+    /// The alternate source URLs, tried in turn when work repeatedly fails from the primary.
     #[must_use]
     pub fn mirrors(&self) -> &[Url] {
         &self.mirrors
@@ -143,14 +143,18 @@ impl DownloadSpecBuilder {
         self
     }
 
-    /// Add one alternate source URL, tried after the primary when a block repeatedly fails.
+    /// Add one alternate source URL, tried after the primary when work repeatedly fails.
+    ///
+    /// A mirror serves any part of the transfer the primary will not: a segment whose connection
+    /// keeps dying, a range the primary answers with a throttling status, or a block that fails its
+    /// hash. It is not asked for byte ranges again once it has answered one with a whole body.
     #[must_use]
     pub fn mirror(mut self, url: Url) -> Self {
         self.mirrors.push(url);
         self
     }
 
-    /// Add alternate source URLs, tried in order after the primary when a block repeatedly fails.
+    /// Add alternate source URLs, tried in turn after the primary when work repeatedly fails.
     #[must_use]
     pub fn mirrors(mut self, urls: impl IntoIterator<Item = Url>) -> Self {
         self.mirrors.extend(urls);
