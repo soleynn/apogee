@@ -618,6 +618,12 @@ mod tests {
             .runner("GE-Proton", "11-1")
             .expect("proton runner present");
         assert_eq!(runner.kind, RunnerKind::ProtonUmu);
+        // Every hosted row publishes both spellings, so a build that predates BLAKE3 keeps reading
+        // this file; what a build that understands both takes is the newer one.
+        assert!(
+            matches!(runner.pin, DigestPin::Blake3(_)),
+            "the hosted rows resolve to the preferred function"
+        );
         assert!(runner.uses_ntsync(), "the proton row declares ntsync");
         assert!(catalog.tool("umu-launcher").is_some());
 

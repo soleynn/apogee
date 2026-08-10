@@ -405,9 +405,11 @@ mod tests {
             .expect("the sample game index entry resolves");
         let artifact =
             include_bytes!("../../../site/indexes/artifacts/game-2024.03.28.0000.0000.apzi");
+        // The row publishes both spellings so a build that predates BLAKE3 can still read it, and
+        // the pin taken here is the preferred one, checked against the artifact it describes.
         assert_eq!(
             entry.pin,
-            DigestPin::Sha256(apogee_test_support::chaos::sha256_of(artifact)),
+            DigestPin::Blake3(apogee_test_support::chaos::blake3_of(artifact)),
             "the manifest pin must match the committed artifact",
         );
     }
