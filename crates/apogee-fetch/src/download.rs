@@ -28,7 +28,7 @@ use crate::fetcher::Shared;
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
 use crate::progress::{Phase, Progress};
-use crate::retry::{Class, classify_status, retry_after, sleep_or_cancel};
+use crate::retry::{Class, classify_send_error, classify_status, retry_after, sleep_or_cancel};
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
@@ -463,6 +463,9 @@ async fn obtain_response(
                 }
                 (failure, retry_after(resp.headers()))
             }
+            Err(e) if classify_send_error(&e) == Class::Fatal => {
+                return Err(connect_error(spec.url(), e));
+            }
             Err(e) => (connect_error(spec.url(), e), None),
         };
         *attempts += 1;
@@ -788,8 +791,15 @@ pub(crate) async fn sync_parent_dir(path: &Path) {
     }
 }
 
-/// A failure establishing the connection.
+/// A failure establishing the connection, or the client's redirect policy declining to follow one.
+/// Both arrive from the same `send`, and only the cause chain tells them apart.
 pub(crate) fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
+    if let Some(detail) = crate::redirect::refusal(&source) {
+        return FetchError::RedirectRefused {
+            url: url.clone(),
+            detail,
+        };
+    }
     FetchError::Connect {
         host: url.host_str().unwrap_or_default().to_owned(),
         source: std::io::Error::other(source),

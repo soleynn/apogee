@@ -64,6 +64,16 @@ impl Fetcher {
         }
     }
 
+    /// The redirect policy the safe builder installs. Test-only (gated behind the `testing` feature
+    /// alongside [`from_client`](Self::from_client)): a redirect policy can only be set while a
+    /// client is being built, so an injected client has no other way to carry the shipped one, and a
+    /// test that reimplemented it would prove nothing about what ships.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn redirect_policy() -> reqwest::redirect::Policy {
+        crate::redirect::policy()
+    }
+
     /// Download `spec`'s source to its destination, returning proof it verified.
     ///
     /// Progress snapshots are sent on `progress` when provided; the sender is dropped when the
@@ -284,6 +294,11 @@ impl FetcherBuilder {
             .deflate(false)
             // Keep enough idle connections alive to reuse across a file's segments.
             .pool_max_idle_per_host(self.max_connections_per_file)
+            .redirect(crate::redirect::policy())
+            // The origin URL is none of the redirect target's business. reqwest adds a `Referer`
+            // carrying it by default, which hands a third-party host the full path a transfer
+            // started from, including a patch file's name. Nothing we fetch needs one.
+            .referer(false)
             .build()
             .map_err(|e| FetchError::Client {
                 source: std::io::Error::other(e),

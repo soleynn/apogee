@@ -44,6 +44,21 @@ pub(crate) fn classify_status(status: u16) -> Class {
     }
 }
 
+/// Whether a request that never produced a response is worth sending again.
+///
+/// Almost all of them are: a refused connection, a reset handshake, a name that did not resolve yet.
+/// The exception is the client's own redirect policy declining to follow a hop, which is a verdict on
+/// where the source points rather than a fault in reaching it. Re-sending asks an identical question
+/// and gets an identical refusal, so it burns the whole attempt budget and its backoffs to arrive at
+/// the failure the first send already had.
+pub(crate) fn classify_send_error(error: &reqwest::Error) -> Class {
+    if crate::redirect::refusal(error).is_some() {
+        Class::Fatal
+    } else {
+        Class::Retryable
+    }
+}
+
 /// The pause a `Retry-After` header asked for, in its delta-seconds form only.
 ///
 /// The HTTP-date form yields `None`, and so does anything unparseable, which sends the caller to its

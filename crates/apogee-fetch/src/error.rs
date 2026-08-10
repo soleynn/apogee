@@ -69,6 +69,13 @@ pub enum FetchError {
     #[error("http {status} for {url}")]
     Http { status: u16, url: Url },
 
+    /// A redirect the client's policy would not follow: a chain past the hop cap, a hop leaving
+    /// `https` for plaintext, or a hop to a scheme that is not HTTP. Distinct from
+    /// [`Connect`](FetchError::Connect) because the host answered perfectly well, and because a
+    /// refusal is a verdict on the source rather than a transient fault, so it is never retried.
+    #[error("refused a redirect while fetching {url}: {detail}")]
+    RedirectRefused { url: Url, detail: &'static str },
+
     /// A resume needed byte ranges the server would not serve.
     #[error("server does not support byte ranges: {url}")]
     RangesUnsupported { url: Url },

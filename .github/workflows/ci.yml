@@ -112,6 +112,9 @@ jobs:
       # The unverified-download-over-TLS test needs a client that trusts a loopback test certificate,
       # exposed only behind apogee-fetch's test-only `testing` feature, so it runs as its own step.
       - run: cargo test -p apogee-fetch --features testing --test none_over_tls
+      # The https-to-plaintext redirect refusal needs a TLS listener to downgrade away from, so it
+      # needs the same loopback-trusting client and rides the same gate.
+      - run: cargo test -p apogee-fetch --features testing --test redirect_tls
       # Same reason: the component-manifest fetch is checked over TLS against a loopback certificate. It
       # is what pins the property that a manifest edit reaches the client at all.
       - run: cargo test -p apogee-addons --features testing --test manifest_fetch

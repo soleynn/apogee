@@ -22,6 +22,7 @@ mod probe;
 mod progress;
 mod range_source;
 mod ranges;
+mod redirect;
 mod retry;
 mod scheduler;
 mod segmented;

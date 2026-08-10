@@ -24,7 +24,7 @@ use http_body_util::StreamBody;
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
     ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderValue, IF_RANGE,
-    LAST_MODIFIED, RANGE, RETRY_AFTER,
+    LAST_MODIFIED, LOCATION, RANGE, REFERER, RETRY_AFTER,
 };
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -48,6 +48,7 @@ type ChaosBody = StreamBody<ReceiverStream<Result<Frame<Bytes>, std::io::Error>>
 struct RequestHeaders {
     user_agent: Option<String>,
     patch_unique_id: Option<String>,
+    referer: Option<String>,
 }
 
 /// Counters a test asserts against, updated as the server works.
@@ -134,9 +135,21 @@ impl Stats {
             .collect()
     }
 
+    /// The `Referer` sent on each request, in request order. `None` where absent. A redirect target
+    /// that is told the origin URL sees one here.
+    #[must_use]
+    pub fn referers(&self) -> Vec<Option<String>> {
+        self.request_headers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|h| h.referer.clone())
+            .collect()
+    }
+
     /// Capture the headers a policy test cares about from one request.
     fn record_request_headers(&self, headers: &hyper::HeaderMap) {
-        let get = |name: &str| {
+        let get = |name: &hyper::header::HeaderName| {
             headers
                 .get(name)
                 .and_then(|v| v.to_str().ok())
@@ -146,8 +159,12 @@ impl Stats {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(RequestHeaders {
-                user_agent: get("user-agent"),
-                patch_unique_id: get("x-patch-unique-id"),
+                user_agent: get(&hyper::header::USER_AGENT),
+                patch_unique_id: headers
+                    .get("x-patch-unique-id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                referer: get(&REFERER),
             });
     }
 }
@@ -244,6 +261,14 @@ struct Config {
     throttle: Option<Duration>,
     chunk: usize,
     tls: bool,
+    /// Answer every request past the first `n` with `status` + `Location: <url>`. `n = 0` redirects
+    /// from the very first request; a higher `n` lets a range-capability probe through so the
+    /// redirect lands on a segment request instead.
+    redirect_to: Option<(u64, u16, String)>,
+    /// Redirect to `/hop{k+1}` on this same server until `k` reaches this many hops, then serve the
+    /// body. The hop count rides in the path, so a chain's length does not depend on which connection
+    /// a request arrives on.
+    redirect_hops: Option<(u16, u64)>,
 }
 
 /// A running chaos server. Dropping it shuts the server down (the held [`DropGuard`] cancels the
@@ -292,6 +317,8 @@ impl ChaosServer {
                 throttle: None,
                 chunk: 64 * 1024,
                 tls: false,
+                redirect_to: None,
+                redirect_hops: None,
             },
         }
     }
@@ -588,6 +615,41 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Answer every request with `status` and `Location: location`, serving no body.
+    ///
+    /// `location` is taken verbatim, so it can be another server's URL (a cross-host hop), a plain
+    /// `http://` URL from a [`tls`](Self::tls) server (a scheme downgrade), or a relative path.
+    #[must_use]
+    pub fn redirect_to(self, status: u16, location: impl Into<String>) -> Self {
+        self.redirect_to_after(0, status, location)
+    }
+
+    /// The same redirect, but only from request `after + 1` onward: the first `after` requests are
+    /// served normally.
+    ///
+    /// With `after = 1` a segmented transfer's range-capability probe succeeds and every segment
+    /// request that follows is redirected, so the redirect lands on the segment path rather than on
+    /// the probe.
+    #[must_use]
+    pub fn redirect_to_after(
+        mut self,
+        after: u64,
+        status: u16,
+        location: impl Into<String>,
+    ) -> Self {
+        self.cfg.redirect_to = Some((after, status, location.into()));
+        self
+    }
+
+    /// Redirect to this same server `hops` times before serving the body, so a chain of a known
+    /// length can be walked. The hop count rides in the request path (`/hop1`, `/hop2`, ...), so the
+    /// chain is the same length however the requests interleave across connections.
+    #[must_use]
+    pub fn redirect_self_hops(mut self, status: u16, hops: u64) -> Self {
+        self.cfg.redirect_hops = Some((status, hops));
+        self
+    }
+
     /// Sleep between body chunks.
     #[must_use]
     pub fn throttle(mut self, delay: Duration) -> Self {
@@ -621,6 +683,12 @@ async fn handle(
 
     if req.method() != Method::GET {
         return Ok(status_only(StatusCode::METHOD_NOT_ALLOWED));
+    }
+
+    // A redirect is answered before any body machinery: a redirecting response carries no content, so
+    // none of the range, corruption or drop knobs apply to it.
+    if let Some(response) = redirect_response(&req, &cfg, request_index) {
+        return Ok(response);
     }
 
     if let Some(max) = cfg.max_header_bytes
@@ -905,6 +973,48 @@ fn build_acceptor(cert_der: &[u8], key_der: &[u8]) -> std::io::Result<TlsAccepto
         .with_single_cert(certs, key)
         .map_err(std::io::Error::other)?;
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// The redirect this request is scripted to get, or `None` to serve it normally: a fixed `Location`
+/// once the warm-up requests are past, or the next link of a self-chain.
+fn redirect_response(
+    req: &Request<Incoming>,
+    cfg: &Config,
+    request_index: u64,
+) -> Option<Response<ChaosBody>> {
+    if let Some((after, status, location)) = &cfg.redirect_to
+        && request_index > *after
+    {
+        return Some(redirect(*status, location));
+    }
+    if let Some((status, hops)) = cfg.redirect_hops {
+        let walked = hop_index(req.uri().path());
+        if walked < hops {
+            return Some(redirect(status, &format!("/hop{}", walked + 1)));
+        }
+    }
+    None
+}
+
+/// How many self-redirect hops a request's path records: `/hopN` is the Nth, any other path is the
+/// chain's start.
+fn hop_index(path: &str) -> u64 {
+    path.rsplit('/')
+        .next()
+        .and_then(|last| last.strip_prefix("hop"))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A redirect response: `status` plus `Location`, no body. A status the HTTP crate rejects falls back
+/// to `302`, so a test cannot accidentally serve a malformed status line instead of a redirect.
+fn redirect(status: u16, location: &str) -> Response<ChaosBody> {
+    Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::FOUND))
+        .header(LOCATION, location)
+        .header(CONTENT_LENGTH, 0)
+        .body(empty_body())
+        .unwrap_or_else(|_| status_only(StatusCode::FOUND))
 }
 
 /// A `503 Service Unavailable` carrying a `Retry-After` and an empty body.
@@ -1648,6 +1758,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 431);
+    }
+
+    #[tokio::test]
+    async fn a_fixed_location_redirects_every_request() {
+        let target = ChaosServer::builder(11, 512).start().await.unwrap();
+        let front = ChaosServer::builder(0, 512)
+            .redirect_to(302, target.url("f.bin").to_string())
+            .start()
+            .await
+            .unwrap();
+
+        // Followed by default, so the body comes from the target and the front served none.
+        let body = reqwest::get(front.url("f.bin"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &generated_vec(11, 0, 512)[..]);
+        assert_eq!(front.stats().bytes_served(), 0);
+        assert_eq!(target.stats().requests(), 1);
+
+        // Held at the redirect itself, the status and Location are visible.
+        let resp = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(front.url("f.bin"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 302);
+        assert_eq!(
+            resp.headers().get("location").unwrap(),
+            target.url("f.bin").as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_warm_up_request_is_served_before_the_redirect_starts() {
+        let server = ChaosServer::builder(12, 256)
+            .redirect_to_after(1, 302, "http://127.0.0.1:1/gone")
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        assert_eq!(
+            client
+                .get(server.url("f.bin"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            200,
+        );
+        assert_eq!(
+            client
+                .get(server.url("f.bin"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            302,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_self_chain_walks_exactly_its_declared_hops() {
+        let server = ChaosServer::builder(13, 256)
+            .redirect_self_hops(302, 3)
+            .start()
+            .await
+            .unwrap();
+        let body = reqwest::get(server.url("f.bin"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &generated_vec(13, 0, 256)[..]);
+        // Three redirects plus the request that served: four in all.
+        assert_eq!(server.stats().requests(), 4);
+    }
+
+    #[test]
+    fn a_hop_path_reports_how_far_the_chain_has_walked() {
+        assert_eq!(hop_index("/f.bin"), 0);
+        assert_eq!(hop_index("/"), 0);
+        assert_eq!(hop_index("/hop1"), 1);
+        assert_eq!(hop_index("/hop12"), 12);
+        assert_eq!(hop_index("/hopped"), 0);
     }
 
     #[tokio::test]
