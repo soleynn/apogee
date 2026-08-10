@@ -49,9 +49,13 @@ pub(crate) fn policy() -> Policy {
 
 /// Why the hop from `previous` (every URL already requested, oldest first) to `next` must not be
 /// followed, or `None` to follow it.
+///
+/// The rules overlap, so the order decides which reason a caller is told: a hop from `https` to
+/// `ftp` is both a foreign scheme and a departure from TLS. The scheme is checked first because it
+/// is the more specific answer, and the detail exists to be read during triage.
 fn refuse(previous: &[Url], next: &Url) -> Option<&'static str> {
-    downgrade(previous, next)
-        .or_else(|| foreign_scheme(next))
+    foreign_scheme(next)
+        .or_else(|| downgrade(previous, next))
         .or_else(|| too_many_hops(previous))
 }
 
@@ -159,15 +163,19 @@ mod tests {
         assert_eq!(decide(&["http://host/a"], "https://host/a"), None);
     }
 
-    /// A hop out of HTTP entirely is refused whatever the chain looked like.
+    /// A hop out of HTTP entirely is refused whatever the chain looked like, and is named for the
+    /// scheme rather than for the downgrade. Leaving `https` for `ftp` is both, and the detail rides
+    /// in the error a caller reads, so it should name the more specific of the two.
     #[test]
     fn a_hop_to_a_foreign_scheme_is_refused() {
         for target in ["ftp://host/x", "file:///etc/passwd", "javascript:0"] {
-            assert_eq!(
-                decide(&["http://host/a"], target),
-                Some("redirect targets a non-http scheme"),
-                "{target}",
-            );
+            for from in ["http://host/a", "https://host/a"] {
+                assert_eq!(
+                    decide(&[from], target),
+                    Some("redirect targets a non-http scheme"),
+                    "{from} -> {target}",
+                );
+            }
         }
     }
 
