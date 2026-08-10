@@ -4,8 +4,8 @@
 the companions it loads into the game. It is authenticated the same way the runner and index catalogs
 are, with its own key:
 
-- Each artifact the launcher itself fetches is **sha256-pinned**, so the bytes are authenticated whoever
-  serves them.
+- Each artifact the launcher itself fetches is **digest-pinned**, so the bytes are authenticated
+  whoever serves them.
 - The manifest carrying the pins is **Ed25519-signed** (`manifest.json.sig`, detached, 64 bytes) and
   verified against the keys compiled into the client (`apogee_addons::COMPONENT_PUBLIC_KEYS`) before any
   pin or pointer is trusted.
@@ -72,7 +72,7 @@ than a release.
         // Omit `name` to remove the key and its subtree; a subtree removal must name a key at least
         // three components below its root.
         { "registry_delete": { "key": "HKLM\\…", "name": "…" } },
-        { "files": { "url": "https://…", "sha256": "<64 hex>",
+        { "files": { "url": "https://…", "blake3": "<64 hex>", "sha256": "<64 hex>",
                      "archive": { "format": "zip" | "tar.gz" | "tar.xz" | "tar.zst",
                                   "strip_prefix": "…" },
                      "into": "<relative to C:>" } }
@@ -126,10 +126,15 @@ automated here.
 
 ## Adding or updating a row
 
-1. **Pin** a verb's artifact: download it and `sha256sum` it. Point `url` at the versioned upstream
-   asset, never at a redirecting "latest" endpoint, since the pin has to describe the bytes that URL
-   will keep serving. An injectable has no pin: its `distribution` is a pointer, and the digests that
-   distribution publishes are what authenticate its bytes.
+1. **Pin** a verb's artifact: download it and hash it once, which prints both lines to paste in:
+   ```
+   cargo run --manifest-path ../../tools/catalog-sign/Cargo.toml -- pin <downloaded-artifact>
+   ```
+   A row may carry `blake3`, `sha256`, or both, and a client that reads both prefers `blake3`. Publish
+   both, so a client released before BLAKE3 keeps reading this file. Point `url` at the versioned
+   upstream asset, never at a redirecting "latest" endpoint, since the pin has to describe the bytes
+   that URL will keep serving. An injectable has no pin: its `distribution` is a pointer, and the
+   digests that distribution publishes are what authenticate its bytes.
 2. **Edit** `manifest.json`.
 3. **Sign** the exact manifest bytes with the offline seed:
    ```

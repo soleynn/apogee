@@ -31,7 +31,7 @@ pub(crate) struct RepairRepoPlan {
     pub(crate) version: String,
 }
 
-/// A repair across a profile's installed repos. The backend resolves each repo's `sha256`-pinned
+/// A repair across a profile's installed repos. The backend resolves each repo's digest-pinned
 /// block index from the signed catalog and hands `apogee-patcher` the full request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepairPlan {

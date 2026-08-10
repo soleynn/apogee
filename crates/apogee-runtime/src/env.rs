@@ -332,6 +332,8 @@ fn read_kernel_version() -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use apogee_fetch::DigestPin;
+
     use super::*;
 
     fn caps(ntsync: bool, fsync: bool) -> HostCaps {
@@ -345,7 +347,7 @@ mod tests {
             version: "1".to_owned(),
             kind: crate::catalog::RunnerKind::Wine,
             url: url::Url::parse("https://example.invalid/r.tar.xz").unwrap(),
-            sha256: [0u8; 32],
+            pin: DigestPin::Blake3([0u8; 32]),
             archive: crate::catalog::ArchiveLayout {
                 format: crate::catalog::ArchiveFormat::TarXz,
                 strip_prefix: None,

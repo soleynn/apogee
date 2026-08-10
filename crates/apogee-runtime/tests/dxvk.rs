@@ -8,12 +8,12 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use apogee_fetch::Fetcher;
+use apogee_fetch::{DigestPin, Fetcher};
 use apogee_runtime::{
     ArchiveFormat, DxvkEntry, HealthIssue, NvapiRef, Prefix, Progress, RunnerKind, Runtime,
     RuntimePaths,
 };
-use apogee_test_support::chaos::{ChaosServer, sha256_of};
+use apogee_test_support::chaos::{ChaosServer, blake3_of};
 use tokio_util::sync::CancellationToken;
 
 /// A `wine` stand-in that lays the prefix skeleton on `wineboot`, so `prepare_custom` initializes a
@@ -92,7 +92,7 @@ async fn install_dxvk_places_dlls_and_records_the_prefix() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: server.url("dxvk.tar.gz"),
-        sha256: sha256_of(&tar),
+        pin: DigestPin::Blake3(blake3_of(&tar)),
         format: ArchiveFormat::TarGz,
         nvapi: None,
     };
@@ -157,11 +157,11 @@ async fn install_dxvk_with_nvapi_adds_the_nvapi_dll() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: dxvk_server.url("dxvk.tar.gz"),
-        sha256: sha256_of(&dxvk_tar),
+        pin: DigestPin::Blake3(blake3_of(&dxvk_tar)),
         format: ArchiveFormat::TarGz,
         nvapi: Some(NvapiRef {
             url: nvapi_server.url("nvapi.tar.gz"),
-            sha256: sha256_of(&nvapi_tar),
+            pin: DigestPin::Blake3(blake3_of(&nvapi_tar)),
             format: ArchiveFormat::TarGz,
         }),
     };
@@ -200,7 +200,7 @@ async fn health_check_flags_a_missing_dxvk_dll() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: server.url("dxvk.tar.gz"),
-        sha256: sha256_of(&tar),
+        pin: DigestPin::Blake3(blake3_of(&tar)),
         format: ArchiveFormat::TarGz,
         nvapi: None,
     };

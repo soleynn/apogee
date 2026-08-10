@@ -121,7 +121,7 @@ struct RepoCtx {
 }
 
 /// Obtain the repo's `.apzi` on local disk: a local source is used in place, a pinned source is
-/// fetched under its `sha256` (allowed over plain HTTP because the pin authenticates the bytes).
+/// fetched under its digest pin (allowed over plain HTTP because the pin authenticates the bytes).
 async fn acquire_index(
     fetcher: &Fetcher,
     config: &PatcherConfig,
@@ -131,7 +131,7 @@ async fn acquire_index(
     let repo = repo_req.repo;
     match &repo_req.index {
         IndexSource::LocalFile(path) => Ok(path.clone()),
-        IndexSource::Pinned { url, sha256 } => {
+        IndexSource::Pinned { url, pin } => {
             let dest = config
                 .patch_store
                 .join("indexes")
@@ -142,7 +142,7 @@ async fn acquire_index(
                     source,
                 })?;
             }
-            let spec = DownloadSpec::builder(url.clone(), dest, Validator::Sha256(*sha256))
+            let spec = DownloadSpec::builder(url.clone(), dest, Validator::from(*pin))
                 .build()
                 .map_err(|e| index_unavailable(repo, e))?;
             // A full disk is routed out of `IndexUnavailable` for the same reason it is routed out of

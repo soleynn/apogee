@@ -258,7 +258,7 @@ frozen!(
         ),
         ManifestError::BadPin { .. } => (
             ManifestError::BadPin { component: "a-verb".to_owned() },
-            "a-verb: sha256 pin is not 32 hex bytes",
+            "a-verb: no blake3 or sha256 pin of 32 hex bytes",
         ),
         ManifestError::BadUrl { .. } => (
             ManifestError::BadUrl {

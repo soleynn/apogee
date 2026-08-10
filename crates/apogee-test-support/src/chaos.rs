@@ -1409,12 +1409,34 @@ pub fn body_sha256(seed: u64, len: u64) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The BLAKE3 of the deterministic body `[0, len)` from `seed`, the counterpart to [`body_sha256`]
+/// for a download pinned under the function our own signed manifests use.
+#[must_use]
+pub fn body_blake3(seed: u64, len: u64) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut off = 0u64;
+    while off < len {
+        let want = (len - off).min(buf.len() as u64) as usize;
+        generate_into(seed, off, &mut buf[..want]);
+        hasher.update(&buf[..want]);
+        off += want as u64;
+    }
+    *hasher.finalize().as_bytes()
+}
+
 /// The SHA256 of a byte slice.
 #[must_use]
 pub fn sha256_of(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
+}
+
+/// The BLAKE3 of a byte slice.
+#[must_use]
+pub fn blake3_of(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
 }
 
 /// The per-block SHA1 digests of the deterministic body `[0, len)` from `seed`: one hash per

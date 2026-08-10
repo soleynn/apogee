@@ -11,6 +11,7 @@ mod block;
 mod download;
 mod error;
 mod fetcher;
+mod hash;
 mod headers;
 mod intervals;
 mod job;
@@ -32,6 +33,7 @@ mod validator;
 
 pub use error::{FetchError, SpecError};
 pub use fetcher::{Fetcher, FetcherBuilder};
+pub use hash::DigestPin;
 pub use headers::HeaderPolicy;
 pub use job::Job;
 pub use limiter::LimitHandle;

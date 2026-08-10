@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use apogee_fetch::Fetcher;
+use apogee_fetch::{DigestPin, Fetcher};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -112,7 +112,7 @@ async fn install_all(
     install_dlls(
         fetcher,
         &dxvk.url,
-        dxvk.sha256,
+        dxvk.pin,
         dxvk.format,
         "dxvk",
         system32,
@@ -128,7 +128,7 @@ async fn install_all(
             install_dlls(
                 fetcher,
                 &nv.url,
-                nv.sha256,
+                nv.pin,
                 nv.format,
                 "dxvk-nvapi",
                 system32,
@@ -148,7 +148,7 @@ async fn install_all(
 async fn install_dlls(
     fetcher: &Fetcher,
     url: &Url,
-    sha256: [u8; 32],
+    pin: DigestPin,
     format: ArchiveFormat,
     name: &str,
     system32: &Path,
@@ -158,7 +158,7 @@ async fn install_dlls(
     progress: &Progress,
 ) -> Result<(), RuntimeError> {
     let cache = work.join(format!("{name}.archive"));
-    let verified = download_verified(fetcher, url, sha256, &cache, cancel, progress).await?;
+    let verified = download_verified(fetcher, url, pin, &cache, cancel, progress).await?;
 
     let staging = work.join(format!("{name}.stage"));
     let _ = tokio::fs::remove_dir_all(&staging).await; // clear any partial prior extraction
