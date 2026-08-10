@@ -1,7 +1,7 @@
 //! The signed component manifest: which companions and prefix verbs exist, as data.
 //!
-//! A JSON body whose Ed25519 signature is verified against compiled-in keys **before** any `sha256`
-//! pin inside it is trusted. [`ComponentManifest::from_json_bytes`] is a pure, total parser over
+//! A JSON body whose Ed25519 signature is verified against compiled-in keys **before** any pin
+//! inside it is trusted. [`ComponentManifest::from_json_bytes`] is a pure, total parser over
 //! untrusted input and carries no authenticity guarantee on its own. [`VerifiedManifest`] is the
 //! shape that has been through the signature check, and the only one the apply path accepts.
 //!
@@ -10,8 +10,8 @@
 //! a release. A key the schema no longer defines is ignored rather than refused, which is what lets
 //! one manifest serve an older build while a newer one stops reading a list it has retired.
 //!
-//! Two lists, because two kinds of bytes. A verb's [`VerbOp::Files`] pins what it places by
-//! `sha256`, since the launcher names the archive it fetches. An [`InjectableEntry`] carries a
+//! Two lists, because two kinds of bytes. A verb's [`VerbOp::Files`] pins what it places by digest,
+//! since the launcher names the archive it fetches. An [`InjectableEntry`] carries a
 //! distribution endpoint instead, for a component whose own versioned, integrity-checked
 //! distribution is what authenticates its bytes and whose current version this manifest is in no
 //! position to pin.
@@ -37,6 +37,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use apogee_fetch::DigestPin;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use thiserror::Error;
@@ -203,8 +204,8 @@ pub enum ManifestError {
         /// The value as published.
         value: String,
     },
-    /// A `sha256` pin that is not 64 hex digits.
-    #[error("{component}: sha256 pin is not 32 hex bytes")]
+    /// A row that carries no pin of 64 hex digits under either name.
+    #[error("{component}: no blake3 or sha256 pin of 32 hex bytes")]
     #[non_exhaustive]
     BadPin {
         /// The row it appears in.
@@ -354,8 +355,8 @@ impl ComponentPath {
 pub struct Artifact {
     /// Where to fetch it.
     pub url: Url,
-    /// What the fetched bytes must hash to.
-    pub sha256: [u8; 32],
+    /// What the fetched bytes must hash to, carrying which function produced it.
+    pub pin: DigestPin,
     /// How to unpack it, and which prefix of the archive to strip.
     pub archive: ArchiveLayout,
 }
@@ -604,10 +605,16 @@ struct RawRegistry {
     value: Option<String>,
 }
 
+/// A row's pin is spelled by the function that produced it, and either spelling is accepted so a
+/// hosted manifest stays readable while it is re-signed onto the newer one. A row carrying both is
+/// read as BLAKE3 (see [`DigestPin::from_hex`]).
 #[derive(Deserialize)]
 struct RawFiles {
     url: String,
-    sha256: String,
+    #[serde(default)]
+    blake3: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
     archive: RawArchive,
     into: String,
 }
@@ -799,27 +806,27 @@ fn build_op(component: &str, raw: RawOp) -> Result<VerbOp, ManifestError> {
                 })?;
             Ok(VerbOp::RegistryDelete(delete))
         }
-        RawOp::Files(files) => Ok(VerbOp::Files {
-            artifact: build_artifact(component, &files.url, &files.sha256, files.archive)?,
-            into: ComponentPath::parse(&files.into, component)?,
-        }),
+        RawOp::Files(files) => {
+            let into = ComponentPath::parse(&files.into, component)?;
+            Ok(VerbOp::Files {
+                artifact: build_artifact(component, files)?,
+                into,
+            })
+        }
     }
 }
 
-fn build_artifact(
-    component: &str,
-    url: &str,
-    sha256: &str,
-    archive: RawArchive,
-) -> Result<Artifact, ManifestError> {
+fn build_artifact(component: &str, files: RawFiles) -> Result<Artifact, ManifestError> {
     Ok(Artifact {
-        url: parse_url(component, url)?,
-        sha256: decode_sha256_hex(sha256).ok_or_else(|| ManifestError::BadPin {
-            component: component.to_owned(),
-        })?,
+        url: parse_url(component, &files.url)?,
+        pin: DigestPin::from_hex(files.blake3.as_deref(), files.sha256.as_deref()).ok_or_else(
+            || ManifestError::BadPin {
+                component: component.to_owned(),
+            },
+        )?,
         archive: ArchiveLayout {
-            format: parse_format(component, &archive.format)?,
-            strip_prefix: archive.strip_prefix,
+            format: parse_format(component, &files.archive.format)?,
+            strip_prefix: files.archive.strip_prefix,
         },
     })
 }
@@ -850,30 +857,6 @@ fn unknown(component: &str, field: &'static str, value: impl Into<String>) -> Ma
         component: component.to_owned(),
         field,
         value: value.into(),
-    }
-}
-
-/// Decode exactly 64 hex digits into 32 bytes; any other length or a non-hex digit is `None`.
-fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = hex_val(bytes[2 * i])?;
-        let lo = hex_val(bytes[2 * i + 1])?;
-        *slot = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-const fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
     }
 }
 
@@ -1013,11 +996,10 @@ mod tests {
         }
     }
 
-    /// Both halves of the pin decoder: the length, and the digits. A pin of the right length made of
-    /// wrong characters is the one that would otherwise decode to a silently wrong 32 bytes, and it is
-    /// also the likelier mistake: a typo'd digit, or a digest in the wrong encoding.
+    /// A row whose pin does not decode, and a row that carries no pin under either name, are both
+    /// refused rather than becoming an unverified download.
     #[test]
-    fn a_bad_pin_is_refused() {
+    fn a_bad_or_absent_pin_is_refused() {
         for bad in [
             "not-hex".to_owned(),
             "g".repeat(64),
@@ -1032,19 +1014,29 @@ mod tests {
                 "{bad:?} must be refused"
             );
         }
+
+        let unpinned = manifest().replace("\"sha256\"", "\"md5\"");
+        assert!(matches!(
+            parse(&unpinned),
+            Err(ManifestError::BadPin { .. })
+        ));
     }
 
-    /// A pin is compared as bytes, so its hex has to decode the same either way it is written.
+    /// A verb's files row takes either spelling, so this manifest can be re-signed onto the newer
+    /// function without stranding a build that only reads the older one.
     #[test]
-    fn a_pin_decodes_the_same_in_either_case() {
-        let lower = "0123456789abcdef".repeat(4);
-        let upper = lower.to_uppercase();
-        let of = |pin: &str| {
-            let json = manifest().replace(GOOD_PIN, pin);
-            placed_artifact(&parse(&json).expect("parse")).sha256
-        };
-        assert_eq!(of(&lower), of(&upper));
-        assert_eq!(of(&lower)[0], 0x01);
+    fn a_files_row_may_spell_its_pin_either_way() {
+        let json = manifest();
+        assert_eq!(
+            placed_artifact(&parse(&json).expect("parse")).pin,
+            DigestPin::Sha256([0u8; 32])
+        );
+
+        let blake3 = json.replace("\"sha256\"", "\"blake3\"");
+        assert_eq!(
+            placed_artifact(&parse(&blake3).expect("parse")).pin,
+            DigestPin::Blake3([0u8; 32])
+        );
     }
 
     /// A value outside the set this build knows is refused by name rather than defaulted.
