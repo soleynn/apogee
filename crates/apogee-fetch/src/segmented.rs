@@ -10,9 +10,10 @@
 //! Re-queued work does not have to go back to the source that failed it. Every unit of work carries
 //! the source it was asked from, and every failure of it - a refused connection, a dropped body, a
 //! silence past the stall timeout, a throttling status, a block that failed its hash - steps that
-//! choice along the spec's source list by the same rule ([`rotate`](crate::retry::rotate)). A mirror
-//! that turns out not to serve ranges at all is taken out of the rotation for the rest of the transfer
-//! rather than being re-asked for every later block.
+//! choice along the spec's source list by the same rule ([`rotate`](crate::retry::rotate)), which the
+//! single-connection engine's retry path shares. A mirror that turns out not to serve ranges at all is
+//! taken out of the rotation for the rest of the transfer rather than being re-asked for every later
+//! block.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::SeekFrom;
@@ -133,9 +134,15 @@ pub(crate) async fn dispatch(
     match probed.capability {
         // A range-ignoring host cannot serve a block re-fetch; the single-connection engine verifies
         // block mode from disk after streaming the whole file (no targeted repair). Only the primary's
-        // own verdict demotes: that engine streams the primary and nothing else, so demoting on a
-        // mirror's answer would settle a question about the wrong host. The segmented engine handles a
-        // range-ignoring mirror itself, by passing over it.
+        // own verdict demotes: a mirror's answer settles nothing about the host the transfer starts
+        // from, and a range-ignoring mirror is the segmented engine's own business (it passes over it).
+        //
+        // Demotion stays a verdict about the primary rather than an excuse to go looking for a mirror
+        // that would segment. Mirrors are the fallbacks the spec names, so a primary that merely
+        // serves slower than one of them still serves, and re-probing to find out would spend a
+        // request per source before a byte was asked for. What demotion costs the job is throughput,
+        // not availability: the single-connection engine rotates through this same source list on
+        // failure, so a demoted transfer whose primary then dies still finishes off a mirror.
         Capability::SingleConnection if from_primary => {
             download::run(client, spec, verify, progress, cancel, shared).await
         }

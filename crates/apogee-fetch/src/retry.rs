@@ -1,10 +1,11 @@
 //! Backoff, jitter, and the one place that decides what a failure is worth.
 //!
-//! Every retry site in the crate asks the same questions: is this failure the kind that could succeed
-//! on a second try, how long should the transfer wait first, and which source should it ask.
+//! Every retry site in the crate asks the same three questions: is this failure the kind that could
+//! succeed on a second try, how long should the transfer wait first, and which source should it ask.
 //! [`classify_status`] answers the first for an HTTP status, [`RetryPolicy::delay`] answers the
-//! second, [`rotate`] answers the third, and the engines route through them so a status cannot be
-//! retryable on one transfer path and fatal on the other.
+//! second, [`rotate`] answers the third, and both engines route through them so a status cannot be
+//! retryable on one transfer path and fatal on the other, nor fail over on one and give up on the
+//! other.
 //!
 //! The delay is exponential with equal jitter: half the computed backoff, plus a random draw over
 //! the other half. Equal jitter (rather than a full-range draw) keeps a guaranteed floor under every
@@ -55,9 +56,8 @@ pub(crate) fn classify_status(status: u16) -> Class {
 /// the same way, because all of them mean "this source did not deliver these bytes".
 ///
 /// Rotation is a pure function of the attempt count and never a step of its own, so failing over can
-/// only ever spend an attempt the retry budget already paid for. That is what keeps a caller's retry
-/// loop finite: no path through it moves work to another source without also moving the counter that
-/// bounds it.
+/// only ever spend an attempt the retry budget already paid for. That is what bounds both engines: no
+/// path through either moves work to another source without also moving the counter that bounds it.
 pub(crate) fn rotate(failures: u32, sources: usize) -> usize {
     (failures as usize).saturating_sub(1) % sources.max(1)
 }
@@ -296,8 +296,8 @@ mod tests {
         }
     }
 
-    /// The first failure is a free same-source retry; each one past it steps along the list, wrapping,
-    /// so a mirror is reached after exactly one wasted try.
+    /// The first failure is a free same-source retry; each one past it steps along the list, wrapping.
+    /// Both engines share this, so a mirror is reached after exactly one wasted try either way.
     #[test]
     fn rotation_retries_the_same_source_once_then_steps_along_the_list() {
         // No failures yet, and the first failure, both stay on the primary.
