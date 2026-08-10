@@ -5,6 +5,21 @@
 //! construction site, so an unsafe request is unrepresentable rather than merely unchecked.
 //! [`FetchError`] is the runtime taxonomy for a transfer that was attempted and failed; expected,
 //! recoverable situations are values in the result types, not variants here.
+//!
+//! # Stability
+//!
+//! Every variant of both enums has a construction site in this crate. A variant naming a situation
+//! the crate cannot produce is dead code in whoever matches it, so there are none, and neither the
+//! variants nor their fields change without a major version.
+//!
+//! Two situations deliberately have no variant, because both are recoveries rather than failures: a
+//! server that will not serve byte ranges demotes the transfer to a single streaming connection, and
+//! a journal that will not decode restarts the download from zero. Neither can reach a caller.
+//!
+//! Both enums stay `#[non_exhaustive]`, so matching one needs a `_` arm. [`Validator`](crate::Validator)
+//! is open for the same reason: a failure shape a server has not shown us yet earns a variant rather
+//! than widening an existing one into vagueness. List the transient cases positively and let `_` read
+//! as "permanent, do not retry", so a variant added here cannot become a retry loop by default.
 
 use std::path::PathBuf;
 
@@ -76,10 +91,6 @@ pub enum FetchError {
     #[error("refused a redirect while fetching {url}: {detail}")]
     RedirectRefused { url: Url, detail: &'static str },
 
-    /// A resume needed byte ranges the server would not serve.
-    #[error("server does not support byte ranges: {url}")]
-    RangesUnsupported { url: Url },
-
     /// The transfer made no progress for too long, with no other source to try.
     #[error("stalled at {at_bytes} bytes: {url}")]
     Stalled { url: Url, at_bytes: u64 },
@@ -116,11 +127,6 @@ pub enum FetchError {
     /// The finished file's whole-file hash did not match the expected digest.
     #[error("file verification failed: expected {expected}, got {got}")]
     FileVerifyFailed { expected: String, got: String },
-
-    /// The resume journal could not be read as a journal at all (as opposed to being merely stale,
-    /// which silently restarts the download).
-    #[error("download journal corrupt: {path:?}")]
-    JournalCorrupt { path: PathBuf },
 
     /// A filesystem operation failed. Disk-full carries its own [`std::io::ErrorKind`].
     #[error("io error at {path:?}")]
