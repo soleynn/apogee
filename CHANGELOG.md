@@ -42,6 +42,7 @@ is tagged with its change type. Versioning aims to follow
 - Classify a download failure beside the code that raises it (#181) _(added)_
 - Preallocate the .part on the single-connection engine (#182) _(added)_
 - Bound every request from send to response headers (#185) _(fixed)_
+- Pin the unknown-length path and correct the connection-count claims (#186) _(testing)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
