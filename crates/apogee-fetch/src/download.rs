@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
@@ -535,8 +536,9 @@ async fn stream_body(
 ///
 /// A valid `206` continues from `start`; a `200` (source changed, or the server ignored the range)
 /// restarts cleanly from zero; a `416` or an unusable `206` re-requests once from zero. A connect
-/// failure or a throttling status spends an attempt from `attempts` and backs off under the fetcher's
-/// policy; every other status is fatal and is not retried.
+/// failure, a throttling status, and a source that sends no headers within the fetcher's stall
+/// timeout (see [`send_bounded`]) each spend an attempt from `attempts` and back off under the
+/// fetcher's policy; every other status is fatal and is not retried.
 ///
 /// Which source each try goes to is [`rotate`]'s decision, the same rule the segmented engine's
 /// re-queue follows: the failing source once more, then one step along the list per failure after
@@ -552,8 +554,9 @@ async fn stream_body(
 /// # Errors
 /// [`FetchError::Http`] for a fatal status, [`FetchError::AllSourcesFailed`] once a transfer with
 /// mirrors has spent its budget across them (the last source's own failure when there are none),
-/// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Cancelled`] if
-/// `cancel` fired, or [`FetchError::Io`] if truncating the `.part` for a restart failed.
+/// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Stalled`] if
+/// it answered with no headers at all, [`FetchError::Cancelled`] if `cancel` fired, or
+/// [`FetchError::Io`] if truncating the `.part` for a restart failed.
 async fn obtain_response(
     client: &reqwest::Client,
     spec: &DownloadSpec,
@@ -586,12 +589,21 @@ async fn obtain_response(
         let sent = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(FetchError::Cancelled),
-            sent = req.send() => sent,
+            sent = send_bounded(req, shared.stall_timeout) => sent,
         };
         // Each arm yields the failure to report if this is the last attempt, plus the pause the
         // server asked for; a usable response returns straight out.
         let (failure, asked) = match sent {
-            Ok(resp) => {
+            // The source took the request and sent no headers within the deadline: no progress, with
+            // nothing delivered to resume from, which is the same verdict a body going quiet earns.
+            Err(_elapsed) => (
+                FetchError::Stalled {
+                    url: url.clone(),
+                    at_bytes: *partial.start,
+                },
+                None,
+            ),
+            Ok(Ok(resp)) => {
                 let status = resp.status().as_u16();
                 if status == 200 {
                     if *partial.start > 0 {
@@ -619,10 +631,10 @@ async fn obtain_response(
                 }
                 (failure, retry_after(resp.headers()))
             }
-            Err(e) if classify_send_error(&e) == Class::Fatal => {
+            Ok(Err(e)) if classify_send_error(&e) == Class::Fatal => {
                 return Err(connect_error(url, e));
             }
-            Err(e) => (connect_error(url, e), None),
+            Ok(Err(e)) => (connect_error(url, e), None),
         };
         *attempts += 1;
         if !shared.retry.may_retry(*attempts) {
@@ -942,6 +954,29 @@ pub(crate) async fn sync_parent_dir(path: &Path) {
     {
         let _ = dir.sync_all().await;
     }
+}
+
+/// Send `req` and wait for the response *headers*, giving up after `within`. Reaching the host is
+/// inside that: this future spans DNS, the connect, the TLS handshake, any redirect hops, and the
+/// wait for a status line.
+///
+/// The crate's other deadline is an inactivity timeout on a body that is already streaming, which
+/// arms only once there is a stream to poll. Nothing before that point is a body: a host that
+/// completes the connection, takes the request and then never sends a status line leaves every
+/// engine parked inside one `send` with no error to retry on, which is a hang no attempt budget
+/// bounds. reqwest's own whole-request `timeout` cannot stand in for this, since it covers the body
+/// too and would cut a multi-gigabyte transfer off at a fixed duration rather than at a fixed
+/// silence, so the deadline goes here, around exactly the part of a request that has a bounded one.
+///
+/// `Err(Elapsed)` is the deadline passing. Every caller reads it as the source going quiet, so it
+/// costs an attempt and rotates like any other failure to deliver, rather than failing the transfer.
+/// A host that *refuses* the connection still errors immediately and reports
+/// [`Connect`](FetchError::Connect); only one that accepts and then says nothing reaches this.
+pub(crate) async fn send_bounded(
+    req: reqwest::RequestBuilder,
+    within: Duration,
+) -> Result<Result<reqwest::Response, reqwest::Error>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(within, req.send()).await
 }
 
 /// A failure establishing the connection, or the client's redirect policy declining to follow one.

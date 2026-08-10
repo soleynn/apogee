@@ -251,6 +251,10 @@ impl FetcherBuilder {
     /// How long a connection may make no progress before it is killed and re-queued (default 15 s).
     /// A dead CDN node is detected by this inactivity timeout, on both the segmented and the
     /// single-connection path.
+    ///
+    /// "No progress" covers a request from the moment it is sent: reaching the host, and then waiting
+    /// for its response headers, are bounded by this too, so a host that accepts a connection and
+    /// then says nothing costs one attempt rather than hanging the transfer.
     #[must_use]
     pub fn stall_timeout(mut self, timeout: Duration) -> Self {
         self.stall_timeout = timeout;
@@ -294,6 +298,14 @@ impl FetcherBuilder {
             .deflate(false)
             // Keep enough idle connections alive to reuse across a file's segments.
             .pool_max_idle_per_host(self.max_connections_per_file)
+            // Neither `timeout` nor `connect_timeout` is set here, and both are deliberate. The first
+            // covers the response body, so it would cut a multi-gigabyte transfer off at a fixed
+            // duration rather than at a fixed silence. The second would bound only what
+            // `download::send_bounded` already bounds from the outside, off a clock that starts a
+            // moment later at the same length, so the two would race to name the same failure and a
+            // hung connect would report `Connect` or `Stalled` depending on which timer's tick landed
+            // first. One deadline, around the whole of each `send`, is what makes that answer
+            // deterministic.
             .redirect(crate::redirect::policy())
             // The origin URL is none of the redirect target's business. reqwest adds a `Referer`
             // carrying it by default, which hands a third-party host the full path a transfer
