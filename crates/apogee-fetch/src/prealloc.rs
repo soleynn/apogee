@@ -17,7 +17,6 @@ use crate::error::FetchError;
 /// # Errors
 /// [`FetchError::Io`] carrying the underlying [`std::io::Error`], whose `kind()` distinguishes
 /// disk-full from other failures.
-#[allow(dead_code)] // wired into the transfer path with the segmented engine.
 pub(crate) async fn preallocate(path: &Path, len: u64) -> Result<(), FetchError> {
     let owned = path.to_owned();
     let joined = tokio::task::spawn_blocking(move || preallocate_blocking(&owned, len)).await;
