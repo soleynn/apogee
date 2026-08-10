@@ -19,8 +19,10 @@ use crate::progress::{Progress, RuntimeEvent};
 /// archive entry cannot plant it and a partial extraction cannot leave a stale one.
 const INSTALLED_DIR: &str = ".installed";
 
-/// How many times to (re)start a download before giving up. The injected fetcher has no internal
-/// retry, so a dropped connection resumes from its journal on the next attempt.
+/// How many times to (re)start a download before giving up, over whatever the injected fetcher
+/// already spent on the request internally; each restart resumes from the journal rather than from
+/// zero. Which failures are worth a restart is [`FetchError::is_transient`], answered by the crate
+/// that raises them.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -165,7 +167,7 @@ pub(crate) async fn download_verified(
             .await
         {
             Ok(verified) => break Ok(verified),
-            Err(e) if attempt < MAX_DOWNLOAD_ATTEMPTS && is_transient(&e) => {
+            Err(e) if attempt < MAX_DOWNLOAD_ATTEMPTS && e.is_transient() => {
                 tokio::time::sleep(RETRY_DELAY).await;
             }
             Err(e) => break Err(e),
@@ -260,19 +262,6 @@ async fn download_unverified(
     Ok(())
 }
 
-/// Whether a download failure is the kind a later attempt could survive: the network ones. An
-/// exhausted source list belongs here too, because the hosts that were all unreachable a moment ago
-/// are the ones a retry is for.
-fn is_transient(e: &FetchError) -> bool {
-    matches!(
-        e,
-        FetchError::Transport { .. }
-            | FetchError::Connect { .. }
-            | FetchError::Stalled { .. }
-            | FetchError::AllSourcesFailed { .. }
-    )
-}
-
 fn io_err(path: &Path, source: std::io::Error) -> RuntimeError {
     RuntimeError::Io {
         path: path.to_path_buf(),
@@ -284,8 +273,8 @@ fn io_err(path: &Path, source: std::io::Error) -> RuntimeError {
 mod tests {
     use std::io::Write;
 
-    use apogee_fetch::FetchError;
-    use apogee_test_support::chaos::{ChaosServer, generated_vec, sha256_of};
+    use apogee_fetch::{FetchError, RetryPolicy};
+    use apogee_test_support::chaos::{ChaosServer, RetryAfter, generated_vec, sha256_of};
     use tokio_util::sync::CancellationToken;
 
     use super::install_runner;
@@ -460,6 +449,64 @@ mod tests {
         assert!(
             err.is_cancellation(),
             "a runner download the user stopped must not read as a failed install: {err:?}"
+        );
+    }
+
+    /// A host that throttles for longer than the fetcher's own budget hands the status back as a
+    /// plain [`FetchError::Http`], which is the one failure whose disposition cannot be read off the
+    /// variant. The restart loop here has to keep asking until the host recovers; reporting the first
+    /// `503` would fail an install over a CDN node that was busy for a second.
+    ///
+    /// The injected fetcher gets a single attempt, so every refusal reaches that loop rather than
+    /// being absorbed (and waited out) inside one `download` call.
+    #[tokio::test]
+    async fn a_throttled_runner_download_is_restarted_until_the_host_serves() {
+        let payload = generated_vec(11, 0, 16 * 1024);
+        let tar = runner_targz("throttled-1", &payload).expect("build archive");
+        let sha = sha256_of(&tar);
+        let server = ChaosServer::serving(tar)
+            .service_unavailable(2, RetryAfter::Seconds(0))
+            .start()
+            .await
+            .expect("server");
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let runners_root = root.path().join("runners");
+        let fetcher = apogee_fetch::Fetcher::builder()
+            .retry_policy(RetryPolicy::default().max_attempts(1))
+            .build()
+            .expect("fetcher");
+        let runner = Runner {
+            name: "throttled".to_owned(),
+            version: "1".to_owned(),
+            kind: RunnerKind::Wine,
+            url: server.url("throttled.tar.gz"),
+            sha256: sha,
+            archive: ArchiveLayout {
+                format: ArchiveFormat::TarGz,
+                strip_prefix: Some("throttled-1".to_owned()),
+            },
+            ntsync: None,
+        };
+
+        let runner_dir = install_runner(
+            &fetcher,
+            &runner,
+            &runners_root,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await
+        .expect("a throttled host must not fail the install");
+
+        assert_eq!(
+            std::fs::read(runner_dir.join("files/bin/wine")).expect("payload"),
+            payload
+        );
+        assert_eq!(
+            server.stats().requests(),
+            3,
+            "two refusals, then the transfer that served"
         );
     }
 }

@@ -18,13 +18,17 @@
 //!
 //! Both enums stay `#[non_exhaustive]`, so matching one needs a `_` arm. [`Validator`](crate::Validator)
 //! is open for the same reason: a failure shape a server has not shown us yet earns a variant rather
-//! than widening an existing one into vagueness. List the transient cases positively and let `_` read
-//! as "permanent, do not retry", so a variant added here cannot become a retry loop by default.
+//! than widening an existing one into vagueness. The transient cases are listed positively in
+//! [`FetchError::is_transient`] and `_` reads there as "permanent, do not retry", so a variant added
+//! here cannot become a retry loop by default, and cannot silently change the answer a consumer gets
+//! from a crate that never saw it added.
 
 use std::path::PathBuf;
 
 use thiserror::Error;
 use url::Url;
+
+use crate::retry::{Class, classify_status};
 
 /// A download request that must not be attempted, rejected when the
 /// [`DownloadSpec`](crate::DownloadSpec) is built. Distinct from [`FetchError`]: these are caller or
@@ -162,6 +166,34 @@ pub enum FetchError {
 }
 
 impl FetchError {
+    /// Whether asking again could succeed: the network faults, plus the two cases only this crate can
+    /// answer.
+    ///
+    /// An [`Http`](FetchError::Http) status is transient exactly when the crate's own backoff treats
+    /// it as such, the throttle-and-overload set (`408`, `429`, `500`, `502`, `503`, `504`). A
+    /// transfer with a single source hands that status back verbatim once its internal budget is
+    /// spent, so a caller reading the variant alone stops on a throttling `503` that a longer pause
+    /// would have cleared. [`ServerFileChanged`](FetchError::ServerFileChanged) is raised only after
+    /// the journal is deleted, so what it asks for is a clean restart rather than a resume against
+    /// bytes that moved underneath one.
+    ///
+    /// Everything else is permanent, `_` included: a consumer restating this list has to be re-edited
+    /// whenever a variant is added, from a crate that cannot see it being added, and until then
+    /// classifies the new failure by whichever way its own `_` arm happened to fall. Answered beside
+    /// the code that constructs these, where the conservative default is also the local one.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Connect { .. }
+            | Self::Transport { .. }
+            | Self::Stalled { .. }
+            | Self::AllSourcesFailed { .. }
+            | Self::ServerFileChanged { .. } => true,
+            Self::Http { status, .. } => classify_status(*status) == Class::Retryable,
+            _ => false,
+        }
+    }
+
     /// Build an [`Io`](FetchError::Io) at `path`, the single tidy build site for the crate's
     /// filesystem failures.
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
@@ -267,5 +299,108 @@ mod tests {
         };
         assert!(err.into_out_of_space().is_err());
         assert!(FetchError::Cancelled.into_out_of_space().is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+
+    use super::*;
+
+    fn io(kind: ErrorKind) -> std::io::Error {
+        std::io::Error::from(kind)
+    }
+
+    /// The faults a second attempt exists for: reaching the host, streaming from it, a source that
+    /// went quiet, a failover that ran out of sources, and a source that stopped honoring ranges
+    /// mid-transfer (whose journal is already gone, so the retry starts clean).
+    #[test]
+    fn the_network_faults_and_a_changed_source_are_transient() {
+        let url = Url::parse("https://example.test/artifact.bin").unwrap();
+        for error in [
+            FetchError::Connect {
+                host: "example.test".to_owned(),
+                source: io(ErrorKind::ConnectionRefused),
+            },
+            FetchError::Transport {
+                url: url.clone(),
+                source: io(ErrorKind::ConnectionReset),
+            },
+            FetchError::Stalled {
+                url: url.clone(),
+                at_bytes: 4096,
+            },
+            FetchError::AllSourcesFailed {
+                url: url.clone(),
+                sources: 3,
+                attempts: 8,
+                at_bytes: 4096,
+            },
+            FetchError::ServerFileChanged {
+                validator: "range ignored mid-transfer".to_owned(),
+            },
+        ] {
+            assert!(error.is_transient(), "{error:?}");
+        }
+    }
+
+    /// Bytes that failed a check, a request shape the source refused, a local fault, and a caller
+    /// that asked to stop: none of them become a success by being asked again.
+    #[test]
+    fn a_failed_check_a_refusal_and_a_cancellation_are_permanent() {
+        let url = Url::parse("https://example.test/artifact.bin").unwrap();
+        for error in [
+            FetchError::RedirectRefused {
+                url: url.clone(),
+                detail: "left https for plaintext",
+            },
+            FetchError::LengthMismatch {
+                expected: 100,
+                got: 99,
+            },
+            FetchError::BlockVerifyFailed {
+                block: 2,
+                offset: 262_144,
+                attempts: 8,
+            },
+            FetchError::FileVerifyFailed {
+                expected: "aa".to_owned(),
+                got: "bb".to_owned(),
+            },
+            FetchError::io("/tmp/out.bin.part", io(ErrorKind::StorageFull)),
+            FetchError::Client {
+                source: io(ErrorKind::Other),
+            },
+            FetchError::MalformedRangeResponse {
+                url: url.clone(),
+                detail: "part outside the requested ranges",
+            },
+            FetchError::Unsupported {
+                what: "multi-range transport",
+            },
+            FetchError::Cancelled,
+        ] {
+            assert!(!error.is_transient(), "{error:?}");
+        }
+    }
+
+    /// A status reads the same to a consumer as it does to the crate's own backoff, over the whole
+    /// range a server can send. Restating the set instead would let the two drift, which is how a
+    /// throttling `503` that outlasts the internal budget stops an outer retry loop dead.
+    #[test]
+    fn a_status_is_transient_exactly_when_the_backoff_would_retry_it() {
+        let url = Url::parse("https://example.test/artifact.bin").unwrap();
+        for status in 100..=599u16 {
+            let error = FetchError::Http {
+                status,
+                url: url.clone(),
+            };
+            assert_eq!(
+                error.is_transient(),
+                classify_status(status) == Class::Retryable,
+                "{status}",
+            );
+        }
     }
 }
