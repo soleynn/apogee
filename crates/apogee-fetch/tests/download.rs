@@ -449,6 +449,49 @@ async fn a_part_shorter_than_the_watermark_restarts_from_zero() {
 }
 
 #[tokio::test]
+async fn a_journal_that_does_not_decode_restarts_from_zero_rather_than_failing() {
+    // The journal is an optimization, never a source of truth, so no failure a caller can see names
+    // one: a journal that will not decode costs the re-download it was holding and nothing else.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let len = 4 * MIB;
+    let server = ChaosServer::builder(21, len)
+        .etag("\"v1\"")
+        .drop_after(2 * MIB)
+        .chunk(64 * 1024)
+        .start()
+        .await
+        .unwrap();
+    let spec = spec_builder(&server, &dest, 21, len).build().unwrap();
+    let downloader = single_attempt().build().unwrap();
+
+    downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let apdl = sidecar(&dest, ".apdl");
+    let mut journal = tokio::fs::read(&apdl).await.unwrap();
+    // Flip a byte of the recorded identity, which the header CRC covers: what a half-written or
+    // bit-rotted journal looks like, as opposed to the stale-but-intact one the identity check catches.
+    journal[16] ^= 0xFF;
+    tokio::fs::write(&apdl, &journal).await.unwrap();
+    let served_before = server.stats().bytes_served();
+
+    let verified = downloader
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(21, len));
+    assert_eq!(
+        server.stats().bytes_served() - served_before,
+        len,
+        "an unreadable journal restarts from zero, so the whole file is served again"
+    );
+}
+
+#[tokio::test]
 async fn a_range_not_satisfiable_response_restarts_and_completes() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.bin");
