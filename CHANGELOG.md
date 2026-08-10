@@ -113,6 +113,7 @@ is tagged with its change type. Versioning aims to follow
 - Require the Secret Service job, widen the unsafe gate to examples (#157) _(ci)_
 - Gate the in-memory secret store out of the shipping launcher (#159) _(ci)_
 - Report whether a companion actually loaded into the game (#167) _(added)_
+- Give a full disk its own error arm across the download path (#183) _(fixed)_
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
