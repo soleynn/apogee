@@ -34,6 +34,22 @@
 //! malware case. It does not stop a mis-issuance by DigiCert or Google, and it does not stop anyone
 //! who has taken over Square Enix's own edge. Those are the same parties the account password
 //! already rests on, so what it removes is the extra one: whoever installed a root on this machine.
+//!
+//! # Which proxy this refuses, measured on 2026-08-10
+//!
+//! Every client the launcher builds follows `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`,
+//! because `reqwest` reads them at build time and nothing here turns that off. The two proxy shapes
+//! land on opposite sides of the anchor set, and the split is the point rather than a limitation.
+//!
+//! A proxy that opens a `CONNECT` tunnel forwards the handshake untouched, so Square Enix's own
+//! certificate arrives and the anchor set validates it. All four endpoints above were reached
+//! through one, indistinguishably from no proxy at all.
+//!
+//! A proxy that terminates TLS and re-signs with its own root is refused, which is this module
+//! working: that root is a locally installed one, and it is the party the anchor set exists to
+//! remove. `rustls` reports it as `InvalidCertificate(UnknownIssuer)` through the tunnel exactly as
+//! it does without one, so [`crate::transport`] names it and points at the hatch above rather than
+//! rendering a bare connect failure.
 
 use crate::error::CoreError;
 
@@ -76,6 +92,14 @@ const ANCHORS: [&[u8]; 4] = [
 /// running as the user does not need a certificate to read the user's password. What the hatch
 /// covers is the person whose employer intercepts TLS and who would otherwise have a launcher that
 /// cannot be made to work.
+///
+/// "The platform's roots" is a claim about the build, not just about this function: it holds only
+/// while `reqwest` carries `rustls-tls-native-roots`, because `rustls-tls` alone resolves to a
+/// Mozilla set compiled into the binary and never reads the machine at all. Under that build the
+/// hatch handed the intercepted user back a list that by construction could not contain their
+/// employer's root, so the only way out of the anchor set led nowhere. The workspace manifest carries
+/// it, `scripts/audit.sh` asserts the shipping selection still does, and
+/// [`the_hatch_reaches_this_machines_trust_store`] fails without it.
 ///
 /// # Errors
 /// [`CoreError::Init`] if an embedded root does not parse, which is a corrupt build rather than
@@ -206,8 +230,9 @@ mod tests {
     /// to load, would take this with them. What it cannot cover is
     /// `tls_built_in_root_certs(false)`, because the chaos server's certificate is unknown to the
     /// platform as well as to the anchor set and is refused either way. Deleting that line leaves
-    /// this test green, which was checked rather than assumed, so the line is covered live in
-    /// [`live_the_platform_roots_are_off_and_square_enix_still_answers`] instead.
+    /// this test green, which was checked rather than assumed;
+    /// [`the_anchor_set_refuses_a_root_this_machine_trusts`] is where that line is covered, by making
+    /// the certificate one the machine does trust.
     ///
     /// The control is what makes the refusal mean anything: a test that only asserted a failed
     /// request would pass just as well against a server that was never listening.
@@ -314,5 +339,231 @@ mod tests {
                 reached.err()
             );
         }
+    }
+
+    /// The environment variable naming the URL a [`probe_child`] run should request. Its presence is
+    /// also what tells that test it is the child rather than an ordinary `--ignored` sweep.
+    ///
+    /// A function rather than a constant because `apogee-core` carries no `&str` constants at all:
+    /// user-facing text belongs to the shell, and `scripts/audit.sh` holds that line across the whole
+    /// crate rather than trying to guess which strings are presentation.
+    fn probe_url_var() -> &'static str {
+        "APOGEE_TRUST_PROBE_URL"
+    }
+
+    /// The environment variable naming the file a [`probe_child`] run writes its outcome to.
+    fn probe_out_var() -> &'static str {
+        "APOGEE_TRUST_PROBE_OUT"
+    }
+
+    /// One request, made by a freshly started process, reported as a single line in a file.
+    ///
+    /// Everything the tests below are about is read out of the environment while the client is being
+    /// built: the hatch by [`anchor`], the proxy variables and `SSL_CERT_FILE` by `reqwest` and the
+    /// platform root loader underneath it. Setting an environment variable is `unsafe` under this
+    /// edition and the workspace does not permit it, and it would not be sound here anyway, because
+    /// these run in a threaded harness beside every other test. So the environment is assembled for a
+    /// child process instead, and this is the far side of it.
+    ///
+    /// A file rather than stdout: no library crate here writes to the terminal, which
+    /// `scripts/audit.sh` enforces including in test code, and a file does not depend on the harness
+    /// being asked to stop capturing either.
+    ///
+    /// [`anchor`] rather than [`apply`] on purpose: the hatch's own reading of the environment is
+    /// part of what is under test, and going through `apply` would step over it.
+    #[tokio::test]
+    #[ignore = "the child half of the probes below; driven through a spawned process, not directly"]
+    async fn probe_child() {
+        let (Ok(url), Ok(out)) = (
+            std::env::var(probe_url_var()),
+            std::env::var(probe_out_var()),
+        ) else {
+            return;
+        };
+        // Capped so that a shape nobody anticipated fails the parent's wait rather than wedging it.
+        let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20));
+        let outcome = match anchor(builder).and_then(|b| {
+            b.build().map_err(|e| CoreError::Init {
+                detail: e.to_string(),
+            })
+        }) {
+            Err(e) => format!("build-failed {e}"),
+            Ok(client) => match client.get(&url).send().await {
+                Ok(resp) => format!("reached {}", resp.status().as_u16()),
+                // The same reading [`crate::transport`] does, and the reason it has to read the
+                // rendering is documented there: `reqwest` classifies a refused chain and a dead
+                // route alike.
+                Err(err) => {
+                    let why = format!("{err:?}").to_ascii_lowercase();
+                    let kind =
+                        if why.contains("unknownissuer") || why.contains("invalidcertificate") {
+                            "trust"
+                        } else {
+                            "other"
+                        };
+                    format!("refused {kind}")
+                }
+            },
+        };
+        std::fs::write(out, outcome).expect("the probe reports");
+    }
+
+    /// Run [`probe_child`] in a new process against `url`, with `env` applied on top of an
+    /// environment this one has been cleared out of, and hand back what it reported.
+    ///
+    /// A `None` value removes the variable, which is not the same as setting it empty: an inherited
+    /// `SSL_CERT_FILE` (several distributions set one) or a hatch left over from a live run would
+    /// otherwise decide the answer instead of the case being tested.
+    fn probe(url: &url::Url, env: &[(&str, Option<&str>)]) -> std::io::Result<String> {
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("outcome");
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.args(["--exact", "trust::tests::probe_child", "--ignored"])
+            .env(probe_url_var(), url.as_str())
+            .env(probe_out_var(), &out)
+            .env_remove("APOGEE_TLS_SYSTEM_ROOTS")
+            .env_remove("SSL_CERT_FILE")
+            .env_remove("SSL_CERT_DIR")
+            .env_remove("HTTP_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("https_proxy")
+            .env_remove("ALL_PROXY")
+            .env_remove("all_proxy")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy");
+        for (name, value) in env {
+            match value {
+                Some(value) => cmd.env(name, value),
+                None => cmd.env_remove(name),
+            };
+        }
+        let finished = cmd.output()?;
+        std::fs::read_to_string(&out).map_err(|e| {
+            std::io::Error::other(format!(
+                "the probe reported nothing ({e}):\n--- stdout\n{}\n--- stderr\n{}",
+                String::from_utf8_lossy(&finished.stdout),
+                String::from_utf8_lossy(&finished.stderr),
+            ))
+        })
+    }
+
+    /// The launcher takes its proxy from the environment, and that is the whole of the feature.
+    ///
+    /// This is the answer to whether a launcher-level proxy setting was needed: no client here turns
+    /// `reqwest`'s environment handling off, so a user who has configured a proxy the way every other
+    /// program on their machine reads one is already configured for this too, and a setting would be
+    /// a second place to say it that could disagree with the first.
+    ///
+    /// Asserted as a pair. A request that fails once the proxy variable is set proves the variable is
+    /// read; the same request succeeding under `NO_PROXY` proves the failure was the proxy and not
+    /// the server having gone away between the two.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_proxy_in_the_environment_is_used_and_no_proxy_overrides_it() {
+        let server = ChaosServer::builder(1, 64)
+            .start()
+            .await
+            .expect("the chaos server starts");
+        let url = server.url("file.bin");
+        // A port nothing is listening on. Connecting to it is refused rather than left hanging, so a
+        // proxy pointed here is a proxy that visibly fails, which is what makes "the request went
+        // through the proxy" observable without running one.
+        let dead_proxy = "http://127.0.0.1:1";
+
+        let through = probe(&url, &[("HTTP_PROXY", Some(dead_proxy))]).expect("the probe reports");
+        assert_eq!(
+            through, "refused other",
+            "the request reached the server, so HTTP_PROXY was not read"
+        );
+
+        let bypassed = probe(
+            &url,
+            &[
+                ("HTTP_PROXY", Some(dead_proxy)),
+                ("NO_PROXY", Some("127.0.0.1")),
+            ],
+        )
+        .expect("the probe reports");
+        assert_eq!(
+            bypassed, "reached 200",
+            "NO_PROXY did not exempt the host, so the refusal above may not be the proxy"
+        );
+    }
+
+    /// A root this machine trusts still does not get to answer for Square Enix.
+    ///
+    /// This is the intercepting-proxy case reduced to what actually decides it: such a proxy works by
+    /// having its own root installed locally, and `SSL_CERT_FILE` is that installation, in a form a
+    /// test can perform. The anchor set must refuse it, and the reason must survive as a trust
+    /// failure rather than an opaque one, because [`crate::transport`] reads exactly that to tell the
+    /// user which of their problems this is.
+    ///
+    /// The control is [`the_hatch_reaches_this_machines_trust_store`]: the same server, the same
+    /// certificate, reached once the hatch is set. Without it a refusal here would also be satisfied
+    /// by a certificate that was never valid for this host to begin with.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_anchor_set_refuses_a_root_this_machine_trusts() {
+        let server = ChaosServer::builder(1, 64)
+            .tls()
+            .start()
+            .await
+            .expect("the chaos server starts");
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pem = dir.path().join("root.pem");
+        std::fs::write(
+            &pem,
+            server.cert_pem().expect("a TLS chaos server has a PEM"),
+        )
+        .expect("the root is written");
+
+        let got = probe(
+            &server.url("file.bin"),
+            &[("SSL_CERT_FILE", Some(&pem.to_string_lossy()))],
+        )
+        .expect("the probe reports");
+
+        assert_eq!(
+            got, "refused trust",
+            "a locally trusted root answered for a constrained client, or it failed for some other \
+             reason and the message the user gets would be the wrong one"
+        );
+    }
+
+    /// The hatch reaches this machine's trust store, which is the only thing it is for.
+    ///
+    /// Its whole audience is the user behind a TLS-intercepting proxy, and the root that proxy signs
+    /// with is installed on their machine and nowhere else. A build carrying only `reqwest`'s
+    /// `rustls-tls` restores a Mozilla root set compiled into the binary instead, which cannot
+    /// contain that root, so the hatch reported success and changed nothing they could observe. This
+    /// goes red on that build. See the manifest's note on `rustls-tls-native-roots`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_hatch_reaches_this_machines_trust_store() {
+        let server = ChaosServer::builder(1, 64)
+            .tls()
+            .start()
+            .await
+            .expect("the chaos server starts");
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pem = dir.path().join("root.pem");
+        std::fs::write(
+            &pem,
+            server.cert_pem().expect("a TLS chaos server has a PEM"),
+        )
+        .expect("the root is written");
+
+        let got = probe(
+            &server.url("file.bin"),
+            &[
+                ("APOGEE_TLS_SYSTEM_ROOTS", Some("1")),
+                ("SSL_CERT_FILE", Some(&pem.to_string_lossy())),
+            ],
+        )
+        .expect("the probe reports");
+
+        assert_eq!(
+            got, "reached 200",
+            "the hatch did not put this machine's roots in play, so the user it exists for has no \
+             way past the anchor set"
+        );
     }
 }
