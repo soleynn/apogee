@@ -11,6 +11,64 @@
 //! Because records are appended only after their bytes are flushed, every intact interval names bytes
 //! the disk has confirmed. A single-connection download writes one growing prefix `[0, watermark)`;
 //! a segmented download writes several intervals out of order, folded into a coalesced set on load.
+//!
+//! # Format
+//!
+//! Every integer is little-endian and every CRC is CRC-32/ISO-HDLC. The header is written once, at
+//! offset 0, and never rewritten:
+//!
+//! | offset | size | field |
+//! |---|---|---|
+//! | 0 | 4 | magic, `APDL` |
+//! | 4 | 2 | format version, currently 2 |
+//! | 6 | 2 | flags, reserved, written as 0 and not read |
+//! | 8 | 4 | identity length `N` |
+//! | 12 | `N` | identity, below |
+//! | 12 + `N` | 4 | CRC over bytes `[0, 12 + N)` |
+//!
+//! The identity is the fingerprint a resume has to match. It is encoded exactly: a trailing byte no
+//! field claims is corruption.
+//!
+//! | size | field |
+//! |---|---|
+//! | 4 | URL length `U`, at most 8192 |
+//! | `U` | URL, UTF-8 |
+//! | 1 | 1 if a length was declared, 0 if not; any other value is corruption |
+//! | 8 | the declared length, 0 when absent |
+//! | 32 | validator config digest |
+//! | 2 | `ETag` length `E`, at most 1024 |
+//! | `E` | `ETag` bytes |
+//! | 2 | `Last-Modified` length `L`, at most 1024 |
+//! | `L` | `Last-Modified` bytes |
+//!
+//! Records follow the header, each exactly 20 bytes, appended in the order their bytes were flushed:
+//! `start` (8), `end` (8), then a CRC over those 16. `end` is exclusive and strictly greater than
+//! `start`.
+//!
+//! A decode reports no journal when the file is larger than 1 MiB, is shorter than the fixed header,
+//! carries the wrong magic or a version this build does not write, fails the header CRC, holds an
+//! identity that does not decode exactly, or folds to more than 8192 disjoint intervals. Every read
+//! is bounds- and length-checked, so decoding is total and its allocation is bounded by the file's
+//! own size cap.
+//!
+//! The record fold stops at the first record that is short, fails its CRC, is empty or reversed, or
+//! names an end past the declared length, and discards every record after it. Writes are sequential,
+//! so a bad record can only be a torn tail, and stopping rather than skipping is what keeps the fold
+//! from claiming bytes on the far side of the tear.
+//!
+//! # Compatibility
+//!
+//! The version field is the whole compatibility mechanism. A journal whose version is not the one
+//! this build writes is not parsed at all: it is a clean restart, which costs a re-download and can
+//! never produce a wrong result. That is what a version 1 journal (a single watermark, no interval
+//! records) does today, and what a later version will do to this one.
+//!
+//! A change to any field above therefore bumps the version rather than reinterpreting a field in
+//! place. What a bump has to preserve is the first six bytes: the magic, then the version, at that
+//! offset and in that encoding, so any build can identify the file and tell that it is not its own
+//! without parsing further. Everything from byte 6 on is free to change. Nothing outside this crate
+//! reads an `.apdl`, and one is deleted the moment its download succeeds, so no decoder ever has to
+//! understand a version other than its own.
 
 use std::io;
 use std::path::Path;
@@ -438,6 +496,79 @@ mod tests {
         let mut buf = image(&identity(), &[(0, 1000)]);
         buf[4] = 1;
         assert!(decode(&buf).is_none());
+    }
+
+    /// A version this build does not write is a clean restart whichever side of the current one it is
+    /// on, which is what lets a later format bump the version and leave this decoder alone.
+    #[test]
+    fn a_later_version_journal_is_start_over() {
+        let mut buf = image(&identity(), &[(0, 1000)]);
+        buf[4] = FORMAT_VERSION.to_le_bytes()[0] + 1;
+        assert!(decode(&buf).is_none());
+    }
+
+    /// The header layout as written down: field offsets, widths and encodings, read here without going
+    /// back through the encoder. Changing any of it is a format change and owes a version bump.
+    #[test]
+    fn the_header_layout_is_the_committed_one() {
+        let id = Identity {
+            url: "http://h/f".to_owned(),
+            expected_len: Some(0x0102_0304),
+            validator_digest: [0xAB; 32],
+            etag: None,
+            last_modified: None,
+        };
+        let header = encode_header(&id).unwrap();
+
+        assert_eq!(&header[0..4], b"APDL");
+        assert_eq!(u16::from_le_bytes([header[4], header[5]]), 2);
+        assert_eq!(u16::from_le_bytes([header[6], header[7]]), 0, "flags");
+        let identity_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+        assert_eq!(header.len(), HEADER_FIXED + identity_len + 4);
+
+        // Identity fields at their fixed offsets from the start of the identity blob: a 4-byte URL
+        // length, the URL, a presence byte, the declared length, the digest, then two length-prefixed
+        // blobs. The URL here is 10 bytes, so every offset after it is that plus 14.
+        let id_at = HEADER_FIXED;
+        assert_eq!(
+            u32::from_le_bytes(header[id_at..id_at + 4].try_into().unwrap()),
+            10
+        );
+        assert_eq!(&header[id_at + 4..id_at + 14], b"http://h/f");
+        assert_eq!(header[id_at + 14], 1, "the declared length is present");
+        assert_eq!(
+            u64::from_le_bytes(header[id_at + 15..id_at + 23].try_into().unwrap()),
+            0x0102_0304
+        );
+        assert_eq!(header[id_at + 23..id_at + 55], [0xAB; 32]);
+        let etag_len = u16::from_le_bytes(header[id_at + 55..id_at + 57].try_into().unwrap());
+        let modified_len = u16::from_le_bytes(header[id_at + 57..id_at + 59].try_into().unwrap());
+        assert_eq!((etag_len, modified_len), (0, 0), "absent blobs are empty");
+
+        let at = id_at + 59;
+        assert_eq!(
+            at,
+            HEADER_FIXED + identity_len,
+            "no unclaimed identity byte"
+        );
+        assert_eq!(
+            u32::from_le_bytes(header[at..at + 4].try_into().unwrap()),
+            crc32(&header[..at]),
+            "the header crc covers everything before it"
+        );
+    }
+
+    /// A record is twenty bytes: two little-endian bounds and a CRC over exactly those sixteen.
+    #[test]
+    fn the_record_layout_is_the_committed_one() {
+        assert_eq!(RECORD_LEN, 20);
+        let rec = encode_record(0x1122_3344_5566_7788, 0x99AA_BBCC_DDEE_FF00);
+        assert_eq!(rec[0..8], 0x1122_3344_5566_7788u64.to_le_bytes());
+        assert_eq!(rec[8..16], 0x99AA_BBCC_DDEE_FF00u64.to_le_bytes());
+        assert_eq!(
+            u32::from_le_bytes(rec[16..20].try_into().unwrap()),
+            crc32(&rec[0..16])
+        );
     }
 
     #[test]
