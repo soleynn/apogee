@@ -81,6 +81,15 @@ async fn a_transfer_that_cannot_be_reserved_fails_before_the_origin_serves_a_pay
     assert_eq!(meta.blocks(), 0, "the refused reservation consumed blocks");
     assert_eq!(meta.len(), 0, "the refused reservation extended the file");
     assert!(!dest.exists(), "a failed transfer published a destination");
+
+    // The same fact through the seam consumers actually route on. `apogee-patcher`,
+    // `apogee-runtime`, and `apogee-addons` each turn a full disk into an out-of-space variant of
+    // their own, and none of them matches `FetchError` itself: which variants can carry `ENOSPC` is
+    // this crate's to know. Asserted here, on a real one, so the accessor is pinned to the shape the
+    // kernel produces rather than only to hand-built errors in a unit test.
+    let (refused, source) = err.into_out_of_space().expect("a full disk");
+    assert_eq!(refused, part, "the accessor named a different file");
+    assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
 }
 
 /// How long the single-connection origin sits on its first chunk. Far longer than the stall timeout

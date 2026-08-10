@@ -1,10 +1,23 @@
 //! Disk-space preflight, two pools.
 //!
-//! A heuristic with an escape hatch ([`PatcherConfig::ignore_space`]) and a backstop (fetch's eager
-//! disk-full detection). The patch store must hold the concurrent downloads (a rolling window, or
-//! all of them when kept); the install dir must hold the applied result, which patch length
-//! overestimates since patches both add and delete. A pool whose free space cannot be read (a
-//! non-existent tree, or a non-Unix target) is not blocked on.
+//! A heuristic with an escape hatch ([`PatcherConfig::ignore_space`]) and a backstop. The patch store
+//! must hold the concurrent downloads (a rolling window, or all of them when kept); the install dir
+//! must hold the applied result, which patch length overestimates since patches both add and delete.
+//! A pool whose free space cannot be read (a non-existent tree, or a non-Unix target) is not blocked
+//! on.
+//!
+//! Two pools, but not always two filesystems: a patch store under the game root, or both under one
+//! home directory, is the ordinary arrangement. Pools that resolve onto the same mount are guarded
+//! once against their summed need, because free space they both draw on is not free space each of
+//! them has.
+//!
+//! The backstop is fetch's eager disk-full detection, and it reaches a caller as its own arm rather
+//! than through this one: `install::acquire_err` routes it to
+//! [`PatchError::OutOfSpace`](crate::PatchError::OutOfSpace), so a
+//! transfer that fills the disk after this check passed (or after it was skipped) is still typed as
+//! a space failure. The two are kept apart because they say different things. This one is a
+//! prediction from patchlist lengths that names a pool and a needed/free pair; that one is an
+//! observation that names the path the filesystem refused.
 
 use std::path::Path;
 #[cfg(unix)]
@@ -25,25 +38,93 @@ struct Need {
     game_root: u64,
 }
 
-/// Refuse the install if either pool lacks the heuristic required space.
+/// Identifies the filesystem a pool resolved onto, so two pools sharing one can be told from two
+/// that do not.
+type FsId = u64;
+
+/// What one pool needs, beside the filesystem that answered for it: which one, and its free bytes.
+/// `fs` is `None` when no reading could be taken, which is what "not blocked on" is made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reading {
+    pool: SpacePool,
+    needed: u64,
+    fs: Option<(FsId, u64)>,
+}
+
+/// One free-space comparison: what to blame if it fails, and the two numbers to compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Check {
+    pool: SpacePool,
+    needed: u64,
+    free: u64,
+}
+
+/// Refuse the install if the pools lack the heuristic required space.
 pub(crate) fn check(
     config: &PatcherConfig,
     game_root: &Path,
     patches: &[PatchListEntry],
 ) -> Result<(), PreflightError> {
     let need = required_bytes(config.keep_patches, patches);
-    guard(SpacePool::PatchStore, need.patch_store, &config.patch_store)?;
-    guard(SpacePool::GameRoot, need.game_root, game_root)?;
+    let readings = [
+        reading(SpacePool::PatchStore, need.patch_store, &config.patch_store),
+        reading(SpacePool::GameRoot, need.game_root, game_root),
+    ];
+    for check in checks(&readings) {
+        if check.needed > check.free {
+            return Err(PreflightError::NotEnoughSpace {
+                pool: check.pool,
+                needed: check.needed,
+                free: check.free,
+            });
+        }
+    }
     Ok(())
 }
 
-fn guard(pool: SpacePool, needed: u64, path: &Path) -> Result<(), PreflightError> {
-    if let Some(free) = available_bytes(path)
-        && needed > free
-    {
-        return Err(PreflightError::NotEnoughSpace { pool, needed, free });
+/// Turn per-pool readings into the comparisons to make, folding pools that share a filesystem into a
+/// single summed check.
+///
+/// The fold is the whole point of the indirection: comparing each pool against its own reading of
+/// one shared mount passes an install needing the sum whenever the larger half fits, and with
+/// `keep_patches` on the two needs are equal, so it clears a request for twice what the volume
+/// holds. Pure over the readings, so the folding is testable without a second filesystem to mount.
+fn checks(readings: &[Reading]) -> Vec<Check> {
+    let mut out: Vec<Check> = Vec::with_capacity(readings.len());
+    let mut seen: Vec<FsId> = Vec::with_capacity(readings.len());
+    for reading in readings {
+        // A pool whose filesystem could not be read is not blocked on; the rest still are.
+        let Some((fs, free)) = reading.fs else {
+            continue;
+        };
+        if let Some(i) = seen.iter().position(|s| *s == fs) {
+            // Saturating for the same reason the per-pool sums are: the lengths are hostile input.
+            out[i].needed = out[i].needed.saturating_add(reading.needed);
+            // Naming either pool once they are one volume would point the user at a distinction that
+            // does not exist on their disk, and the number to beat is the sum rather than the half
+            // that happened to be read first. The first reading's `free` is kept rather than the
+            // later one, arbitrarily: both are the same filesystem, moments apart, and nothing here
+            // makes one the better number.
+            out[i].pool = SpacePool::SharedFilesystem;
+        } else {
+            seen.push(fs);
+            out.push(Check {
+                pool: reading.pool,
+                needed: reading.needed,
+                free,
+            });
+        }
     }
-    Ok(())
+    out
+}
+
+/// Take one pool's reading.
+fn reading(pool: SpacePool, needed: u64, path: &Path) -> Reading {
+    Reading {
+        pool,
+        needed,
+        fs: filesystem(path),
+    }
 }
 
 /// The heuristic requirement per pool. Pure and testable.
@@ -74,19 +155,29 @@ fn window_bytes(patches: &[PatchListEntry]) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
-/// Free bytes available to an unprivileged process on the filesystem holding `path`, walking up to
-/// the nearest existing ancestor (the game root may not exist yet). `None` when it cannot be read.
+/// The filesystem holding `path`: an id distinguishing it from other mounts, and the bytes free on it
+/// to an unprivileged process. Walks up to the nearest existing ancestor (the game root may not exist
+/// yet). `None` when it cannot be read.
+///
+/// The id is `st_dev` rather than `statvfs`'s `f_fsid`, which Linux leaves zero or non-unique on
+/// several filesystems; `st_dev` is what `find -xdev` compares. It answers "one mount" and not "one
+/// physical volume", so two btrfs subvolumes drawing on one pool read as separate and fall back to
+/// the per-pool guard. That is an underestimate, which is the direction this whole check already errs
+/// in, and the download backstop covers.
 #[cfg(unix)]
-fn available_bytes(path: &Path) -> Option<u64> {
+fn filesystem(path: &Path) -> Option<(FsId, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
     let existing = nearest_existing(path)?;
+    let dev = std::fs::metadata(&existing).ok()?.dev();
     let vfs = rustix::fs::statvfs(&existing).ok()?;
-    Some(vfs.f_bavail.saturating_mul(vfs.f_frsize))
+    Some((dev, vfs.f_bavail.saturating_mul(vfs.f_frsize)))
 }
 
-/// Off Unix the free-space query is unavailable, so the pool is not blocked on; the fetch disk-full
+/// Off Unix the free-space query is unavailable, so no pool is blocked on; the fetch disk-full
 /// backstop still fires during download.
 #[cfg(not(unix))]
-fn available_bytes(_path: &Path) -> Option<u64> {
+fn filesystem(_path: &Path) -> Option<(FsId, u64)> {
     None
 }
 
@@ -112,6 +203,97 @@ mod tests {
             url: "http://h/game/4e9a232b/D2024.01.01.0000.0000.patch".to_owned(),
             hashes: None,
         }
+    }
+
+    /// A reading for `pool` needing `needed`, taken on filesystem `fs` with `free` bytes on it.
+    const fn on(pool: SpacePool, needed: u64, fs: FsId, free: u64) -> Reading {
+        Reading {
+            pool,
+            needed,
+            fs: Some((fs, free)),
+        }
+    }
+
+    /// A reading whose filesystem could not be read at all.
+    const fn unread(pool: SpacePool, needed: u64) -> Reading {
+        Reading {
+            pool,
+            needed,
+            fs: None,
+        }
+    }
+
+    #[test]
+    fn pools_on_one_filesystem_are_guarded_once_against_their_sum() {
+        // 60 free, each pool wants 40: every per-pool comparison passes and the install still needs
+        // 80 of the same 60 bytes. This is the shape `keep_patches` makes routine, where the two
+        // needs are equal, and the shape a patch store under the game root makes ordinary.
+        let readings = [
+            on(SpacePool::PatchStore, 40, 1, 60),
+            on(SpacePool::GameRoot, 40, 1, 60),
+        ];
+        assert_eq!(
+            checks(&readings),
+            vec![Check {
+                pool: SpacePool::SharedFilesystem,
+                needed: 80,
+                free: 60,
+            }],
+        );
+    }
+
+    #[test]
+    fn pools_on_different_filesystems_keep_their_own_comparisons() {
+        // The reason the fold has to be conditional: 40 against each of two 60s genuinely fits, and
+        // summing here would refuse an install that has the space for it twice over.
+        let readings = [
+            on(SpacePool::PatchStore, 40, 1, 60),
+            on(SpacePool::GameRoot, 40, 2, 60),
+        ];
+        assert_eq!(
+            checks(&readings),
+            vec![
+                Check {
+                    pool: SpacePool::PatchStore,
+                    needed: 40,
+                    free: 60,
+                },
+                Check {
+                    pool: SpacePool::GameRoot,
+                    needed: 40,
+                    free: 60,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn a_pool_with_no_reading_is_dropped_and_the_other_is_still_guarded_alone() {
+        // "Not blocked on" has to survive the fold: an unreadable pool contributes nothing, and must
+        // not drag the pool beside it out of the check or fold into it as a zero.
+        let readings = [
+            unread(SpacePool::PatchStore, 40),
+            on(SpacePool::GameRoot, 40, 1, 60),
+        ];
+        assert_eq!(
+            checks(&readings),
+            vec![Check {
+                pool: SpacePool::GameRoot,
+                needed: 40,
+                free: 60,
+            }],
+        );
+        assert!(checks(&[unread(SpacePool::GameRoot, 40)]).is_empty());
+    }
+
+    #[test]
+    fn a_folded_sum_saturates_instead_of_overflow_panicking() {
+        // Two hostile lengths land here already saturated, and folding them adds them again.
+        let readings = [
+            on(SpacePool::PatchStore, u64::MAX, 1, 60),
+            on(SpacePool::GameRoot, u64::MAX, 1, 60),
+        ];
+        assert_eq!(checks(&readings)[0].needed, u64::MAX);
     }
 
     #[test]
