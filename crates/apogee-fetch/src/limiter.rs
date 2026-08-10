@@ -29,7 +29,7 @@ struct Bucket {
 }
 
 impl LimitHandle {
-    /// An uncapped handle: [`acquire`](Self::acquire) never waits until a limit is [`set`](Self::set).
+    /// An uncapped handle: `acquire` never waits until a limit is [`set`](Self::set).
     #[must_use]
     pub fn uncapped() -> Self {
         Self::from_rate(None)
