@@ -194,8 +194,8 @@ impl Fetcher {
 }
 
 /// Builder for a [`Fetcher`]: the concurrency caps and the shared speed limit. `build()` with no
-/// knobs set produces the reference-parity defaults (4 files, 8 connections per file, 24 total,
-/// uncapped).
+/// knobs set produces the reference-parity defaults (4 files, 8 segments in flight per file, 24 in
+/// flight in total, uncapped).
 #[derive(Debug)]
 pub struct FetcherBuilder {
     max_files: usize,
@@ -227,14 +227,20 @@ impl FetcherBuilder {
         self
     }
 
-    /// The number of connections a single segmented file may open (default 8).
+    /// How many segments of one file are in flight at once, and so how many segments it is split into
+    /// (default 8).
+    ///
+    /// Named for connections because that is what it costs against an HTTP/1.1 source: one per
+    /// segment. An h2 host serves all of them as streams on a single connection instead, so the
+    /// sockets a transfer opens are the server's choice and this is the request count either way.
     #[must_use]
     pub fn max_connections_per_file(mut self, n: usize) -> Self {
         self.max_connections_per_file = n;
         self
     }
 
-    /// The global cap on open connections across all jobs (default 24).
+    /// The global cap on transfer requests in flight across all jobs (default 24), one socket each
+    /// against an HTTP/1.1 source and streams on one connection against an h2 host.
     #[must_use]
     pub fn max_connections_total(mut self, n: usize) -> Self {
         self.max_connections_total = n;
