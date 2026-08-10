@@ -253,58 +253,8 @@ impl FetchError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use super::*;
-
-    fn io(kind: std::io::ErrorKind) -> FetchError {
-        FetchError::io("/dest/out.part", kind.into())
-    }
-
-    #[test]
-    fn a_disk_full_io_failure_yields_its_path_and_kind() {
-        let (path, source) = io(std::io::ErrorKind::StorageFull)
-            .into_out_of_space()
-            .map_err(|e| format!("{e:?}"))
-            .expect("a full disk");
-        assert_eq!(path, Path::new("/dest/out.part"));
-        assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
-    }
-
-    #[test]
-    fn another_io_failure_at_the_same_path_is_not_a_full_disk() {
-        // The path alone cannot be the signal: the same `.part` raises permission and not-found
-        // faults that a caller must not report as "free up space". Each is handed back whole, so a
-        // caller can go on routing it.
-        for kind in [
-            std::io::ErrorKind::PermissionDenied,
-            std::io::ErrorKind::NotFound,
-            std::io::ErrorKind::FileTooLarge,
-        ] {
-            let returned = io(kind).into_out_of_space().err().ok_or(kind);
-            assert!(
-                matches!(returned, Ok(FetchError::Io { .. })),
-                "{kind:?} was taken for a full disk",
-            );
-        }
-    }
-
-    #[test]
-    fn a_transport_failure_carrying_an_io_error_is_not_a_full_disk() {
-        // Connect/Transport wrap an `io::Error` of their own, so a caller matching on "has an
-        // io::Error inside" would misread a network fault as a disk one.
-        let err = FetchError::Transport {
-            url: Url::parse("https://example.invalid/f.bin").expect("static url"),
-            source: std::io::ErrorKind::StorageFull.into(),
-        };
-        assert!(err.into_out_of_space().is_err());
-        assert!(FetchError::Cancelled.into_out_of_space().is_err());
-    }
-}
-
-#[cfg(test)]
-mod tests {
     use std::io::ErrorKind;
+    use std::path::Path;
 
     use super::*;
 
@@ -402,5 +352,50 @@ mod tests {
                 "{status}",
             );
         }
+    }
+
+    /// A `FetchError::Io` at a fixed `.part`, for the disk-full routing tests below.
+    fn io_failure(kind: ErrorKind) -> FetchError {
+        FetchError::io("/dest/out.part", io(kind))
+    }
+
+    #[test]
+    fn a_disk_full_io_failure_yields_its_path_and_kind() {
+        let (path, source) = io_failure(std::io::ErrorKind::StorageFull)
+            .into_out_of_space()
+            .map_err(|e| format!("{e:?}"))
+            .expect("a full disk");
+        assert_eq!(path, Path::new("/dest/out.part"));
+        assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn another_io_failure_at_the_same_path_is_not_a_full_disk() {
+        // The path alone cannot be the signal: the same `.part` raises permission and not-found
+        // faults that a caller must not report as "free up space". Each is handed back whole, so a
+        // caller can go on routing it.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::FileTooLarge,
+        ] {
+            let returned = io_failure(kind).into_out_of_space().err().ok_or(kind);
+            assert!(
+                matches!(returned, Ok(FetchError::Io { .. })),
+                "{kind:?} was taken for a full disk",
+            );
+        }
+    }
+
+    #[test]
+    fn a_transport_failure_carrying_an_io_error_is_not_a_full_disk() {
+        // Connect/Transport wrap an `io::Error` of their own, so a caller matching on "has an
+        // io::Error inside" would misread a network fault as a disk one.
+        let err = FetchError::Transport {
+            url: Url::parse("https://example.invalid/f.bin").expect("static url"),
+            source: std::io::ErrorKind::StorageFull.into(),
+        };
+        assert!(err.into_out_of_space().is_err());
+        assert!(FetchError::Cancelled.into_out_of_space().is_err());
     }
 }
