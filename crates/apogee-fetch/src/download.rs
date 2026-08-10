@@ -24,11 +24,11 @@ use url::Url;
 
 use crate::block::BlockPlan;
 use crate::error::FetchError;
+use crate::fetcher::Shared;
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
-use crate::limiter::LimitHandle;
 use crate::progress::{Phase, Progress};
-use crate::scheduler::Scheduler;
+use crate::retry::{Class, classify_status, retry_after, sleep_or_cancel};
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
@@ -49,17 +49,20 @@ const READ_CHUNK: usize = 64 * 1024;
 
 /// Run one single-connection download to completion.
 ///
-/// The transfer draws `limiter` tokens on the bytes it reads off the socket and holds one connection
-/// slot from `scheduler` for its lifetime, so it counts against the global connection cap the same as
-/// a segment does.
+/// The transfer draws the shared limiter's tokens on the bytes it reads off the socket and holds one
+/// connection slot from the shared scheduler for its lifetime, so it counts against the global
+/// connection cap the same as a segment does.
+///
+/// One attempt is one request plus the body it delivers. A connection cut off mid-body, or one that
+/// goes silent past the inactivity timeout, commits what it received and re-requests the rest after a
+/// backoff, so a drop at 90% costs a wait rather than the whole transfer.
 pub(crate) async fn run(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     verify: Verify,
     progress: Option<mpsc::UnboundedSender<Progress>>,
     cancel: CancellationToken,
-    limiter: &LimitHandle,
-    scheduler: &Arc<Scheduler>,
+    shared: &Shared,
 ) -> Result<VerifiedFile, FetchError> {
     let dest = spec.dest();
     let part = sidecar(dest, ".part");
@@ -73,7 +76,7 @@ pub(crate) async fn run(
 
     // Hold one global connection slot for the transfer, so a single-connection download counts against
     // the same cap as a segment. Released when this scope ends.
-    let _conn = scheduler.acquire_connection().await;
+    let _conn = shared.scheduler.acquire_connection().await;
 
     let core_identity = base_identity(spec, spec.expected_len());
 
@@ -115,100 +118,104 @@ pub(crate) async fn run(
         None
     };
 
-    let resp = obtain_response(
-        client,
-        spec,
-        &part,
-        &mut part_file,
-        &mut hasher,
-        &mut journal,
-        &mut start,
-        &mut if_range,
-    )
-    .await?;
+    // The high-water mark every progress event is clamped to. A restart from zero re-downloads bytes
+    // the consumer was already told about, and a bar that walks backwards would read as corruption;
+    // the segmented engine clamps its own events the same way across a block repair.
+    let mut high = start;
+    let mut attempts = 0u32;
+    let mut total;
+    let written = loop {
+        let resp = obtain_response(
+            client,
+            spec,
+            &part,
+            &mut part_file,
+            &mut hasher,
+            &mut journal,
+            &mut start,
+            &mut if_range,
+            shared,
+            &cancel,
+            &mut attempts,
+        )
+        .await?;
 
-    // The first progress event is emitted only after the resume disposition is settled, so
-    // `bytes_done` never regresses (a 200-restart has already reset `start` to 0 here).
-    emit(
-        &progress,
-        Progress {
-            bytes_done: start,
-            total: spec.expected_len(),
-            phase: Phase::Connecting,
-        },
-    );
+        // The first progress event of an attempt is emitted only after the resume disposition is
+        // settled, so it never names bytes a `200` has just discarded.
+        high = high.max(start);
+        emit(
+            &progress,
+            Progress {
+                bytes_done: high,
+                total: spec.expected_len(),
+                phase: Phase::Connecting,
+            },
+        );
 
-    if let (Some(exp), Some(cl)) = (spec.expected_len(), resp.content_length()) {
-        let server_total = start.saturating_add(cl);
-        if server_total != exp {
-            return Err(FetchError::LengthMismatch {
-                expected: exp,
-                got: server_total,
-            });
-        }
-    }
-    let total = spec
-        .expected_len()
-        .or_else(|| resp.content_length().map(|cl| cl.saturating_add(start)));
-
-    // A fresh start records the server's validators so a later resume can revalidate with `If-Range`.
-    if spec.resume() && journal.is_none() {
-        journal_identity.etag = header_bytes(&resp, &ETAG);
-        journal_identity.last_modified = header_bytes(&resp, &LAST_MODIFIED);
-        journal = Journal::create(&apdl, &journal_identity)
-            .await
-            .map_err(|e| FetchError::io(&apdl, e))?;
-    }
-
-    // Stream the body into a batch buffer: one write and one fsync+journal-commit per batch, so a
-    // multi-GB transfer issues thousands of writes, not millions. Hashing reads the arriving chunk,
-    // so it is unaffected by the buffering.
-    let mut stream = Box::pin(resp.bytes_stream());
-    let mut written = start;
-    let mut batch: Vec<u8> = Vec::with_capacity(BATCH as usize);
-    emit(
-        &progress,
-        Progress {
-            bytes_done: written,
-            total,
-            phase: Phase::Downloading,
-        },
-    );
-    loop {
-        let item = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                write_batch(&mut part_file, &part, &mut batch).await?;
-                flush_and_commit(&mut part_file, &part, &mut journal, &apdl, written).await?;
-                return Err(FetchError::Cancelled);
+        if let (Some(exp), Some(cl)) = (spec.expected_len(), resp.content_length()) {
+            let server_total = start.saturating_add(cl);
+            if server_total != exp {
+                return Err(FetchError::LengthMismatch {
+                    expected: exp,
+                    got: server_total,
+                });
             }
-            item = stream.next() => item,
-        };
-        let Some(chunk) = item else { break };
-        let chunk = chunk.map_err(|e| transport_error(spec.url(), e))?;
-        let bytes: &[u8] = chunk.as_ref();
-        // Throttle on the bytes just read off the socket, before consuming more.
-        limiter.acquire(bytes.len() as u64).await;
-        if let Some(h) = hasher.as_mut() {
-            h.update(bytes);
         }
-        batch.extend_from_slice(bytes);
-        written += bytes.len() as u64;
-        if batch.len() as u64 >= BATCH {
-            write_batch(&mut part_file, &part, &mut batch).await?;
-            flush_and_commit(&mut part_file, &part, &mut journal, &apdl, written).await?;
-            emit(
-                &progress,
-                Progress {
-                    bytes_done: written,
-                    total,
-                    phase: Phase::Downloading,
-                },
-            );
+        total = spec
+            .expected_len()
+            .or_else(|| resp.content_length().map(|cl| cl.saturating_add(start)));
+
+        // A fresh start records the server's validators so a later resume can revalidate with
+        // `If-Range`.
+        if spec.resume() && journal.is_none() {
+            journal_identity.etag = header_bytes(&resp, &ETAG);
+            journal_identity.last_modified = header_bytes(&resp, &LAST_MODIFIED);
+            journal = Journal::create(&apdl, &journal_identity)
+                .await
+                .map_err(|e| FetchError::io(&apdl, e))?;
         }
-    }
-    write_batch(&mut part_file, &part, &mut batch).await?;
-    flush_and_commit(&mut part_file, &part, &mut journal, &apdl, written).await?;
+        // Pin this response's validator for the in-process retries too, even when no journal is being
+        // kept: a source that changes between a dropped body and its retry then answers the
+        // conditional range with a `200` and restarts cleanly, instead of stitching two files together.
+        if if_range.is_none() {
+            if_range = header_bytes(&resp, &ETAG).or_else(|| header_bytes(&resp, &LAST_MODIFIED));
+        }
+
+        match stream_body(
+            resp,
+            spec,
+            &part,
+            &mut part_file,
+            &mut hasher,
+            &mut journal,
+            &apdl,
+            Cursor {
+                start,
+                total,
+                high: &mut high,
+            },
+            &progress,
+            &cancel,
+            shared,
+        )
+        .await?
+        {
+            Outcome::Complete(written) => break written,
+            Outcome::Interrupted { written, source } => {
+                attempts += 1;
+                if !shared.retry.may_retry(attempts) {
+                    return Err(source);
+                }
+                let delay = shared.retry.delay(attempts, None, &shared.jitter);
+                if !sleep_or_cancel(delay, &cancel).await {
+                    return Err(FetchError::Cancelled);
+                }
+                // Everything received is durable and hashed, so the next attempt asks only for the
+                // rest. This is the resume path the journal already supported, run in-process.
+                start = written;
+            }
+        }
+    };
 
     if let Some(exp) = spec.expected_len()
         && written != exp
@@ -272,9 +279,127 @@ pub(crate) async fn run(
     publish(dest, &part, &apdl, written, total, &progress).await
 }
 
-/// Send the request, handling the resume dispositions: a valid `206` continues from `start`; a `200`
-/// (source changed, or the server ignored the range) restarts cleanly from zero; a `416` or an
-/// unusable `206` re-requests once from zero.
+/// Where one body attempt starts and what the transfer has already reported.
+struct Cursor<'a> {
+    /// The offset this response's body lands at.
+    start: u64,
+    /// The transfer's total length, once the server or the caller has named one.
+    total: Option<u64>,
+    /// The high-water mark progress events are clamped to, shared across attempts.
+    high: &'a mut u64,
+}
+
+/// How one body attempt ended.
+enum Outcome {
+    /// The body ran to its end; `written` bytes are durable.
+    Complete(u64),
+    /// The connection was cut off or went silent mid-body. Everything received is durable and hashed,
+    /// so the next attempt resumes from `written`; `source` is the failure to report if the attempt
+    /// budget runs out first.
+    Interrupted { written: u64, source: FetchError },
+}
+
+/// Stream one response body into the `.part`, hashing as it goes.
+///
+/// The body lands in a batch buffer: one write and one `fsync` + journal-commit per batch, so a
+/// multi-GB transfer issues thousands of writes, not millions. Hashing reads the arriving chunk, so
+/// it is unaffected by the buffering. A mid-body error or an inactivity timeout commits the batch
+/// first, so the [`Outcome::Interrupted`] watermark it reports is durable rather than merely received.
+///
+/// # Errors
+/// [`FetchError::Cancelled`] if `cancel` fires, or [`FetchError::Io`] if the `.part` or its journal
+/// cannot be written. A transport failure is not an error here: it is an outcome the caller retries.
+#[allow(clippy::too_many_arguments)]
+async fn stream_body(
+    resp: reqwest::Response,
+    spec: &DownloadSpec,
+    part: &Path,
+    part_file: &mut tokio::fs::File,
+    hasher: &mut Option<Sha256>,
+    journal: &mut Option<Journal>,
+    apdl: &Path,
+    cursor: Cursor<'_>,
+    progress: &Option<mpsc::UnboundedSender<Progress>>,
+    cancel: &CancellationToken,
+    shared: &Shared,
+) -> Result<Outcome, FetchError> {
+    let Cursor { start, total, high } = cursor;
+    let mut stream = Box::pin(resp.bytes_stream());
+    let mut written = start;
+    let mut batch: Vec<u8> = Vec::with_capacity(BATCH as usize);
+    let tick = |written: u64, high: &mut u64, phase: Phase| {
+        *high = (*high).max(written);
+        emit(
+            progress,
+            Progress {
+                bytes_done: *high,
+                total,
+                phase,
+            },
+        );
+    };
+    tick(written, high, Phase::Downloading);
+    loop {
+        // Each arm that leaves the loop early names the failure it would report; the batch is
+        // committed once, below, so no return path can leave received bytes unflushed.
+        let cut_off = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Some(FetchError::Cancelled),
+            () = tokio::time::sleep(shared.stall_timeout) => Some(FetchError::Stalled {
+                url: spec.url().clone(),
+                at_bytes: written,
+            }),
+            item = stream.next() => match item {
+                None => break,
+                Some(Ok(chunk)) => {
+                    let bytes: &[u8] = chunk.as_ref();
+                    // Throttle on the bytes just read off the socket, before consuming more.
+                    shared.limiter.acquire(bytes.len() as u64).await;
+                    if let Some(h) = hasher.as_mut() {
+                        h.update(bytes);
+                    }
+                    batch.extend_from_slice(bytes);
+                    written += bytes.len() as u64;
+                    if batch.len() as u64 >= BATCH {
+                        write_batch(part_file, part, &mut batch).await?;
+                        flush_and_commit(part_file, part, journal, apdl, written).await?;
+                        tick(written, high, Phase::Downloading);
+                    }
+                    None
+                }
+                Some(Err(e)) => Some(transport_error(spec.url(), e)),
+            },
+        };
+        if let Some(source) = cut_off {
+            write_batch(part_file, part, &mut batch).await?;
+            flush_and_commit(part_file, part, journal, apdl, written).await?;
+            if matches!(source, FetchError::Cancelled) {
+                return Err(FetchError::Cancelled);
+            }
+            // A server that resets after its last byte (a real RST rather than a clean close) has
+            // still delivered everything asked for; retrying would ask for an empty range.
+            if total.is_some_and(|total| written >= total) {
+                return Ok(Outcome::Complete(written));
+            }
+            return Ok(Outcome::Interrupted { written, source });
+        }
+    }
+    write_batch(part_file, part, &mut batch).await?;
+    flush_and_commit(part_file, part, journal, apdl, written).await?;
+    Ok(Outcome::Complete(written))
+}
+
+/// Send the request and settle the resume disposition, retrying what is worth retrying.
+///
+/// A valid `206` continues from `start`; a `200` (source changed, or the server ignored the range)
+/// restarts cleanly from zero; a `416` or an unusable `206` re-requests once from zero. A connect
+/// failure or a throttling status spends an attempt from `attempts` and backs off under the fetcher's
+/// policy; every other status is fatal and is not retried.
+///
+/// # Errors
+/// [`FetchError::Http`] for a fatal status or once the attempt budget is spent,
+/// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Cancelled`] if
+/// `cancel` fired, or [`FetchError::Io`] if truncating the `.part` for a restart failed.
 #[allow(clippy::too_many_arguments)]
 async fn obtain_response(
     client: &reqwest::Client,
@@ -285,8 +410,14 @@ async fn obtain_response(
     journal: &mut Option<Journal>,
     start: &mut u64,
     if_range: &mut Option<Vec<u8>>,
+    shared: &Shared,
+    cancel: &CancellationToken,
+    attempts: &mut u32,
 ) -> Result<reqwest::Response, FetchError> {
-    for attempt in 0..2 {
+    // The resume disposition gets exactly one restart from zero, and it is not charged to the retry
+    // budget: it corrects *this* request rather than re-attempting a failed one.
+    let mut restarted = false;
+    loop {
         let mut req = apply_headers(client.get(spec.url().clone()), spec.header_policy());
         if *start > 0 {
             req = req.header(RANGE, format!("bytes={}-", *start));
@@ -296,32 +427,53 @@ async fn obtain_response(
                 req = req.header(IF_RANGE, header);
             }
         }
-        let resp = req.send().await.map_err(|e| connect_error(spec.url(), e))?;
-        let status = resp.status().as_u16();
-
-        if status == 200 {
-            if *start > 0 {
-                reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
+        let sent = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(FetchError::Cancelled),
+            sent = req.send() => sent,
+        };
+        // Each arm yields the failure to report if this is the last attempt, plus the pause the
+        // server asked for; a usable response returns straight out.
+        let (failure, asked) = match sent {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status == 200 {
+                    if *start > 0 {
+                        reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
+                    }
+                    return Ok(resp);
+                }
+                if status == 206
+                    && *start > 0
+                    && content_range_ok(&resp, *start, spec.expected_len())
+                {
+                    return Ok(resp);
+                }
+                if (status == 206 || status == 416) && *start > 0 && !restarted {
+                    restarted = true;
+                    reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
+                    continue;
+                }
+                let failure = FetchError::Http {
+                    status,
+                    url: spec.url().clone(),
+                };
+                if classify_status(status) == Class::Fatal {
+                    return Err(failure);
+                }
+                (failure, retry_after(resp.headers()))
             }
-            return Ok(resp);
+            Err(e) => (connect_error(spec.url(), e), None),
+        };
+        *attempts += 1;
+        if !shared.retry.may_retry(*attempts) {
+            return Err(failure);
         }
-        if status == 206 && *start > 0 && content_range_ok(&resp, *start, spec.expected_len()) {
-            return Ok(resp);
+        let delay = shared.retry.delay(*attempts, asked, &shared.jitter);
+        if !sleep_or_cancel(delay, cancel).await {
+            return Err(FetchError::Cancelled);
         }
-        if (status == 206 || status == 416) && *start > 0 && attempt == 0 {
-            reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
-            continue;
-        }
-        return Err(FetchError::Http {
-            status,
-            url: spec.url().clone(),
-        });
     }
-    // Unreachable: the second pass always returns or errors. Report, never panic.
-    Err(FetchError::Http {
-        status: 0,
-        url: spec.url().clone(),
-    })
 }
 
 /// Open the `.part` for writing at `start`: create it fresh at zero, or truncate an existing file to

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apogee_fetch::{
-    DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, HeaderPolicy, Progress, Validator,
-    VerifiedFile,
+    DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, HeaderPolicy, Progress, RetryPolicy,
+    Validator, VerifiedFile,
 };
 use apogee_test_support::chaos::{ChaosServer, block_hashes, generated_vec};
 use tokio_util::sync::CancellationToken;
@@ -499,8 +499,14 @@ async fn all_corrupt_sources_exhaust_the_block_budget_and_fail() {
         .build()
         .unwrap();
 
+    // Compressed delays: the budget's size is what is under test here, not the wait between tries.
     let err = Fetcher::builder()
         .max_connections_per_file(4)
+        .retry_policy(
+            RetryPolicy::default()
+                .max_attempts(6)
+                .base_delay(Duration::from_millis(1)),
+        )
         .build()
         .unwrap()
         .download(&spec, None, CancellationToken::new())

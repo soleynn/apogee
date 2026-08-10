@@ -66,10 +66,9 @@ async fn an_unverified_download_over_tls_resumes() {
         .build()
         .unwrap();
 
-    fetcher
-        .download(&spec, None, CancellationToken::new())
-        .await
-        .unwrap_err();
+    // The drop is absorbed inside the one call: the conditional range picks up at the watermark and
+    // no digest is computed anywhere along the way. `from_client` takes the default retry policy, so
+    // this waits out one real backoff.
     let verified = fetcher
         .download(&spec, None, CancellationToken::new())
         .await
@@ -77,5 +76,10 @@ async fn an_unverified_download_over_tls_resumes() {
     assert_eq!(
         tokio::fs::read(verified.path()).await.unwrap(),
         generated_vec(5, 0, len as usize)
+    );
+    assert_eq!(
+        server.stats().served_ranges(),
+        vec![0..2 * MIB, 2 * MIB..4 * MIB],
+        "the retry asked only for the bytes past the drop",
     );
 }
