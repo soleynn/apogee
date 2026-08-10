@@ -122,8 +122,9 @@ fn why(url: &Url, err: &reqwest::Error) -> String {
         "timed out"
     } else if err.is_connect() {
         "could not be reached"
-    } else if err.is_redirect() {
-        "redirected too many times"
+    } else if crate::redirect::refusal(err) {
+        "answered with a redirect, which this launcher does not follow on a request carrying an \
+         account credential"
     } else if err.is_decode() {
         "sent a response that could not be decoded"
     } else if err.is_body() {
@@ -163,6 +164,8 @@ fn refused_the_certificate(err: &reqwest::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use apogee_test_support::chaos::ChaosServer;
     use reqwest::Method;
@@ -208,6 +211,104 @@ mod tests {
             String::from_utf8_lossy(&buf[..read]).into_owned()
         });
         Ok((url, captured))
+    }
+
+    /// Count what reaches a second host, and answer each of its callers with a plain 200 so a client
+    /// that followed a redirect here completes rather than failing for an unrelated reason. The
+    /// counter is what a test reads: a request that arrives is one that carried the credential.
+    async fn counting_host() -> std::io::Result<(String, std::sync::Arc<AtomicUsize>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let arrived = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&arrived);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                        .await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        Ok((format!("http://{addr}/moved"), arrived))
+    }
+
+    /// The client the composition root ships hands nothing to the host a redirect names.
+    ///
+    /// A 307 keeps the method and the body, so following one moves the submitted password to
+    /// whatever the answer points at, and the fidelity check above never sees that second request:
+    /// reqwest builds it below this layer, adds a `referer`, and drops the `cookie`. The counting
+    /// host is what makes the refusal legible as one, since a test that only asserted an error would
+    /// pass against a client that followed the hop and failed for some other reason.
+    ///
+    /// Driven through `http_transport` rather than a client assembled here: the policy is client-wide
+    /// wiring, so this is the test that reddens if the composition root stops applying it.
+    #[tokio::test]
+    async fn a_redirect_is_refused_before_the_credential_can_follow_it() -> std::io::Result<()> {
+        let sentinel = "PASSWORDSECRET";
+        let (elsewhere, arrived) = counting_host().await?;
+        let url = one_shot_redirect(&elsewhere).await?;
+        let request = ProtoRequest::new(Method::POST, url)
+            .header(
+                HeaderName::from_static("user-agent"),
+                HeaderValue::from_static("SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)"),
+            )
+            .header(
+                HeaderName::from_static("accept"),
+                HeaderValue::from_static("image/gif, */*"),
+            )
+            .header(
+                HeaderName::from_static("cookie"),
+                HeaderValue::from_static("_rsid=\"\""),
+            )
+            .body(sqex_proto::RequestBody::new(
+                format!("pwd={sentinel}").into_bytes(),
+            ));
+
+        let transport = crate::composition::http_transport()
+            .map_err(|err| std::io::Error::other(format!("{err:?}")))?;
+        let err = transport
+            .execute(request)
+            .await
+            .expect_err("a redirect must not be followed");
+
+        assert_eq!(
+            arrived.load(Ordering::SeqCst),
+            0,
+            "the redirect target was contacted, so the submitted body followed the hop"
+        );
+        let rendered = format!("{err} {err:?}");
+        assert!(rendered.contains("redirect"), "{rendered}");
+        assert!(!rendered.contains("could not be reached"), "{rendered}");
+        assert!(!rendered.contains(sentinel), "{rendered}");
+        Ok(())
+    }
+
+    /// Answer one request with a 307 pointing at `target`, and hand back the URL to send it to.
+    async fn one_shot_redirect(target: &str) -> std::io::Result<Url> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = Url::parse(&format!(
+            "http://{}/oauth/ffxivarr/login/login.send",
+            listener.local_addr()?
+        ))
+        .map_err(|_| std::io::Error::other("the listener's address is not a url"))?;
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target}\r\n\
+             content-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        Ok(url)
     }
 
     /// The `Date` header comes back off a real socket.
