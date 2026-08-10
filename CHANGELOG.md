@@ -39,6 +39,7 @@ is tagged with its change type. Versioning aims to follow
 - Commit to the download error set and the resume journal layout (#179) _(fixed)_
 - Drop the private intra-doc link in LimitHandle::uncapped (#180) _(documentation)_
 - Classify a download failure beside the code that raises it (#181) _(added)_
+- Preallocate the .part on the single-connection engine (#182) _(added)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
