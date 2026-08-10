@@ -257,10 +257,16 @@ async fn download_unverified(
     Ok(())
 }
 
+/// Whether a download failure is the kind a later attempt could survive: the network ones. An
+/// exhausted source list belongs here too, because the hosts that were all unreachable a moment ago
+/// are the ones a retry is for.
 fn is_transient(e: &FetchError) -> bool {
     matches!(
         e,
-        FetchError::Transport { .. } | FetchError::Connect { .. } | FetchError::Stalled { .. }
+        FetchError::Transport { .. }
+            | FetchError::Connect { .. }
+            | FetchError::Stalled { .. }
+            | FetchError::AllSourcesFailed { .. }
     )
 }
 

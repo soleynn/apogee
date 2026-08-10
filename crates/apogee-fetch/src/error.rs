@@ -80,9 +80,22 @@ pub enum FetchError {
     #[error("server does not support byte ranges: {url}")]
     RangesUnsupported { url: Url },
 
-    /// The transfer made no progress for too long.
+    /// The transfer made no progress for too long, with no other source to try.
     #[error("stalled at {at_bytes} bytes: {url}")]
     Stalled { url: Url, at_bytes: u64 },
+
+    /// One range failed on every source in turn until its attempt budget ran out. Distinct from
+    /// [`Stalled`](FetchError::Stalled), which is a lone source going quiet with nowhere to fail over
+    /// to: the fact worth triaging here is that failover itself was exhausted, so `sources` and
+    /// `attempts` say how wide and how hard the transfer tried. `url` names the primary, the source
+    /// list's head and the transfer's identity.
+    #[error("all {sources} sources failed {url} after {attempts} attempt(s), {at_bytes} bytes in")]
+    AllSourcesFailed {
+        url: Url,
+        sources: usize,
+        attempts: u32,
+        at_bytes: u64,
+    },
 
     /// The server's advertised length disagreed with the caller's expectation before bytes flowed.
     #[error("length mismatch: expected {expected}, got {got}")]
