@@ -119,8 +119,15 @@ impl CoreConfig {
 /// which is placed here because this is the only client that carries an account credential. The patch
 /// fetcher builds its own and is left alone: it addresses its hosts over plain HTTP, so it has no
 /// handshake to constrain, and what it downloads is checked against block digests rather than TLS.
+///
+/// It follows no redirect either (see [`crate::redirect`]), for the same reason the anchors are here:
+/// a hop out of `https` carries the credential in the clear, on a connection those anchors never see.
 pub(crate) fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
-    let client = crate::trust::anchor(reqwest::Client::builder().gzip(true).deflate(true))?
+    let builder = reqwest::Client::builder()
+        .gzip(true)
+        .deflate(true)
+        .redirect(crate::redirect::policy());
+    let client = crate::trust::anchor(builder)?
         .build()
         .map_err(|e| CoreError::Init {
             detail: e.to_string(),
