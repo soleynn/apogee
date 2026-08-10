@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Validator, VerifiedFile};
+use apogee_fetch::{DigestPin, DownloadSpec, FetchError, Fetcher, Validator, VerifiedFile};
 use ed25519_dalek::VerifyingKey;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -39,7 +39,7 @@ pub(crate) async fn install_runner(
         &runner.name,
         &runner.version,
         &runner.url,
-        runner.sha256,
+        runner.pin,
         &runner.archive,
         runners_root,
         cancel,
@@ -66,7 +66,7 @@ pub(crate) async fn install_tool(
         &tool.name,
         &tool.version,
         &tool.url,
-        tool.sha256,
+        tool.pin,
         &tool.archive,
         tools_root,
         cancel,
@@ -86,7 +86,7 @@ async fn install_artifact(
     name: &str,
     version: &str,
     url: &Url,
-    sha256: [u8; 32],
+    pin: DigestPin,
     layout: &ArchiveLayout,
     root: &Path,
     cancel: &CancellationToken,
@@ -99,7 +99,7 @@ async fn install_artifact(
         return Ok(dir);
     }
     let cache = root.join(".cache").join(format!("{name}-{version}.tar"));
-    let verified = download_verified(fetcher, url, sha256, &cache, cancel, progress).await?;
+    let verified = download_verified(fetcher, url, pin, &cache, cancel, progress).await?;
 
     progress.emit(RuntimeEvent::Extracting {
         name: name.to_owned(),
@@ -134,12 +134,12 @@ async fn install_artifact(
     Ok(dir)
 }
 
-/// Download `url` to `dest`, verifying its whole-file sha256 and relaying download progress into the
+/// Download `url` to `dest`, verifying its whole-file digest and relaying download progress into the
 /// runtime event stream. A dropped connection resumes from the fetcher's journal on the next attempt.
 pub(crate) async fn download_verified(
     fetcher: &Fetcher,
     url: &Url,
-    sha256: [u8; 32],
+    pin: DigestPin,
     dest: &Path,
     cancel: &CancellationToken,
     progress: &Progress,
@@ -149,7 +149,7 @@ pub(crate) async fn download_verified(
             .await
             .map_err(|e| io_err(parent, e))?;
     }
-    let spec = DownloadSpec::builder(url.clone(), dest, Validator::Sha256(sha256)).build()?;
+    let spec = DownloadSpec::builder(url.clone(), dest, Validator::from(pin)).build()?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();
     let sink = progress.clone();
@@ -273,8 +273,8 @@ fn io_err(path: &Path, source: std::io::Error) -> RuntimeError {
 mod tests {
     use std::io::Write;
 
-    use apogee_fetch::{FetchError, RetryPolicy};
-    use apogee_test_support::chaos::{ChaosServer, RetryAfter, generated_vec, sha256_of};
+    use apogee_fetch::{DigestPin, FetchError, RetryPolicy};
+    use apogee_test_support::chaos::{ChaosServer, RetryAfter, blake3_of, generated_vec};
     use tokio_util::sync::CancellationToken;
 
     use super::install_runner;
@@ -303,7 +303,7 @@ mod tests {
         // An incompressible payload keeps the gz sizable, so a mid-stream drop is meaningful.
         let payload = generated_vec(42, 0, 256 * 1024);
         let tar = runner_targz("runner-1.0", &payload).expect("build archive");
-        let sha = sha256_of(&tar);
+        let pin = DigestPin::Blake3(blake3_of(&tar));
         let len = tar.len() as u64;
 
         let server = ChaosServer::serving(tar)
@@ -322,7 +322,7 @@ mod tests {
             version: "1.0".to_owned(),
             kind: RunnerKind::Wine,
             url: server.url("runner.tar.gz"),
-            sha256: sha,
+            pin,
             archive: ArchiveLayout {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("runner-1.0".to_owned()),
@@ -360,7 +360,7 @@ mod tests {
     async fn a_finished_install_re_downloads_nothing() {
         let payload = generated_vec(7, 0, 8 * 1024);
         let tar = runner_targz("r-2", &payload).expect("build archive");
-        let sha = sha256_of(&tar);
+        let pin = DigestPin::Blake3(blake3_of(&tar));
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -371,7 +371,7 @@ mod tests {
             version: "2".to_owned(),
             kind: RunnerKind::Wine,
             url: server.url("r.tar.gz"),
-            sha256: sha,
+            pin,
             archive: ArchiveLayout {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("r-2".to_owned()),
@@ -417,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn a_download_the_token_stopped_reads_as_a_cancellation() {
         let tar = runner_targz("stopped-1", b"payload").expect("build archive");
-        let sha = sha256_of(&tar);
+        let pin = DigestPin::Blake3(blake3_of(&tar));
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -428,7 +428,7 @@ mod tests {
             version: "1".to_owned(),
             kind: RunnerKind::Wine,
             url: server.url("stopped.tar.gz"),
-            sha256: sha,
+            pin,
             archive: ArchiveLayout {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("stopped-1".to_owned()),
@@ -463,7 +463,7 @@ mod tests {
     async fn a_throttled_runner_download_is_restarted_until_the_host_serves() {
         let payload = generated_vec(11, 0, 16 * 1024);
         let tar = runner_targz("throttled-1", &payload).expect("build archive");
-        let sha = sha256_of(&tar);
+        let pin = DigestPin::Blake3(blake3_of(&tar));
         let server = ChaosServer::serving(tar)
             .service_unavailable(2, RetryAfter::Seconds(0))
             .start()
@@ -481,7 +481,7 @@ mod tests {
             version: "1".to_owned(),
             kind: RunnerKind::Wine,
             url: server.url("throttled.tar.gz"),
-            sha256: sha,
+            pin,
             archive: ArchiveLayout {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("throttled-1".to_owned()),

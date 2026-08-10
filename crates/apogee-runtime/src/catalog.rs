@@ -1,9 +1,10 @@
 //! The signed runner catalog: a JSON manifest whose Ed25519 signature is verified against a
-//! compiled-in key *before* any `sha256` pin inside is trusted.
+//! compiled-in key *before* any pin inside is trusted.
 //!
 //! [`Catalog::from_json_bytes`] is a pure, total parser over untrusted input (the fuzz entry point);
 //! [`Catalog::parse_and_verify`] gates it behind the signature check.
 
+use apogee_fetch::DigestPin;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use url::Url;
@@ -61,7 +62,8 @@ pub struct Runner {
     pub version: String,
     pub kind: RunnerKind,
     pub url: Url,
-    pub sha256: [u8; 32],
+    /// The whole-file digest, carrying which function a row pinned it under.
+    pub pin: DigestPin,
     pub archive: ArchiveLayout,
     /// Whether this build uses ntsync, which is a property of the build rather than of the kernel:
     /// a row omits it when nobody has said. Read [`Runner::uses_ntsync`] rather than this field,
@@ -88,7 +90,8 @@ pub struct ToolEntry {
     pub name: String,
     pub version: String,
     pub url: Url,
-    pub sha256: [u8; 32],
+    /// The whole-file digest, carrying which function a row pinned it under.
+    pub pin: DigestPin,
     pub archive: ArchiveLayout,
 }
 
@@ -97,18 +100,19 @@ pub struct ToolEntry {
 pub struct DxvkEntry {
     pub version: String,
     pub url: Url,
-    pub sha256: [u8; 32],
+    /// The whole-file digest, carrying which function a row pinned it under.
+    pub pin: DigestPin,
     /// The container format (`tar.gz` by default); data-driven like a runner's, not hardcoded.
     pub format: ArchiveFormat,
-    /// `dxvk-nvapi`, present only when both its URL and sha256 pin are in the manifest.
+    /// `dxvk-nvapi`, present only when both its URL and its pin are in the manifest.
     pub nvapi: Option<NvapiRef>,
 }
 
-/// A pinned `dxvk-nvapi` artifact (its own url + sha256 + format), installed alongside a [`DxvkEntry`].
+/// A pinned `dxvk-nvapi` artifact (its own url + pin + format), installed alongside a [`DxvkEntry`].
 #[derive(Debug, Clone)]
 pub struct NvapiRef {
     pub url: Url,
-    pub sha256: [u8; 32],
+    pub pin: DigestPin,
     pub format: ArchiveFormat,
 }
 
@@ -132,7 +136,7 @@ impl Catalog {
     }
 
     /// Verify `signature` over the exact `manifest_json` bytes against `key`, then parse. The
-    /// signature is checked **first**, so no `sha256` pin is trusted before authenticity is
+    /// signature is checked **first**, so no pin is trusted before authenticity is
     /// established. A signature that is not exactly 64 bytes, or does not verify, is
     /// [`CatalogError::BadSignature`].
     pub fn parse_and_verify(
@@ -191,7 +195,10 @@ struct RawRunner {
     version: String,
     kind: String,
     url: String,
-    sha256: String,
+    #[serde(default)]
+    blake3: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
     archive: RawArchive,
     /// Absent in a row written before the key existed, and absent is meaningful (see
     /// [`Runner::uses_ntsync`]), so it stays an `Option` rather than defaulting to a bool.
@@ -204,7 +211,10 @@ struct RawTool {
     name: String,
     version: String,
     url: String,
-    sha256: String,
+    #[serde(default)]
+    blake3: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
     archive: RawArchive,
 }
 
@@ -212,11 +222,16 @@ struct RawTool {
 struct RawDxvk {
     version: String,
     url: String,
-    sha256: String,
+    #[serde(default)]
+    blake3: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
     nvapi_url: Option<String>,
+    #[serde(default)]
+    nvapi_blake3: Option<String>,
     #[serde(default)]
     nvapi_sha256: Option<String>,
     #[serde(default)]
@@ -272,9 +287,11 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
         _ => return Err(CatalogError::UnknownRunnerKind { kind: r.kind }),
     };
     let archive = build_archive(r.archive)?;
-    let sha256 = decode_sha256_hex(&r.sha256).ok_or_else(|| CatalogError::BadPin {
-        name: r.name.clone(),
-        version: r.version.clone(),
+    let pin = DigestPin::from_hex(r.blake3.as_deref(), r.sha256.as_deref()).ok_or_else(|| {
+        CatalogError::BadPin {
+            name: r.name.clone(),
+            version: r.version.clone(),
+        }
     })?;
     let url = Url::parse(&r.url).map_err(|_| CatalogError::BadUrl {
         name: r.name.clone(),
@@ -285,7 +302,7 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
         version: r.version,
         kind,
         url,
-        sha256,
+        pin,
         archive,
         ntsync: r.ntsync,
     })
@@ -293,9 +310,11 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
 
 fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
     let archive = build_archive(t.archive)?;
-    let sha256 = decode_sha256_hex(&t.sha256).ok_or_else(|| CatalogError::BadPin {
-        name: t.name.clone(),
-        version: t.version.clone(),
+    let pin = DigestPin::from_hex(t.blake3.as_deref(), t.sha256.as_deref()).ok_or_else(|| {
+        CatalogError::BadPin {
+            name: t.name.clone(),
+            version: t.version.clone(),
+        }
     })?;
     let url = Url::parse(&t.url).map_err(|_| CatalogError::BadUrl {
         name: t.name.clone(),
@@ -305,15 +324,17 @@ fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
         name: t.name,
         version: t.version,
         url,
-        sha256,
+        pin,
         archive,
     })
 }
 
 fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
-    let sha256 = decode_sha256_hex(&d.sha256).ok_or_else(|| CatalogError::BadPin {
-        name: "dxvk".to_owned(),
-        version: d.version.clone(),
+    let pin = DigestPin::from_hex(d.blake3.as_deref(), d.sha256.as_deref()).ok_or_else(|| {
+        CatalogError::BadPin {
+            name: "dxvk".to_owned(),
+            version: d.version.clone(),
+        }
     })?;
     let url = Url::parse(&d.url).map_err(|_| CatalogError::BadUrl {
         name: "dxvk".to_owned(),
@@ -321,21 +342,18 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
     })?;
     let format = parse_format(d.format.as_deref())?;
     // dxvk-nvapi is all-or-nothing: both its URL and its pin, or neither. A lone URL or lone pin is a
-    // malformed row (an unpinned download would violate the sha256-before-trust rule).
-    let nvapi = match (d.nvapi_url, d.nvapi_sha256) {
+    // malformed row (an unpinned download would violate the verify-before-trust rule).
+    let nvapi_pin = DigestPin::from_hex(d.nvapi_blake3.as_deref(), d.nvapi_sha256.as_deref());
+    let nvapi = match (d.nvapi_url, nvapi_pin) {
         (None, None) => None,
-        (Some(nvapi_url), Some(nvapi_sha)) => {
+        (Some(nvapi_url), Some(pin)) => {
             let url = Url::parse(&nvapi_url).map_err(|_| CatalogError::BadUrl {
-                name: "dxvk-nvapi".to_owned(),
-                version: d.version.clone(),
-            })?;
-            let sha256 = decode_sha256_hex(&nvapi_sha).ok_or_else(|| CatalogError::BadPin {
                 name: "dxvk-nvapi".to_owned(),
                 version: d.version.clone(),
             })?;
             Some(NvapiRef {
                 url,
-                sha256,
+                pin,
                 format: parse_format(d.nvapi_format.as_deref())?,
             })
         }
@@ -349,7 +367,7 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
     Ok(DxvkEntry {
         version: d.version,
         url,
-        sha256,
+        pin,
         format,
         nvapi,
     })
@@ -376,37 +394,12 @@ fn parse_format(format: Option<&str>) -> Result<ArchiveFormat, CatalogError> {
     }
 }
 
-/// Decode exactly 64 lowercase/uppercase hex digits into 32 bytes; any other length or a non-hex
-/// digit is `None`.
-fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = hex_val(bytes[2 * i])?;
-        let lo = hex_val(bytes[2 * i + 1])?;
-        *slot = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
 
-    /// A well-formed single-runner manifest with the given sha256 hex pin.
+    /// A well-formed single-runner manifest with the given hex pin, spelled `sha256`.
     fn manifest(pin: &str) -> String {
         format!(
             r#"{{
@@ -482,6 +475,42 @@ mod tests {
         assert!(matches!(err, CatalogError::UnknownRunnerKind { .. }));
     }
 
+    /// Every kind of row takes either spelling, and one that pins nothing at all is refused rather
+    /// than becoming an unverified download. Checked per row kind because each has its own builder,
+    /// and the nvapi companion has its own pair of keys besides.
+    #[test]
+    fn every_row_may_spell_its_pin_either_way_but_must_carry_one() {
+        let blake3 = manifest(GOOD_PIN).replace("\"sha256\"", "\"blake3\"");
+        let cat = Catalog::from_json_bytes(blake3.as_bytes()).expect("parse");
+        assert_eq!(
+            cat.runner("UMU-Proton", "9-20").expect("runner").pin,
+            DigestPin::Blake3([0u8; 32])
+        );
+        assert_eq!(
+            cat.tool("umu-launcher").expect("tool").pin,
+            DigestPin::Blake3([0u8; 32])
+        );
+
+        let nvapi = format!(
+            r#", "nvapi_url": "https://example.invalid/nvapi.tar.gz", "nvapi_blake3": "{GOOD_PIN}""#
+        );
+        let dxvk = dxvk_manifest(&nvapi).replace("\"sha256\"", "\"blake3\"");
+        let cat = Catalog::from_json_bytes(dxvk.as_bytes()).expect("parse");
+        let entry = cat.dxvk.first().expect("dxvk row");
+        assert_eq!(entry.pin, DigestPin::Blake3([0u8; 32]));
+        assert_eq!(
+            entry.nvapi.as_ref().expect("nvapi").pin,
+            DigestPin::Blake3([0u8; 32])
+        );
+
+        // Neither key present is a row with no pin, not a row to download unverified.
+        let unpinned = manifest(GOOD_PIN).replace("\"sha256\"", "\"md5\"");
+        assert!(matches!(
+            Catalog::from_json_bytes(unpinned.as_bytes()),
+            Err(CatalogError::BadPin { .. })
+        ));
+    }
+
     #[test]
     fn schema_rejects_a_bad_pin() {
         let err = Catalog::from_json_bytes(manifest("not-hex").as_bytes()).expect_err("bad pin");
@@ -532,7 +561,7 @@ mod tests {
 
     #[test]
     fn dxvk_rejects_an_unpinned_nvapi_url() {
-        // An nvapi URL without its sha256 pin would be an unauthenticated download.
+        // An nvapi URL without a pin would be an unauthenticated download.
         let nvapi = r#", "nvapi_url": "https://example.invalid/nvapi.tar.gz""#;
         let err = Catalog::from_json_bytes(dxvk_manifest(nvapi).as_bytes()).expect_err("unpinned");
         assert!(matches!(err, CatalogError::BadPin { .. }));
