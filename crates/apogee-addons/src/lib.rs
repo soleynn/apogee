@@ -181,6 +181,24 @@ pub enum AddonError {
     // unwritten `?` would flatten it into "download failed". Every caller goes through `from_fetch`.
     #[error("download failed")]
     Download(#[source] FetchError),
+    /// The disk filled while a download was being written.
+    ///
+    /// Its own arm rather than a [`Download`](Self::Download) with the reason buried in the chain,
+    /// because it is the one download failure the user can act on directly and the only one where
+    /// retrying without doing anything is pointless. Names the path the filesystem refused, which is
+    /// the part that says which volume is full.
+    #[error("{what}: out of disk space at {path:?}")]
+    #[non_exhaustive]
+    OutOfSpace {
+        /// What was being set up.
+        what: String,
+        /// The file the filesystem would not make room for.
+        path: PathBuf,
+        /// The `ENOSPC` the filesystem raised. The [`FetchError`] it arrived in held this same path
+        /// and nothing else besides, so the pair is carried rather than the wrapper.
+        #[source]
+        source: std::io::Error,
+    },
     /// A download was described in a way the fetcher will not accept.
     #[error("invalid download request")]
     Spec(#[from] apogee_fetch::SpecError),
@@ -378,7 +396,8 @@ pub enum AddonError {
 
 impl AddonError {
     /// A fetch failure in this crate's taxonomy, with `FileVerifyFailed` routed to
-    /// [`Self::IntegrityMismatch`] and everything else to [`Self::Download`].
+    /// [`Self::IntegrityMismatch`], a full disk to [`Self::OutOfSpace`], and everything else to
+    /// [`Self::Download`].
     ///
     /// `what` names what was being fetched and `file` where it landed. A named conversion rather
     /// than a `From` because of both: a `From` cannot be told either, and it would put the
@@ -394,6 +413,13 @@ impl AddonError {
     /// let raised = FetchError::FileVerifyFailed { expected: "aa".to_owned(), got: "bb".to_owned() };
     /// let err = AddonError::from_fetch(raised, "dalamud", Path::new("/tmp/latest.zip"));
     /// assert!(matches!(err, AddonError::IntegrityMismatch { .. }));
+    ///
+    /// let full = FetchError::Io {
+    ///     path: "/tmp/latest.zip.part".into(),
+    ///     source: std::io::ErrorKind::StorageFull.into(),
+    /// };
+    /// let err = AddonError::from_fetch(full, "dalamud", Path::new("/tmp/latest.zip"));
+    /// assert!(matches!(err, AddonError::OutOfSpace { .. }));
     /// ```
     #[must_use]
     pub fn from_fetch(source: FetchError, what: &str, file: &std::path::Path) -> Self {
@@ -406,7 +432,16 @@ impl AddonError {
                 expected,
                 got,
             },
-            other => Self::Download(other),
+            // The path here is fetch's, the `.part` the reservation failed on, rather than `file`:
+            // the published destination is not what the filesystem refused.
+            other => match other.into_out_of_space() {
+                Ok((path, source)) => Self::OutOfSpace {
+                    what: what.to_owned(),
+                    path,
+                    source,
+                },
+                Err(other) => Self::Download(other),
+            },
         }
     }
 
