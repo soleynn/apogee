@@ -1,6 +1,6 @@
 //! Getting a pinned artifact onto disk.
 //!
-//! One path for every *pinned* download, so the sha256 pin is checked in exactly one place and
+//! One path for every *pinned* download, so the digest pin is checked in exactly one place and
 //! nothing downstream is handed a path to bytes that failed it: the fetcher returns a
 //! [`VerifiedFile`], which only it can mint, and that is what reaches extraction.
 //!
@@ -26,7 +26,7 @@ use crate::{AddonError, Result};
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// Download `artifact` into `work`, verify its sha256, and extract it into `dest`.
+/// Download `artifact` into `work`, verify its digest, and extract it into `dest`.
 ///
 /// `what` names whatever the caller is setting up, and is what every failure is reported against.
 /// Returns the number of entries written.
@@ -121,12 +121,8 @@ async fn download(
             .await
             .map_err(|source| io_failed(what, "stage a download", parent, source))?;
     }
-    let spec = DownloadSpec::builder(
-        artifact.url.clone(),
-        dest,
-        Validator::Sha256(artifact.sha256),
-    )
-    .build()?;
+    let spec =
+        DownloadSpec::builder(artifact.url.clone(), dest, Validator::from(artifact.pin)).build()?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();
     let sink = events.clone();

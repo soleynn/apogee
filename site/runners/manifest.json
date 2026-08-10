@@ -6,6 +6,7 @@
       "version": "11-2",
       "kind": "proton_umu",
       "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-2/GE-Proton11-2.tar.gz",
+      "blake3": "63081b96895ce4c91c15cb141095001cf71cb3885dc5caf341268be652a34427",
       "sha256": "9f9a4bef8a5a55ead90b0cbfc035a973d98b35c607bad6a110d79aeb57d0c751",
       "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-2" },
       "ntsync": true
@@ -15,6 +16,7 @@
       "version": "11-1",
       "kind": "proton_umu",
       "url": "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-1/GE-Proton11-1.tar.gz",
+      "blake3": "25f7fe6319b4e77f8e72d863cb4a7303834e624e6df29c5d03a3d806316d6fc8",
       "sha256": "ce6dd663ea01725a31805ed5c165723a253cdf0945a6642907330742ae2de5e4",
       "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-1" },
       "ntsync": true
@@ -24,6 +26,7 @@
       "version": "10.8.r0.a2ca9e4",
       "kind": "wine",
       "url": "https://github.com/goatcorp/wine-xiv-git/releases/download/10.8.r0.a2ca9e4/wine-xiv-staging-fsync-git-ubuntu-10.8.r0.a2ca9e4-nolsc.tar.xz",
+      "blake3": "19208429a0940a31a621c2911791a257c3a0474d4d6f782dbe7932e318a33341",
       "sha256": "ec52b3234d68f7357b2a93e4f6a2bf1c50dc85a641226d2abf6ad47cde117fac",
       "archive": { "format": "tar.xz", "strip_prefix": "wine-xiv-staging-fsync-git-10.8.r0.a2ca9e4-nolsc" },
       "ntsync": false
@@ -34,6 +37,7 @@
       "name": "umu-launcher",
       "version": "1.4.1",
       "url": "https://soleynn.github.io/apogee/runners/artifacts/umu-launcher-1.4.1.tar.gz",
+      "blake3": "53bd99551654cca85e97d8c5dc81734f0ca07a41142cf465e6a96ce87b331712",
       "sha256": "7f978dc7bf94ffe4e05e38387050c39602f78b3df6c16f3a8f14b296341b4570",
       "archive": { "format": "tar.gz", "strip_prefix": "umu" }
     }
@@ -42,8 +46,10 @@
     {
       "version": "3.0.2",
       "url": "https://github.com/doitsujin/dxvk/releases/download/v3.0.2/dxvk-3.0.2.tar.gz",
+      "blake3": "8a36dda16c99a9dd420358f97c56b4c937534cc6d45600d55ebae75293b16559",
       "sha256": "9c538924110a7cdef871ca36dee218c0774124374ffdeb38af4b76be55bdf7c2",
       "nvapi_url": "https://github.com/jp7677/dxvk-nvapi/releases/download/v0.9.2/dxvk-nvapi-v0.9.2.tar.gz",
+      "nvapi_blake3": "0f3edbe85bf5d761b4aeae09fdfc1e2eb405f80339e5982be15dd982d55647fd",
       "nvapi_sha256": "60c284223530d643c446c263f1e1a96c6de7b5ff21796219646da734d97a70d6"
     }
   ]

@@ -10,12 +10,12 @@ use std::error::Error;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use apogee_fetch::Fetcher;
+use apogee_fetch::{DigestPin, Fetcher};
 use apogee_patcher::{
     IndexSource, PatchError, Patcher, PatcherConfig, RepairPatchSource, RepairRepo, RepairRequest,
     Repo, SePatch,
 };
-use apogee_test_support::chaos::{ChaosServer, sha256_of};
+use apogee_test_support::chaos::{ChaosServer, blake3_of};
 use apogee_test_support::tree_manifest;
 use apogee_zipatch::{Platform, build_index, fixtures};
 
@@ -522,7 +522,7 @@ async fn a_pinned_index_authenticates_over_http() -> Result<(), Box<dyn Error>> 
     // Serve the .apzi from its own server under its sha256 pin, so the patch servers' byte-accounting
     // stays clean.
     let apzi = apzi_bytes(&chain, VERSION)?;
-    let pin = sha256_of(&apzi);
+    let pin = DigestPin::Blake3(blake3_of(&apzi));
     let index_server = ChaosServer::serving(apzi).start().await?;
 
     corrupt_byte(&repo.join("ffxivboot.exe"), 0)?;
@@ -535,7 +535,7 @@ async fn a_pinned_index_authenticates_over_http() -> Result<(), Box<dyn Error>> 
             game_root.path(),
             IndexSource::Pinned {
                 url: index_server.url("game.apzi"),
-                sha256: pin,
+                pin,
             },
             sources,
         ))
@@ -569,7 +569,7 @@ async fn a_pinned_index_with_a_bad_pin_is_rejected() -> Result<(), Box<dyn Error
             // being unavailable rather than a silent trust.
             IndexSource::Pinned {
                 url: index_server.url("game.apzi"),
-                sha256: [0u8; 32],
+                pin: DigestPin::Sha256([0u8; 32]),
             },
             sources,
         ))

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::hash::DigestPin;
+
 /// How a downloaded file (or its blocks) is verified before it can become a [`VerifiedFile`].
 /// `None` over a plain-`http://` source is rejected when the download spec is built.
 #[derive(Debug, Clone)]
@@ -20,6 +22,10 @@ pub enum Validator {
     },
     /// A single SHA256 over the whole file.
     Sha256([u8; 32]),
+    /// A single BLAKE3 over the whole file. Same width and same guarantee as
+    /// [`Sha256`](Validator::Sha256), and what our own signed manifests pin under; the older
+    /// function stays for the artifacts pinned before it and for anything SE hands us.
+    Blake3([u8; 32]),
     /// No verification (refused unless explicitly opted into, never over plain HTTP).
     None,
     /// The bytes are length-checked here and authenticated by a named out-of-band gate downstream:
@@ -53,8 +59,27 @@ impl Validator {
             }
             Validator::None => hasher.update([0x00]),
             Validator::External => hasher.update([0x03]),
+            // A tag of its own, and never the one SHA256 already answers to. The two digests are the
+            // same width, so without distinct tags a `.part` half-hashed under one function would
+            // resume under the other and be verified against a digest that describes different bytes.
+            Validator::Blake3(digest) => {
+                hasher.update([0x04]);
+                hasher.update(digest);
+            }
         }
         hasher.finalize().into()
+    }
+}
+
+/// The check a signed manifest's artifact pin becomes. The catalogs carry a [`DigestPin`] rather
+/// than a bare 32 bytes precisely so this conversion, and not a caller's assumption, decides which
+/// function the download is verified under.
+impl From<DigestPin> for Validator {
+    fn from(pin: DigestPin) -> Self {
+        match pin {
+            DigestPin::Sha256(digest) => Validator::Sha256(digest),
+            DigestPin::Blake3(digest) => Validator::Blake3(digest),
+        }
     }
 }
 
@@ -77,5 +102,48 @@ impl VerifiedFile {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant's fingerprint is its own. The pair that matters is the two whole-file digests
+    /// over *identical* bytes: they are the same width, so only the tag tells them apart, and a
+    /// collision would let a `.part` hashed under one function resume under the other and be judged
+    /// against a digest describing different bytes.
+    #[test]
+    fn no_two_validators_share_a_journal_fingerprint() {
+        let digest = [0x5au8; 32];
+        let all = [
+            Validator::None,
+            Validator::External,
+            Validator::Sha256(digest),
+            Validator::Blake3(digest),
+            Validator::BlockSha1 {
+                block_size: 1,
+                hashes: vec![[0; 20]],
+            },
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(
+                    a.config_digest(),
+                    b.config_digest(),
+                    "{a:?} and {b:?} fingerprint alike"
+                );
+            }
+        }
+    }
+
+    /// The tag is what separates them, not the digest bytes: same function, different bytes must
+    /// also differ, or a resume would accept a `.part` fetched under a different pin entirely.
+    #[test]
+    fn a_different_expected_digest_is_a_different_fingerprint() {
+        assert_ne!(
+            Validator::Blake3([1; 32]).config_digest(),
+            Validator::Blake3([2; 32]).config_digest()
+        );
     }
 }

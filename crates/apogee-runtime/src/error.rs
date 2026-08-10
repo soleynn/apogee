@@ -175,7 +175,7 @@ pub enum CatalogError {
     UnknownRunnerKind { kind: String },
     #[error("unknown archive format {format:?}")]
     UnknownArchiveFormat { format: String },
-    #[error("{name} {version}: sha256 pin is not 32 hex bytes")]
+    #[error("{name} {version}: no blake3 or sha256 pin of 32 hex bytes")]
     BadPin { name: String, version: String },
     #[error("{name} {version}: not a valid absolute url")]
     BadUrl { name: String, version: String },

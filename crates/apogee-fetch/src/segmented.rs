@@ -40,6 +40,7 @@ use crate::block::{self, BlockVerify};
 use crate::download::{self, Verify};
 use crate::error::FetchError;
 use crate::fetcher::Shared;
+use crate::hash::DigestPin;
 use crate::headers::{HeaderPolicy, apply_headers};
 use crate::intervals::IntervalSet;
 use crate::journal::{self, Identity, Journal};
@@ -587,7 +588,7 @@ async fn transfer(
         }
     }
 
-    verify_and_publish(dest, &part, &apdl, len, verify.sha, &progress).await
+    verify_and_publish(dest, &part, &apdl, len, verify.digest, &progress).await
 }
 
 /// Emit a monotonic download snapshot on every progress tick, so concurrent workers cannot interleave
@@ -1064,10 +1065,10 @@ async fn verify_and_publish(
     part: &Path,
     apdl: &Path,
     len: u64,
-    expected_sha: Option<[u8; 32]>,
+    pin: Option<DigestPin>,
     progress: &Option<mpsc::UnboundedSender<Progress>>,
 ) -> Result<VerifiedFile, FetchError> {
-    if let Some(expected) = expected_sha {
+    if let Some(pin) = pin {
         download::emit(
             progress,
             Progress {
@@ -1076,7 +1077,8 @@ async fn verify_and_publish(
                 phase: Phase::Verifying,
             },
         );
-        let got = download::hash_file(part).await?;
+        let expected = pin.bytes();
+        let got = download::hash_file(part, pin).await?;
         if got != expected {
             // Drop the journal so a retry restarts clean rather than re-assembling the same bad bytes.
             let _ = tokio::fs::remove_file(apdl).await;

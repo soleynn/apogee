@@ -2,7 +2,7 @@
 //!
 //! Install requests arrive fully formed from the flow (the pending set comes from registration); this
 //! backend just runs them and relays progress. Repair requests do not: a [`RepairPlan`] names the
-//! repos and versions, and the backend resolves each repo's `sha256`-pinned block index from the
+//! repos and versions, and the backend resolves each repo's digest-pinned block index from the
 //! hosted, Ed25519-signed catalog before handing `apogee-patcher` the full request. The catalog bytes
 //! are fetched here (transport is the composition root's job); the signature check stays in
 //! `apogee-patcher` ([`IndexCatalog::verify_default`]), so no crypto lives in this crate.

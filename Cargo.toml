@@ -41,6 +41,14 @@ sha1             = "0.11"
 # digests are needed to check what it serves. RustCrypto, same family as sha1/sha2.
 md-5             = "0.11"
 sha2             = "0.11"
+# The whole-file digest our own signed manifests pin artifacts under. `pure` is deliberate and it
+# costs something: this crate's AVX-512 and NEON kernels are C reached through a `cc` build script,
+# and `pure` compiles neither, so x86_64 gets its Rust SSE2/SSE4.1/AVX2 kernels and everything else
+# gets the portable one. What it buys is a binary that does not depend on what the build machine
+# happened to have installed: without `pure` the crate probes for a C compiler and falls back to the
+# same Rust kernels when it finds none, so one source tree would produce two different binaries with
+# nothing anywhere saying which one this is.
+blake3           = { version = "1", default-features = false, features = ["std", "pure"] }
 crc32fast        = "1"
 http             = "1"
 url              = "2"

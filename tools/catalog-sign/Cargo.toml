@@ -15,3 +15,8 @@ publish = false
 ed25519-dalek = "2"
 # Fill a fresh seed from the OS CSPRNG for keygen, avoiding a heavier rng dependency.
 getrandom = "0.2"
+# The two functions a manifest row may pin an artifact under, so computing a pin needs no tool
+# beyond this one. `pure` matches what the launcher verifies with; the digest is identical either
+# way, and this keeps a C toolchain out of the build here too.
+blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
+sha2 = "0.10"
