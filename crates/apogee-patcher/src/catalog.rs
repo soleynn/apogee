@@ -1,6 +1,5 @@
 //! The signed index catalog: a JSON manifest of per-repo-and-version `.apzi` block-index pins, whose
-//! Ed25519 signature is verified against a compiled-in key *before* any `sha256` pin inside is
-//! trusted.
+//! Ed25519 signature is verified against a compiled-in key *before* any pin inside is trusted.
 //!
 //! The index is derived (reproducible from the same patch chain), so authenticity rests on the pin;
 //! the pin, in turn, is trustworthy only once the manifest carrying it is authenticated. This is the
@@ -11,6 +10,7 @@
 //! point); [`IndexCatalog::parse_and_verify`] gates it behind the signature check. A resolved
 //! [`IndexEntry`] hands back the [`IndexSource`] a repair fetches under.
 
+use apogee_fetch::DigestPin;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use thiserror::Error;
@@ -33,13 +33,14 @@ pub const INDEX_CATALOG_PUBLIC_KEY: [u8; 32] = [
 ];
 
 /// One repo-and-version block index: which repo and version it describes, where its `.apzi` is
-/// served, and the `sha256` pin authenticating the fetched bytes.
+/// served, and the digest pin authenticating the fetched bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
     pub repo: Repo,
     pub version: String,
     pub url: Url,
-    pub sha256: [u8; 32],
+    /// The whole-file digest, carrying which function a row pinned it under.
+    pub pin: DigestPin,
 }
 
 impl IndexEntry {
@@ -48,7 +49,7 @@ impl IndexEntry {
     pub fn source(&self) -> IndexSource {
         IndexSource::Pinned {
             url: self.url.clone(),
-            sha256: self.sha256,
+            pin: self.pin,
         }
     }
 }
@@ -75,8 +76,8 @@ impl IndexCatalog {
     }
 
     /// Verify `signature` over the exact `manifest_json` bytes against `key`, then parse. The
-    /// signature is checked **first**, so no `sha256` pin is trusted before authenticity is
-    /// established. A signature that is not exactly 64 bytes, or does not verify, is
+    /// signature is checked **first**, so no pin is trusted before authenticity is established. A
+    /// signature that is not exactly 64 bytes, or does not verify, is
     /// [`IndexCatalogError::BadSignature`].
     ///
     /// # Errors
@@ -132,7 +133,7 @@ pub enum IndexCatalogError {
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("unknown repo {repo:?}")]
     UnknownRepo { repo: String },
-    #[error("{repo} {version}: sha256 pin is not 32 hex bytes")]
+    #[error("{repo} {version}: no blake3 or sha256 pin of 32 hex bytes")]
     BadPin { repo: String, version: String },
     #[error("{repo} {version}: not a valid absolute url")]
     BadUrl { repo: String, version: String },
@@ -147,12 +148,18 @@ struct RawCatalog {
     indexes: Vec<RawIndex>,
 }
 
+/// A row's pin is spelled by the function that produced it, and either spelling is accepted so a
+/// hosted catalog stays readable while it is re-signed onto the newer one. A row carrying both is
+/// read as BLAKE3 (see [`DigestPin::from_hex`]).
 #[derive(Deserialize)]
 struct RawIndex {
     repo: String,
     version: String,
     url: String,
-    sha256: String,
+    #[serde(default)]
+    blake3: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
 }
 
 impl TryFrom<RawCatalog> for IndexCatalog {
@@ -181,9 +188,11 @@ fn build_entry(r: RawIndex) -> Result<IndexEntry, IndexCatalogError> {
     let repo = parse_repo(&r.repo).ok_or_else(|| IndexCatalogError::UnknownRepo {
         repo: r.repo.clone(),
     })?;
-    let sha256 = decode_sha256_hex(&r.sha256).ok_or_else(|| IndexCatalogError::BadPin {
-        repo: r.repo.clone(),
-        version: r.version.clone(),
+    let pin = DigestPin::from_hex(r.blake3.as_deref(), r.sha256.as_deref()).ok_or_else(|| {
+        IndexCatalogError::BadPin {
+            repo: r.repo.clone(),
+            version: r.version.clone(),
+        }
     })?;
     let url = Url::parse(&r.url).map_err(|_| IndexCatalogError::BadUrl {
         repo: r.repo.clone(),
@@ -193,7 +202,7 @@ fn build_entry(r: RawIndex) -> Result<IndexEntry, IndexCatalogError> {
         repo,
         version: r.version,
         url,
-        sha256,
+        pin,
     })
 }
 
@@ -206,30 +215,6 @@ fn parse_repo(label: &str) -> Option<Repo> {
             .strip_prefix("ex")
             .and_then(|n| n.parse::<u8>().ok())
             .map(Repo::Expansion),
-    }
-}
-
-/// Decode exactly 64 hex digits into 32 bytes; any other length or a non-hex digit is `None`.
-fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = hex_val(bytes[2 * i])?;
-        let lo = hex_val(bytes[2 * i + 1])?;
-        *slot = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
     }
 }
 
@@ -267,7 +252,7 @@ mod tests {
                 .resolve(repo, "2024.03.28.0000.0000")
                 .expect("resolve the entry");
             assert_eq!(entry.repo, repo);
-            assert_eq!(entry.sha256, [0u8; 32]);
+            assert_eq!(entry.pin, DigestPin::Sha256([0u8; 32]));
             // The resolved entry hands back a pinned source ready for repair.
             assert!(matches!(entry.source(), IndexSource::Pinned { .. }));
         }
@@ -318,6 +303,25 @@ mod tests {
                 Err(IndexCatalogError::BadSignature)
             ));
         }
+    }
+
+    /// The schema takes either spelling and a row that pins nothing is refused, so a catalog can be
+    /// re-signed onto the newer function one row at a time and a row that forgot its pin cannot pass
+    /// as an unpinned download.
+    #[test]
+    fn a_row_may_spell_its_pin_either_way_but_must_carry_one() {
+        let blake3 = manifest("game", GOOD_PIN).replace("\"sha256\"", "\"blake3\"");
+        let cat = IndexCatalog::from_json_bytes(blake3.as_bytes()).expect("parse");
+        let entry = cat
+            .resolve(Repo::Game, "2024.03.28.0000.0000")
+            .expect("resolve");
+        assert_eq!(entry.pin, DigestPin::Blake3([0u8; 32]));
+
+        let unpinned = manifest("game", GOOD_PIN).replace("\"sha256\"", "\"md5\"");
+        assert!(matches!(
+            IndexCatalog::from_json_bytes(unpinned.as_bytes()),
+            Err(IndexCatalogError::BadPin { .. })
+        ));
     }
 
     #[test]
@@ -402,8 +406,8 @@ mod tests {
         let artifact =
             include_bytes!("../../../site/indexes/artifacts/game-2024.03.28.0000.0000.apzi");
         assert_eq!(
-            entry.sha256,
-            apogee_test_support::chaos::sha256_of(artifact),
+            entry.pin,
+            DigestPin::Sha256(apogee_test_support::chaos::sha256_of(artifact)),
             "the manifest pin must match the committed artifact",
         );
     }

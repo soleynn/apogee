@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use apogee_fetch::DigestPin;
 use sqex_proto::PatchListEntry;
 use url::Url;
 
@@ -63,9 +64,9 @@ pub struct Installed {
 /// How a repair obtains a repo's `.apzi` block index.
 ///
 /// The index is derived (reproducible from the same patch chain), so its authenticity rests on a
-/// `sha256` pin: [`Pinned`](Self::Pinned) fetches it over HTTP(S) under that pin, and
+/// digest pin: [`Pinned`](Self::Pinned) fetches it over HTTP(S) under that pin, and
 /// [`LocalFile`](Self::LocalFile) reads one already on disk (a local regeneration, or a cached
-/// download). The `sha256`-pinned rows come from a signed index catalog the caller resolves; the
+/// download). The pinned rows come from a signed index catalog the caller resolves; the
 /// catalog's Ed25519 authenticity check and hosting are the adjacent index-infrastructure, not this
 /// crate's runtime path (it consumes a resolved pin).
 #[derive(Debug, Clone)]
@@ -73,12 +74,12 @@ pub struct Installed {
 pub enum IndexSource {
     /// Read the `.apzi` from a local path (a regeneration, or a prior download).
     LocalFile(PathBuf),
-    /// Fetch the `.apzi` over HTTP(S), authenticated by its whole-file `sha256` pin.
+    /// Fetch the `.apzi` over HTTP(S), authenticated by its whole-file digest pin.
     Pinned {
         /// Where the `.apzi` is served.
         url: Url,
-        /// The pin the fetched bytes must hash to.
-        sha256: [u8; 32],
+        /// The pin the fetched bytes must hash to, carrying which function produced it.
+        pin: DigestPin,
     },
 }
 
