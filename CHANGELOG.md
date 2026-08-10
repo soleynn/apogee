@@ -35,6 +35,7 @@ is tagged with its change type. Versioning aims to follow
 - Hand a range no source will serve to the next one (#175) _(added)_
 - Inject a real disk-full into the preallocation path (#176) _(testing)_
 - Fail over on the single-connection engine too (#177) _(added)_
+- Measure resume waste on the client, not the server's byte tally (#178) _(testing)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
