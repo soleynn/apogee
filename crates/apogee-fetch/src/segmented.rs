@@ -32,6 +32,7 @@ use crate::journal::{self, Identity, Journal};
 use crate::prealloc::preallocate;
 use crate::probe::{Capability, classify};
 use crate::progress::{Phase, Progress};
+use crate::retry::{Class, Jitter, RetryPolicy, classify_status, retry_after, sleep_or_cancel};
 use crate::spec::DownloadSpec;
 use crate::util::lock;
 use crate::validator::VerifiedFile;
@@ -40,11 +41,6 @@ use crate::validator::VerifiedFile;
 const BATCH: u64 = 1024 * 1024;
 /// The floor on segment size; a file no larger than this is not worth splitting.
 const MIN_SEGMENT: u64 = 8 * 1024 * 1024;
-/// How many times one stuck offset may be re-queued before the job fails as stalled.
-const RETRY_BUDGET: u32 = 5;
-/// How many times one block may be re-fetched after a failed hash before the file fails. A separate
-/// budget from [`RETRY_BUDGET`]: a corrupt block and a stalled connection are different failure modes.
-const BLOCK_RETRY_BUDGET: u32 = 5;
 
 /// How many block hashes may run on the shared blocking pool at once. Bounded to the host's parallelism
 /// (capped) so a burst of newly-durable blocks never starves the transfer's own disk I/O.
@@ -74,16 +70,7 @@ pub(crate) async fn dispatch(
     let verify = download::plan(spec.validator(), spec.expected_len())?;
 
     let Some(len) = spec.expected_len() else {
-        return download::run(
-            client,
-            spec,
-            verify,
-            progress,
-            cancel,
-            &shared.limiter,
-            &shared.scheduler,
-        )
-        .await;
+        return download::run(client, spec, verify, progress, cancel, shared).await;
     };
     let per_file = shared.max_connections_per_file;
     let seg_size = (len / per_file as u64).max(MIN_SEGMENT);
@@ -92,16 +79,7 @@ pub(crate) async fn dispatch(
     // one segment: its dirty-block re-fetch rides that engine's work queue, so it demotes only when the
     // host ignores ranges (handled below).
     if (per_file <= 1 || len.div_ceil(seg_size) <= 1) && !block_mode {
-        return download::run(
-            client,
-            spec,
-            verify,
-            progress,
-            cancel,
-            &shared.limiter,
-            &shared.scheduler,
-        )
-        .await;
+        return download::run(client, spec, verify, progress, cancel, shared).await;
     }
 
     // Skip a satisfied destination before spending a probe request.
@@ -117,7 +95,7 @@ pub(crate) async fn dispatch(
     let (capability, etag, last_modified) = match shared.capabilities.get(spec.url()) {
         Some(cap) => (cap, None, None),
         None => {
-            let probe = probe(client, spec, &cancel).await?;
+            let probe = probe(client, spec, &cancel, shared).await?;
             shared.capabilities.set(spec.url(), probe.capability);
             (probe.capability, probe.etag, probe.last_modified)
         }
@@ -126,16 +104,7 @@ pub(crate) async fn dispatch(
         // A range-ignoring host cannot serve a block re-fetch; the single-connection engine verifies
         // block mode from disk after streaming the whole file (no targeted repair).
         Capability::SingleConnection => {
-            download::run(
-                client,
-                spec,
-                verify,
-                progress,
-                cancel,
-                &shared.limiter,
-                &shared.scheduler,
-            )
-            .await
+            download::run(client, spec, verify, progress, cancel, shared).await
         }
         Capability::Segmentable => {
             transfer(
@@ -165,32 +134,60 @@ struct Probe {
 /// Probe range support with a one-byte ranged request, classifying the response and capturing its
 /// validators, then dropping its body (so a range-ignoring `200` wastes only a socket buffer, never
 /// the whole file).
+///
+/// The probe is the transfer's first request, so a throttled or restarting host would otherwise fail
+/// a whole job before a byte was asked for: a connect failure or a retryable status backs off here
+/// under the same policy the segment workers use.
 async fn probe(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     cancel: &CancellationToken,
+    shared: &Shared,
 ) -> Result<Probe, FetchError> {
-    let request = apply_headers(client.get(spec.url().clone()), spec.header_policy())
-        .header(RANGE, "bytes=0-0");
-    let resp = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(FetchError::Cancelled),
-        sent = request.send() => sent.map_err(|e| download::connect_error(spec.url(), e))?,
-    };
-    let capability = match resp.status().as_u16() {
-        200 | 206 => classify(&resp),
-        status => {
-            return Err(FetchError::Http {
-                status,
-                url: spec.url().clone(),
-            });
+    let mut attempts = 0u32;
+    loop {
+        let request = apply_headers(client.get(spec.url().clone()), spec.header_policy())
+            .header(RANGE, "bytes=0-0");
+        let sent = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(FetchError::Cancelled),
+            sent = request.send() => sent,
+        };
+        // Each arm yields the failure to report if this is the last attempt, plus the pause the
+        // server asked for; a usable response returns straight out.
+        let (failure, asked) = match sent {
+            Ok(resp) => match resp.status().as_u16() {
+                200 | 206 => {
+                    return Ok(Probe {
+                        etag: download::header_bytes(&resp, &ETAG),
+                        last_modified: download::header_bytes(&resp, &LAST_MODIFIED),
+                        capability: classify(&resp),
+                    });
+                }
+                status if classify_status(status) == Class::Retryable => (
+                    FetchError::Http {
+                        status,
+                        url: spec.url().clone(),
+                    },
+                    retry_after(resp.headers()),
+                ),
+                status => {
+                    return Err(FetchError::Http {
+                        status,
+                        url: spec.url().clone(),
+                    });
+                }
+            },
+            Err(e) => (download::connect_error(spec.url(), e), None),
+        };
+        attempts += 1;
+        if !shared.retry.may_retry(attempts) {
+            return Err(failure);
         }
-    };
-    Ok(Probe {
-        capability,
-        etag: download::header_bytes(&resp, &ETAG),
-        last_modified: download::header_bytes(&resp, &LAST_MODIFIED),
-    })
+        if !sleep_or_cancel(shared.retry.delay(attempts, asked, &shared.jitter), cancel).await {
+            return Err(FetchError::Cancelled);
+        }
+    }
 }
 
 /// Shared state for one segmented transfer: the work queue, the durable-byte counter, the journal, and
@@ -209,6 +206,9 @@ struct TransferState {
     if_range: Option<Vec<u8>>,
     limiter: crate::limiter::LimitHandle,
     scheduler: Arc<crate::scheduler::Scheduler>,
+    /// How a re-queued range or a dirty block waits, and how many attempts each gets.
+    retry: RetryPolicy,
+    jitter: Arc<Jitter>,
     queue: Mutex<VecDeque<Task>>,
     notify: Notify,
     progress_notify: Notify,
@@ -280,6 +280,23 @@ impl TransferState {
         let counter = attempts.entry(start).or_insert(0);
         *counter += 1;
         *counter
+    }
+
+    /// Wait out the backoff for work that has failed `attempts` times, honoring a server-named pause.
+    /// `false` means the transfer ended or was cancelled while waiting, so the caller must stop
+    /// rather than re-queue.
+    async fn backoff(
+        &self,
+        attempts: u32,
+        asked: Option<Duration>,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let delay = self.retry.delay(attempts, asked, &self.jitter);
+        tokio::select! {
+            biased;
+            () = self.done.cancelled() => false,
+            waited = sleep_or_cancel(delay, cancel) => waited,
+        }
     }
 
     /// Append a completed interval to the journal, if one is being kept.
@@ -403,6 +420,8 @@ async fn transfer(
             if_range,
             limiter: shared.limiter.clone(),
             scheduler: shared.scheduler.clone(),
+            retry: shared.retry,
+            jitter: shared.jitter.clone(),
             queue: Mutex::new(queue),
             notify: Notify::new(),
             progress_notify: Notify::new(),
@@ -479,8 +498,13 @@ async fn aggregator(
 enum SegmentResult {
     /// The segment's range is fully durable.
     Done,
-    /// The connection dropped or stalled; the remaining bytes must be re-fetched.
-    Requeue(Range<u64>),
+    /// The connection dropped or stalled, or the server refused with a retryable status; the
+    /// remaining bytes must be re-fetched after a backoff. `asked` carries a `Retry-After` the
+    /// server named, which the policy clamps before honoring.
+    Requeue {
+        range: Range<u64>,
+        asked: Option<Duration>,
+    },
     /// The server returned a `200` where a `206` was expected (the source changed under us).
     SourceChanged,
     /// The transfer is ending (finished or cancelled); stop working.
@@ -495,19 +519,32 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
         let source = task.source;
         match stream_segment(&state, task, &cancel).await {
             SegmentResult::Done => {}
-            SegmentResult::Requeue(remaining) => {
-                if state.bump_attempt(remaining.start) > RETRY_BUDGET {
+            // An empty remainder is a finished segment, not a stuck one: the connection went after the
+            // last byte was already durable, so there is nothing left to ask for. It falls through to
+            // the completion check below rather than being charged an attempt and a backoff. The
+            // charge would land on the *next* segment's budget (the ranges are contiguous, so the
+            // remainder starts exactly where that one does) and could fail a transfer whose bytes all
+            // arrived.
+            SegmentResult::Requeue { range, .. } if range.is_empty() => {}
+            SegmentResult::Requeue {
+                range: remaining,
+                asked,
+            } => {
+                let attempts = state.bump_attempt(remaining.start);
+                if !state.retry.may_retry(attempts) {
                     state.finish(Err(FetchError::Stalled {
                         url: state.primary().clone(),
                         at_bytes: state.durable.load(Ordering::SeqCst),
                     }));
-                } else {
+                } else if state.backoff(attempts, asked, &cancel).await {
                     // A transport stall keeps the same source; block-level mirror rotation is driven by
                     // the verifier, not by a dropped connection.
                     state.push_task(Task {
                         range: remaining,
                         source,
                     });
+                } else {
+                    return; // the transfer ended or was cancelled during the backoff
                 }
             }
             SegmentResult::SourceChanged => {
@@ -570,11 +607,16 @@ fn spawn_hash(
     let want = verify.expected(i);
     let limit = state.hash_limit.clone();
     tokio::spawn(async move {
-        // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also uses.
-        let Ok(_permit) = limit.acquire_owned().await else {
-            return; // the semaphore is never closed; this only guards a shutdown race
+        // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also
+        // uses. The permit is scoped to the hash itself: reporting a verdict does no hashing, and a
+        // dirty block's verdict waits out a backoff, so holding it any longer would park the whole
+        // verification pipeline behind however long a repair was told to wait.
+        let hashed = {
+            let Ok(_permit) = limit.acquire_owned().await else {
+                return; // the semaphore is never closed; this only guards a shutdown race
+            };
+            tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await
         };
-        let hashed = tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await;
         match hashed {
             Ok(Ok(got)) if got == want => on_verified(&state, &verify, i, &cancel),
             Ok(Ok(_)) => on_dirty(&state, &verify, i, &cancel).await,
@@ -607,7 +649,7 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
     }
     let range = verify.block_range(i);
     let attempts = verify.bump_attempt(i);
-    if attempts > BLOCK_RETRY_BUDGET {
+    if !state.retry.may_retry(attempts) {
         // Drop the journal so a retry restarts clean rather than trusting the bad interval.
         let _ = tokio::fs::remove_file(&state.apdl).await;
         state.finish(Err(FetchError::BlockVerifyFailed {
@@ -618,11 +660,16 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
         return;
     }
     // Clear the block's coverage and reset it to pending atomically, so a concurrent verifier pass
-    // cannot re-dispatch it against stale coverage before its bytes are re-fetched.
+    // cannot re-dispatch it against stale coverage before its bytes are re-fetched. This happens
+    // before the backoff, not after: leaving the bad bytes marked durable for the length of a wait
+    // would let a verifier pass re-dispatch the block against coverage it has already failed.
     verify.clear_and_reset(i, &state.covered, range.clone());
     state
         .durable
         .fetch_sub(range.end - range.start, Ordering::SeqCst);
+    if !state.backoff(attempts, None, cancel).await {
+        return; // the transfer ended or was cancelled during the backoff
+    }
     let source = mirror_source(state, attempts);
     state.push_task(Task { range, source });
 }
@@ -666,12 +713,20 @@ async fn stream_segment(
         sent = request.send() => match sent {
             Ok(resp) => resp,
             // A connect error is transient: re-queue the whole range.
-            Err(_) => return SegmentResult::Requeue(range),
+            Err(_) => return SegmentResult::Requeue { range, asked: None },
         },
     };
     match resp.status().as_u16() {
         200 => return SegmentResult::SourceChanged,
         206 => {}
+        // A throttling or overload answer is not a verdict on the request, so the range goes back on
+        // the queue and waits instead of failing the job.
+        status if classify_status(status) == Class::Retryable => {
+            return SegmentResult::Requeue {
+                range,
+                asked: retry_after(resp.headers()),
+            };
+        }
         status => {
             return SegmentResult::Fatal(FetchError::Http {
                 status,
@@ -725,7 +780,10 @@ async fn stream_segment(
                 if let Err(err) = commit_batch(&mut file, &mut batch, &mut committed, state).await {
                     return SegmentResult::Fatal(err);
                 }
-                return SegmentResult::Requeue(committed..range.end);
+                return SegmentResult::Requeue {
+                    range: committed..range.end,
+                    asked: None,
+                };
             }
             item = stream.next() => item,
         };
@@ -734,7 +792,10 @@ async fn stream_segment(
             Ok(chunk) => chunk,
             Err(_) => {
                 let _ = commit_batch(&mut file, &mut batch, &mut committed, state).await;
-                return SegmentResult::Requeue(committed..range.end);
+                return SegmentResult::Requeue {
+                    range: committed..range.end,
+                    asked: None,
+                };
             }
         };
         let bytes: &[u8] = chunk.as_ref();
@@ -763,7 +824,10 @@ async fn stream_segment(
     }
     // A short 206 (fewer bytes than the range) leaves a gap; re-queue the remainder.
     if committed < range.end {
-        return SegmentResult::Requeue(committed..range.end);
+        return SegmentResult::Requeue {
+            range: committed..range.end,
+            asked: None,
+        };
     }
     SegmentResult::Done
 }

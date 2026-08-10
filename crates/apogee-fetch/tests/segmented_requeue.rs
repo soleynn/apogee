@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Progress, Validator};
+use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Progress, RetryPolicy, Validator};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, sha256_of};
 use tokio_util::sync::CancellationToken;
 
@@ -196,9 +196,12 @@ async fn a_permanently_slow_segment_fails_as_stalled() {
         .start()
         .await
         .unwrap();
+    // The wall-clock cost of exhausting the budget is the policy's, not the engine's, so the delays
+    // are compressed here; what is under test is that the budget runs out at all.
     let fetcher = Fetcher::builder()
         .max_connections_per_file(4)
         .stall_timeout(Duration::from_millis(100))
+        .retry_policy(RetryPolicy::default().base_delay(Duration::from_millis(1)))
         .build()
         .unwrap();
     let spec = DownloadSpec::builder(

@@ -181,6 +181,7 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures-util",
+ "getrandom 0.4.3",
  "proptest",
  "reqwest",
  "rustix",

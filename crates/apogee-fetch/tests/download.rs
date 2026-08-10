@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use apogee_fetch::{DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, Validator};
+use apogee_fetch::{
+    DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, FetcherBuilder, RetryPolicy, Validator,
+};
 use apogee_test_support::chaos::{
     ChaosServer, block_hashes, body_sha256, generated_vec, sha256_of,
 };
@@ -20,6 +22,16 @@ fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// A fetcher that never retries in-process.
+///
+/// The interruption tests below are about the journal's *cross-call* resume: the first call has to
+/// surface the drop as an error and leave a `.part` plus journal behind, and the second call is the
+/// one under test. With retries on, the first call would quietly recover and the resume path would go
+/// unexercised, so the budget is spent down to one attempt to keep each of those a two-call test.
+fn single_attempt() -> FetcherBuilder {
+    Fetcher::builder().retry_policy(RetryPolicy::default().max_attempts(1))
 }
 
 /// A verified-Sha256 spec builder for `len` bytes from `seed`, served by `server`.
@@ -134,7 +146,7 @@ async fn a_dropped_connection_resumes_from_the_journal() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 5, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     let err = downloader
         .download(&spec, None, CancellationToken::new())
@@ -172,7 +184,7 @@ async fn a_changed_etag_restarts_cleanly_and_still_verifies() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 9, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
@@ -202,7 +214,7 @@ async fn a_server_that_ignores_range_on_resume_restarts_cleanly() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 4, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
@@ -334,7 +346,10 @@ async fn a_persistently_corrupt_block_fails_after_exhausting_its_retries() {
     .build()
     .unwrap();
 
+    // Compressed delays: what is under test is that the budget runs out and nothing is published,
+    // not the wall clock the policy's backoff spends getting there.
     let err = Fetcher::builder()
+        .retry_policy(RetryPolicy::default().base_delay(Duration::from_millis(1)))
         .build()
         .unwrap()
         .download(&spec, None, CancellationToken::new())
@@ -375,7 +390,7 @@ async fn resume_disabled_writes_no_journal_and_restarts_from_zero() {
         .resume(false)
         .build()
         .unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
@@ -412,7 +427,7 @@ async fn a_part_shorter_than_the_watermark_restarts_from_zero() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 8, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
@@ -449,7 +464,7 @@ async fn a_range_not_satisfiable_response_restarts_and_completes() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 3, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
@@ -476,7 +491,7 @@ async fn resume_uses_last_modified_when_no_etag_is_offered() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 5, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
@@ -508,7 +523,7 @@ async fn a_changed_last_modified_restarts_cleanly() {
         .await
         .unwrap();
     let spec = spec_builder(&server, &dest, 6, len).build().unwrap();
-    let downloader = Fetcher::builder().build().unwrap();
+    let downloader = single_attempt().build().unwrap();
 
     downloader
         .download(&spec, None, CancellationToken::new())
