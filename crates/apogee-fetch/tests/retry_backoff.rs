@@ -133,6 +133,10 @@ async fn a_fatal_status_fails_on_the_first_response() {
         matches!(err, FetchError::Http { status: 431, .. }),
         "got {err:?}",
     );
+    assert!(
+        !err.is_transient(),
+        "a caller must not restart what this transfer would not retry: {err:?}",
+    );
     assert_eq!(
         server.stats().requests(),
         1,
@@ -171,6 +175,11 @@ async fn a_retryable_status_that_never_clears_exhausts_the_budget() {
     assert!(
         matches!(err, FetchError::Http { status: 503, .. }),
         "got {err:?}",
+    );
+    assert!(
+        err.is_transient(),
+        "a spent budget is this transfer's limit, not a verdict that the host will refuse forever: \
+         {err:?}",
     );
     assert_eq!(
         server.stats().requests(),
