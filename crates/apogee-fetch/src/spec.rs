@@ -146,8 +146,19 @@ impl DownloadSpecBuilder {
     /// Add one alternate source URL, tried after the primary when work repeatedly fails.
     ///
     /// A mirror serves any part of the transfer the primary will not: a segment whose connection
-    /// keeps dying, a range the primary answers with a throttling status, or a block that fails its
-    /// hash. It is not asked for byte ranges again once it has answered one with a whole body.
+    /// keeps dying, a range the primary answers with a throttling status, a block that fails its hash,
+    /// or the whole of a transfer that runs on one connection because the file is small, its length is
+    /// unknown, or the primary would not serve ranges.
+    ///
+    /// It is asked only after the failing source has had one more try, so a transient blip does not
+    /// give up a warm connection, and each further failure steps one source along. A mirror that
+    /// answers a ranged request with the whole body is dropped from a segmented transfer's rotation,
+    /// since it can serve neither a segment nor a block repair; a single-connection transfer keeps
+    /// using it, because a whole body is what that one asked for anyway.
+    ///
+    /// A mirror is never sent the validator the primary issued, nor its own recorded for a later
+    /// resume against the primary, so the file's own validator is what proves a transfer assembled
+    /// from more than one source.
     #[must_use]
     pub fn mirror(mut self, url: Url) -> Self {
         self.mirrors.push(url);

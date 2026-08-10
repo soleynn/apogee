@@ -7,6 +7,14 @@
 //! with `Range` + `If-Range`; a source that changed (a `200` where a `206` was asked for) restarts
 //! cleanly from zero. An existing destination is re-hashed against the validator, not trusted on its
 //! path, so a `VerifiedFile` is never minted over unverified bytes.
+//!
+//! A retry does not have to go back to the source that failed. Each try picks its source from the
+//! spec's list by the same rule the segmented engine's re-queue uses
+//! ([`rotate`](crate::retry::rotate)), so the three cases this engine owns - a transfer of unknown
+//! length, a file too small to be worth segmenting, and a job demoted because the primary answered a
+//! ranged probe with a whole body - fail over to a mirror rather than failing. What belongs to the
+//! primary alone stays with it: the journal's identity, and the validator a conditional range offers
+//! (see [`Conditional`]).
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -28,7 +36,9 @@ use crate::fetcher::Shared;
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
 use crate::progress::{Phase, Progress};
-use crate::retry::{Class, classify_send_error, classify_status, retry_after, sleep_or_cancel};
+use crate::retry::{
+    Class, classify_send_error, classify_status, retry_after, rotate, sleep_or_cancel,
+};
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
@@ -79,11 +89,14 @@ pub(crate) async fn run(
     let _conn = shared.scheduler.acquire_connection().await;
 
     let core_identity = base_identity(spec, spec.expected_len());
+    // The primary, then each mirror: the list every try rotates through. The primary stays index 0, so
+    // it alone carries the journal's identity and a conditional range's validator.
+    let sources = spec.sources();
 
     // Reconcile a prior attempt: resume only when the journal matches this request, records real
     // progress, and the `.part` is at least that long.
     let mut start = 0u64;
-    let mut if_range: Option<Vec<u8>> = None;
+    let mut if_range: Option<Conditional> = None;
     let mut journal_identity = core_identity.clone();
     if spec.resume()
         && let Some(loaded) = journal::load(&apdl)
@@ -96,11 +109,14 @@ pub(crate) async fn run(
         && meta.len() >= loaded.watermark()
     {
         start = loaded.watermark();
+        // A journaled validator is always the primary's: the identity it was recorded under is the
+        // primary's URL, and only the primary's own answer is ever written there.
         if_range = loaded
             .identity
             .etag
             .clone()
-            .or_else(|| loaded.identity.last_modified.clone());
+            .or_else(|| loaded.identity.last_modified.clone())
+            .map(|value| Conditional { source: 0, value });
         journal_identity = loaded.identity;
     }
 
@@ -125,20 +141,24 @@ pub(crate) async fn run(
     let mut attempts = 0u32;
     let mut total;
     let written = loop {
-        let resp = obtain_response(
+        let Attempt { resp, source } = obtain_response(
             client,
             spec,
-            &part,
-            &mut part_file,
-            &mut hasher,
-            &mut journal,
-            &mut start,
-            &mut if_range,
+            &sources,
+            Partial {
+                path: &part,
+                file: &mut part_file,
+                hasher: &mut hasher,
+                journal: &mut journal,
+                start: &mut start,
+                if_range: &mut if_range,
+            },
             shared,
             &cancel,
             &mut attempts,
         )
         .await?;
+        let url = &sources[source];
 
         // The first progress event of an attempt is emitted only after the resume disposition is
         // settled, so it never names bytes a `200` has just discarded.
@@ -166,24 +186,41 @@ pub(crate) async fn run(
             .or_else(|| resp.content_length().map(|cl| cl.saturating_add(start)));
 
         // A fresh start records the server's validators so a later resume can revalidate with
-        // `If-Range`.
+        // `If-Range`. Only the primary's own answer may be recorded: the identity these are written
+        // under is the primary's URL, so a mirror's would be offered back to the primary on the next
+        // run and invite a changed-source verdict on a source that never changed. The segmented
+        // engine drops a mirror-answered probe's validators for the same reason.
+        //
+        // A mirror-served prefix therefore journals nothing to revalidate against, so the next run's
+        // resume continues it unconditionally and the file's own validator is what catches a prefix
+        // and a tail that came from copies which had diverged. That is the trade the segmented engine
+        // already makes for a mirror-answered probe, and the reason `External` names a downstream gate.
         if spec.resume() && journal.is_none() {
-            journal_identity.etag = header_bytes(&resp, &ETAG);
-            journal_identity.last_modified = header_bytes(&resp, &LAST_MODIFIED);
+            let (etag, last_modified) = match source {
+                0 => (
+                    header_bytes(&resp, &ETAG),
+                    header_bytes(&resp, &LAST_MODIFIED),
+                ),
+                _ => (None, None),
+            };
+            journal_identity.etag = etag;
+            journal_identity.last_modified = last_modified;
             journal = Journal::create(&apdl, &journal_identity)
                 .await
                 .map_err(|e| FetchError::io(&apdl, e))?;
         }
         // Pin this response's validator for the in-process retries too, even when no journal is being
         // kept: a source that changes between a dropped body and its retry then answers the
-        // conditional range with a `200` and restarts cleanly, instead of stitching two files together.
-        if if_range.is_none() {
-            if_range = header_bytes(&resp, &ETAG).or_else(|| header_bytes(&resp, &LAST_MODIFIED));
+        // conditional range with a `200` and restarts cleanly, instead of stitching two files
+        // together. Held per source, so the pin is re-taken whenever the rotation lands somewhere the
+        // current one does not describe.
+        if if_range.as_ref().is_none_or(|held| held.source != source) {
+            if_range = conditional(&resp, source);
         }
 
         match stream_body(
             resp,
-            spec,
+            url,
             &part,
             &mut part_file,
             &mut hasher,
@@ -201,17 +238,21 @@ pub(crate) async fn run(
         .await?
         {
             Outcome::Complete(written) => break written,
-            Outcome::Interrupted { written, source } => {
+            Outcome::Interrupted {
+                written,
+                source: cause,
+            } => {
                 attempts += 1;
                 if !shared.retry.may_retry(attempts) {
-                    return Err(source);
+                    return Err(exhausted(&sources, attempts, written, cause));
                 }
                 let delay = shared.retry.delay(attempts, None, &shared.jitter);
                 if !sleep_or_cancel(delay, &cancel).await {
                     return Err(FetchError::Cancelled);
                 }
                 // Everything received is durable and hashed, so the next attempt asks only for the
-                // rest. This is the resume path the journal already supported, run in-process.
+                // rest. This is the resume path the journal already supported, run in-process, and the
+                // spent attempt is also what steps the rotation, so the rest may come off a mirror.
                 start = written;
             }
         }
@@ -279,6 +320,74 @@ pub(crate) async fn run(
     publish(dest, &part, &apdl, written, total, &progress).await
 }
 
+/// A usable response and which source answered it.
+struct Attempt {
+    resp: reqwest::Response,
+    /// `0` for the primary, higher for the mirror the rotation stepped onto. The caller needs it to
+    /// decide what may be recorded from the response: the journal's identity and a conditional
+    /// range's validator are the primary's alone.
+    source: usize,
+}
+
+/// The `.part` being written and everything that has to stay consistent with it: its open handle, the
+/// running hash over its prefix, its journal, where the next body lands, and the validator a
+/// conditional range for it may offer.
+///
+/// Grouped because settling a resume disposition moves all of it together or none of it: a response
+/// that restarts the transfer rewinds the file, the hash, the journal, the offset and the validator in
+/// one step ([`reset_to_zero`]), and passing them separately let a caller move one without the rest.
+struct Partial<'a> {
+    path: &'a Path,
+    file: &'a mut tokio::fs::File,
+    hasher: &'a mut Option<Sha256>,
+    journal: &'a mut Option<Journal>,
+    start: &'a mut u64,
+    if_range: &'a mut Option<Conditional>,
+}
+
+/// A server validator, and which source issued it.
+///
+/// A validator describes one source's copy of the file, so it is only ever offered back to that
+/// source. The primary's given to a mirror would be answered with a whole body, throwing a durable
+/// prefix away over a difference that means nothing; a mirror's given to the primary would read as
+/// the primary changing when it never did.
+///
+/// The segmented engine needs no such tag: its `If-Range` comes from a probe it only ever records from
+/// the primary, so the one validator it holds belongs to the one source it sends it to. This engine
+/// re-asks whichever source the rotation names, and asks it to continue a prefix rather than to serve a
+/// closed range, so it has to know whose validator it is holding.
+struct Conditional {
+    source: usize,
+    value: Vec<u8>,
+}
+
+/// The strongest validator `resp` offers (an `ETag`, else a `Last-Modified`), tagged with the source
+/// that sent it.
+fn conditional(resp: &reqwest::Response, source: usize) -> Option<Conditional> {
+    header_bytes(resp, &ETAG)
+        .or_else(|| header_bytes(resp, &LAST_MODIFIED))
+        .map(|value| Conditional { source, value })
+}
+
+/// The failure to report once a transfer's attempt budget is spent.
+///
+/// A transfer carrying mirrors spent that budget across its whole source list, so the fact worth
+/// triaging is that failover itself was exhausted, and the reported source count and attempt count say
+/// how wide and how hard it tried. One with a single source had nowhere to fail over to, so `last`, the
+/// failure that source ended on, is still the whole story and is reported verbatim. The segmented
+/// engine splits the same way, except that it has no single failure to hand back.
+fn exhausted(sources: &[Url], attempts: u32, at_bytes: u64, last: FetchError) -> FetchError {
+    match sources {
+        [primary, _, ..] => FetchError::AllSourcesFailed {
+            url: primary.clone(),
+            sources: sources.len(),
+            attempts,
+            at_bytes,
+        },
+        _ => last,
+    }
+}
+
 /// Where one body attempt starts and what the transfer has already reported.
 struct Cursor<'a> {
     /// The offset this response's body lands at.
@@ -312,7 +421,7 @@ enum Outcome {
 #[allow(clippy::too_many_arguments)]
 async fn stream_body(
     resp: reqwest::Response,
-    spec: &DownloadSpec,
+    url: &Url,
     part: &Path,
     part_file: &mut tokio::fs::File,
     hasher: &mut Option<Sha256>,
@@ -346,7 +455,7 @@ async fn stream_body(
             biased;
             () = cancel.cancelled() => Some(FetchError::Cancelled),
             () = tokio::time::sleep(shared.stall_timeout) => Some(FetchError::Stalled {
-                url: spec.url().clone(),
+                url: url.clone(),
                 at_bytes: written,
             }),
             item = stream.next() => match item {
@@ -367,7 +476,7 @@ async fn stream_body(
                     }
                     None
                 }
-                Some(Err(e)) => Some(transport_error(spec.url(), e)),
+                Some(Err(e)) => Some(transport_error(url, e)),
             },
         };
         if let Some(source) = cut_off {
@@ -389,40 +498,55 @@ async fn stream_body(
     Ok(Outcome::Complete(written))
 }
 
-/// Send the request and settle the resume disposition, retrying what is worth retrying.
+/// Send the request and settle the resume disposition, retrying what is worth retrying and rotating
+/// off a source that will not answer.
 ///
 /// A valid `206` continues from `start`; a `200` (source changed, or the server ignored the range)
 /// restarts cleanly from zero; a `416` or an unusable `206` re-requests once from zero. A connect
 /// failure or a throttling status spends an attempt from `attempts` and backs off under the fetcher's
 /// policy; every other status is fatal and is not retried.
 ///
+/// Which source each try goes to is [`rotate`]'s decision, the same rule the segmented engine's
+/// re-queue follows: the failing source once more, then one step along the list per failure after
+/// that. Because the choice is a pure function of `attempts`, which only the failure paths advance,
+/// rotating cannot add a try the budget has not already paid for.
+///
+/// A `200` where a range was asked for is read the same way whichever source sent it: restart from
+/// zero and stream the whole body. This engine wants a whole body, so a range-ignoring source is
+/// merely a source that starts over here, not the capability failure it is to the segmented engine.
+/// What that costs is the durable prefix, which is why only a conditional range's *own* source is
+/// asked to match it (see [`Conditional`]).
+///
 /// # Errors
-/// [`FetchError::Http`] for a fatal status or once the attempt budget is spent,
+/// [`FetchError::Http`] for a fatal status, [`FetchError::AllSourcesFailed`] once a transfer with
+/// mirrors has spent its budget across them (the last source's own failure when there are none),
 /// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Cancelled`] if
 /// `cancel` fired, or [`FetchError::Io`] if truncating the `.part` for a restart failed.
-#[allow(clippy::too_many_arguments)]
 async fn obtain_response(
     client: &reqwest::Client,
     spec: &DownloadSpec,
-    part: &Path,
-    part_file: &mut tokio::fs::File,
-    hasher: &mut Option<Sha256>,
-    journal: &mut Option<Journal>,
-    start: &mut u64,
-    if_range: &mut Option<Vec<u8>>,
+    sources: &[Url],
+    mut partial: Partial<'_>,
     shared: &Shared,
     cancel: &CancellationToken,
     attempts: &mut u32,
-) -> Result<reqwest::Response, FetchError> {
+) -> Result<Attempt, FetchError> {
     // The resume disposition gets exactly one restart from zero, and it is not charged to the retry
-    // budget: it corrects *this* request rather than re-attempting a failed one.
+    // budget: it corrects *this* request rather than re-attempting a failed one. It therefore does not
+    // step the rotation either, so the correction is asked of the source that needs correcting.
     let mut restarted = false;
     loop {
-        let mut req = apply_headers(client.get(spec.url().clone()), spec.header_policy());
-        if *start > 0 {
-            req = req.header(RANGE, format!("bytes={}-", *start));
-            if let Some(value) = if_range.as_deref()
-                && let Ok(header) = reqwest::header::HeaderValue::from_bytes(value)
+        let source = rotate(*attempts, sources.len());
+        let url = &sources[source];
+        let mut req = apply_headers(client.get(url.clone()), spec.header_policy());
+        if *partial.start > 0 {
+            req = req.header(RANGE, format!("bytes={}-", *partial.start));
+            // The validator goes back only to the source that issued it. Offered to any other, it is a
+            // mismatch by construction, and this engine answers a mismatch by throwing the durable
+            // prefix away and streaming from zero.
+            if let Some(held) = partial.if_range.as_ref()
+                && held.source == source
+                && let Ok(header) = reqwest::header::HeaderValue::from_bytes(&held.value)
             {
                 req = req.header(IF_RANGE, header);
             }
@@ -438,25 +562,25 @@ async fn obtain_response(
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 if status == 200 {
-                    if *start > 0 {
-                        reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
+                    if *partial.start > 0 {
+                        reset_to_zero(&mut partial).await?;
                     }
-                    return Ok(resp);
+                    return Ok(Attempt { resp, source });
                 }
                 if status == 206
-                    && *start > 0
-                    && content_range_ok(&resp, *start, spec.expected_len())
+                    && *partial.start > 0
+                    && content_range_ok(&resp, *partial.start, spec.expected_len())
                 {
-                    return Ok(resp);
+                    return Ok(Attempt { resp, source });
                 }
-                if (status == 206 || status == 416) && *start > 0 && !restarted {
+                if (status == 206 || status == 416) && *partial.start > 0 && !restarted {
                     restarted = true;
-                    reset_to_zero(part_file, part, hasher, journal, start, if_range).await?;
+                    reset_to_zero(&mut partial).await?;
                     continue;
                 }
                 let failure = FetchError::Http {
                     status,
-                    url: spec.url().clone(),
+                    url: url.clone(),
                 };
                 if classify_status(status) == Class::Fatal {
                     return Err(failure);
@@ -464,13 +588,13 @@ async fn obtain_response(
                 (failure, retry_after(resp.headers()))
             }
             Err(e) if classify_send_error(&e) == Class::Fatal => {
-                return Err(connect_error(spec.url(), e));
+                return Err(connect_error(url, e));
             }
-            Err(e) => (connect_error(spec.url(), e), None),
+            Err(e) => (connect_error(url, e), None),
         };
         *attempts += 1;
         if !shared.retry.may_retry(*attempts) {
-            return Err(failure);
+            return Err(exhausted(sources, *attempts, *partial.start, failure));
         }
         let delay = shared.retry.delay(*attempts, asked, &shared.jitter);
         if !sleep_or_cancel(delay, cancel).await {
@@ -525,30 +649,27 @@ async fn open_part(
     Ok(file)
 }
 
-/// Truncate the `.part`, reset the running hash, drop the journal, and clear the resume position, so
-/// a fresh body streams from zero.
-async fn reset_to_zero(
-    part_file: &mut tokio::fs::File,
-    part: &Path,
-    hasher: &mut Option<Sha256>,
-    journal: &mut Option<Journal>,
-    start: &mut u64,
-    if_range: &mut Option<Vec<u8>>,
-) -> Result<(), FetchError> {
-    part_file
+/// Truncate the `.part`, reset the running hash, drop the journal, and clear the resume position and
+/// its validator, so a fresh body streams from zero.
+async fn reset_to_zero(partial: &mut Partial<'_>) -> Result<(), FetchError> {
+    partial
+        .file
         .set_len(0)
         .await
-        .map_err(|e| FetchError::io(part, e))?;
-    part_file
+        .map_err(|e| FetchError::io(partial.path, e))?;
+    partial
+        .file
         .seek(SeekFrom::Start(0))
         .await
-        .map_err(|e| FetchError::io(part, e))?;
-    if let Some(h) = hasher.as_mut() {
+        .map_err(|e| FetchError::io(partial.path, e))?;
+    if let Some(h) = partial.hasher.as_mut() {
         *h = Sha256::new();
     }
-    *journal = None;
-    *start = 0;
-    *if_range = None;
+    *partial.journal = None;
+    *partial.start = 0;
+    // The held validator described a prefix that no longer exists. The response that triggered this
+    // reset carries the current one, and the caller re-pins from it.
+    *partial.if_range = None;
     Ok(())
 }
 
