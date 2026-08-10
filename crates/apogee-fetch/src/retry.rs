@@ -1,9 +1,11 @@
 //! Backoff, jitter, and the one place that decides what a failure is worth.
 //!
-//! Every retry site in the crate asks the same two questions: is this failure the kind that could
-//! succeed on a second try, and how long should the transfer wait first. [`classify_status`] answers
-//! the first for an HTTP status, [`RetryPolicy::delay`] answers the second, and both engines route
-//! through them so a status cannot be retryable on one transfer path and fatal on the other.
+//! Every retry site in the crate asks the same three questions: is this failure the kind that could
+//! succeed on a second try, how long should the transfer wait first, and which source should it ask.
+//! [`classify_status`] answers the first for an HTTP status, [`RetryPolicy::delay`] answers the
+//! second, [`rotate`] answers the third, and both engines route through them so a status cannot be
+//! retryable on one transfer path and fatal on the other, nor fail over on one and give up on the
+//! other.
 //!
 //! The delay is exponential with equal jitter: half the computed backoff, plus a random draw over
 //! the other half. Equal jitter (rather than a full-range draw) keeps a guaranteed floor under every
@@ -42,6 +44,22 @@ pub(crate) fn classify_status(status: u16) -> Class {
         408 | 429 | 500 | 502 | 503 | 504 => Class::Retryable,
         _ => Class::Fatal,
     }
+}
+
+/// Which source a unit of work goes to on its next try, given how many times it has already failed:
+/// the same source once more, then one step further along the list per failure after that.
+///
+/// The one free retry absorbs the common transient blip without giving up a warm connection, and
+/// every failure past it steps on, so a dead host costs one unit of work two attempts instead of its
+/// whole budget. Which failure it was does not matter: a refused connection, a body that dropped, a
+/// silence past the stall timeout, a throttling status and a block that failed its hash all rotate
+/// the same way, because all of them mean "this source did not deliver these bytes".
+///
+/// Rotation is a pure function of the attempt count and never a step of its own, so failing over can
+/// only ever spend an attempt the retry budget already paid for. That is what bounds both engines: no
+/// path through either moves work to another source without also moving the counter that bounds it.
+pub(crate) fn rotate(failures: u32, sources: usize) -> usize {
+    (failures as usize).saturating_sub(1) % sources.max(1)
 }
 
 /// Whether a request that never produced a response is worth sending again.
@@ -276,6 +294,32 @@ mod tests {
         for status in [400, 401, 403, 404, 410, 416, 431, 451, 501, 505] {
             assert_eq!(classify_status(status), Class::Fatal, "{status}");
         }
+    }
+
+    /// The first failure is a free same-source retry; each one past it steps along the list, wrapping.
+    /// Both engines share this, so a mirror is reached after exactly one wasted try either way.
+    #[test]
+    fn rotation_retries_the_same_source_once_then_steps_along_the_list() {
+        // No failures yet, and the first failure, both stay on the primary.
+        assert_eq!(rotate(0, 3), 0);
+        assert_eq!(rotate(1, 3), 0);
+        // Then one step per failure, wrapping back to the primary rather than running off the end.
+        assert_eq!(rotate(2, 3), 1);
+        assert_eq!(rotate(3, 3), 2);
+        assert_eq!(rotate(4, 3), 0);
+        // A transfer with no mirrors always names the primary, however hard it has failed.
+        for failures in 0..8 {
+            assert_eq!(rotate(failures, 1), 0, "{failures}");
+        }
+    }
+
+    /// A degenerate source count cannot panic on the modulo or index past a real list: the crate
+    /// always has at least one source, so `0` is unreachable, but it must still resolve to an index.
+    #[test]
+    fn rotation_over_an_empty_source_list_still_names_an_index() {
+        assert_eq!(rotate(0, 0), 0);
+        assert_eq!(rotate(9, 0), 0);
+        assert_eq!(rotate(u32::MAX, 2), (u32::MAX as usize - 1) % 2);
     }
 
     /// Only the delta-seconds form of `Retry-After` is read; a date or garbage falls back to the
