@@ -10,9 +10,9 @@
 //! Re-queued work does not have to go back to the source that failed it. Every unit of work carries
 //! the source it was asked from, and every failure of it - a refused connection, a dropped body, a
 //! silence past the stall timeout, a throttling status, a block that failed its hash - steps that
-//! choice along the spec's source list by the same rule ([`rotate`]). A mirror that turns out not to
-//! serve ranges at all is taken out of the rotation for the rest of the transfer rather than being
-//! re-asked for every later block.
+//! choice along the spec's source list by the same rule ([`rotate`](crate::retry::rotate)). A mirror
+//! that turns out not to serve ranges at all is taken out of the rotation for the rest of the transfer
+//! rather than being re-asked for every later block.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::SeekFrom;
@@ -40,7 +40,8 @@ use crate::prealloc::preallocate;
 use crate::probe::{Capability, classify};
 use crate::progress::{Phase, Progress};
 use crate::retry::{
-    Class, Jitter, RetryPolicy, classify_send_error, classify_status, retry_after, sleep_or_cancel,
+    Class, Jitter, RetryPolicy, classify_send_error, classify_status, retry_after, rotate,
+    sleep_or_cancel,
 };
 use crate::spec::DownloadSpec;
 use crate::util::lock;
@@ -65,23 +66,6 @@ fn hash_concurrency() -> usize {
 struct Task {
     range: Range<u64>,
     source: usize,
-}
-
-/// Which source a unit of work goes to on its next try, given how many times it has already failed:
-/// the same source once more, then one step further along the list per failure after that.
-///
-/// The one free retry absorbs the common transient blip without giving up a warm connection, and
-/// every failure past it steps on, so a dead host costs one range two attempts instead of its whole
-/// budget. Which failure it was does not matter: a refused connection, a body that dropped, a
-/// silence past the stall timeout, a throttling status and a block that failed its hash all rotate
-/// the same way, because all of them mean "this source did not deliver these bytes".
-///
-/// Rotation is a pure function of the attempt count and never a step of its own, so failing over can
-/// only ever spend an attempt the retry budget already paid for. That is what keeps the work queue
-/// finite: no path through it moves work to another source without also moving the counter that
-/// bounds it.
-fn rotate(failures: u32, sources: usize) -> usize {
-    (failures as usize).saturating_sub(1) % sources.max(1)
 }
 
 /// Decide single vs segmented and run the transfer. The single-connection engine owns the
