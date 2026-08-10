@@ -1,5 +1,9 @@
 //! The single-connection streaming download state machine.
 //!
+//! A download reserves its `.part` to the full length as soon as one is known - the caller's, or the
+//! first response's `Content-Length` - so a transfer with nowhere to land fails before the payload
+//! streams rather than partway through it. A body whose length nobody states reserves nothing.
+//!
 //! A download streams the body to a `.part` sidecar, hashing as it writes, and flushes the journal
 //! watermark only after the corresponding bytes are `fsync`ed, so a crash never leaves the journal
 //! naming bytes that are not on disk. On success the file is verified, atomically renamed onto its
@@ -35,6 +39,7 @@ use crate::error::FetchError;
 use crate::fetcher::Shared;
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
+use crate::prealloc::preallocate;
 use crate::progress::{Phase, Progress};
 use crate::retry::{
     Class, classify_send_error, classify_status, retry_after, rotate, sleep_or_cancel,
@@ -95,6 +100,16 @@ pub(crate) async fn run(
 
     // Reconcile a prior attempt: resume only when the journal matches this request, records real
     // progress, and the `.part` is at least that long.
+    //
+    // The length test is kept rather than replaced now that the `.part` is preallocated. What it used
+    // to do, separate an interrupted transfer from a journal claiming more than the file holds, the
+    // reservation makes moot: a `.part` this engine left behind is always the full reserved length.
+    // What it still does is the case it was written for, a `.part` shortened or replaced by something
+    // outside this engine, where resuming at the watermark would stitch a tail onto bytes that are not
+    // there. The watermark's own trustworthiness never came from the file size anyway: it comes from
+    // the commit order (bytes are `fsync`ed before the interval naming them is written) and the
+    // identity match, which is exactly what the segmented engine leans on beside its own preallocated
+    // `.part`.
     let mut start = 0u64;
     let mut if_range: Option<Conditional> = None;
     let mut journal_identity = core_identity.clone();
@@ -184,6 +199,23 @@ pub(crate) async fn run(
         total = spec
             .expected_len()
             .or_else(|| resp.content_length().map(|cl| cl.saturating_add(start)));
+
+        // Reserve the whole file before a byte of the body lands, so a transfer that cannot fit fails
+        // here instead of after writing however much did fit. The length is the caller's when it
+        // declared one and the response's own `Content-Length` otherwise, which is the case that
+        // matters: everything whose length the caller did not declare runs on this engine, and those
+        // are the largest transfers there are. A body of genuinely unknown length (a chunked response
+        // with no `Content-Length`) reserves nothing rather than guessing at a size.
+        //
+        // Inside the attempt loop, after `obtain_response` has settled the resume disposition, because
+        // that is what decides where the body lands: a `200` answering a ranged request truncates the
+        // `.part` back to zero on its way through, and reserving here takes back what the truncation
+        // gave up. `open_part` has the same relationship and runs before the first request for the same
+        // reason. `preallocate` never shrinks a file, so an attempt that did not restart pays one
+        // syscall over an already-full-length file.
+        if let Some(len) = total {
+            preallocate(&part, len).await?;
+        }
 
         // A fresh start records the server's validators so a later resume can revalidate with
         // `If-Range`. Only the primary's own answer may be recorded: the identity these are written

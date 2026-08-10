@@ -1,10 +1,14 @@
 //! Eager file preallocation.
 //!
-//! A segmented download writes at scattered offsets into one `.part`, so the file is reserved to its
-//! full length up front. `fallocate` also reserves the disk blocks, so a doomed transfer fails on a
-//! full disk here, before any payload streams, rather than mid-way through gigabytes. On a filesystem
-//! without `fallocate` support the length is still set (a sparse file), trading eager disk-full
-//! detection for portability while keeping correctness.
+//! Both engines reserve their `.part` to its full length up front, for the two reasons that overlap
+//! here. A segmented download must: it writes at scattered offsets into one file. Either may: with
+//! the blocks reserved, a doomed transfer fails on a full disk here, before any payload streams,
+//! rather than mid-way through gigabytes. The lengths reach this from different places, the caller's
+//! declaration on the segmented path and the first response's `Content-Length` on the streaming one,
+//! and a transfer with no length at all skips the reservation rather than guessing.
+//!
+//! On a filesystem without `fallocate` support the length is still set (a sparse file), trading eager
+//! disk-full detection for portability while keeping correctness.
 
 use std::path::Path;
 
