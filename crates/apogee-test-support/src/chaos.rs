@@ -310,6 +310,7 @@ pub struct ChaosServer {
     base: Url,
     stats: Arc<Stats>,
     cert_der: Option<Vec<u8>>,
+    cert_pem: Option<String>,
     _guard: DropGuard,
 }
 
@@ -369,11 +370,16 @@ impl ChaosServer {
     async fn start(cfg: Config) -> std::io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let addr: SocketAddr = listener.local_addr()?;
-        let (scheme, acceptor, cert_der) = if cfg.tls {
-            let (cert, key) = generate_cert()?;
-            ("https", Some(build_acceptor(&cert, &key)?), Some(cert))
+        let (scheme, acceptor, cert_der, cert_pem) = if cfg.tls {
+            let (cert, pem, key) = generate_cert()?;
+            (
+                "https",
+                Some(build_acceptor(&cert, &key)?),
+                Some(cert),
+                Some(pem),
+            )
         } else {
-            ("http", None, None)
+            ("http", None, None, None)
         };
         let base = Url::parse(&format!("{scheme}://{addr}/"))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -412,6 +418,7 @@ impl ChaosServer {
             base,
             stats,
             cert_der,
+            cert_pem,
             _guard: token.drop_guard(),
         })
     }
@@ -427,6 +434,14 @@ impl ChaosServer {
     #[must_use]
     pub fn cert_der(&self) -> Option<&[u8]> {
         self.cert_der.as_deref()
+    }
+
+    /// The same certificate as PEM, for the interfaces that take a file rather than bytes:
+    /// `SSL_CERT_FILE` and everything else that reads a trust store off disk. `None` when not
+    /// running over TLS.
+    #[must_use]
+    pub fn cert_pem(&self) -> Option<&str> {
+        self.cert_pem.as_deref()
     }
 
     /// The URL of `path` under this server.
@@ -977,8 +992,9 @@ where
     }
 }
 
-/// A fresh self-signed certificate (DER) and its PKCS#8 private key (DER), valid for `127.0.0.1`.
-fn generate_cert() -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+/// A fresh self-signed certificate (DER, then the same certificate as PEM) and its PKCS#8 private
+/// key (DER), valid for `127.0.0.1`.
+fn generate_cert() -> std::io::Result<(Vec<u8>, String, Vec<u8>)> {
     let mut params = rcgen::CertificateParams::new(Vec::new()).map_err(std::io::Error::other)?;
     params.subject_alt_names = vec![rcgen::SanType::IpAddress(std::net::IpAddr::V4(
         Ipv4Addr::LOCALHOST,
@@ -987,7 +1003,7 @@ fn generate_cert() -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let cert = params
         .self_signed(&key_pair)
         .map_err(std::io::Error::other)?;
-    Ok((cert.der().to_vec(), key_pair.serialize_der()))
+    Ok((cert.der().to_vec(), cert.pem(), key_pair.serialize_der()))
 }
 
 /// A TLS acceptor presenting `cert_der`/`key_der`, using the ring provider explicitly so it does not

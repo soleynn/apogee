@@ -19,7 +19,21 @@ tokio-stream     = "0.1"
 tokio-util       = "0.7"
 futures-util     = "0.3"
 bytes            = "1"
-reqwest          = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "deflate", "http2", "stream"] }
+# `rustls-tls` on its own resolves to `rustls-tls-webpki-roots`, a Mozilla root set compiled into the
+# binary, and the platform's own trust store is then never read. That is invisible until something
+# depends on it: `APOGEE_TLS_SYSTEM_ROOTS` exists so a user behind a TLS-intercepting proxy can put
+# the launcher back on this machine's roots, and against a webpki-only build it restored a list that
+# cannot contain a locally installed root, so the one escape hatch from the anchor set landed the user
+# exactly where they started. `rustls-tls-native-roots` adds the platform store beside it.
+#
+# That widens every client that is not anchored (patch fetch, catalog fetch, addon downloads) from
+# Mozilla's set to Mozilla's set plus whatever this machine has been given, which is the ordinary
+# posture for a desktop program and is deliberate rather than incidental: those hosts are reached over
+# TLS but trusted through Ed25519 signatures and sha256 pins, and restricting them to webpki would
+# leave the intercepted user with a launcher that logs in and then cannot download anything. It does
+# not widen the anchored one, where the credential is: `tls_built_in_root_certs(false)` turns both
+# sets off, which `crates/apogee-core/src/trust.rs` asserts against a root the machine does trust.
+reqwest          = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "gzip", "deflate", "http2", "stream"] }
 serde            = { version = "1", features = ["derive"] }
 serde_json       = "1"
 sha1             = "0.11"

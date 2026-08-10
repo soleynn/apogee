@@ -122,6 +122,13 @@ impl CoreConfig {
 ///
 /// It follows no redirect either (see [`crate::redirect`]), for the same reason the anchors are here:
 /// a hop out of `https` carries the credential in the clear, on a connection those anchors never see.
+///
+/// Its proxy is `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and nothing else. reqwest reads
+/// them when the client is built, so the launcher carries no proxy setting of its own: a setting
+/// would be read at the same moment and take effect at the same time, and it would be a second place
+/// to say a thing the user's shell, package manager and browser already read from the first. Which
+/// of the two proxy shapes works is decided by the anchors above rather than here, and
+/// [`crate::trust`] records the measurement.
 pub(crate) fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
     let builder = reqwest::Client::builder()
         .gzip(true)
