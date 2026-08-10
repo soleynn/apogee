@@ -29,7 +29,6 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +37,7 @@ use url::Url;
 use crate::block::BlockPlan;
 use crate::error::FetchError;
 use crate::fetcher::Shared;
+use crate::hash::{DigestPin, FileHasher};
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
 use crate::prealloc::preallocate;
@@ -48,11 +48,13 @@ use crate::retry::{
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
-/// What a download must prove before it publishes: a whole-file SHA256, a per-block SHA1 map, or
+/// What a download must prove before it publishes: a whole-file digest, a per-block SHA1 map, or
 /// nothing. Derived from the [`Validator`] once via [`plan`] and threaded through both engines so the
 /// two never disagree about what "verified" means.
 pub(crate) struct Verify {
-    pub(crate) sha: Option<[u8; 32]>,
+    /// The whole-file digest and the function that produced it. Which function is carried rather
+    /// than assumed: both are 32 bytes wide, so the expected bytes alone cannot say.
+    pub(crate) digest: Option<DigestPin>,
     pub(crate) blocks: Option<Arc<BlockPlan>>,
 }
 
@@ -138,7 +140,7 @@ pub(crate) async fn run(
 
     // Block mode leaves the running hasher off (there is no whole-file digest on that path); its
     // per-block SHA1s are checked from disk after the stream completes.
-    let mut hasher: Option<Sha256> = verify.sha.map(|_| Sha256::new());
+    let mut hasher: Option<FileHasher> = verify.digest.map(|pin| pin.hasher());
     let mut part_file = open_part(&part, start, hasher.as_mut()).await?;
     let mut journal: Option<Journal> = if spec.resume() && start > 0 {
         Some(
@@ -300,7 +302,7 @@ pub(crate) async fn run(
         });
     }
 
-    if let (Some(h), Some(exp)) = (hasher.take(), verify.sha) {
+    if let (Some(h), Some(pin)) = (hasher.take(), verify.digest) {
         emit(
             &progress,
             Progress {
@@ -309,7 +311,8 @@ pub(crate) async fn run(
                 phase: Phase::Verifying,
             },
         );
-        let got = digest_bytes(h);
+        let exp = pin.bytes();
+        let got = h.finalize();
         if got != exp {
             // Drop the journal so a retry restarts from zero instead of re-hashing the same bad bytes;
             // the .part survives for triage.
@@ -372,7 +375,7 @@ struct Attempt {
 struct Partial<'a> {
     path: &'a Path,
     file: &'a mut tokio::fs::File,
-    hasher: &'a mut Option<Sha256>,
+    hasher: &'a mut Option<FileHasher>,
     journal: &'a mut Option<Journal>,
     start: &'a mut u64,
     if_range: &'a mut Option<Conditional>,
@@ -457,7 +460,7 @@ async fn stream_body(
     url: &Url,
     part: &Path,
     part_file: &mut tokio::fs::File,
-    hasher: &mut Option<Sha256>,
+    hasher: &mut Option<FileHasher>,
     journal: &mut Option<Journal>,
     apdl: &Path,
     cursor: Cursor<'_>,
@@ -652,7 +655,7 @@ async fn obtain_response(
 async fn open_part(
     part: &Path,
     start: u64,
-    hasher: Option<&mut Sha256>,
+    hasher: Option<&mut FileHasher>,
 ) -> Result<tokio::fs::File, FetchError> {
     if start == 0 {
         return tokio::fs::File::create(part)
@@ -707,7 +710,7 @@ async fn reset_to_zero(partial: &mut Partial<'_>) -> Result<(), FetchError> {
         .await
         .map_err(|e| FetchError::io(partial.path, e))?;
     if let Some(h) = partial.hasher.as_mut() {
-        *h = Sha256::new();
+        h.reset();
     }
     *partial.journal = None;
     *partial.start = 0;
@@ -800,20 +803,24 @@ pub(crate) async fn publish(
     Ok(VerifiedFile::mint(dest))
 }
 
-/// Derive what a download must prove from its validator: a whole-file SHA256, a per-block SHA1 map, or
+/// Derive what a download must prove from its validator: a whole-file digest, a per-block SHA1 map, or
 /// nothing. The spec builder has already checked a block validator's layout, so the length is present
 /// and consistent here.
 pub(crate) fn plan(validator: &Validator, expected_len: Option<u64>) -> Result<Verify, FetchError> {
     match validator {
         Validator::Sha256(digest) => Ok(Verify {
-            sha: Some(*digest),
+            digest: Some(DigestPin::Sha256(*digest)),
+            blocks: None,
+        }),
+        Validator::Blake3(digest) => Ok(Verify {
+            digest: Some(DigestPin::Blake3(*digest)),
             blocks: None,
         }),
         // No fetch-side hash: length is checked during the transfer, and a downstream gate
         // authenticates the bytes. Reached only via `download_external`, which returns a plain path
         // rather than a `VerifiedFile`.
         Validator::None | Validator::External => Ok(Verify {
-            sha: None,
+            digest: None,
             blocks: None,
         }),
         Validator::BlockSha1 { block_size, hashes } => {
@@ -821,7 +828,7 @@ pub(crate) fn plan(validator: &Validator, expected_len: Option<u64>) -> Result<V
                 what: "block-hash validation requires a declared length",
             })?;
             Ok(Verify {
-                sha: None,
+                digest: None,
                 blocks: Some(Arc::new(BlockPlan::new(*block_size, hashes.clone(), len))),
             })
         }
@@ -891,18 +898,18 @@ async fn dest_satisfies(
     if let Some(plan) = &verify.blocks {
         return Ok(verify_blocks_seq(dest, plan).await?.is_none());
     }
-    match verify.sha {
+    match verify.digest {
         None => Ok(true),
-        Some(expected) => Ok(hash_file(dest).await? == expected),
+        Some(pin) => Ok(hash_file(dest, pin).await? == pin.bytes()),
     }
 }
 
-/// SHA256 a file on disk in bounded memory.
-pub(crate) async fn hash_file(path: &Path) -> Result<[u8; 32], FetchError> {
+/// Hash a file on disk in bounded memory, under the function `pin` names.
+pub(crate) async fn hash_file(path: &Path, pin: DigestPin) -> Result<[u8; 32], FetchError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| FetchError::io(path, e))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = pin.hasher();
     let mut buf = vec![0u8; READ_CHUNK];
     loop {
         let read = file
@@ -914,12 +921,7 @@ pub(crate) async fn hash_file(path: &Path) -> Result<[u8; 32], FetchError> {
         }
         hasher.update(&buf[..read]);
     }
-    Ok(digest_bytes(hasher))
-}
-
-/// Finalize a SHA256 into a fixed array.
-fn digest_bytes(hasher: Sha256) -> [u8; 32] {
-    hasher.finalize().into()
+    Ok(hasher.finalize())
 }
 
 /// Whether a `206`'s `Content-Range` starts exactly where we resumed and (when known) reports the

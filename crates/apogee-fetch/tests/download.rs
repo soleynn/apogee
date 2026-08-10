@@ -12,7 +12,7 @@ use apogee_fetch::{
     DownloadSpec, DownloadSpecBuilder, FetchError, Fetcher, FetcherBuilder, RetryPolicy, Validator,
 };
 use apogee_test_support::chaos::{
-    ChaosServer, block_hashes, body_sha256, generated_vec, sha256_of,
+    ChaosServer, block_hashes, body_blake3, body_sha256, generated_vec, sha256_of,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -633,4 +633,51 @@ async fn a_same_size_wrong_content_destination_is_re_downloaded() {
         sha256_of(&tokio::fs::read(verified.path()).await.unwrap()),
         body_sha256(2, len)
     );
+}
+
+/// A pin under the function our own signed manifests carry, verified end to end on **both** engines.
+///
+/// The two settle the whole-file digest in different places: the single-connection engine hashes the
+/// body as it streams past, the segmented one re-reads the assembled `.part` from disk once its
+/// workers are done. Threading the function through one of those says nothing about the other, and
+/// picking the wrong one there fails a download whose bytes are perfect. The request counts are what
+/// prove each case took the engine it claims (one plain request; a capability probe plus one per
+/// segment), since a spec that quietly demoted would pass the digest assertion just the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blake3_pinned_download_verifies_on_both_engines() {
+    let dir = tempfile::tempdir().unwrap();
+    // 8 MiB is the minimum segment, so 300 KB cannot be split and 16 MiB splits in two.
+    for (name, seed, len, connections, requests) in [
+        ("single.bin", 70u64, 300_000u64, 1usize, 1u64),
+        ("segmented.bin", 71, 16 * MIB, 2, 3),
+    ] {
+        let dest = dir.path().join(name);
+        let server = ChaosServer::builder(seed, len).start().await.unwrap();
+        let spec = DownloadSpec::builder(
+            server.url("file.bin"),
+            &dest,
+            Validator::Blake3(body_blake3(seed, len)),
+        )
+        .expected_len(len)
+        .build()
+        .unwrap();
+
+        let verified = Fetcher::builder()
+            .max_connections_per_file(connections)
+            .build()
+            .unwrap()
+            .download(&spec, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(verified.path(), dest);
+        assert_eq!(server.stats().requests(), requests, "{name} engine");
+        // Byte-identity, checked under the *other* function: the pin passing says the digest matched,
+        // not that the bytes on disk are the ones the server generated.
+        assert_eq!(
+            sha256_of(&tokio::fs::read(&dest).await.unwrap()),
+            body_sha256(seed, len),
+            "{name} bytes"
+        );
+    }
 }
