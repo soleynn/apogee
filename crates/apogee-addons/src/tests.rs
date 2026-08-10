@@ -70,6 +70,19 @@ frozen!(
             AddonError::Download(apogee_fetch::FetchError::LengthMismatch { expected: 10, got: 9 }),
             "download failed: length mismatch: expected 10, got 9",
         ),
+        // The one download failure with an answer the user can act on, so it does not sit inside
+        // `Download` with `ENOSPC` three links down the chain.
+        AddonError::OutOfSpace { .. } => (
+            AddonError::from_fetch(
+                apogee_fetch::FetchError::Io {
+                    path: PathBuf::from("/tmp/a.part"),
+                    source: std::io::Error::new(std::io::ErrorKind::StorageFull, "the disk is full"),
+                },
+                "dalamud",
+                &path(),
+            ),
+            "dalamud: out of disk space at \"/tmp/a.part\": the disk is full",
+        ),
         AddonError::Spec(_) => (
             AddonError::Spec(apogee_fetch::SpecError::UnverifiedNotAcknowledged),
             "invalid download request: unverified downloads must be acknowledged explicitly",

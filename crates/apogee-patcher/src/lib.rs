@@ -68,17 +68,31 @@ pub struct PartRef {
 }
 
 /// A disk pool checked during preflight.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpacePool {
     PatchStore,
     GameRoot,
+    /// The pools resolved onto one filesystem, so they were guarded once against their combined
+    /// need.
+    ///
+    /// Its own variant rather than reporting whichever pool contributed more, because on a shared
+    /// mount that choice is not information: both names point at the same disk, and the `needed`
+    /// figure beside it is the sum, which is not a number either pool alone asked for. Naming a pool
+    /// would invite a caller to show a per-directory breakdown that does not correspond to anything
+    /// the user can act on separately.
+    SharedFilesystem,
 }
 
 /// Preflight failures, surfaced through [`PatchError::Preflight`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PreflightError {
+    /// A pool is predicted to come up short, before a byte moves. This is an estimate derived from
+    /// the patchlist lengths, not an observation: `needed` overestimates (patches delete as well as
+    /// add) and `free` is a reading taken before the transfer. A disk that actually fills, including
+    /// one this estimate cleared or that [`PatcherConfig::ignore_space`] skipped, arrives as
+    /// [`PatchError::OutOfSpace`] instead.
     #[error("not enough space in {pool:?}: need {needed}, have {free}")]
     NotEnoughSpace {
         pool: SpacePool,
@@ -107,8 +121,27 @@ pub enum PatchError {
     Preflight(#[from] PreflightError),
     #[error("patchlist entry {index}: {detail}")]
     Patchlist { index: u32, detail: String },
+    /// The disk filled during the transfer: the other half of the space story, and the half that
+    /// fires when the [`PreflightError::NotEnoughSpace`] estimate cleared the install or
+    /// [`PatcherConfig::ignore_space`] skipped it. Separate from that variant rather than folded
+    /// into it because this one is observed, not predicted, so it names the path the filesystem
+    /// refused; a needed/free pair is not knowable once a write has already failed, and re-reading
+    /// free space here would report whatever another process left behind a moment later.
+    ///
+    /// The source is the `ENOSPC` itself rather than the [`FetchError`] it came wrapped in, which
+    /// holds this same path and nothing else besides.
+    #[error("out of disk space at {path:?}")]
+    OutOfSpace {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A download failed for a reason with no typed home here. Deliberately not `#[from]`: an
+    /// unwritten `?` would flatten the arms that do have one, [`OutOfSpace`](Self::OutOfSpace) and
+    /// [`Cancelled`](Self::Cancelled), back into "acquire failed". Every fetch failure in this crate
+    /// is routed by hand.
     #[error("acquire failed")]
-    Acquire(#[from] FetchError),
+    Acquire(#[source] FetchError),
     #[error("{broken} broken part(s) in {repo:?}")]
     Verify {
         repo: Repo,

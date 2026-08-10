@@ -132,7 +132,8 @@ pub enum FetchError {
     #[error("file verification failed: expected {expected}, got {got}")]
     FileVerifyFailed { expected: String, got: String },
 
-    /// A filesystem operation failed. Disk-full carries its own [`std::io::ErrorKind`].
+    /// A filesystem operation failed. Disk-full carries its own [`std::io::ErrorKind`], which
+    /// [`into_out_of_space`](FetchError::into_out_of_space) is the way to route on.
     #[error("io error at {path:?}")]
     Io {
         path: PathBuf,
@@ -201,11 +202,59 @@ impl FetchError {
             source,
         }
     }
+
+    /// Take this failure apart as a full disk: the path the filesystem refused and the `ENOSPC` it
+    /// raised. `Err(self)` hands the failure back untouched when it is not one.
+    ///
+    /// Answered here rather than by each caller, because which variants can carry `ENOSPC` is this
+    /// crate's knowledge and it is not obvious from the outside: preallocation raises it before a
+    /// payload byte streams, and a write into a `.part` raises it mid-transfer on a filesystem with
+    /// no reservation support, but both arrive as [`Io`](FetchError::Io) while a network fault with
+    /// its own `io::Error` inside does not. A caller matching the enum itself would have to know
+    /// that, and would silently stop covering the case if a later variant ever carried it too.
+    ///
+    /// This is the whole distinction between a full disk and any other filesystem fault, so a caller
+    /// that routes on it gets a typed answer instead of walking the source chain for an
+    /// [`ErrorKind`](std::io::ErrorKind). It yields the pair rather than the whole error because
+    /// those two are all a disk-full [`Io`](FetchError::Io) holds: a caller re-wrapping the original
+    /// beside a path it just read out of it would be storing the path twice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_fetch::FetchError;
+    ///
+    /// let full = FetchError::Io {
+    ///     path: "/tmp/game.patch.part".into(),
+    ///     source: std::io::ErrorKind::StorageFull.into(),
+    /// };
+    /// let (path, source) = full.into_out_of_space().expect("a full disk");
+    /// assert_eq!(path, std::path::Path::new("/tmp/game.patch.part"));
+    /// assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
+    ///
+    /// let denied = FetchError::Io {
+    ///     path: "/tmp/game.patch.part".into(),
+    ///     source: std::io::ErrorKind::PermissionDenied.into(),
+    /// };
+    /// assert!(denied.into_out_of_space().is_err());
+    /// ```
+    ///
+    /// # Errors
+    /// The failure itself, unchanged, when it is not a full disk.
+    pub fn into_out_of_space(self) -> Result<(PathBuf, std::io::Error), Self> {
+        match self {
+            Self::Io { path, source } if source.kind() == std::io::ErrorKind::StorageFull => {
+                Ok((path, source))
+            }
+            other => Err(other),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
+    use std::path::Path;
 
     use super::*;
 
@@ -303,5 +352,50 @@ mod tests {
                 "{status}",
             );
         }
+    }
+
+    /// A `FetchError::Io` at a fixed `.part`, for the disk-full routing tests below.
+    fn io_failure(kind: ErrorKind) -> FetchError {
+        FetchError::io("/dest/out.part", io(kind))
+    }
+
+    #[test]
+    fn a_disk_full_io_failure_yields_its_path_and_kind() {
+        let (path, source) = io_failure(std::io::ErrorKind::StorageFull)
+            .into_out_of_space()
+            .map_err(|e| format!("{e:?}"))
+            .expect("a full disk");
+        assert_eq!(path, Path::new("/dest/out.part"));
+        assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn another_io_failure_at_the_same_path_is_not_a_full_disk() {
+        // The path alone cannot be the signal: the same `.part` raises permission and not-found
+        // faults that a caller must not report as "free up space". Each is handed back whole, so a
+        // caller can go on routing it.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::FileTooLarge,
+        ] {
+            let returned = io_failure(kind).into_out_of_space().err().ok_or(kind);
+            assert!(
+                matches!(returned, Ok(FetchError::Io { .. })),
+                "{kind:?} was taken for a full disk",
+            );
+        }
+    }
+
+    #[test]
+    fn a_transport_failure_carrying_an_io_error_is_not_a_full_disk() {
+        // Connect/Transport wrap an `io::Error` of their own, so a caller matching on "has an
+        // io::Error inside" would misread a network fault as a disk one.
+        let err = FetchError::Transport {
+            url: Url::parse("https://example.invalid/f.bin").expect("static url"),
+            source: std::io::ErrorKind::StorageFull.into(),
+        };
+        assert!(err.into_out_of_space().is_err());
+        assert!(FetchError::Cancelled.into_out_of_space().is_err());
     }
 }

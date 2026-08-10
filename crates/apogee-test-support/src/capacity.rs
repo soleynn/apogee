@@ -44,6 +44,21 @@ impl MemoryBackedDir {
         self.capacity
     }
 
+    /// The bytes currently free on that filesystem to an unprivileged process.
+    ///
+    /// Read at call time and not stored beside the capacity, because the two are different kinds of
+    /// number: capacity is a property of the mount, free space is a moment. A test sizing a request
+    /// against free space wants the reading the code under test will take, not one from setup. This
+    /// mount is usually shared (`/dev/shm`), so anything derived from a fixed fraction of
+    /// [`capacity`](Self::capacity) is a guess about how busy the host is.
+    ///
+    /// # Errors
+    /// Whatever `statvfs` raised.
+    pub fn available(&self) -> std::io::Result<u64> {
+        let stat = rustix::fs::statvfs(self.dir.path())?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+
     /// A byte length this filesystem rejects with `ENOSPC` without reserving a block toward it.
     ///
     /// Twice the capacity plus a gigabyte: far enough past the mount's size that no amount of free
