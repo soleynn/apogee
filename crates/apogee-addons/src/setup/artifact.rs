@@ -18,9 +18,11 @@ use super::event::{SetupEvent, SetupEvents};
 use crate::manifest::Artifact;
 use crate::{AddonError, Result};
 
-/// How many times to (re)start a download before giving up. The fetcher has no internal retry, so a
-/// dropped connection resumes from its journal on the next attempt. Worth having here because the
-/// artifacts are tens of megabytes and prefix setup is not something to make a user restart.
+/// How many times to (re)start a download before giving up, over whatever the fetcher already spent
+/// on the request internally; each restart resumes from the journal rather than from zero. Worth
+/// having here because the artifacts are tens of megabytes and prefix setup is not something to make
+/// a user restart. Which failures are worth a restart is [`FetchError::is_transient`], answered by
+/// the crate that raises them.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -147,7 +149,7 @@ async fn download(
             .await
         {
             Ok(verified) => break Ok(verified),
-            Err(e) if attempt < MAX_DOWNLOAD_ATTEMPTS && is_transient(&e) => {
+            Err(e) if attempt < MAX_DOWNLOAD_ATTEMPTS && e.is_transient() => {
                 tokio::time::sleep(RETRY_DELAY).await;
             }
             Err(e) => break Err(e),
@@ -161,19 +163,6 @@ async fn download(
     // just not the bytes the signed manifest promised. `from_fetch` is where that is decided, for this
     // call and every other one.
     outcome.map_err(|source| AddonError::from_fetch(source, what, dest))
-}
-
-/// Whether a download failure is the kind a later attempt could survive: the network ones. An
-/// exhausted source list belongs here too, because the hosts that were all unreachable a moment ago
-/// are the ones a retry is for.
-const fn is_transient(e: &FetchError) -> bool {
-    matches!(
-        e,
-        FetchError::Transport { .. }
-            | FetchError::Connect { .. }
-            | FetchError::Stalled { .. }
-            | FetchError::AllSourcesFailed { .. }
-    )
 }
 
 /// A filesystem step, with the path beside the error the filesystem raised rather than folded into a
