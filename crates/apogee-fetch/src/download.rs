@@ -28,7 +28,7 @@ use crate::fetcher::Shared;
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
 use crate::progress::{Phase, Progress};
-use crate::retry::{Class, classify_status, retry_after, sleep_or_cancel};
+use crate::retry::{Class, classify_send_error, classify_status, retry_after, sleep_or_cancel};
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
@@ -462,6 +462,9 @@ async fn obtain_response(
                     return Err(failure);
                 }
                 (failure, retry_after(resp.headers()))
+            }
+            Err(e) if classify_send_error(&e) == Class::Fatal => {
+                return Err(connect_error(spec.url(), e));
             }
             Err(e) => (connect_error(spec.url(), e), None),
         };
