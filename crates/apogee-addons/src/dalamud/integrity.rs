@@ -128,7 +128,7 @@ pub(crate) fn first_fault(
 ///
 /// Checked before the digests so a half-extracted tree is reported as incomplete rather than as a long
 /// list of individual mismatches, and so a tree missing the injector never reaches the launch path.
-pub(crate) const REQUIRED: &[&str] = &["Dalamud.Injector.exe", "Dalamud.dll", "ImGuiScene.dll"];
+pub const REQUIRED: &[&str] = &["Dalamud.Injector.exe", "Dalamud.dll", "ImGuiScene.dll"];
 
 /// The first of those files that is not there, or `None` when every one is.
 ///

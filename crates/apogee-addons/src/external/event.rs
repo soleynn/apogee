@@ -17,23 +17,53 @@ use super::session::Outcome;
 pub enum AddonEvent {
     /// A companion was started.
     #[non_exhaustive]
-    Started { program: PathBuf, pid: i32 },
+    Started {
+        /// The program that was started.
+        program: PathBuf,
+        /// Its process id.
+        pid: i32,
+    },
     /// A companion was not started because it was already running.
     #[non_exhaustive]
-    AlreadyRunning { program: PathBuf, pid: i32 },
+    AlreadyRunning {
+        /// The program that was already up.
+        program: PathBuf,
+        /// The process id of the copy that was found.
+        pid: i32,
+    },
     /// A companion was stopped along with the game.
     #[non_exhaustive]
-    Stopped { program: PathBuf, pid: i32 },
+    Stopped {
+        /// The program that was stopped.
+        program: PathBuf,
+        /// The process id it was stopped under.
+        pid: i32,
+    },
     /// A companion that runs after the game finished.
     #[non_exhaustive]
-    Finished { program: PathBuf, outcome: Outcome },
+    Finished {
+        /// The program that ran.
+        program: PathBuf,
+        /// What it came to.
+        outcome: Outcome,
+    },
     /// One entry could not be run. The launch is unaffected.
     #[non_exhaustive]
-    Failed { program: PathBuf, reason: String },
+    Failed {
+        /// The program the entry names.
+        program: PathBuf,
+        /// The failure and its causes, as one line.
+        reason: String,
+    },
     /// Still waiting on a companion that runs after the game, so a launcher that has not exited can
     /// say why rather than appearing to hang.
     #[non_exhaustive]
-    StillWaiting { program: PathBuf, seconds: u64 },
+    StillWaiting {
+        /// The program still being waited on.
+        program: PathBuf,
+        /// How long it has been, in whole seconds.
+        seconds: u64,
+    },
     /// Something loaded into the game left proof it came up: a file it writes from *inside* the game
     /// process was written after this launch began.
     ///
@@ -41,7 +71,10 @@ pub enum AddonEvent {
     /// believed on its way out, and is unreachable behind a container-style runner, where what the
     /// launcher spawned is the runner rather than the loader.
     #[non_exhaustive]
-    Loaded { what: String },
+    Loaded {
+        /// What came up inside the game.
+        what: String,
+    },
     /// No such proof yet, after waiting.
     ///
     /// Deliberately not "it failed". The game may still be starting, and a launcher that announced a
@@ -50,8 +83,11 @@ pub enum AddonEvent {
     /// themselves.
     #[non_exhaustive]
     NotConfirmed {
+        /// What was being waited for.
         what: String,
+        /// How long the watch ran before giving up.
         waited: Duration,
+        /// The file that was watched, so a reader can look for themselves.
         evidence: PathBuf,
     },
 }
@@ -87,13 +123,13 @@ impl AddonEvents {
     /// let events = AddonEvents::none();
     /// ```
     #[must_use]
-    pub fn none() -> Self {
+    pub const fn none() -> Self {
         Self { tx: None }
     }
 
     /// A stream feeding `tx`.
     #[must_use]
-    pub fn new(tx: UnboundedSender<AddonEvent>) -> Self {
+    pub const fn new(tx: UnboundedSender<AddonEvent>) -> Self {
         Self { tx: Some(tx) }
     }
 

@@ -108,3 +108,12 @@ pub fn game_tree_reversed(root: &Path) -> io::Result<()> {
     write(&root.join("FFXIV.cfg"), "cfg")?;
     Ok(())
 }
+
+/// Lowercase hex, the form a test compares its own hashes against.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}

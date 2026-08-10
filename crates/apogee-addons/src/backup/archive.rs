@@ -85,6 +85,31 @@ pub struct BackupReport {
     pub roots: Vec<RootReport>,
 }
 
+impl BackupReport {
+    /// How many files the archive holds, across every root.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::backup::BackupReport;
+    /// # fn demo(report: &BackupReport) {
+    /// if report.files() == 0 {
+    ///     // Nothing was captured, which a caller should say rather than report a success.
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn files(&self) -> usize {
+        self.roots.iter().map(RootReport::files).sum()
+    }
+
+    /// The total length of those files, which is what was read rather than what was written.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.roots.iter().map(RootReport::bytes).sum()
+    }
+}
+
 /// Write `spec`'s selection into a new archive.
 ///
 /// Blocking, and unbounded in the size of what it copies, so `cancel` is checked between entries.
@@ -407,7 +432,7 @@ fn stamp(unix: u64) -> String {
     let (days, secs) = (unix / 86_400, unix % 86_400);
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     // Civil-from-days, shifting the epoch to 0000-03-01 so leap days land at the end of the cycle.
-    let z = days as i64 + 719_468;
+    let z = days.cast_signed() + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;

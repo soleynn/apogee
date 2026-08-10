@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport, Retain};
-// Restore is unix-only, and so is everything only it needs.
-#[cfg(unix)]
-use apogee_addons::backup::{BackupError, RestorePlan, RestoreReport};
+use apogee_addons::backup::{RestorePlan, RestoreReport};
 use apogee_addons::{AddonError, AddonPaths, Addons};
 
 use crate::addons::AddonBackend;
@@ -907,10 +905,7 @@ impl Core {
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
-        // Retention's own identification, so listing and pruning agree on what is ours.
-        let plan = apogee_addons::backup::plan_prune(&dir, Retain::keep(NonZeroUsize::MAX))
-            .map_err(AddonError::Backup)?;
-        Ok(plan.ours)
+        Ok(apogee_addons::backup::archives(&dir).map_err(AddonError::Backup)?)
     }
 
     /// Restore `archive` into the game config tree of `profile`'s prefix.
@@ -921,8 +916,8 @@ impl Core {
     ///
     /// # Errors
     /// [`CoreError::Store`] if the profile cannot be read, and [`CoreError::Addons`] for anything the
-    /// restore refuses.
-    #[cfg(unix)]
+    /// restore refuses, including a platform that cannot carry one out. Refused rather than absent, so
+    /// a shell can offer the command everywhere and report why it did not happen.
     pub fn restore_config(
         &self,
         profile: Uuid,
@@ -932,14 +927,9 @@ impl Core {
         let prefix = self
             .prefixes_dir
             .join(crate::flow::prefix_name(&profile_record));
-        let target = apogee_addons::backup::game_config_dirs(&prefix)
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                CoreError::Addons(AddonError::Backup(BackupError::MissingRoot {
-                    path: prefix.clone(),
-                }))
-            })?;
+        let target = apogee_addons::backup::game_config_trees(&prefix)
+            .map_err(AddonError::Backup)?
+            .into_live();
         // Derived from the archive's own record rather than stated here: a map this layer wrote would
         // be a guess at which roots the archive holds, and a guess that misses one restores less than
         // the archive has while returning like it restored everything.

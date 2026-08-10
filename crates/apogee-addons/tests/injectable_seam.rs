@@ -32,7 +32,7 @@ struct Framework {
 }
 
 impl Framework {
-    fn new(fail_prepare: bool) -> Self {
+    const fn new(fail_prepare: bool) -> Self {
         Self {
             ensured: AtomicUsize::new(0),
             fail_prepare,
@@ -42,7 +42,7 @@ impl Framework {
 
 #[async_trait]
 impl Injectable for Framework {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "Framework"
     }
 

@@ -74,7 +74,7 @@ pub enum Trigger {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawExternalAddon")]
 pub struct ExternalAddon {
     program: PathBuf,
@@ -139,30 +139,30 @@ impl ExternalAddon {
 
     /// Host or prefix.
     #[must_use]
-    pub fn run_in(&self) -> RunIn {
+    pub const fn run_in(&self) -> RunIn {
         self.run_in
     }
 
     /// When it runs.
     #[must_use]
-    pub fn trigger(&self) -> Trigger {
+    pub const fn trigger(&self) -> Trigger {
         self.trigger
     }
 
     /// Whether the launch considers it at all.
     #[must_use]
-    pub fn enabled(&self) -> bool {
+    pub const fn enabled(&self) -> bool {
         self.enabled
     }
 
     /// Turn it on or off without losing the entry.
-    pub fn set_enabled(&mut self, on: bool) {
+    pub const fn set_enabled(&mut self, on: bool) {
         self.enabled = on;
     }
 
     /// Whether the game's exit leaves it running.
     #[must_use]
-    pub fn keeps_running(&self) -> bool {
+    pub const fn keeps_running(&self) -> bool {
         matches!(
             self.trigger,
             Trigger::WithGame {
@@ -181,6 +181,30 @@ impl ExternalAddon {
     /// [`AddonError::InvalidAddon`] for an empty or relative program, [`AddonError::UnsupportedField`]
     /// for a key this build does not understand, and [`AddonError::PrefixRequired`] for a prefix tool
     /// in a launch that has no prefix.
+    /// Why this entry cannot be run, or `None` if it can.
+    ///
+    /// The same check a launch makes, asked without one, so a caller can show a broken entry while the
+    /// user is still editing it rather than at the moment the game starts. `has_prefix` is what the
+    /// launch it would join will have: an entry that runs inside a prefix is only a problem for a
+    /// launch that has none.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::ExternalAddon;
+    /// # fn demo(addons: &[ExternalAddon]) {
+    /// let broken: Vec<String> = addons
+    ///     .iter()
+    ///     .enumerate()
+    ///     .filter_map(|(index, addon)| addon.problem(index, true).map(|err| err.chain()))
+    ///     .collect();
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn problem(&self, index: usize, has_prefix: bool) -> Option<AddonError> {
+        self.validate(index, has_prefix).err()
+    }
+
     pub(crate) fn validate(&self, index: usize, has_prefix: bool) -> Result<()> {
         self.check_program(index)?;
         if let Some(field) = self.unsupported.keys().next() {

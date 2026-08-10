@@ -113,7 +113,7 @@ impl LaunchEdit {
 
     /// Whether this edit takes over the program the launch spawns.
     #[must_use]
-    pub fn redirects(&self) -> bool {
+    pub const fn redirects(&self) -> bool {
         self.redirect.is_some()
     }
 

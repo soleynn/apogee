@@ -163,7 +163,7 @@ async fn download(
     outcome.map_err(|source| AddonError::from_fetch(source, what, dest))
 }
 
-fn is_transient(e: &FetchError) -> bool {
+const fn is_transient(e: &FetchError) -> bool {
     matches!(
         e,
         FetchError::Transport { .. } | FetchError::Connect { .. } | FetchError::Stalled { .. }

@@ -105,7 +105,7 @@ pub enum TrustedKey {
 }
 
 impl TrustedKey {
-    fn at(position: usize) -> Self {
+    const fn at(position: usize) -> Self {
         if position == 0 {
             Self::Current
         } else {
@@ -115,7 +115,7 @@ impl TrustedKey {
 
     /// Whether the signature came from the key in use today.
     #[must_use]
-    pub fn is_current(&self) -> bool {
+    pub const fn is_current(&self) -> bool {
         matches!(self, Self::Current)
     }
 }
@@ -124,7 +124,7 @@ impl TrustedKey {
 ///
 /// One place, so every path that admits a manifest against a shipping key goes through the same
 /// constant and no field anywhere holds a key that could have been substituted.
-pub(crate) fn default_keys() -> &'static [[u8; 32]] {
+pub(crate) const fn default_keys() -> &'static [[u8; 32]] {
     COMPONENT_PUBLIC_KEYS
 }
 
@@ -868,7 +868,7 @@ fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-fn hex_val(c: u8) -> Option<u8> {
+const fn hex_val(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
         b'a'..=b'f' => Some(c - b'a' + 10),
@@ -1177,7 +1177,7 @@ mod tests {
         let json = manifest().replace(
             r#"{ "registry": { "key": "HKCU\\Software\\Wine\\DllOverrides",
                                        "name": "winemenubuilder.exe", "type": "disabled" } }"#,
-            r#"{ }"#,
+            r"{ }",
         );
         assert!(matches!(parse(&json), Err(ManifestError::Malformed(_))));
     }
@@ -1494,7 +1494,7 @@ impl VerifiedManifest {
 
     /// The rows it carries. Reading them is not applying them, so this is ordinary access.
     #[must_use]
-    pub fn rows(&self) -> &ComponentManifest {
+    pub const fn rows(&self) -> &ComponentManifest {
         &self.manifest
     }
 
@@ -1502,7 +1502,7 @@ impl VerifiedManifest {
     /// rotation is finished. Most do not: the point of an overlap window is that a launch works
     /// either way.
     #[must_use]
-    pub fn key(&self) -> TrustedKey {
+    pub const fn key(&self) -> TrustedKey {
         self.key
     }
 }

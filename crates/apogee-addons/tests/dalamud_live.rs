@@ -147,7 +147,7 @@ async fn the_cost_of_a_no_op_pass_is_reported() -> R<()> {
     for (label, dir) in [
         ("dalamud tree", paths.addon.clone()),
         ("runtime", paths.runtime.clone()),
-        ("assets", paths.assets.clone()),
+        ("assets", paths.assets),
     ] {
         let (files, bytes) = weigh(&dir)?;
         println!("{label}: {files} files, {} MiB", bytes / (1024 * 1024));
