@@ -11,6 +11,7 @@ is tagged with its change type. Versioning aims to follow
 - Refuse a second companion redirecting the same launch (#166) _(fixed)_
 - Harden the companion seam before its surface freezes (#169) _(changed)_
 - Rewrite the crate's rustdoc from scratch (#170) _(documentation)_
+- Add the readings callers were deriving, clear pedantic, and freeze at 1.0.0 (#171) _(added)_
 
 ### apogee-cli
 - Take the one-time code on stdin and stop the launcher being dumpable (#116) _(fixed)_
