@@ -57,6 +57,7 @@ impl Retain {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ArchiveRecord {
+    /// The archive file.
     pub path: PathBuf,
     /// From the record, never from the filename: an instant rendered into a name is a fragile
     /// ordering key, and two backups in one second share a stamp.
@@ -65,7 +66,9 @@ pub struct ArchiveRecord {
     /// of these is what a capture was stamped with and the other is what a listing reads back, and a
     /// bare count of seconds on one side of that round trip is a unit nothing states.
     pub created_at: SystemTime,
+    /// The format version the archive declares, which is what a reader checks before deleting it.
     pub format_version: u32,
+    /// The archive file's size on disk.
     pub bytes: u64,
 }
 
@@ -133,7 +136,9 @@ pub struct PrunePlan {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PruneReport {
+    /// The archives that were removed.
     pub deleted: Vec<PathBuf>,
+    /// How many of ours were kept.
     pub kept: usize,
     /// What was left alone and the check that rejected each one, carried through from the plan the
     /// prune ran.

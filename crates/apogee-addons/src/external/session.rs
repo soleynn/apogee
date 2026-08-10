@@ -33,17 +33,26 @@ pub(super) const STOP_GRACE: Duration = Duration::from_secs(5);
 pub enum Outcome {
     /// Started, and running under the given process id.
     #[non_exhaustive]
-    Started { pid: i32 },
+    Started {
+        /// The process id it was started under.
+        pid: i32,
+    },
     /// Not started because it was already running, under the given process id.
     ///
     /// Whoever started it owns it: a launch that finds a companion it did not start never stops it.
     #[non_exhaustive]
-    AlreadyRunning { pid: i32 },
+    AlreadyRunning {
+        /// The process id of the copy that was found.
+        pid: i32,
+    },
     /// Not started because the entry is switched off.
     Disabled,
     /// Ran after the game exited and finished with this status.
     #[non_exhaustive]
-    Completed { code: Option<i32> },
+    Completed {
+        /// Its exit code, or `None` when a signal ended it.
+        code: Option<i32>,
+    },
     /// Stopped, or never started, because the teardown was cancelled.
     ///
     /// Its own outcome rather than a failure: nothing went wrong, somebody quit. A shell counting
@@ -51,7 +60,10 @@ pub enum Outcome {
     Cancelled,
     /// Could not be run. The rest of the launch is unaffected.
     #[non_exhaustive]
-    Failed { reason: String },
+    Failed {
+        /// The failure and its causes, as one line.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Outcome {

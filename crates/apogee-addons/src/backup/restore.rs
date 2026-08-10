@@ -153,10 +153,15 @@ pub struct RestoreReport {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RestoredRoot {
+    /// Which tree was put back.
     pub label: RootLabel,
+    /// Where it was written.
     pub target: PathBuf,
+    /// Files written.
     pub files: u64,
+    /// Directories created.
     pub dirs: u64,
+    /// Payload bytes written.
     pub bytes: u64,
     /// Where the tree that previously occupied the target was moved. Never deleted, so the restore
     /// is reversible with one rename. `None` when there was nothing there.

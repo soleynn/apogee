@@ -82,19 +82,27 @@ pub enum SetupState {
     /// is either something in the prefix undoing it each time or a reading of the prefix that is
     /// wrong, and a report that called it `Applied` would show neither.
     #[non_exhaustive]
-    Reapplied { because: String },
+    Reapplied {
+        /// The reading that says the effect had gone.
+        because: String,
+    },
     /// The prefix already recorded it, so nothing was done.
     AlreadyPresent,
     /// It could not be applied. The rest of the pass is unaffected.
     #[non_exhaustive]
-    Failed { reason: String },
+    Failed {
+        /// The failure and its causes, as one line.
+        reason: String,
+    },
 }
 
 /// One verb and what became of it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SetupOutcome {
+    /// The verb, by the name the manifest gives it.
     pub name: String,
+    /// What became of it.
     pub state: SetupState,
 }
 

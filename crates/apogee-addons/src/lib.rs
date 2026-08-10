@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 #![warn(clippy::pedantic, clippy::nursery)]
 // `pub(crate)` inside an already-private module is redundant to the compiler, but it is this
 // crate's own signal that an item is deliberately not part of its public surface, independent of

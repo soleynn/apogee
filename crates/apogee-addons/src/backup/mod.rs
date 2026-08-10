@@ -350,6 +350,25 @@ impl GameConfigTrees {
     }
 }
 
+/// Every game configuration directory inside `prefix`, newest first.
+///
+/// A prefix can hold more than one: the wine user is whatever the prefix was built under, and a
+/// prefix carried between machines keeps the old one beside the new. Ordering is by when the
+/// configuration was last written rather than by the directory's own timestamp, then by path, so it
+/// is total and does not shift between runs. A tree reachable under two names is reported once.
+///
+/// Empty when the prefix holds no such directory, which is what a prefix the game has not run in
+/// looks like.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # fn demo(prefix: &Path) -> Option<std::path::PathBuf> {
+/// // The newest is the one a backup would offer by default.
+/// apogee_addons::backup::game_config_dirs(prefix).into_iter().next()
+/// # }
+/// ```
 #[must_use]
 pub fn game_config_dirs(prefix: &Path) -> Vec<PathBuf> {
     let mut found: Vec<(std::time::SystemTime, PathBuf, PathBuf)> = Vec::new();

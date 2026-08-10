@@ -52,15 +52,22 @@ pub struct BackupManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RootRecord {
+    /// Which tree this is, as the entry-name namespace spells it.
     pub label: RootLabel,
     /// The host path the tree came from, for a human choosing between archives. Restore never reads
     /// it: the destination is always supplied by the caller.
     pub source: String,
+    /// Every rule applied to this tree, and what each matched.
     pub rules: Vec<RuleRecord>,
+    /// Files captured.
     pub files: u64,
+    /// Directories captured.
     pub dirs: u64,
+    /// Payload bytes captured, before compression.
     pub bytes: u64,
+    /// Symlinks passed over. A backup stores what a config tree is, not what it points at.
     pub links_skipped: u64,
+    /// Non-regular files passed over: sockets, fifos, device nodes.
     pub specials_skipped: u64,
 }
 
@@ -70,8 +77,11 @@ pub struct RootRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RuleRecord {
+    /// The rule, as written.
     pub rule: String,
+    /// Whether it selected entries or removed them from the selection.
     pub role: RuleRole,
+    /// How many entries it matched.
     pub matched: u64,
 }
 
@@ -79,8 +89,11 @@ pub struct RuleRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EntryRecord {
+    /// The entry name, as the archive spells it.
     pub name: String,
+    /// Whether it is a file or a directory.
     pub kind: EntryKind,
+    /// Uncompressed size in bytes. Zero for a directory.
     pub size: u64,
     /// Lowercase hex sha256 of the file bytes, computed while streaming into the archive. Empty for
     /// a directory.
