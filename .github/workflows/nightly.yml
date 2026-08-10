@@ -98,7 +98,13 @@ jobs:
       - run: cargo run -p apogee-test-support --features corpus --example prime_corpus
       # Apply the real boot chain and rebuild its index; both compare byte-for-byte against the recorded
       # oracle tree. These skip when the corpus is unprimed (every-push), so they run here.
+      #
+      # The step above just primed it, so here "unprimed" cannot mean "no network" and a skip would be
+      # this job reporting success for work it did not do. Declaring the corpus required turns that
+      # skip back into a failure.
       - run: cargo test -p apogee-zipatch --test apply_boot --test index_corpus
+        env:
+          APOGEE_CORPUS_REQUIRED: "1"
 
   trust-anchors:
     name: trust-anchors

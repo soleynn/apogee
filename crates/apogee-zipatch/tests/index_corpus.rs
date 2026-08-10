@@ -1,12 +1,13 @@
 //! The block-index corpus gate: build an index over the real boot patch chain, verify the applied
 //! install against it (zero broken/missing/size/strays), and reconstruct a byte-identical tree. Skips
-//! when the corpus cache is absent, like the other corpus gates; uses only recorded facts (URLs +
-//! digests), never Square Enix bytes.
+//! only when the corpus cache is empty and unrequired, like the other corpus gates; uses only
+//! recorded facts (URLs + digests), never Square Enix bytes.
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
+use apogee_test_support::corpus;
 use apogee_test_support::tree_manifest;
 use apogee_zipatch::{
     ApplyOptions, DiskSink, PatchReader, Platform, VerifyOptions, apply, build_index,
@@ -43,18 +44,23 @@ fn cache_dir() -> PathBuf {
 fn a_boot_index_verifies_clean_and_reconstructs_the_applied_tree() {
     let manifest: Manifest = serde_json::from_str(MANIFEST_JSON).expect("parse corpus manifest");
     let cache = cache_dir();
+    let digests: Vec<&str> = manifest.entries.iter().map(|e| e.sha256.as_str()).collect();
+    match corpus::readiness(&cache, &digests) {
+        Ok(corpus::Readiness::Primed) => {}
+        Ok(corpus::Readiness::Unprimed) => {
+            eprintln!(
+                "skipping: boot corpus not primed under {} (no-network run)",
+                cache.display()
+            );
+            return;
+        }
+        Err(unusable) => panic!("{unusable}"),
+    }
     let patches: Vec<PathBuf> = manifest
         .entries
         .iter()
         .map(|e| cache.join(&e.sha256))
         .collect();
-    if patches.iter().any(|p| !p.exists()) {
-        eprintln!(
-            "skipping: boot corpus not primed under {} (no-network run)",
-            cache.display()
-        );
-        return;
-    }
 
     // Apply the boot chain to get the reference install tree.
     let applied = tempfile::tempdir().expect("tempdir");
