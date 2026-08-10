@@ -37,6 +37,7 @@ is tagged with its change type. Versioning aims to follow
 - Fail over on the single-connection engine too (#177) _(added)_
 - Measure resume waste on the client, not the server's byte tally (#178) _(testing)_
 - Commit to the download error set and the resume journal layout (#179) _(fixed)_
+- Drop the private intra-doc link in LimitHandle::uncapped (#180) _(documentation)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
