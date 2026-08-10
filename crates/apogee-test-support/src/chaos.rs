@@ -257,6 +257,16 @@ struct Config {
     unavailable_fired: Arc<Mutex<HashMap<u64, u64>>>,
     /// On the first request only, serve this many bytes then hang forever (a hard stall).
     stall_after: Option<u64>,
+    /// Accept the first N requests and never answer them: the connection and the request complete,
+    /// and no response header ever comes back. Distinct from every other silence knob, which all
+    /// stall a body that has already started.
+    silent_first: Option<u64>,
+    /// The same silence keyed on one segment's range start instead of the connection's request
+    /// number, so a transfer's probe is not the thing that absorbs it. Fires `times` per start (via
+    /// `silent_fired`) so a re-queued retry of that segment can complete.
+    silent_ranges: Vec<(u64, u64)>,
+    /// How many times each entry of `silent_ranges` has already fired, shared across connections.
+    silent_fired: Arc<Mutex<HashMap<u64, u64>>>,
     /// Reject a request whose header bytes exceed this budget with `431`, so range packing must stay
     /// under a header-size cap.
     max_header_bytes: Option<usize>,
@@ -336,6 +346,9 @@ impl ChaosServer {
                 unavailable_ranges: Vec::new(),
                 unavailable_fired: Arc::new(Mutex::new(HashMap::new())),
                 stall_after: None,
+                silent_first: None,
+                silent_ranges: Vec::new(),
+                silent_fired: Arc::new(Mutex::new(HashMap::new())),
                 max_header_bytes: None,
                 corrupt: Vec::new(),
                 corrupt_once: Vec::new(),
@@ -563,6 +576,28 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Accept the first `times` requests and never answer them, then serve normally. The connection,
+    /// the TLS handshake and the request all complete; no status line or header ever comes back, and
+    /// the connection is held open until the client abandons it.
+    ///
+    /// The other silence knobs all stall a body that has already started, so a client learns the
+    /// response's status, length and validators before the source goes quiet. This one leaves it
+    /// nothing at all, which is the case a body-inactivity timeout cannot see.
+    #[must_use]
+    pub fn withhold_response(mut self, times: u64) -> Self {
+        self.cfg.silent_first = Some(times);
+        self
+    }
+
+    /// The same silence keyed on one segment's range start, `times` times, then that range is served
+    /// normally. Targets a segment the way [`unavailable_range_at`](Self::unavailable_range_at) does,
+    /// so a transfer's range-capability probe is not what absorbs it.
+    #[must_use]
+    pub fn withhold_range_at(mut self, start: u64, times: u64) -> Self {
+        self.cfg.silent_ranges.push((start, times));
+        self
+    }
+
     /// Reject any request whose header bytes (method + path + header names and values) exceed `max`
     /// with `431 Request Header Fields Too Large`. Keep `max` below hyper's own connection-level
     /// limit so this app-level rejection is the one that fires. Forces the client to cap
@@ -751,6 +786,35 @@ async fn handle(
         && request_index <= *times
     {
         return Ok(service_unavailable(retry_after));
+    }
+
+    // The first N requests are accepted and never answered. Held here rather than returned, so the
+    // client waits on a live connection with no response headers on it; the connection's own token
+    // cancels this when the server is dropped.
+    if cfg.silent_first.is_some_and(|times| request_index <= times) {
+        std::future::pending::<()>().await;
+    }
+
+    // The same silence, keyed on one segment's range start rather than the request number.
+    if !cfg.silent_ranges.is_empty()
+        && let Some(start) = parse_range_start(req.headers().get(RANGE))
+        && let Some((_, times)) = cfg.silent_ranges.iter().find(|(s, _)| *s == start)
+    {
+        let hold = {
+            let mut fired = cfg
+                .silent_fired
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let count = fired.entry(start).or_insert(0);
+            let hold = *count < *times;
+            if hold {
+                *count += 1;
+            }
+            hold
+        };
+        if hold {
+            std::future::pending::<()>().await;
+        }
     }
 
     // The same refusal, keyed on one segment's range start instead of the connection's request
