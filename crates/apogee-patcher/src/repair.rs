@@ -145,12 +145,18 @@ async fn acquire_index(
             let spec = DownloadSpec::builder(url.clone(), dest, Validator::Sha256(*sha256))
                 .build()
                 .map_err(|e| index_unavailable(repo, e))?;
+            // A full disk is routed out of `IndexUnavailable` for the same reason it is routed out of
+            // `Acquire` on the install path: it is not the index being unreachable, and reporting it
+            // that way sends a caller looking at the catalog and the network instead of at free space.
             let verified = fetcher
                 .download(&spec, None, cancel.clone())
                 .await
                 .map_err(|e| match e {
                     FetchError::Cancelled => PatchError::Cancelled,
-                    other => index_unavailable(repo, other),
+                    other => match other.into_out_of_space() {
+                        Ok((path, source)) => PatchError::OutOfSpace { path, source },
+                        Err(other) => index_unavailable(repo, other),
+                    },
                 })?;
             Ok(verified.path().to_path_buf())
         }

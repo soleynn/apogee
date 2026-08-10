@@ -315,12 +315,22 @@ async fn acquire_one(
     }
 }
 
-/// Map a fetch failure into the patcher taxonomy: a cancellation stays [`PatchError::Cancelled`],
-/// everything else is an [`PatchError::Acquire`] carrying fetch's block/offset/attempt context.
+/// Map a fetch failure into the patcher taxonomy: a cancellation stays [`PatchError::Cancelled`], a
+/// full disk becomes [`PatchError::OutOfSpace`], everything else is an [`PatchError::Acquire`]
+/// carrying fetch's block/offset/attempt context.
+///
+/// The disk-full arm is what makes [`preflight`](crate::preflight)'s backstop real. Preflight is an
+/// estimate over patchlist lengths and can be skipped outright, so the case it exists to catch is
+/// exactly the one it cannot see: the disk filling mid-transfer. Fetch detects that eagerly and
+/// reports it with an intact [`std::io::ErrorKind`], and without this arm the most actionable
+/// failure a 120 GB install has would reach a caller as a generic acquire fault.
 fn acquire_err(err: FetchError) -> PatchError {
-    match err {
-        FetchError::Cancelled => PatchError::Cancelled,
-        other => PatchError::Acquire(other),
+    if matches!(err, FetchError::Cancelled) {
+        return PatchError::Cancelled;
+    }
+    match err.into_out_of_space() {
+        Ok((path, source)) => PatchError::OutOfSpace { path, source },
+        Err(other) => PatchError::Acquire(other),
     }
 }
 
@@ -479,6 +489,58 @@ mod tests {
         assert!(
             matches!(err, PatchError::Patchlist { index: 3, .. }),
             "got {err:?}"
+        );
+    }
+
+    /// A fetch i/o failure carrying `ENOSPC` is routed to the typed space arm, keeping the path.
+    ///
+    /// The end-to-end proof that fetch really raises this shape is `tests/disk_full_backstop.rs`
+    /// (and `apogee-fetch`'s own `tests/disk_full.rs`); this covers the mapping itself, on every
+    /// target rather than only where a memory-backed filesystem exists.
+    #[test]
+    fn a_disk_full_acquire_failure_is_routed_out_of_the_generic_arm() {
+        let err = acquire_err(FetchError::Io {
+            path: PathBuf::from("/store/game/D2024.01.01.0000.0000.patch.part"),
+            source: std::io::ErrorKind::StorageFull.into(),
+        });
+        let PatchError::OutOfSpace { path, .. } = &err else {
+            panic!("a full disk must not arrive as a generic acquire failure, got {err:?}");
+        };
+        assert_eq!(
+            path,
+            Path::new("/store/game/D2024.01.01.0000.0000.patch.part"),
+        );
+    }
+
+    /// Only disk-full leaves the generic arm; a cancellation and every other fault keep their homes.
+    ///
+    /// Delete the guard in `acquire_err` and the first case still passes, so it is the pair that
+    /// carries the claim: the routing has to be the `ErrorKind` and not "any i/o failure".
+    #[test]
+    fn other_acquire_failures_keep_their_existing_arms() {
+        assert!(matches!(
+            acquire_err(FetchError::Cancelled),
+            PatchError::Cancelled
+        ));
+        let denied = acquire_err(FetchError::Io {
+            path: PathBuf::from("/store/game/p.patch.part"),
+            source: std::io::ErrorKind::PermissionDenied.into(),
+        });
+        assert!(
+            matches!(denied, PatchError::Acquire(FetchError::Io { .. })),
+            "a permission fault is not a space fault, got {denied:?}",
+        );
+        let verify = acquire_err(FetchError::BlockVerifyFailed {
+            block: 2,
+            offset: 128,
+            attempts: 3,
+        });
+        assert!(
+            matches!(
+                verify,
+                PatchError::Acquire(FetchError::BlockVerifyFailed { .. })
+            ),
+            "got {verify:?}",
         );
     }
 }
