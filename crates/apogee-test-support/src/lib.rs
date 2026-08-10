@@ -4,6 +4,8 @@
 //! Dev-dependency only: consumers pull this in under `[dev-dependencies]`, so it never enters a
 //! shipping build's graph.
 
+#[cfg(target_os = "linux")]
+pub mod capacity;
 pub mod catalog_sign;
 pub mod chaos;
 #[cfg(feature = "corpus")]

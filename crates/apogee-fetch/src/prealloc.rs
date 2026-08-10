@@ -17,7 +17,6 @@ use crate::error::FetchError;
 /// # Errors
 /// [`FetchError::Io`] carrying the underlying [`std::io::Error`], whose `kind()` distinguishes
 /// disk-full from other failures.
-#[allow(dead_code)] // wired into the transfer path with the segmented engine.
 pub(crate) async fn preallocate(path: &Path, len: u64) -> Result<(), FetchError> {
     let owned = path.to_owned();
     let joined = tokio::task::spawn_blocking(move || preallocate_blocking(&owned, len)).await;
@@ -100,5 +99,68 @@ mod tests {
         let path = dir.path().join("no-such-dir").join("out.part");
         let err = preallocate(&path, 4096).await.unwrap_err();
         assert!(matches!(err, FetchError::Io { .. }));
+    }
+
+    /// A length the filesystem cannot hold fails as disk-full specifically, and reserves nothing.
+    ///
+    /// Both halves are the claim: `FetchError::Io` alone would also be satisfied by a permission
+    /// fault or by the `EFBIG` a request past the maximum file size returns, so the inner kind and
+    /// errno are what make disk-full distinguishable to a caller; the allocated-block count is what
+    /// makes it eager, since a filesystem that reserved its way to the failure would have consumed
+    /// the host's disk to reach the same error.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_length_past_the_filesystem_capacity_is_a_distinct_disk_full_error() {
+        use std::os::unix::fs::MetadataExt;
+
+        let scratch = apogee_test_support::capacity::memory_backed_dir("apogee-prealloc-").unwrap();
+        let path = scratch.path().join("out.part");
+
+        let err = preallocate(&path, scratch.beyond_capacity())
+            .await
+            .unwrap_err();
+        let FetchError::Io { source, .. } = &err else {
+            panic!("want a typed I/O error, got {err:?}");
+        };
+        assert_eq!(
+            source.kind(),
+            std::io::ErrorKind::StorageFull,
+            "want disk-full, got {source:?}",
+        );
+        assert_eq!(
+            source.raw_os_error(),
+            Some(rustix::io::Errno::NOSPC.raw_os_error()),
+            "want ENOSPC and not the EFBIG of an over-large request, got {source:?}",
+        );
+
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.blocks(), 0, "the refused reservation consumed blocks");
+        assert_eq!(meta.len(), 0, "the refused reservation extended the file");
+    }
+
+    /// A filesystem with no reservation support falls back to a length set rather than failing.
+    ///
+    /// procfs is the one filesystem reachable without mounting one (which needs root) that refuses
+    /// `fallocate` the way the fallback arm expects: its files are regular files with no `fallocate`
+    /// operation, so the kernel answers `EOPNOTSUPP`. The direct call is part of the test rather than
+    /// an assumption, so a kernel that ever grew the operation fails here with a clear reason instead
+    /// of leaving the arm silently unexercised. `oom_score_adj` belongs to this process and ignores a
+    /// length set, which is also why the sparse-file half of the fallback's contract cannot be
+    /// asserted here: what is covered is that the refusal is swallowed, not that a file gets a length.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_filesystem_without_reservation_support_falls_back_to_a_length_set() {
+        use rustix::fs::{FallocateFlags, fallocate};
+
+        let path = Path::new("/proc/self/oom_score_adj");
+        let probe = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        assert_eq!(
+            fallocate(&probe, FallocateFlags::empty(), 0, 4096),
+            Err(rustix::io::Errno::OPNOTSUPP),
+            "this path no longer stands in for a filesystem that cannot reserve",
+        );
+        drop(probe);
+
+        preallocate(path, 4096).await.unwrap();
     }
 }

@@ -34,6 +34,11 @@ ed25519-dalek.workspace = true
 apogee-fetch = { path = "../apogee-fetch", optional = true }
 thiserror = { workspace = true, optional = true }
 
+# Reads a mount's type and total capacity, so a disk-full injection can pick a filesystem that
+# refuses an oversize reservation outright instead of one that allocates the host's disk toward it.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [features]
 # Download-by-URL+SHA256 corpus fetch into a content-addressed cache. Off by default so the plain
 # `--workspace` and Windows-cross builds never pull apogee-fetch into test-support's normal graph.
