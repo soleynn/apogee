@@ -1,4 +1,11 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::pedantic, clippy::nursery)]
+// `pub(crate)` inside an already-private module is redundant to the compiler, but it is this
+// crate's own signal that an item is deliberately not part of its public surface, independent of
+// how deep the module nesting runs or whether a later edit makes an enclosing module `pub`.
+// Widening every one of these to plain `pub` would erase that guardrail for a lint with no
+// behavioral stake, right before the surface it protects freezes at 1.0.
+#![allow(clippy::redundant_pub_crate)]
 
 //! The companion layer: what runs alongside the game, and the prefix setup it needs.
 //!
@@ -439,7 +446,7 @@ impl AddonError {
     /// assert!(AddonError::Download(FetchError::Cancelled).is_cancellation());
     /// ```
     #[must_use]
-    pub fn is_cancellation(&self) -> bool {
+    pub const fn is_cancellation(&self) -> bool {
         matches!(
             self,
             Self::Cancelled | Self::Download(FetchError::Cancelled)
@@ -590,7 +597,7 @@ pub struct Addons {
 impl Addons {
     /// Construct over the runtime, fetcher, and paths.
     #[must_use]
-    pub fn new(runtime: Runtime, fetcher: Fetcher, paths: AddonPaths) -> Self {
+    pub const fn new(runtime: Runtime, fetcher: Fetcher, paths: AddonPaths) -> Self {
         Self {
             runtime,
             fetcher,

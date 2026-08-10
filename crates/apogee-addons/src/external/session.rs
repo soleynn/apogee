@@ -122,7 +122,7 @@ pub(super) struct Held {
 
 impl Held {
     /// Hold a started companion, reading its stop policy out of `trigger` once.
-    pub(super) fn new(
+    pub(super) const fn new(
         index: usize,
         program: std::path::PathBuf,
         companion: Companion,
@@ -184,7 +184,7 @@ pub struct AddonSession {
 
 impl AddonSession {
     /// Take ownership of what one launch started.
-    pub(super) fn new(
+    pub(super) const fn new(
         runtime: Runtime,
         game_prefix: Option<std::path::PathBuf>,
         held: Vec<Held>,
@@ -202,7 +202,7 @@ impl AddonSession {
 
     /// What happened when the companions started.
     #[must_use]
-    pub fn report(&self) -> &AddonReport {
+    pub const fn report(&self) -> &AddonReport {
         &self.report
     }
 
@@ -326,6 +326,9 @@ impl Drop for AddonSession {
     }
 }
 
+// Deliberately partial: counts rather than contents, since a session also holds a runtime handle and
+// other people's programs, neither of which reads as anything useful in a log line.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for AddonSession {
     /// Counts rather than contents: a session holds a runtime handle and other people's programs,
     /// neither of which reads as anything useful in a log line.

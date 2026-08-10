@@ -196,8 +196,8 @@ fn only_our_archives_are_candidates() -> Result<(), Fallible> {
     // than the answer: these nine are here for nine different reasons.
     // By path, because both come from their own directory listing and the order of one is not the
     // order of the other.
-    let mut reported = report.foreign.clone();
-    let mut planned = plan.foreign.clone();
+    let mut reported = report.foreign;
+    let mut planned = plan.foreign;
     reported.sort_by(|a, b| a.0.cmp(&b.0));
     planned.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(

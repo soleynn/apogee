@@ -95,13 +95,13 @@ impl SetupEvents {
     /// });
     /// ```
     #[must_use]
-    pub fn none() -> Self {
+    pub const fn none() -> Self {
         Self { tx: None }
     }
 
     /// A stream feeding `tx`.
     #[must_use]
-    pub fn new(tx: UnboundedSender<SetupEvent>) -> Self {
+    pub const fn new(tx: UnboundedSender<SetupEvent>) -> Self {
         Self { tx: Some(tx) }
     }
 

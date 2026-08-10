@@ -275,7 +275,7 @@ fn the_endpoints_are_derived_from_the_one_pointer_the_row_carries() {
         endpoints.asset_meta.as_str(),
         "https://kamori.goats.dev/Dalamud/Asset/Meta"
     );
-    let (dotnet, desktop) = endpoints.runtime_archives("10.0.0").expect("runtime urls");
+    let [dotnet, desktop] = endpoints.runtime_archives("10.0.0").expect("runtime urls");
     assert_eq!(
         dotnet.as_str(),
         "https://kamori.goats.dev/Dalamud/Release/Runtime/DotNet/10.0.0"

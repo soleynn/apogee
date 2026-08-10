@@ -25,7 +25,7 @@ pub enum LoadMode {
 
 impl LoadMode {
     /// The spelling `--mode` takes.
-    fn as_flag_value(self) -> &'static str {
+    const fn as_flag_value(self) -> &'static str {
         match self {
             Self::EntryPoint => "entrypoint",
             Self::Inject => "inject",
@@ -85,7 +85,7 @@ impl ClientLanguage {
     /// assert_eq!(ClientLanguage::French.ordinal(), 3);
     /// ```
     #[must_use]
-    pub fn ordinal(self) -> u8 {
+    pub const fn ordinal(self) -> u8 {
         self as u8
     }
 
@@ -104,7 +104,7 @@ impl ClientLanguage {
     /// assert_eq!(ClientLanguage::from_ordinal(200), ClientLanguage::English);
     /// ```
     #[must_use]
-    pub fn from_ordinal(ordinal: u8) -> Self {
+    pub const fn from_ordinal(ordinal: u8) -> Self {
         match ordinal {
             0 => Self::Japanese,
             2 => Self::German,

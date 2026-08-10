@@ -138,7 +138,11 @@ fn logs_rotations_screenshots_and_the_restore_blob_are_left_out() -> Result<(), 
         !names.iter().any(|n| n.contains("/log")),
         "chat logs kept: {names:?}"
     );
-    assert!(!names.iter().any(|n| n.ends_with(".old")));
+    // A known, fixed, lowercase suffix this crate generates, not an arbitrary file from a real
+    // filesystem: `Path::extension()`'s case-insensitivity buys nothing worth the indirection here.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    let dropped_rotation = !names.iter().any(|n| n.ends_with(".old"));
+    assert!(dropped_rotation);
     assert!(!names.iter().any(|n| n.contains("screenshots")));
     assert!(!names.iter().any(|n| n.contains("FFXIV_BKCHR")));
     Ok(())
@@ -358,7 +362,7 @@ fn the_game_root_is_required() {
 /// The user directory inside a prefix is named after whoever the runner claims to be, and Proton
 /// relocates the whole prefix a level down. Both shapes are real, and both must resolve.
 #[test]
-fn the_game_config_tree_is_found_in_either_prefix_shape() -> Result<(), BackupError> {
+fn the_game_config_tree_is_found_in_either_prefix_shape() {
     use apogee_addons::backup::game_config_dirs;
 
     for (label, drive) in [("plain", ""), ("relocated", "pfx")] {
@@ -376,14 +380,13 @@ fn the_game_config_tree_is_found_in_either_prefix_shape() -> Result<(), BackupEr
 
         assert_eq!(game_config_dirs(tmp.path()), vec![config], "{label} prefix");
     }
-    Ok(())
 }
 
 /// A prefix run under two runners holds a full set of settings under each name. Choosing between
 /// them by name would quietly back up whichever sorted first, so both are returned and the one the
 /// game wrote to last comes first.
 #[test]
-fn a_prefix_run_under_two_runners_reports_both_trees_newest_first() -> Result<(), BackupError> {
+fn a_prefix_run_under_two_runners_reports_both_trees_newest_first() {
     use apogee_addons::backup::game_config_dirs;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -417,7 +420,6 @@ fn a_prefix_run_under_two_runners_reports_both_trees_newest_first() -> Result<()
     assert_eq!(found.len(), 2, "both trees are real settings: {found:?}");
     assert_eq!(found[0], under("steamuser"), "the live tree comes first");
     assert_eq!(found[1], under("lyra"));
-    Ok(())
 }
 
 /// A prefix the game has never written into has no config tree, which is a state rather than a fault.

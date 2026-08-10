@@ -12,7 +12,7 @@ use apogee_addons::backup::{
     Selection, SelectionRoot, create, inspect,
 };
 
-use common::{CHARACTER_DIR, CHARACTER_FILES, game_tree, game_tree_reversed, write};
+use common::{CHARACTER_DIR, CHARACTER_FILES, game_tree, game_tree_reversed, hex, write};
 use tokio_util::sync::CancellationToken;
 
 /// A fixed instant, so an archive is a function of its contents alone.
@@ -225,7 +225,7 @@ fn contents_round_trip_and_match_their_recorded_hash() -> Result<(), Fallible> {
         assert_eq!(record.size, body.len() as u64, "{name} size");
         if !body.is_empty() {
             let digest = <sha2::Sha256 as sha2::Digest>::digest(body);
-            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            let hex = hex(&digest);
             assert_eq!(record.sha256, hex, "{name} hash");
         }
     }
@@ -289,15 +289,16 @@ fn a_second_backup_in_the_same_second_gets_its_own_name() -> Result<(), BackupEr
     )?;
     assert_ne!(a.archive, b.archive);
     assert!(a.archive.exists() && b.archive.exists());
-    // The name states the instant, so a directory listing sorts chronologically.
-    assert!(
-        a.archive
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("apogee-config-20260725T") && n.ends_with(".apbk")),
-        "unexpected name {:?}",
-        a.archive
-    );
+    // The name states the instant, so a directory listing sorts chronologically. A known, fixed,
+    // lowercase extension this crate generates, not an arbitrary file from a real filesystem:
+    // `Path::extension()`'s case-insensitivity buys nothing worth the indirection here.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    let named_right = a
+        .archive
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("apogee-config-20260725T") && n.ends_with(".apbk"));
+    assert!(named_right, "unexpected name {:?}", a.archive);
     Ok(())
 }
 

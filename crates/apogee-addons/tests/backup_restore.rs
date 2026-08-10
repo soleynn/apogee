@@ -12,7 +12,7 @@ use apogee_addons::backup::{
     RejectReason, RestorePlan, RootLabel, Selection, SelectionRoot, create, restore,
 };
 
-use common::{CHARACTER_DIR, game_tree, write};
+use common::{CHARACTER_DIR, game_tree, hex, write};
 use tokio_util::sync::CancellationToken;
 
 type Fallible = Box<dyn std::error::Error>;
@@ -63,7 +63,7 @@ fn snapshot(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, Fallible> {
 }
 
 /// Build an archive by hand, so a restore can be handed shapes the writer would never produce.
-/// `entries` is (name, body, is_dir); every one is also listed in the record so a rejection can only
+/// `entries` is (name, body, `is_dir`); every one is also listed in the record so a rejection can only
 /// come from the name checks rather than from the entry being unlisted.
 fn hostile_archive(
     path: &Path,
@@ -83,7 +83,7 @@ fn hostile_archive(
             w.start_file(*name, opts)?;
             w.write_all(body)?;
             let digest = <sha2::Sha256 as sha2::Digest>::digest(body);
-            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            let hex = hex(&digest);
             records.push(serde_json::json!({
                 "name": name, "kind": "file", "size": body.len(), "sha256": hex,
             }));
@@ -137,7 +137,11 @@ fn a_restored_tree_matches_what_was_backed_up() -> Result<(), Fallible> {
     );
     // What the selection dropped stays dropped on the way back.
     assert!(!restored.keys().any(|k| k.contains("log")));
-    assert!(!restored.keys().any(|k| k.ends_with(".old")));
+    // A known, fixed, lowercase suffix this crate generates, not an arbitrary file from a real
+    // filesystem: `Path::extension()`'s case-insensitivity buys nothing worth the indirection here.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    let dropped_rotation = !restored.keys().any(|k| k.ends_with(".old"));
+    assert!(dropped_rotation);
     Ok(())
 }
 
@@ -186,7 +190,7 @@ fn a_root_the_plan_does_not_name_is_untouched() -> Result<(), Fallible> {
 
     let live = tempfile::tempdir()?;
     let empty = RestorePlan {
-        archive: archive.clone(),
+        archive,
         targets: BTreeMap::new(),
     };
     let report = restore(&empty, &CancellationToken::new())?;
@@ -300,7 +304,7 @@ fn a_tampered_entry_is_caught_by_its_recorded_hash() -> Result<(), Fallible> {
     w.start_file("user/FFXIV.cfg", opts)?;
     w.write_all(b"tampered")?;
     let honest = <sha2::Sha256 as sha2::Digest>::digest(b"original");
-    let hex: String = honest.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = hex(&honest);
     let manifest = serde_json::json!({
         "format": BACKUP_FORMAT,
         "format_version": BACKUP_FORMAT_VERSION,

@@ -42,13 +42,13 @@ impl Retain {
     /// # }
     /// ```
     #[must_use]
-    pub fn keep(n: NonZeroUsize) -> Self {
+    pub const fn keep(n: NonZeroUsize) -> Self {
         Self(n)
     }
 
     /// How many are kept.
     #[must_use]
-    pub fn count(self) -> usize {
+    pub const fn count(self) -> usize {
         self.0.get()
     }
 }
@@ -309,14 +309,11 @@ fn classify_unreadable(path: &Path) -> ForeignReason {
     let Ok(file) = std::fs::File::open(path) else {
         return ForeignReason::NotAnArchive;
     };
-    match zip::ZipArchive::new(file) {
-        Ok(mut zip) => {
-            if zip.by_name(super::manifest::MANIFEST_ENTRY).is_ok() {
-                ForeignReason::UnreadableRecord
-            } else {
-                ForeignReason::NoRecord
-            }
+    zip::ZipArchive::new(file).map_or(ForeignReason::NotAnArchive, |mut zip| {
+        if zip.by_name(super::manifest::MANIFEST_ENTRY).is_ok() {
+            ForeignReason::UnreadableRecord
+        } else {
+            ForeignReason::NoRecord
         }
-        Err(_) => ForeignReason::NotAnArchive,
-    }
+    })
 }

@@ -74,7 +74,7 @@ pub enum Trigger {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawExternalAddon")]
 pub struct ExternalAddon {
     program: PathBuf,
@@ -139,30 +139,30 @@ impl ExternalAddon {
 
     /// Host or prefix.
     #[must_use]
-    pub fn run_in(&self) -> RunIn {
+    pub const fn run_in(&self) -> RunIn {
         self.run_in
     }
 
     /// When it runs.
     #[must_use]
-    pub fn trigger(&self) -> Trigger {
+    pub const fn trigger(&self) -> Trigger {
         self.trigger
     }
 
     /// Whether the launch considers it at all.
     #[must_use]
-    pub fn enabled(&self) -> bool {
+    pub const fn enabled(&self) -> bool {
         self.enabled
     }
 
     /// Turn it on or off without losing the entry.
-    pub fn set_enabled(&mut self, on: bool) {
+    pub const fn set_enabled(&mut self, on: bool) {
         self.enabled = on;
     }
 
     /// Whether the game's exit leaves it running.
     #[must_use]
-    pub fn keeps_running(&self) -> bool {
+    pub const fn keeps_running(&self) -> bool {
         matches!(
             self.trigger,
             Trigger::WithGame {

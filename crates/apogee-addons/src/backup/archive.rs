@@ -432,7 +432,7 @@ fn stamp(unix: u64) -> String {
     let (days, secs) = (unix / 86_400, unix % 86_400);
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     // Civil-from-days, shifting the epoch to 0000-03-01 so leap days land at the end of the cycle.
-    let z = days as i64 + 719_468;
+    let z = days.cast_signed() + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;

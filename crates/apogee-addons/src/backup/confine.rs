@@ -108,7 +108,7 @@ pub(crate) struct ConfinedName {
 
 impl ConfinedName {
     /// Which root the entry belongs to.
-    pub(crate) fn root(&self) -> RootLabel {
+    pub(crate) const fn root(&self) -> RootLabel {
         self.root
     }
 
@@ -148,7 +148,7 @@ pub(crate) fn entry_name(raw: &str, is_regular: bool) -> Result<ConfinedName, Re
     let mut parts: Vec<String> = Vec::new();
     for component in Path::new(&folded).components() {
         match component {
-            Component::CurDir => continue,
+            Component::CurDir => {}
             Component::RootDir => return Err(RejectReason::Absolute),
             Component::ParentDir => return Err(RejectReason::Traversal),
             Component::Prefix(_) => return Err(RejectReason::DriveLetter),
@@ -197,9 +197,7 @@ fn check_component(part: &str) -> Result<(), RejectReason> {
 
 /// The root a leading component names, folded because the rest of this layer folds.
 fn label(head: &str) -> Option<RootLabel> {
-    [RootLabel::User]
-        .into_iter()
-        .find(|candidate| head.eq_ignore_ascii_case(candidate.prefix()))
+    std::iter::once(RootLabel::User).find(|candidate| head.eq_ignore_ascii_case(candidate.prefix()))
 }
 
 #[cfg(test)]

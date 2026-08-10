@@ -107,7 +107,7 @@ pub struct RuleReport {
 impl RuleReport {
     /// Which list this rule came from.
     #[must_use]
-    pub fn role(&self) -> RuleRole {
+    pub const fn role(&self) -> RuleRole {
         self.role
     }
 
@@ -119,7 +119,7 @@ impl RuleReport {
 
     /// How many entries it matched. Zero is the value that makes a rule that does nothing visible.
     #[must_use]
-    pub fn matched(&self) -> usize {
+    pub const fn matched(&self) -> usize {
         self.matched
     }
 }
@@ -147,7 +147,7 @@ impl SelectedEntry {
 
     /// Whether it is a file or a directory.
     #[must_use]
-    pub fn kind(&self) -> EntryKind {
+    pub const fn kind(&self) -> EntryKind {
         self.kind
     }
 }
@@ -169,7 +169,7 @@ pub struct RootReport {
 impl RootReport {
     /// The namespace this root's entries sit under.
     #[must_use]
-    pub fn label(&self) -> RootLabel {
+    pub const fn label(&self) -> RootLabel {
         self.label
     }
 
@@ -181,37 +181,37 @@ impl RootReport {
 
     /// Whether the directory existed. An absent optional root reports false with every count zero.
     #[must_use]
-    pub fn present(&self) -> bool {
+    pub const fn present(&self) -> bool {
         self.present
     }
 
     /// How many files were selected.
     #[must_use]
-    pub fn files(&self) -> usize {
+    pub const fn files(&self) -> usize {
         self.files
     }
 
     /// How many directories were selected.
     #[must_use]
-    pub fn dirs(&self) -> usize {
+    pub const fn dirs(&self) -> usize {
         self.dirs
     }
 
     /// The total length of the selected files.
     #[must_use]
-    pub fn bytes(&self) -> u64 {
+    pub const fn bytes(&self) -> u64 {
         self.bytes
     }
 
     /// How many symlinks were passed over.
     #[must_use]
-    pub fn links_skipped(&self) -> usize {
+    pub const fn links_skipped(&self) -> usize {
         self.links_skipped
     }
 
     /// How many sockets, fifos, and device nodes were passed over.
     #[must_use]
-    pub fn specials_skipped(&self) -> usize {
+    pub const fn specials_skipped(&self) -> usize {
         self.specials_skipped
     }
 

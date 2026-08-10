@@ -382,10 +382,9 @@ pub(crate) async fn apply_verbs(
                     break;
                 }
                 let state = match outcome {
-                    Ok(()) => match stale_because {
-                        Some(because) => SetupState::Reapplied { because },
-                        None => SetupState::Applied,
-                    },
+                    Ok(()) => stale_because.map_or(SetupState::Applied, |because| {
+                        SetupState::Reapplied { because }
+                    }),
                     Err(err) => {
                         let reason = err.chain();
                         events.emit(SetupEvent::Failed {

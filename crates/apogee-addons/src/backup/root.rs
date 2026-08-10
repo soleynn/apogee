@@ -29,7 +29,7 @@ impl RootLabel {
     /// assert_eq!(RootLabel::User.prefix(), "user");
     /// ```
     #[must_use]
-    pub fn prefix(self) -> &'static str {
+    pub const fn prefix(self) -> &'static str {
         match self {
             Self::User => "user",
         }
@@ -51,6 +51,10 @@ pub enum Presence {
 /// for.
 ///
 /// Everything else in the tree is taken without being named.
+// Four bools rather than an enum: they are independent toggles a caller may set in any combination
+// (wanting chat logs says nothing about wanting screenshots), not mutually exclusive states, so there
+// is no state machine here to extract one into.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GameConfigOpts {
     /// Keep the per-character `log` directories: chat scrollback, unbounded, and tens of megabytes
@@ -168,7 +172,7 @@ impl SelectionRoot {
 
     /// The namespace this root's entries sit under.
     #[must_use]
-    pub fn label(&self) -> RootLabel {
+    pub const fn label(&self) -> RootLabel {
         self.label
     }
 
@@ -180,7 +184,7 @@ impl SelectionRoot {
 
     /// Whether an absent root is a fault.
     #[must_use]
-    pub fn presence(&self) -> Presence {
+    pub const fn presence(&self) -> Presence {
         self.presence
     }
 
