@@ -11,7 +11,7 @@
 //! The body bytes come from [`generate_into`]: a test computes the same bytes (and their hash) with
 //! that function, so a ranged response and a full response reproduce identical content.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::Range;
@@ -195,8 +195,17 @@ struct Config {
     last_modified: Option<String>,
     last_modified_after: Option<(u64, String)>,
     range_not_satisfiable: bool,
+    /// Serve the body with no `Content-Length` (chunked), so nothing but the framing tells the client
+    /// where the body ended.
+    omit_content_length: bool,
     /// Answer the first `n` requests with `503` + this `Retry-After`, then serve normally.
     unavailable_first: Option<(u64, RetryAfter)>,
+    /// Answer the first `n` requests whose `Range` starts at this offset with `503` + this
+    /// `Retry-After`, then serve that range normally. Keyed on the range start like `drop_ranges`, so
+    /// one segment can be refused while the rest of the transfer proceeds.
+    unavailable_ranges: Vec<(u64, u64, RetryAfter)>,
+    /// How many times each entry of `unavailable_ranges` has already fired, shared across connections.
+    unavailable_fired: Arc<Mutex<HashMap<u64, u64>>>,
     /// On the first request only, serve this many bytes then hang forever (a hard stall).
     stall_after: Option<u64>,
     /// Reject a request whose header bytes exceed this budget with `431`, so range packing must stay
@@ -259,7 +268,10 @@ impl ChaosServer {
                 last_modified: None,
                 last_modified_after: None,
                 range_not_satisfiable: false,
+                omit_content_length: false,
                 unavailable_first: None,
+                unavailable_ranges: Vec::new(),
+                unavailable_fired: Arc::new(Mutex::new(HashMap::new())),
                 stall_after: None,
                 max_header_bytes: None,
                 corrupt: Vec::new(),
@@ -419,6 +431,18 @@ impl ChaosServerBuilder {
         self
     }
 
+    /// Serve every body chunked, with no `Content-Length`.
+    ///
+    /// The client then learns where the body ended only from the framing, so an error frame after the
+    /// last data frame reaches it instead of being hidden behind a satisfied byte count. Pair with
+    /// [`reset_after_range`](Self::reset_after_range) for a server that delivers everything and then
+    /// resets.
+    #[must_use]
+    pub fn omit_content_length(mut self) -> Self {
+        self.cfg.omit_content_length = true;
+        self
+    }
+
     /// Answer any request carrying a `Range` header with `416 Range Not Satisfiable`, forcing a
     /// resume to demote to a fresh `200` from zero.
     #[must_use]
@@ -432,6 +456,21 @@ impl ChaosServerBuilder {
     #[must_use]
     pub fn service_unavailable(mut self, times: u64, retry_after: RetryAfter) -> Self {
         self.cfg.unavailable_first = Some((times, retry_after));
+        self
+    }
+
+    /// Answer the first `times` requests whose `Range` starts at `start` with `503` and the given
+    /// `Retry-After`, then serve that range normally.
+    ///
+    /// Unlike [`service_unavailable`](Self::service_unavailable), which counts from the connection's
+    /// very first request and so lands on a range-capability probe, this targets one segment the way
+    /// [`drop_range_at`](Self::drop_range_at) does: the rest of the transfer proceeds while that
+    /// segment is refused.
+    #[must_use]
+    pub fn unavailable_range_at(mut self, start: u64, times: u64, retry_after: RetryAfter) -> Self {
+        self.cfg
+            .unavailable_ranges
+            .push((start, times, retry_after));
         self
     }
 
@@ -578,6 +617,24 @@ async fn handle(
         return Ok(service_unavailable(retry_after));
     }
 
+    // The same refusal, keyed on one segment's range start instead of the connection's request
+    // number, so a transfer's probe is not the thing that absorbs it.
+    if !cfg.unavailable_ranges.is_empty()
+        && let Some(start) = parse_range_start(req.headers().get(RANGE))
+        && let Some((_, times, retry_after)) =
+            cfg.unavailable_ranges.iter().find(|(s, _, _)| *s == start)
+    {
+        let mut fired = cfg
+            .unavailable_fired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let count = fired.entry(start).or_insert(0);
+        if *count < *times {
+            *count += 1;
+            return Ok(service_unavailable(retry_after));
+        }
+    }
+
     // A server that cannot satisfy the range refuses every ranged request, forcing a resume to demote
     // to a fresh request from zero.
     if cfg.range_not_satisfiable && req.headers().get(RANGE).is_some() {
@@ -637,9 +694,12 @@ async fn handle(
     };
 
     let body_len = end - start;
-    let mut builder = Response::builder()
-        .status(status)
-        .header(CONTENT_LENGTH, body_len);
+    let mut builder = Response::builder().status(status);
+    // Without a declared length the response goes out chunked, so the client learns the body ended
+    // only from the framing rather than from a byte count it can check against.
+    if !cfg.omit_content_length {
+        builder = builder.header(CONTENT_LENGTH, body_len);
+    }
     if cfg.accept_ranges {
         builder = builder.header(ACCEPT_RANGES, "bytes");
     }
@@ -1261,6 +1321,29 @@ mod tests {
         let ok = client.get(server.url("f.bin")).send().await.unwrap();
         assert_eq!(ok.status().as_u16(), 200);
         assert_eq!(ok.bytes().await.unwrap().len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn one_range_can_be_refused_while_the_rest_is_served() {
+        let server = ChaosServer::builder(5, 4096)
+            .unavailable_range_at(1000, 2, RetryAfter::Seconds(1))
+            .start()
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let get = |range: &'static str| {
+            let client = client.clone();
+            let url = server.url("f.bin");
+            async move { client.get(url).header("Range", range).send().await.unwrap() }
+        };
+
+        // The targeted range is refused twice, then served; a different range is never refused.
+        assert_eq!(get("bytes=1000-1999").await.status().as_u16(), 503);
+        assert_eq!(get("bytes=2000-2999").await.status().as_u16(), 206);
+        assert_eq!(get("bytes=1000-1999").await.status().as_u16(), 503);
+        let served = get("bytes=1000-1999").await;
+        assert_eq!(served.status().as_u16(), 206);
+        assert_eq!(served.bytes().await.unwrap().len(), 1000);
     }
 
     #[tokio::test]
