@@ -242,6 +242,26 @@ if tr ',' '\n' <<<"$selection" | grep -qx mock; then
       "apogee-cli resolves apogee-secrets with: $selection")"
 fi
 
+# 9b. The shipping launcher can still read this machine's certificate authorities. `reqwest`'s
+#    `rustls-tls` alone resolves to `rustls-tls-webpki-roots`, a Mozilla set compiled into the binary,
+#    and under it the platform's store is never opened. `apogee-core/src/trust.rs` narrows the login
+#    client to four embedded roots and offers `APOGEE_TLS_SYSTEM_ROOTS` as the one way out; that hatch
+#    is for the user behind a TLS-intercepting proxy, whose root is installed on their machine and
+#    nowhere else, so on a webpki-only build it restored a list that could not contain it and left
+#    them exactly where they started. A unit test covers this, but only on a machine whose store the
+#    test can write to, so the resolved feature is asserted here too. Read off `cargo tree` for the
+#    same reason gate 9a is: the manifest names a workspace dependency, and what any one package
+#    resolves is a different question from what the line says.
+selection=$(cargo tree -p apogee-cli -e normal --prefix none -f '{f} {p}' \
+  | awk '$2 == "reqwest" { print $1 }' | sort -u)
+if ! tr ',' '\n' <<<"$selection" | grep -qx rustls-tls-native-roots; then
+  report "the launcher cannot read this machine's certificate authorities" \
+    "$(printf '%s\n%s\n%s' \
+      'reqwest resolves without rustls-tls-native-roots, so APOGEE_TLS_SYSTEM_ROOTS restores a' \
+      'root set compiled into the binary and a user behind an intercepting proxy has no way in.' \
+      "apogee-cli resolves reqwest with: $selection")"
+fi
+
 # 10. Unsafe code has exactly one home. The workspace lint is `deny` rather than `forbid` so that the
 #    Windows arm of the fallback secret store can set an owner-only access list through advapi32,
 #    which the standard library has no API for. `deny` is overridable where `forbid` was not, and the
