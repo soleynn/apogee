@@ -18,6 +18,9 @@ sha1.workspace = true
 sha2.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
+# Seeds the retry backoff's jitter generator once per fetcher. Wait times only, never a secret, so
+# the system generator is read once and a counter-based mixer supplies every draw after it.
+getrandom.workspace = true
 # HttpRangeSource implements zipatch's RangeSource seam (the only in-workspace edge).
 apogee-zipatch = { path = "../apogee-zipatch" }
 

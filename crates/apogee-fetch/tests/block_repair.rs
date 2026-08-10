@@ -1,7 +1,9 @@
 //! Property test: an arbitrary set of dirty blocks is each re-fetched exactly once, and the file
 //! still verifies byte-for-byte, with no other range re-served.
 
-use apogee_fetch::{DownloadSpec, Fetcher, Validator};
+use std::time::Duration;
+
+use apogee_fetch::{DownloadSpec, Fetcher, RetryPolicy, Validator};
 use apogee_test_support::chaos::{ChaosServer, block_hashes, generated_vec};
 use proptest::prelude::*;
 use tokio_util::sync::CancellationToken;
@@ -53,8 +55,11 @@ proptest! {
             .build()
             .unwrap();
 
+            // Byte accounting, not timing: the repair's backoff is compressed so a 16-case run does
+            // not spend most of its wall clock waiting.
             let verified = Fetcher::builder()
                 .max_connections_per_file(4)
+                .retry_policy(RetryPolicy::default().base_delay(Duration::from_millis(1)))
                 .build()
                 .unwrap()
                 .download(&spec, None, CancellationToken::new())

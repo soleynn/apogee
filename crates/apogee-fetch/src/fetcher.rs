@@ -12,16 +12,18 @@ use crate::job::Job;
 use crate::limiter::LimitHandle;
 use crate::probe::CapabilityCache;
 use crate::progress::Progress;
+use crate::retry::{Jitter, RetryPolicy};
 use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
-/// The default connection-inactivity timeout before a segment is re-queued.
+/// The default connection-inactivity timeout before a transfer is re-queued.
 const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// State shared by every clone of a [`Fetcher`]: the job/connection scheduler, the speed limiter, the
-/// per-host capability cache, and the segmentation config. Cloning the fetcher is cheap and shares all
-/// of it, so the caps and the cache hold across concurrently submitted jobs.
+/// per-host capability cache, the retry policy and its jitter source, and the segmentation config.
+/// Cloning the fetcher is cheap and shares all of it, so the caps and the cache hold across
+/// concurrently submitted jobs.
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) scheduler: Arc<Scheduler>,
@@ -29,6 +31,10 @@ pub(crate) struct Shared {
     pub(crate) capabilities: CapabilityCache,
     pub(crate) max_connections_per_file: usize,
     pub(crate) stall_timeout: Duration,
+    pub(crate) retry: RetryPolicy,
+    /// One jitter source per fetcher, so every retry site of every job draws from a generator seeded
+    /// once rather than one seeded per transfer.
+    pub(crate) jitter: Arc<Jitter>,
 }
 
 /// A resumable, verified downloader. A cheap handle over a pooled HTTP client and the shared
@@ -187,6 +193,7 @@ pub struct FetcherBuilder {
     max_connections_total: usize,
     speed_limit: Option<LimitHandle>,
     stall_timeout: Duration,
+    retry: RetryPolicy,
 }
 
 impl Default for FetcherBuilder {
@@ -197,6 +204,7 @@ impl Default for FetcherBuilder {
             max_connections_total: 24,
             speed_limit: None,
             stall_timeout: DEFAULT_STALL_TIMEOUT,
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -230,11 +238,21 @@ impl FetcherBuilder {
         self
     }
 
-    /// How long a segment connection may make no progress before it is killed and re-queued
-    /// (default 15 s). A dead CDN node is detected by this inactivity timeout.
+    /// How long a connection may make no progress before it is killed and re-queued (default 15 s).
+    /// A dead CDN node is detected by this inactivity timeout, on both the segmented and the
+    /// single-connection path.
     #[must_use]
     pub fn stall_timeout(mut self, timeout: Duration) -> Self {
         self.stall_timeout = timeout;
+        self
+    }
+
+    /// How this fetcher's transfers back off and how many attempts each stuck range gets (default
+    /// [`RetryPolicy::default`]). One policy covers every retry site: a dropped or silent connection,
+    /// a block that failed its hash, the range probe, and a throttling server.
+    #[must_use]
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
         self
     }
 
@@ -249,6 +267,8 @@ impl FetcherBuilder {
             capabilities: CapabilityCache::default(),
             max_connections_per_file: self.max_connections_per_file.max(1),
             stall_timeout: self.stall_timeout,
+            retry: self.retry,
+            jitter: Arc::new(Jitter::new()),
         })
     }
 
