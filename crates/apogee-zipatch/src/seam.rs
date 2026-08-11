@@ -136,6 +136,9 @@ impl KeepFilter {
 }
 
 /// Identifies one source patch file to a [`RangeSource`].
+///
+/// Frozen: `apogee-fetch`'s HTTP adapter reads the public index field, and its 1.0 surface names
+/// this type in a trait impl, so the tuple shape holds until both crates take a major together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchId(pub u32);
 
@@ -183,6 +186,10 @@ pub trait PatchSink {
 /// Random-access byte-range reads over one source patch file. Ranges are pre-merged and sorted by
 /// the caller. The local implementor is `LocalPatchSource`; the HTTP one (`HttpRangeSource`) lives
 /// in `apogee-fetch`.
+///
+/// Frozen: the HTTP implementor is public API of a crate with a semver commitment, and a trait
+/// impl's signature cannot move without breaking it, so this method's shape (and the error variants
+/// an implementor can build, noted in `error.rs`) hold until both crates take a major together.
 pub trait RangeSource {
     fn read_ranges(
         &mut self,
