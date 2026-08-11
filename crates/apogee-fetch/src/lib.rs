@@ -39,7 +39,7 @@ mod validator;
 
 pub use error::{FetchError, SpecError};
 pub use fetcher::{Fetcher, FetcherBuilder};
-pub use hash::DigestPin;
+pub use hash::{DigestPin, HexPins};
 pub use headers::HeaderPolicy;
 pub use job::Job;
 pub use limiter::LimitHandle;
