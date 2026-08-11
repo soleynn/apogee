@@ -43,10 +43,6 @@ apogee-test-support = { path = "../apogee-test-support" }
 serial_test.workspace = true
 # A prefix handle over a scratch directory, so the install tests need no real wine.
 apogee-runtime = { path = "../apogee-runtime", features = ["testing"] }
-# Two gated tests build a client that trusts the test server's certificate and hand it to the fetcher.
-# A dev-dependency because that is the whole of it: nothing under `src/` names an HTTP client, and this
-# crate reaches the network through `apogee-fetch` or not at all.
-reqwest.workspace = true
 
 [[test]]
 name = "verb_wine"

@@ -139,12 +139,21 @@ pub enum PatchError {
         #[source]
         source: std::io::Error,
     },
-    /// A download failed for a reason with no typed home here. Deliberately not `#[from]`: an
-    /// unwritten `?` would flatten the arms that do have one, [`OutOfSpace`](Self::OutOfSpace) and
-    /// [`Cancelled`](Self::Cancelled), back into "acquire failed". Every fetch failure in this crate
-    /// is routed by hand.
-    #[error("acquire failed")]
-    Acquire(#[source] FetchError),
+    /// A download failed for a reason with no typed home here, while acquiring patch `index` of
+    /// `repo`'s chain: without those two, a failed 200-patch install reads as "acquire failed" and
+    /// names no patch. Deliberately not `#[from]`: an unwritten `?` would flatten the arms that do
+    /// have one, [`OutOfSpace`](Self::OutOfSpace) and [`Cancelled`](Self::Cancelled), back into
+    /// "acquire failed". Every fetch failure in this crate is routed by hand.
+    #[error("acquire failed for {repo:?} patch {index}")]
+    Acquire {
+        /// The repository whose chain was being acquired.
+        repo: Repo,
+        /// The failed patch's zero-based position in the install's acquisition order.
+        index: u32,
+        /// The download failure itself.
+        #[source]
+        source: FetchError,
+    },
     #[error("{broken} broken part(s) in {repo:?}")]
     Verify {
         repo: Repo,

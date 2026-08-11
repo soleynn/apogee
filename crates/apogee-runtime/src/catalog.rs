@@ -4,7 +4,7 @@
 //! [`Catalog::from_json_bytes`] is a pure, total parser over untrusted input (the fuzz entry point);
 //! [`Catalog::parse_and_verify`] gates it behind the signature check.
 
-use apogee_fetch::DigestPin;
+use apogee_fetch::{DigestPin, HexPins};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use url::Url;
@@ -287,11 +287,13 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
         _ => return Err(CatalogError::UnknownRunnerKind { kind: r.kind }),
     };
     let archive = build_archive(r.archive)?;
-    let pin = DigestPin::from_hex(r.blake3.as_deref(), r.sha256.as_deref()).ok_or_else(|| {
-        CatalogError::BadPin {
-            name: r.name.clone(),
-            version: r.version.clone(),
-        }
+    let pin = DigestPin::from_hex(HexPins {
+        blake3: r.blake3.as_deref(),
+        sha256: r.sha256.as_deref(),
+    })
+    .ok_or_else(|| CatalogError::BadPin {
+        name: r.name.clone(),
+        version: r.version.clone(),
     })?;
     let url = Url::parse(&r.url).map_err(|_| CatalogError::BadUrl {
         name: r.name.clone(),
@@ -310,11 +312,13 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
 
 fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
     let archive = build_archive(t.archive)?;
-    let pin = DigestPin::from_hex(t.blake3.as_deref(), t.sha256.as_deref()).ok_or_else(|| {
-        CatalogError::BadPin {
-            name: t.name.clone(),
-            version: t.version.clone(),
-        }
+    let pin = DigestPin::from_hex(HexPins {
+        blake3: t.blake3.as_deref(),
+        sha256: t.sha256.as_deref(),
+    })
+    .ok_or_else(|| CatalogError::BadPin {
+        name: t.name.clone(),
+        version: t.version.clone(),
     })?;
     let url = Url::parse(&t.url).map_err(|_| CatalogError::BadUrl {
         name: t.name.clone(),
@@ -330,11 +334,13 @@ fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
 }
 
 fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
-    let pin = DigestPin::from_hex(d.blake3.as_deref(), d.sha256.as_deref()).ok_or_else(|| {
-        CatalogError::BadPin {
-            name: "dxvk".to_owned(),
-            version: d.version.clone(),
-        }
+    let pin = DigestPin::from_hex(HexPins {
+        blake3: d.blake3.as_deref(),
+        sha256: d.sha256.as_deref(),
+    })
+    .ok_or_else(|| CatalogError::BadPin {
+        name: "dxvk".to_owned(),
+        version: d.version.clone(),
     })?;
     let url = Url::parse(&d.url).map_err(|_| CatalogError::BadUrl {
         name: "dxvk".to_owned(),
@@ -343,7 +349,10 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
     let format = parse_format(d.format.as_deref())?;
     // dxvk-nvapi is all-or-nothing: both its URL and its pin, or neither. A lone URL or lone pin is a
     // malformed row (an unpinned download would violate the verify-before-trust rule).
-    let nvapi_pin = DigestPin::from_hex(d.nvapi_blake3.as_deref(), d.nvapi_sha256.as_deref());
+    let nvapi_pin = DigestPin::from_hex(HexPins {
+        blake3: d.nvapi_blake3.as_deref(),
+        sha256: d.nvapi_sha256.as_deref(),
+    });
     let nvapi = match (d.nvapi_url, nvapi_pin) {
         (None, None) => None,
         (Some(nvapi_url), Some(pin)) => {

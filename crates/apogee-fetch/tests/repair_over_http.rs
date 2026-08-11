@@ -24,11 +24,10 @@ async fn serve(chain: &[Vec<u8>]) -> Result<(Vec<ChaosServer>, Vec<HttpSource>),
     let mut sources = Vec::new();
     for (i, patch) in chain.iter().enumerate() {
         let server = ChaosServer::serving(patch.clone()).start().await?;
-        sources.push(HttpSource {
-            url: server.url(&format!("p{i}.patch")),
-            expected_len: patch.len() as u64,
-            policy: None,
-        });
+        sources.push(HttpSource::new(
+            server.url(&format!("p{i}.patch")),
+            patch.len() as u64,
+        ));
         servers.push(server);
     }
     Ok((servers, sources))
@@ -165,17 +164,14 @@ async fn repair_over_http_packs_under_a_strict_header_limit() -> Result<(), Box<
         .max_request_header_bytes(150)
         .start()
         .await?;
-    let sources = vec![HttpSource {
-        url: server.url("p0.patch"),
-        expected_len: chain[0].len() as u64,
-        policy: None,
-    }];
+    let sources = vec![HttpSource::new(
+        server.url("p0.patch"),
+        chain[0].len() as u64,
+    )];
     let fetcher = Fetcher::builder().build()?;
     let handle = tokio::runtime::Handle::current();
-    let mut src = HttpRangeSource::new(fetcher, handle, sources).with_packing(RangePacking {
-        max_ranges: 256,
-        max_range_header_bytes: 12,
-    });
+    let mut src = HttpRangeSource::new(fetcher, handle, sources)
+        .with_packing(RangePacking::default().max_range_header_bytes(12));
 
     let root = applied.path().to_path_buf();
     let outcome =

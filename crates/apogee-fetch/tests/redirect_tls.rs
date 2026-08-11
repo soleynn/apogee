@@ -5,34 +5,22 @@
 //! TLS; a server that then answers `302` with an `http://` `Location` walks the transfer into exactly
 //! the state that was refused, after the check that would have caught it has already run.
 //!
-//! Gated behind the `testing` feature because it needs a client that trusts the chaos server's
-//! self-signed loopback certificate. That is dependency injection, not a certificate bypass: the
-//! injected client still validates the server against that one root. It carries the shipped redirect
-//! policy through `Fetcher::redirect_policy`, so what is under test is the policy that ships rather
-//! than a copy of it.
+//! Gated behind the `testing` feature because the fetcher has to trust the chaos server's
+//! self-signed loopback certificate. That is an extra trusted root, not a certificate bypass: the
+//! client still validates the server against that one root, and it comes out of the shipped
+//! `build()`, so what is under test is the redirect policy that ships rather than a copy of it.
 
 use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Validator};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, generated_vec};
 use tokio_util::sync::CancellationToken;
 
-/// A client that trusts `cert_der` (and nothing else new), carrying the same no-compression setting
-/// and the same redirect policy the real fetcher is built with.
-fn client_trusting(cert_der: &[u8]) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
-    let cert = reqwest::Certificate::from_der(cert_der)?;
-    Ok(reqwest::Client::builder()
-        .gzip(false)
-        .deflate(false)
-        .add_root_certificate(cert)
-        .redirect(Fetcher::redirect_policy())
-        .referer(false)
-        .build()?)
-}
-
-/// A fetcher over that client. `from_client` takes the default retry policy, which is what makes the
-/// request-count assertion below worth making: were a refusal treated as a transient fault, the count
-/// would be the full attempt budget rather than one.
+/// The shipped fetcher, trusting `cert_der` (and nothing else new). It takes the default retry
+/// policy, which is what makes the request-count assertion below worth making: were a refusal
+/// treated as a transient fault, the count would be the full attempt budget rather than one.
 fn fetcher(cert_der: &[u8]) -> Result<Fetcher, Box<dyn std::error::Error>> {
-    Ok(Fetcher::from_client(client_trusting(cert_der)?))
+    Ok(Fetcher::builder()
+        .extra_root_certificate(cert_der)
+        .build()?)
 }
 
 #[tokio::test]
@@ -108,15 +96,11 @@ async fn a_redirect_that_stays_on_https_is_followed() {
         .unwrap();
 
     // One client has to trust both loopback certificates, since the hop crosses between them.
-    let mut builder = reqwest::Client::builder()
-        .gzip(false)
-        .deflate(false)
-        .redirect(Fetcher::redirect_policy())
-        .referer(false);
-    for der in [front.cert_der().unwrap(), store.cert_der().unwrap()] {
-        builder = builder.add_root_certificate(reqwest::Certificate::from_der(der).unwrap());
-    }
-    let fetcher = Fetcher::from_client(builder.build().unwrap());
+    let fetcher = Fetcher::builder()
+        .extra_root_certificate(front.cert_der().unwrap())
+        .extra_root_certificate(store.cert_der().unwrap())
+        .build()
+        .unwrap();
 
     let spec = DownloadSpec::builder(
         front.url("asset.bin"),

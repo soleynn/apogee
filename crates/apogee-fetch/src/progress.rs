@@ -68,12 +68,15 @@ pub enum Phase {
 /// successive events the way it already does for `bytes_done`. A resumed transfer starts from zero:
 /// these count this process's work, not the file's history.
 ///
-/// Exhaustive, unlike the [`Progress`] carrying it. The event stays open because a consumer only
-/// ever reads it, but a consumer's *tests* have to build one of these to check what its own shell
-/// renders, and a `#[non_exhaustive]` bag of counters cannot be built at all from outside. The cost
-/// is that a seventh counter breaks those tests rather than being absorbed silently, which is the
-/// direction worth failing in: the field above this one is `phase`, which every relay in this
-/// workspace quietly drops, and nothing anywhere went red about it.
+/// Exhaustive, unlike the [`Progress`] carrying it, and deliberately so at the version freeze: a
+/// consumer that destructures every field (the CLI's renderer does, on purpose) is the enforcement
+/// that keeps a future counter from rotting write-only, and `#[non_exhaustive]` would forbid exactly
+/// that destructure. Sealing would still leave the struct buildable from outside (field assignment
+/// onto a [`Default`] survives; a literal and functional-update syntax do not), so constructibility
+/// is not what decides this; the destructure guard is. The cost is that a seventh counter is a
+/// breaking change consumers must acknowledge rather than absorb silently, which is the direction
+/// worth failing in: the field above this one is `phase`, which every relay in this workspace
+/// quietly drops, and nothing anywhere went red about it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Recoveries {
     /// Attempts charged to the retry budget after a failed one, over every unit of work the

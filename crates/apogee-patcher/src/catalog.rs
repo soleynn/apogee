@@ -11,7 +11,7 @@
 //! [`IndexEntry`] hands back the [`IndexSource`] a repair fetches under, and the base its source
 //! patches are served under ([`IndexEntry::source_base`]) when the row names one.
 
-use apogee_fetch::DigestPin;
+use apogee_fetch::{DigestPin, HexPins};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use thiserror::Error;
@@ -204,11 +204,13 @@ fn build_entry(r: RawIndex) -> Result<IndexEntry, IndexCatalogError> {
     let repo = parse_repo(&r.repo).ok_or_else(|| IndexCatalogError::UnknownRepo {
         repo: r.repo.clone(),
     })?;
-    let pin = DigestPin::from_hex(r.blake3.as_deref(), r.sha256.as_deref()).ok_or_else(|| {
-        IndexCatalogError::BadPin {
-            repo: r.repo.clone(),
-            version: r.version.clone(),
-        }
+    let pin = DigestPin::from_hex(HexPins {
+        blake3: r.blake3.as_deref(),
+        sha256: r.sha256.as_deref(),
+    })
+    .ok_or_else(|| IndexCatalogError::BadPin {
+        repo: r.repo.clone(),
+        version: r.version.clone(),
     })?;
     let url = Url::parse(&r.url).map_err(|_| IndexCatalogError::BadUrl {
         repo: r.repo.clone(),

@@ -15,8 +15,22 @@ use sha2::{Digest as _, Sha256};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DigestPin {
+    /// A SHA256 digest, the function the pre-BLAKE3 catalogs pinned under.
     Sha256([u8; 32]),
+    /// A BLAKE3 digest, what our own signed manifests pin under today.
     Blake3([u8; 32]),
+}
+
+/// The hex spellings one manifest row may carry, one field per function. A struct rather than two
+/// positional `Option<&str>` parameters because the two are the same type: a swapped pair would
+/// compile and mint a pin under the wrong function, which is the exact hazard [`DigestPin`] exists
+/// to prevent. The field names are the row's key names, so a call site reads as the row does.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HexPins<'a> {
+    /// The row's BLAKE3 spelling, when present. Preferred when both are.
+    pub blake3: Option<&'a str>,
+    /// The row's SHA256 spelling, when present.
+    pub sha256: Option<&'a str>,
 }
 
 impl DigestPin {
@@ -28,11 +42,11 @@ impl DigestPin {
     /// builds that predate the newer one and the newer one for builds that have it, and every build
     /// that understands both takes the same arm, so two clients never verify one artifact differently.
     #[must_use]
-    pub fn from_hex(blake3: Option<&str>, sha256: Option<&str>) -> Option<Self> {
-        if let Some(hex) = blake3 {
+    pub fn from_hex(pins: HexPins<'_>) -> Option<Self> {
+        if let Some(hex) = pins.blake3 {
             return decode_hex(hex).map(Self::Blake3);
         }
-        decode_hex(sha256?).map(Self::Sha256)
+        decode_hex(pins.sha256?).map(Self::Sha256)
     }
 
     /// The expected digest bytes, whichever function they came from.
@@ -125,7 +139,11 @@ mod tests {
     /// that understands both verifies one artifact the same way.
     #[test]
     fn a_row_carrying_both_pins_is_read_as_blake3() {
-        let pin = DigestPin::from_hex(Some(A), Some(B)).expect("decodes");
+        let pin = DigestPin::from_hex(HexPins {
+            blake3: Some(A),
+            sha256: Some(B),
+        })
+        .expect("decodes");
         assert!(matches!(pin, DigestPin::Blake3(_)));
         assert_eq!(pin.bytes()[31], 1);
     }
@@ -134,14 +152,20 @@ mod tests {
     #[test]
     fn either_pin_alone_is_accepted_and_keeps_its_function() {
         assert!(matches!(
-            DigestPin::from_hex(Some(A), None),
+            DigestPin::from_hex(HexPins {
+                blake3: Some(A),
+                sha256: None
+            }),
             Some(DigestPin::Blake3(_))
         ));
         assert!(matches!(
-            DigestPin::from_hex(None, Some(A)),
+            DigestPin::from_hex(HexPins {
+                blake3: None,
+                sha256: Some(A)
+            }),
             Some(DigestPin::Sha256(_))
         ));
-        assert_eq!(DigestPin::from_hex(None, None), None);
+        assert_eq!(DigestPin::from_hex(HexPins::default()), None);
     }
 
     /// A malformed BLAKE3 pin is not silently answered by a well-formed SHA256 one beside it: the
@@ -149,7 +173,13 @@ mod tests {
     /// intend for that build.
     #[test]
     fn a_bad_blake3_pin_does_not_fall_through_to_a_good_sha256_one() {
-        assert_eq!(DigestPin::from_hex(Some("not-hex"), Some(A)), None);
+        assert_eq!(
+            DigestPin::from_hex(HexPins {
+                blake3: Some("not-hex"),
+                sha256: Some(A)
+            }),
+            None
+        );
     }
 
     /// Both halves of the decoder: the length, and the digits. A pin of the right length made of

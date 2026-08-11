@@ -55,28 +55,6 @@ impl Fetcher {
         FetcherBuilder::default()
     }
 
-    /// Construct a fetcher over a caller-supplied client. Test-only (gated behind the `testing`
-    /// feature, never compiled into a release build): it lets a test inject a client that trusts a
-    /// loopback test certificate, which the safe builder deliberately cannot be configured to do.
-    #[cfg(feature = "testing")]
-    #[must_use]
-    pub fn from_client(client: reqwest::Client) -> Self {
-        Self {
-            client,
-            shared: FetcherBuilder::default().shared(),
-        }
-    }
-
-    /// The redirect policy the safe builder installs. Test-only (gated behind the `testing` feature
-    /// alongside [`from_client`](Self::from_client)): a redirect policy can only be set while a
-    /// client is being built, so an injected client has no other way to carry the shipped one, and a
-    /// test that reimplemented it would prove nothing about what ships.
-    #[cfg(feature = "testing")]
-    #[must_use]
-    pub fn redirect_policy() -> reqwest::redirect::Policy {
-        crate::redirect::policy()
-    }
-
     /// Download `spec`'s source to its destination, returning proof it verified.
     ///
     /// Progress snapshots are sent on `progress` when provided; the sender is dropped when the
@@ -176,27 +154,35 @@ impl Fetcher {
         Job::new(handle, rx, cancel)
     }
 
-    /// Fetch a set of byte `ranges` (sorted, non-overlapping) of one `url`, delivering each fetched
-    /// span to `sink` as `(absolute_offset, bytes)`. `expected_len` is the source file's length,
-    /// cross-checked against each response's `Content-Range` total. This is the low-level scatter-
-    /// gather primitive behind repair; [`HttpRangeSource`](crate::HttpRangeSource) wraps it to
-    /// implement `apogee-zipatch`'s range seam.
+    /// Fetch a set of byte `ranges` (sorted, non-overlapping) of one `source`, delivering each
+    /// fetched span to `sink` as `(absolute_offset, bytes)`. The source names the URL, the file's
+    /// length (cross-checked against each response's `Content-Range` total), and the header policy.
+    /// This is the low-level scatter-gather primitive behind repair;
+    /// [`HttpRangeSource`](crate::HttpRangeSource) wraps it to implement `apogee-zipatch`'s range
+    /// seam.
     ///
     /// Ranges are packed into requests under `packing` (a count cap and a `Range` header byte budget),
     /// and each response is handled whether it is a single `206`, a `multipart/byteranges` body, or a
     /// range-ignoring `200`. A single attempt against one URL: mirror rotation and retry live in the
-    /// caller.
+    /// caller. `cancel` aborts between requests, during any wait (the connection slot, the send, the
+    /// throttle), and between body chunks; a caller that wants an uncancellable fetch passes a fresh
+    /// token.
+    ///
+    /// The sink's error type is pinned to [`FetchError`], deliberately: a generic error would buy
+    /// each caller its own type at the price of a type parameter on this signature forever, and the
+    /// one wrapper that needs to smuggle a foreign error through
+    /// ([`HttpRangeSource`](crate::HttpRangeSource)) captures it beside the fetch and re-surfaces it
+    /// afterward, which composes fine from outside.
     ///
     /// # Errors
     /// A [`FetchError`] for any transport, HTTP-status, length, or malformed-response fault, or the
     /// sink's own error propagated verbatim.
     pub async fn fetch_ranges<F>(
         &self,
-        url: &url::Url,
-        expected_len: u64,
+        source: &crate::HttpSource,
         ranges: &[std::ops::Range<u64>],
-        policy: Option<&crate::HeaderPolicy>,
         packing: crate::RangePacking,
+        cancel: CancellationToken,
         sink: F,
     ) -> Result<(), FetchError>
     where
@@ -206,7 +192,7 @@ impl Fetcher {
             client: &self.client,
             shared: &self.shared,
         };
-        crate::ranges::fetch_ranges(&engine, url, expected_len, ranges, policy, packing, sink).await
+        crate::ranges::fetch_ranges(&engine, source, ranges, packing, &cancel, sink).await
     }
 }
 
@@ -221,6 +207,10 @@ pub struct FetcherBuilder {
     speed_limit: Option<LimitHandle>,
     stall_timeout: Duration,
     retry: RetryPolicy,
+    /// DER roots a test fixture asks the client to trust, beside (never instead of) the system
+    /// store. Exists only under the `testing` feature; a release build has no way to hold one.
+    #[cfg(feature = "testing")]
+    extra_roots: Vec<Vec<u8>>,
 }
 
 impl Default for FetcherBuilder {
@@ -246,6 +236,8 @@ impl Default for FetcherBuilder {
             speed_limit: None,
             stall_timeout: DEFAULT_STALL_TIMEOUT,
             retry: RetryPolicy::default(),
+            #[cfg(feature = "testing")]
+            extra_roots: Vec::new(),
         }
     }
 }
@@ -309,6 +301,20 @@ impl FetcherBuilder {
         self
     }
 
+    /// Trust one additional root certificate (DER), for a test standing up a loopback TLS fixture.
+    /// Test-only (gated behind the `testing` feature, never compiled into a release build) and
+    /// outside the crate's version commitment, which covers the default feature set. This is
+    /// dependency injection, not a certificate bypass: the built client still validates the server
+    /// against that root, and everything else about it is exactly what ships, the shipped redirect
+    /// policy and flow-control window included, so a test through this knob exercises the real
+    /// client rather than a hand-rebuilt approximation.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn extra_root_certificate(mut self, der: &[u8]) -> Self {
+        self.extra_roots.push(der.to_vec());
+        self
+    }
+
     /// Assemble the shared scheduler/limiter/cache from the configured caps.
     fn shared(&self) -> Arc<Shared> {
         Arc::new(Shared {
@@ -328,9 +334,27 @@ impl FetcherBuilder {
     /// Build the configured [`Fetcher`].
     ///
     /// # Errors
-    /// [`FetchError::Client`] if the HTTP client cannot be constructed.
+    /// [`FetchError::Config`] if `max_files * max_connections_per_file` exceeds
+    /// `max_connections_total` (see [`FetcherBuilder::default`] for why that combination cannot be
+    /// served); [`FetchError::Client`] if the HTTP client cannot be constructed.
     pub fn build(self) -> Result<Fetcher, FetchError> {
-        let client = reqwest::Client::builder()
+        // The scheduler clamps each cap to at least 1, so the invariant is checked over the values
+        // that will actually run.
+        let (files, per_file, total) = (
+            self.max_files.max(1),
+            self.max_connections_per_file.max(1),
+            self.max_connections_total.max(1),
+        );
+        if files * per_file > total {
+            return Err(FetchError::Config {
+                detail: format!(
+                    "{files} file(s) x {per_file} connection(s) per file exceeds the global cap of \
+                     {total}: admitted files would park segment workers on the semaphore and go \
+                     silent while the others transfer",
+                ),
+            });
+        }
+        let client_builder = reqwest::Client::builder()
             // Keep the on-wire bytes identical to the body bytes: verification and the length
             // cross-check must see exactly what the server sent, never a transparently decoded stream.
             .gzip(false)
@@ -364,11 +388,18 @@ impl FetcherBuilder {
             // The origin URL is none of the redirect target's business. reqwest adds a `Referer`
             // carrying it by default, which hands a third-party host the full path a transfer
             // started from, including a patch file's name. Nothing we fetch needs one.
-            .referer(false)
-            .build()
-            .map_err(|e| FetchError::Client {
-                source: std::io::Error::other(e),
-            })?;
+            .referer(false);
+        #[cfg(feature = "testing")]
+        let client_builder = self.extra_roots.iter().try_fold(client_builder, |b, der| {
+            reqwest::Certificate::from_der(der)
+                .map(|cert| b.add_root_certificate(cert))
+                .map_err(|e| FetchError::Client {
+                    source: std::io::Error::other(e),
+                })
+        })?;
+        let client = client_builder.build().map_err(|e| FetchError::Client {
+            source: std::io::Error::other(e),
+        })?;
         let shared = self.shared();
         Ok(Fetcher { client, shared })
     }
@@ -395,6 +426,30 @@ mod tests {
             b.max_connections_per_file,
             b.max_connections_total,
             b.max_files * b.max_connections_per_file - b.max_connections_total,
+        );
+    }
+
+    /// The combination the default docs warn about: it built and then quietly parked a quarter of
+    /// its workers, which read as multi-second per-file silences over a live install. Now it is
+    /// refused where the numbers are chosen.
+    #[test]
+    fn a_cap_triple_that_parks_workers_is_refused_at_build() {
+        let err = Fetcher::builder()
+            .max_files(4)
+            .max_connections_per_file(8)
+            .max_connections_total(24)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Config { .. }), "got {err:?}");
+
+        // The boundary itself is fine: every admitted file can run all of its segments.
+        assert!(
+            Fetcher::builder()
+                .max_files(4)
+                .max_connections_per_file(6)
+                .max_connections_total(24)
+                .build()
+                .is_ok()
         );
     }
 

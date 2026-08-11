@@ -11,11 +11,11 @@ use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
 
-use apogee_fetch::{FetchError, Fetcher};
+use apogee_fetch::{FetchError, Fetcher, RetryPolicy};
 use apogee_patcher::{
     InstallRequest, Installed, PatchError, PatchProgress, Patcher, PatcherConfig, Repo, SePatch,
 };
-use apogee_test_support::chaos::ChaosServer;
+use apogee_test_support::chaos::{ChaosServer, RetryAfter};
 use apogee_test_support::tree_manifest;
 use apogee_zipatch::fixtures;
 use sha1::{Digest, Sha1};
@@ -354,7 +354,10 @@ async fn a_corrupt_patch_is_rejected_before_apply() -> Result<(), Box<dyn Error>
     assert!(
         matches!(
             result,
-            Err(PatchError::Acquire(FetchError::BlockVerifyFailed { .. }))
+            Err(PatchError::Acquire {
+                source: FetchError::BlockVerifyFailed { .. },
+                ..
+            })
         ),
         "a corrupt patch must be rejected at acquire, got {result:?}",
     );
@@ -517,6 +520,64 @@ async fn a_malformed_entry_fails_before_any_download_and_leaks_no_task()
     assert!(
         !game_root.path().join("game").exists(),
         "nothing should be applied when the patchlist is rejected",
+    );
+    Ok(())
+}
+
+/// A throttling storm that outlives the download engine's own attempt budget restarts the transfer
+/// instead of failing the install: the patch-day shape where a runner tarball already survived and
+/// a game patch used to give up. The server 503s more requests than one transfer can spend, so the
+/// first `download` pass exhausts its budget and surfaces a transient failure; the acquisition's
+/// outer pass then rides the journal's resume to completion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_throttling_storm_outliving_the_engine_budget_is_survived() -> Result<(), Box<dyn Error>>
+{
+    let chain = fixtures::chain();
+    let versions = ["D2024.01.01.0000.0000", "D2024.01.02.0000.0000"];
+    let scratch = tempfile::tempdir()?;
+    fixtures::apply_chain(scratch.path(), &chain)?;
+    let baseline = tree_manifest::author(scratch.path())?;
+
+    // More refusals than one transfer's whole budget (a probe plus the per-range attempts), so the
+    // failure genuinely escapes the engine rather than being absorbed inside it.
+    let s0 = ChaosServer::serving(chain[0].clone())
+        .service_unavailable(12, RetryAfter::Seconds(0))
+        .start()
+        .await?;
+    let s1 = ChaosServer::serving(chain[1].clone()).start().await?;
+    let patches = vec![
+        game_entry(s0.url("p0.patch"), &chain[0], versions[0]),
+        game_entry(s1.url("p1.patch"), &chain[1], versions[1]),
+    ];
+
+    let store = tempfile::tempdir()?;
+    let game_root = tempfile::tempdir()?;
+    // A brisk retry policy so the engine's budget is spent in milliseconds rather than the shipped
+    // backoff's minutes; the outer pass is what is under test.
+    let fetcher = Fetcher::builder()
+        .stall_timeout(Duration::from_secs(5))
+        .retry_policy(
+            RetryPolicy::default()
+                .base_delay(Duration::from_millis(1))
+                .max_delay(Duration::from_millis(5)),
+        )
+        .build()?;
+    let patcher = Patcher::new(
+        fetcher,
+        PatcherConfig {
+            patch_store: store.path().to_path_buf(),
+            keep_patches: false,
+            ignore_space: false,
+            ..PatcherConfig::default()
+        },
+    );
+
+    let installed = patcher.install(request(game_root.path(), patches)).await?;
+    assert_eq!(installed.new_version, "2024.01.02.0000.0000");
+    tree_manifest::assert_tree_matches(
+        &game_root.path().join("game"),
+        &baseline,
+        Some(&is_ver_or_bck as &dyn Fn(&Path) -> bool),
     );
     Ok(())
 }

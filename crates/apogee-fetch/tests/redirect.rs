@@ -79,7 +79,6 @@ async fn a_cross_host_redirect_still_downloads_and_verifies() {
         .unwrap();
 
     let spec = sha_spec(front.url("asset.bin"), &dest, 71, len)
-        .header_policy(HeaderPolicy::Manifest)
         .build()
         .unwrap();
     let verified = fetcher(1)
@@ -323,9 +322,7 @@ async fn the_patch_session_id_follows_a_cross_host_redirect() {
         .unwrap();
 
     let spec = sha_spec(front.url("patch.bin"), &dest, 77, len)
-        .header_policy(HeaderPolicy::SePatch {
-            unique_id: Some("session-abc".to_owned()),
-        })
+        .header_policy(HeaderPolicy::se_patch(Some("session-abc".to_owned())))
         .build()
         .unwrap();
     fetcher(1)

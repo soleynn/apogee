@@ -269,6 +269,7 @@ async fn only_the_primarys_validator_is_journaled_for_a_later_resume() {
             sources,
             attempts,
             at_bytes,
+            ..
         } => {
             assert_eq!(sources, 2);
             assert_eq!(attempts, 4, "the budget was spent, not overrun");
@@ -380,6 +381,7 @@ async fn every_source_failing_ends_the_transfer_instead_of_spinning() {
             sources,
             attempts,
             at_bytes,
+            ..
         } => {
             assert_eq!(sources, 2);
             assert_eq!(attempts, 4, "the budget was spent, not overrun");

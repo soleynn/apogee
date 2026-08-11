@@ -400,9 +400,7 @@ async fn the_se_patch_header_policy_is_sent_on_every_request() {
     let (len, block_size) = (48 * MIB, 4 * MIB as u32);
     let server = ChaosServer::builder(29, len).start().await.unwrap();
     let spec = block_spec(&server, &dest, 29, len, block_size)
-        .header_policy(HeaderPolicy::SePatch {
-            unique_id: Some("unique-123".to_owned()),
-        })
+        .header_policy(HeaderPolicy::se_patch(Some("unique-123".to_owned())))
         .build()
         .unwrap();
     let fetcher = Fetcher::builder()
@@ -606,9 +604,7 @@ async fn the_header_policy_reaches_the_single_connection_path() {
         .await
         .unwrap();
     let spec = block_spec(&server, &dest, 37, len, block_size)
-        .header_policy(HeaderPolicy::SePatch {
-            unique_id: Some("uid-9".to_owned()),
-        })
+        .header_policy(HeaderPolicy::se_patch(Some("uid-9".to_owned())))
         .build()
         .unwrap();
 
