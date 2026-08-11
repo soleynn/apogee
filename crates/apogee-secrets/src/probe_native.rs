@@ -8,9 +8,7 @@
 //! jobs have neither. It is exercised by the manual pre-release pass. A cross-target check job does
 //! compile it, and the status table the classification below reads is tested on every host.
 
-use keyring::Entry;
-
-use crate::keyring_store::{BACKEND, SERVICE};
+use crate::keyring_store::{BACKEND, SERVICE, open};
 use crate::{BackendReport, BackendState};
 
 /// A key nothing ever writes. Reading it asks the store to answer without changing anything.
@@ -26,22 +24,27 @@ pub(crate) fn probe() -> BackendReport {
 }
 
 fn probe_state() -> BackendState {
-    classify(Entry::new(SERVICE, PROBE_KEY).and_then(|entry| entry.get_secret()))
+    classify(
+        open()
+            .and_then(|store| store.build(SERVICE, PROBE_KEY, None))
+            .and_then(|entry| entry.get_secret()),
+    )
 }
 
 /// What the store's answer to that read says about its condition.
 ///
 /// Split from the read so the truth table is a value rather than a machine: the read needs one of
 /// two operating systems, and the table needs none.
-fn classify(answer: Result<Vec<u8>, keyring::Error>) -> BackendState {
+fn classify(answer: Result<Vec<u8>, keyring_core::Error>) -> BackendState {
     match answer {
         // The key is never written, so a miss is the expected healthy answer; a hit would mean
         // something else wrote it, and the store still answered.
-        Ok(_) | Err(keyring::Error::NoEntry) => BackendState::Ready,
+        Ok(_) | Err(keyring_core::Error::NoEntry) => BackendState::Ready,
         // Windows raises this only when there is no credential store session at all. On macOS it
-        // covers an unavailable, missing, invalid, or read-only keychain; keyring drops the code, so
-        // the read-only case cannot be separated out here.
-        Err(keyring::Error::NoStorageAccess(_)) => BackendState::NoProvider,
+        // covers an unavailable, missing, invalid, or read-only keychain, plus a write-permissions
+        // refusal; the store boxes the code rather than reporting it, so the read-only case cannot be
+        // separated out here.
+        Err(keyring_core::Error::NoStorageAccess(_)) => BackendState::NoProvider,
         // A keychain that is shut rather than broken. It is worth writing to: the write raises the
         // unlock prompt and then succeeds, so reporting it as unreachable makes `is_usable()` false
         // and sends a front end to the fallback, or to keeping nothing, over a store that works
@@ -58,12 +61,16 @@ mod tests {
     #[test]
     fn a_store_that_answers_at_all_is_ready() {
         assert_eq!(classify(Ok(Vec::new())), BackendState::Ready);
-        assert_eq!(classify(Err(keyring::Error::NoEntry)), BackendState::Ready);
+        assert_eq!(
+            classify(Err(keyring_core::Error::NoEntry)),
+            BackendState::Ready
+        );
     }
 
     #[test]
     fn no_storage_access_is_no_provider() {
-        let err = keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("no session")));
+        let err =
+            keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("no session")));
         assert_eq!(classify(Err(err)), BackendState::NoProvider);
     }
 
@@ -71,7 +78,8 @@ mod tests {
     /// as a lock, which would tell a user to unlock a store that is not shut.
     #[test]
     fn a_failure_with_no_readable_status_is_unreachable() {
-        let err = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("something")));
+        let err =
+            keyring_core::Error::PlatformFailure(Box::new(std::io::Error::other("something")));
         assert_eq!(classify(Err(err)), BackendState::Unreachable);
     }
 
@@ -83,7 +91,7 @@ mod tests {
     #[test]
     fn a_shut_keychain_is_locked_and_therefore_still_usable() {
         for code in [-25308, -25293, -128] {
-            let err = keyring::Error::PlatformFailure(Box::new(
+            let err = keyring_core::Error::PlatformFailure(Box::new(
                 security_framework::base::Error::from_code(code),
             ));
             assert_eq!(classify(Err(err)), BackendState::Locked, "{code}");

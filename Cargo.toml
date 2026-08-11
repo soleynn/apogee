@@ -61,20 +61,30 @@ tracing          = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 zeroize          = { version = "1", features = ["derive"] }
 # domain-adjacent, gated to the crates that use them.
-# keyring has no `default` feature key: with no store feature named it selects an in-memory mock on
-# Linux, so the backend features are set per-target in apogee-secrets, the only crate that uses it.
-keyring          = "3"
-# A direct dependency of apogee-secrets alongside keyring, which folds "no session bus", "nothing
-# owns the name" and "collection locked" into one opaque variant. Backend classification reads the
-# Secret Service error itself, so it must resolve to the single version keyring also picks.
-secret-service   = "4"
+# The credential-store API, without any store attached. Its umbrella crate, `keyring`, is deliberately
+# not used: it selects the stores, and a target naming none of its features gets an in-memory mock
+# that answers every call. Its own documentation sends an application that picks its own backends
+# here instead, which is what apogee-secrets does, one store crate per target below.
+keyring-core     = "1"
+# The three stores, each selected by the target block that names it. Every classification this
+# workspace does reads the error the store boxed, by downcasting to a type both sides must have got
+# from the same package, so each store's own backend crate is pinned alongside it and scripts/audit.sh
+# asserts the resolver handed out one copy rather than two. That split is not a compile error: it
+# fails a downcast at runtime and flattens every condition into an opaque failure.
+zbus-secret-service-keyring-store = "1"
+apple-native-keyring-store       = "1"
+windows-native-keyring-store     = "1"
+# The Secret Service client the Linux store is built on, taken directly as well: the probe reports the
+# store's condition without going through a credential at all, and the import reads keys another
+# launcher owns. Must resolve to the single version the store crate picks.
+secret-service   = "5"
 # The D-Bus error names the classification above reads. Already in the graph under secret-service;
 # named here so the match is on typed variants rather than on a rendered string.
-zbus             = "4"
-# The Keychain's side of the same problem: keyring maps five status codes and boxes every other one
-# opaquely, and a locked keychain is among the others. Only `base::Error`, which carries the code, is
-# used, so the TLS-oriented default features are off. Must resolve to the version keyring picks for
-# macOS or the downcast that reads the code silently never matches; scripts/audit.sh asserts it.
+zbus             = "5"
+# The Keychain's side of the same problem: the Apple store maps a handful of status codes and boxes
+# every other one opaquely, and a locked keychain is among the others. Only `base::Error`, which
+# carries the code, is used, so the TLS-oriented default features are off. Must resolve to the version
+# that store picks or the downcast that reads the code silently never matches.
 security-framework = { version = "3", default-features = false }
 # RFC 6238 code generation. The `otpauth` feature is deliberately never enabled by any member: its
 # URI parser unwraps the host of an authority-less URI, so a pasted `otpauth:totp/x` takes the whole

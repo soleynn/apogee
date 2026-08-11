@@ -275,9 +275,9 @@ fn first_readable(
 /// session at all rather than that this one credential could not be read. Reported as a backend
 /// failure it would send a caller looking for a fault in the other launcher's storage.
 #[cfg(any(target_os = "windows", test))]
-fn classify_credential_read(err: &keyring::Error) -> SecretsError {
+fn classify_credential_read(err: &keyring_core::Error) -> SecretsError {
     match err {
-        keyring::Error::NoStorageAccess(_) => SecretsError::NoBackend,
+        keyring_core::Error::NoStorageAccess(_) => SecretsError::NoBackend,
         _ => SecretsError::Backend {
             step: "read the other launcher's credential",
         },
@@ -291,16 +291,17 @@ fn classify_credential_read(err: &keyring::Error) -> SecretsError {
 /// instead, so a blob that is not text becomes a condition rather than an error holding a password.
 #[cfg(target_os = "windows")]
 fn read_credential(target: &str, name: &str) -> Result<Import, SecretsError> {
-    use keyring::Entry;
+    let addressing = || SecretsError::Backend {
+        step: "address the other launcher's credential",
+    };
 
     // Service and user are recorded on the credential but are not what this store looks it up by,
-    // so they only have to be present. The target above is the whole key.
-    let entry =
-        Entry::new_with_target(target, crate::keyring_store::SERVICE, name).map_err(|_| {
-            SecretsError::Backend {
-                step: "address the other launcher's credential",
-            }
-        })?;
+    // so they only have to be present. The `target` modifier above is the whole key.
+    let modifiers = HashMap::from([("target", target)]);
+    let entry = crate::keyring_store::open()
+        .map_err(|_| addressing())?
+        .build(crate::keyring_store::SERVICE, name, Some(&modifiers))
+        .map_err(|_| addressing())?;
     match entry.get_secret() {
         // The blob is the password in another encoding, and the library hands it over as the only
         // surviving copy: it erases its own buffer before freeing it. Erased here on both the
@@ -310,7 +311,7 @@ fn read_credential(target: &str, name: &str) -> Result<Import, SecretsError> {
             blob.zeroize();
             Ok(non_empty(decoded?))
         }
-        Err(keyring::Error::NoEntry) => Ok(Import::Nothing),
+        Err(keyring_core::Error::NoEntry) => Ok(Import::Nothing),
         Err(err) => Err(classify_credential_read(&err)),
     }
 }
@@ -618,7 +619,7 @@ mod tests {
         /// import naming it something else would be the only place that disagrees.
         #[test]
         fn no_credential_store_session_is_not_a_credential_that_failed() {
-            let err = keyring::Error::NoStorageAccess(Box::new(std::io::Error::other(
+            let err = keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other(
                 "ERROR_NO_SUCH_LOGON_SESSION",
             )));
             assert!(matches!(
@@ -629,7 +630,8 @@ mod tests {
 
         #[test]
         fn any_other_store_failure_is_a_backend_failure() {
-            let err = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("broken")));
+            let err =
+                keyring_core::Error::PlatformFailure(Box::new(std::io::Error::other("broken")));
             assert!(matches!(
                 classify_credential_read(&err),
                 SecretsError::Backend { .. }

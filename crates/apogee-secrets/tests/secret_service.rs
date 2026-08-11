@@ -51,9 +51,10 @@ fn a_stored_secret_reads_back_and_deletes() {
     );
 }
 
-/// The keyring crate falls back to an in-process mock store when no backend feature is enabled, and
-/// a mock passes every round-trip in this file while saving nothing. Reading the item back off the
-/// bus, rather than through the same library that wrote it, is what tells the two apart.
+/// `keyring_core` ships an in-process mock store, and which store attaches is this crate's own
+/// choice of dependency: a build that attached the mock passes every round-trip in this file while
+/// saving nothing. Reading the item back off the bus, rather than through the same library that
+/// wrote it, is what tells the two apart.
 #[test]
 fn the_secret_reaches_the_bus_and_not_a_process_local_store() {
     let store = store();
