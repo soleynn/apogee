@@ -1,8 +1,9 @@
-//! The FFXIV patchlist block-hash scheme: one SHA1 over each fixed-size block of a file.
+//! Per-block SHA1 verification for a downloaded file.
 //!
-//! A file verified this way carries a SHA1 per block; a block that fails is re-fetched on its own,
-//! never the whole file. This module owns the layout math ([`BlockPlan`]) and the hashing of one block
-//! from disk ([`hash_block`]); the concurrent verification and re-fetch live with the transfer engine.
+//! A file verified this way carries one SHA1 per fixed-size block, so a block that fails re-fetches
+//! on its own rather than the whole file. [`BlockPlan`] is the block layout, [`hash_block`] hashes one
+//! block from disk, and [`BlockVerify`] tracks each block through its verification lifecycle; the
+//! concurrent claiming and re-fetch dispatch live with the transfer engine.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -15,11 +16,11 @@ use tokio::sync::Notify;
 use crate::intervals::IntervalSet;
 use crate::util::lock;
 
-/// The buffer size for reading a block back off disk to hash it.
+/// Buffer size for reading a block back off disk to hash it.
 const READ_CHUNK: usize = 64 * 1024;
 
-/// The block layout of a file: a SHA1 per fixed-size block over `[0, len)`. The last block is short
-/// when `len` is not a multiple of the block size.
+/// The block layout of a file: one SHA1 per fixed-size block over `[0, len)`; the last block is short
+/// when `len` isn't a multiple of the block size.
 pub(crate) struct BlockPlan {
     block_size: u64,
     len: u64,
@@ -27,8 +28,10 @@ pub(crate) struct BlockPlan {
 }
 
 impl BlockPlan {
-    /// Build a plan from a validator's `block_size`/`hashes` and the file's total length. The spec
-    /// builder has already checked `hashes.len() == len.div_ceil(block_size)` and `block_size > 0`.
+    /// Build a plan from a validator's block size, hashes, and the file's total length.
+    ///
+    /// Assumes `hashes.len() == len.div_ceil(block_size)` and `block_size > 0`, both already checked
+    /// by the spec builder.
     pub(crate) fn new(block_size: u32, hashes: Vec<[u8; 20]>, len: u64) -> Self {
         Self {
             block_size: u64::from(block_size),
@@ -42,8 +45,7 @@ impl BlockPlan {
         self.hashes.len() as u32
     }
 
-    /// The half-open byte range block `i` covers; the last block is short when `len` is not a multiple
-    /// of the block size.
+    /// The half-open byte range block `i` covers.
     pub(crate) fn block_range(&self, i: u32) -> Range<u64> {
         let start = u64::from(i) * self.block_size;
         let end = (start + self.block_size).min(self.len);
@@ -56,9 +58,8 @@ impl BlockPlan {
     }
 }
 
-/// Where a block sits in its verification lifecycle. `Pending` blocks whose bytes are durable become
-/// `Hashing`; a hash either confirms them (`Verified`) or, on a mismatch, resets them to `Pending` for
-/// a re-fetch.
+/// A block's place in its verification lifecycle: `Pending` becomes `Hashing` once its bytes are
+/// durable, then either `Verified` or back to `Pending` on a hash mismatch.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
     Pending,
@@ -77,14 +78,13 @@ struct BlockState {
 struct States {
     blocks: Vec<BlockState>,
     verified: u32,
-    /// The indices still in `Pending` (not yet claimed for hashing), so a claim scan is O(pending)
-    /// rather than O(blocks). A block is in this list iff its status is `Pending`.
+    /// Indices still `Pending`, so a claim scan is O(pending) rather than O(blocks).
     pending: Vec<u32>,
 }
 
-/// The shared, concurrent verification state for one block-hashed transfer. The transfer engine
-/// notifies [`notify`](Self::notify) as bytes become durable; a verifier task reads coverage, claims
-/// newly-ready blocks, hashes them off-thread, and reports the result back here.
+/// Shared, concurrent verification state for one block-hashed transfer: the transfer engine notifies
+/// [`notify`](Self::notify) as bytes become durable, and a verifier task claims, hashes, and reports
+/// blocks back through this type.
 pub(crate) struct BlockVerify {
     plan: std::sync::Arc<BlockPlan>,
     states: Mutex<States>,
@@ -127,13 +127,16 @@ impl BlockVerify {
         self.plan.expected(i)
     }
 
-    /// Claim every `Pending` block now fully covered, marking each `Hashing`, and return their indices.
-    /// Coverage is read from `covered` LIVE inside the same critical section that flips the status, so a
-    /// block cleared by a concurrent [`clear_and_reset`](Self::clear_and_reset) is never re-claimed
-    /// against stale coverage. Only still-pending indices are scanned, so this is O(pending). Lock order
-    /// is states-then-covered (the one order used crate-wide, so no inversion).
+    /// Claim every `Pending` block now fully covered, marking each `Hashing`, and return their
+    /// indices.
+    ///
+    /// Safe to call concurrently with [`clear_and_reset`](Self::clear_and_reset): coverage is read
+    /// inside the same critical section that flips the status, so a block it clears is never
+    /// re-claimed against stale coverage.
     pub(crate) fn take_ready(&self, covered: &Mutex<IntervalSet>) -> Vec<u32> {
         let mut states = lock(&self.states);
+        // Lock order is states-then-covered (the one order used crate-wide, so no inversion). Only
+        // still-pending indices are scanned, so this is O(pending) rather than O(blocks).
         let covered = lock(covered);
         let mut ready = Vec::new();
         for i in std::mem::take(&mut states.pending) {
@@ -155,9 +158,10 @@ impl BlockVerify {
         states.verified
     }
 
-    /// Record a failed hash: bump block `i`'s attempt count and return it. Status is left `Hashing`
-    /// until the caller decides between a re-fetch ([`clear_and_reset`](Self::clear_and_reset)) and
-    /// giving up, so a spent budget never leaves the block re-dispatchable.
+    /// Record a failed hash: bump block `i`'s attempt count and return it.
+    ///
+    /// Status stays `Hashing` until the caller calls [`clear_and_reset`](Self::clear_and_reset) or
+    /// gives up, so a spent budget never leaves the block re-dispatchable.
     pub(crate) fn bump_attempt(&self, i: u32) -> u32 {
         let mut states = lock(&self.states);
         let block = &mut states.blocks[i as usize];
@@ -165,10 +169,10 @@ impl BlockVerify {
         block.attempts
     }
 
-    /// Clear block `i`'s coverage and reset it to `Pending` in one step so a re-fetch re-hashes it. The
-    /// coverage removal and the status/pending update happen under the states lock together, so a
-    /// concurrent [`take_ready`](Self::take_ready) can never observe the block as pending-and-covered
-    /// mid-reset and re-dispatch it before its bytes are re-fetched.
+    /// Clear block `i`'s coverage and reset it to `Pending` in one step, so a re-fetch re-hashes it.
+    ///
+    /// The coverage removal and the status update happen under one lock, so a concurrent
+    /// [`take_ready`](Self::take_ready) can never observe the block as pending-and-covered mid-reset.
     pub(crate) fn clear_and_reset(&self, i: u32, covered: &Mutex<IntervalSet>, range: Range<u64>) {
         let mut states = lock(&self.states);
         lock(covered).remove(range.start, range.end);
@@ -177,9 +181,14 @@ impl BlockVerify {
     }
 }
 
-/// SHA1 the byte range `range` of the file at `part`, reading in bounded memory. Meant to run on a
-/// blocking worker (`spawn_blocking`): it uses positioned reads on a fresh handle, so it never touches
-/// the async transfer path and never contends with a worker writing a different block.
+/// SHA1 the byte range `range` of the file at `part`, reading in bounded memory.
+///
+/// Meant to run on a blocking worker (`spawn_blocking`): positioned reads on a fresh handle never
+/// touch the async transfer path or contend with a worker writing a different block.
+///
+/// # Errors
+///
+/// Returns an error on I/O failure, including reaching EOF before `range.end`.
 pub(crate) fn hash_block(part: &Path, range: Range<u64>) -> std::io::Result<[u8; 20]> {
     let mut file = std::fs::File::open(part)?;
     file.seek(SeekFrom::Start(range.start))?;

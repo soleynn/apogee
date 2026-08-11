@@ -1,4 +1,4 @@
-//! `Fetcher::fetch_ranges` against the chaos server: the three response shapes (single `206`,
+//! [`Fetcher::fetch_ranges`] against the chaos server: the three response shapes (single `206`,
 //! `multipart/byteranges`, and a range-ignoring `200`) and range packing under a strict request-
 //! header-size limit.
 

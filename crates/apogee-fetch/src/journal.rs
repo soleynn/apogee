@@ -391,9 +391,9 @@ impl<'a> Reader<'a> {
 }
 
 /// A stable 32-byte fingerprint of a validator's configuration, part of the journal's identity: a
-/// resume against a different validator no longer matches and restarts from zero. A leading tag
-/// byte keeps the variants from colliding, and the one multi-byte field is committed little-endian
-/// like every other integer in this file; both choices are part of the frozen format.
+/// resume against a different validator no longer matches and restarts from zero. A leading tag byte
+/// keeps the variants from colliding, and the one multi-byte field is committed little-endian like
+/// every other integer in this file; both choices are part of the frozen format.
 pub(crate) fn validator_config_digest(validator: &Validator) -> [u8; 32] {
     let mut hasher = Sha256::new();
     match validator {
@@ -532,8 +532,8 @@ mod tests {
         assert!(decode(&buf).is_none());
     }
 
-    /// A version this build does not write is a clean restart whichever side of the current one it is
-    /// on, which is what lets a later format bump the version and leave this decoder alone.
+    /// A version this build does not write is a clean restart on either side of the current one,
+    /// which is what lets a later format bump the version and leave this decoder alone.
     #[test]
     fn a_later_version_journal_is_start_over() {
         let mut buf = image(&identity(), &[(0, 1000)]);
@@ -541,8 +541,8 @@ mod tests {
         assert!(decode(&buf).is_none());
     }
 
-    /// The header layout as written down: field offsets, widths and encodings, read here without going
-    /// back through the encoder. Changing any of it is a format change and owes a version bump.
+    /// The header layout as written down: field offsets, widths and encodings, read here without
+    /// going back through the encoder. Changing any of it is a format change and owes a version bump.
     #[test]
     fn the_header_layout_is_the_committed_one() {
         let id = Identity {

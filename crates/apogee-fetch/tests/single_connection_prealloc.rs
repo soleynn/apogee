@@ -7,7 +7,8 @@
 //! served nothing, leave a resume pointed at the journal's watermark rather than at the reserved end,
 //! and reserve nothing at all when no length was ever stated.
 //!
-//! The disk-full half of the contract lives in `disk_full.rs`, next to the injection helper it needs.
+//! The disk-full half of the reservation contract lives in `disk_full.rs`, next to the
+//! fault-injection helper it needs.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

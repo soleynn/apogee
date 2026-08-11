@@ -1,9 +1,9 @@
-//! A coalesced set of half-open `[start, end)` byte intervals.
+//! A coalesced set of half-open `[start, end)` byte intervals, used to track which byte ranges of a
+//! download are durably on disk.
 //!
-//! The resume journal records which byte ranges are durably on disk. A single-connection download
-//! grows one prefix `[0, watermark)`; a segmented download completes ranges out of order, so the set
-//! coalesces overlapping and adjacent runs into the minimal cover. [`complement`](IntervalSet::complement)
-//! turns that cover into the gaps a resume must still fetch.
+//! A single-connection download grows one prefix `[0, watermark)`; a segmented download completes
+//! ranges out of order, so the set coalesces overlapping and adjacent runs into the minimal cover.
+//! [`IntervalSet::complement`] turns that cover into the gaps a resume must still fetch.
 
 use std::ops::Range;
 
@@ -15,12 +15,11 @@ pub(crate) struct IntervalSet {
 }
 
 impl IntervalSet {
-    /// An empty set.
     pub(crate) fn new() -> Self {
         Self { runs: Vec::new() }
     }
 
-    /// Build from unsorted, possibly overlapping runs, coalescing once. Empty/reversed runs are
+    /// Build from unsorted, possibly overlapping runs, coalescing once; empty or reversed runs are
     /// dropped.
     pub(crate) fn from_runs(runs: Vec<Range<u64>>) -> Self {
         let mut set = Self { runs };
@@ -28,9 +27,11 @@ impl IntervalSet {
         set
     }
 
-    /// Insert `[start, end)`, coalescing with any overlapping or adjacent runs. An empty or reversed
-    /// range (`start >= end`) is ignored. (The set is otherwise built in bulk via [`from_runs`]; this
-    /// incremental form backs the tests and the set's contract.)
+    /// Insert `[start, end)`, coalescing with any overlapping or adjacent runs; an empty or reversed
+    /// range (`start >= end`) is ignored.
+    // Only ever driven incrementally by the tests; production code builds in bulk via `from_runs`.
+    // Kept as the second half of the set's contract (insert and remove agree on invariants) even
+    // though it has no non-test caller.
     pub(crate) fn insert(&mut self, start: u64, end: u64) {
         if start >= end {
             return;
@@ -39,10 +40,11 @@ impl IntervalSet {
         self.coalesce();
     }
 
-    /// Remove `[start, end)` from the set: split a straddling run into up to two, trim a partial
-    /// overlap, and drop a fully-covered run. An empty or reversed range is ignored. Backs a dirty
-    /// block's clear-and-re-fetch, so `covered_len` drops by exactly the removed coverage. The runs
-    /// stay sorted, disjoint, and non-adjacent (each remainder lies within its original run's bounds).
+    /// Remove `[start, end)` from the set: splits a straddling run in two, trims a partial overlap,
+    /// and drops a fully-covered run. An empty or reversed range is ignored.
+    ///
+    /// Backs a dirty block's clear-and-re-fetch, so `covered_len` drops by exactly the removed
+    /// coverage.
     pub(crate) fn remove(&mut self, start: u64, end: u64) {
         if start >= end {
             return;
@@ -64,12 +66,13 @@ impl IntervalSet {
         self.runs = result;
     }
 
-    /// Whether `[range.start, range.end)` is fully covered. Since runs are coalesced (disjoint and
-    /// non-adjacent), a covered range lies within one single run. An empty range is trivially covered.
+    /// Whether `range` is fully covered; an empty range is trivially covered.
     pub(crate) fn covers(&self, range: &Range<u64>) -> bool {
         if range.start >= range.end {
             return true;
         }
+        // Runs are coalesced (disjoint, non-adjacent), so a covered range always lies within one
+        // single run; no need to check whether it spans several.
         self.runs
             .iter()
             .any(|r| r.start <= range.start && r.end >= range.end)
@@ -101,8 +104,8 @@ impl IntervalSet {
         self.runs.iter().map(|r| r.end - r.start).sum()
     }
 
-    /// The end of the contiguous run covering byte 0 (the resumable prefix), or 0 when 0 is uncovered.
-    /// For a single-connection download this is exactly the old watermark.
+    /// The end of the contiguous run covering byte 0 (the resumable prefix), or 0 when 0 is
+    /// uncovered. For a single-connection download this is exactly the old watermark.
     pub(crate) fn leading_end(&self) -> u64 {
         match self.runs.first() {
             Some(r) if r.start == 0 => r.end,
@@ -110,13 +113,13 @@ impl IntervalSet {
         }
     }
 
-    /// The number of disjoint runs (a bound the journal caps to keep decoding total).
+    /// The number of disjoint runs; the journal caps this to keep decoding bounded.
     pub(crate) fn len(&self) -> usize {
         self.runs.len()
     }
 
-    /// Sort by start and merge overlapping or adjacent runs in one linear pass. Runs are already few
-    /// (≈ segment count), so the sort is cheap.
+    /// Sort by start and merge overlapping or adjacent runs in one linear pass; runs are already few
+    /// (≈ the segment count), so the sort is cheap.
     fn coalesce(&mut self) {
         self.runs.retain(|r| r.start < r.end);
         self.runs.sort_unstable_by_key(|r| r.start);

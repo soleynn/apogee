@@ -1,46 +1,54 @@
-//! The whole-file digests a download can be pinned to, and the running hash behind each one.
+//! Whole-file digest pins a download can be verified against, and the running hash behind each one.
 //!
-//! SHA256 and BLAKE3 are both 32 bytes wide, so a digest's bytes never say which function produced
-//! them. A pin therefore carries its algorithm, and this module is the single place that turns one
-//! into a hasher: both engines verify through it, so neither can decide on its own what a pin means.
+//! SHA256 and BLAKE3 are both 32 bytes wide, so a digest's bytes alone don't say which function
+//! produced them: a [`DigestPin`] carries its algorithm, and this module is the only place that turns
+//! one into a [`FileHasher`].
 
 use sha2::{Digest as _, Sha256};
 
-/// A whole-file digest together with the hash that produced it.
+/// A whole-file digest together with the hash function that produced it.
 ///
-/// This is the shape a signed manifest's artifact pin takes once parsed. Two functions are accepted
-/// so a hosted catalog stays readable while it is being re-signed onto the newer one; which of them
-/// a row named travels with the pin rather than being inferred, because the widths are equal and a
-/// wrong guess would verify a file against the wrong function and reject good bytes.
+/// The shape a signed manifest's artifact pin takes once parsed. Two functions are accepted so a
+/// catalog stays readable while being re-signed onto the newer one; the algorithm travels with the
+/// pin rather than being inferred, since both digests are the same width and a wrong guess would
+/// verify a file against the wrong function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DigestPin {
-    /// A SHA256 digest, the function the pre-BLAKE3 catalogs pinned under.
+    /// A SHA256 digest: the function the pre-BLAKE3 catalogs pinned under.
     Sha256([u8; 32]),
-    /// A BLAKE3 digest, what our own signed manifests pin under today.
+    /// A BLAKE3 digest: what our own signed manifests pin under today.
     Blake3([u8; 32]),
 }
 
-/// The hex spellings one manifest row may carry, one field per function. A struct rather than two
-/// positional `Option<&str>` parameters because the two are the same type: a swapped pair would
-/// compile and mint a pin under the wrong function, which is the exact hazard [`DigestPin`] exists
-/// to prevent. The field names are the row's key names, so a call site reads as the row does.
+/// The hex spellings one manifest row may carry, one field per function.
+///
+/// A struct rather than two positional `&str` parameters: the two are the same type, so a swapped
+/// pair would compile and mint a pin under the wrong function, the exact hazard [`DigestPin`] exists
+/// to prevent.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HexPins<'a> {
-    /// The row's BLAKE3 spelling, when present. Preferred when both are.
+    /// The row's BLAKE3 spelling, when present; preferred when both are.
     pub blake3: Option<&'a str>,
     /// The row's SHA256 spelling, when present.
     pub sha256: Option<&'a str>,
 }
 
 impl DigestPin {
-    /// Decode a manifest row's pin from the hex spellings it may carry, **preferring BLAKE3** when a
-    /// row publishes both. `None` is a row that pins nothing decodable, which every catalog parser
-    /// turns into its own bad-pin error.
+    /// Decode a manifest row's pin from the hex spellings it may carry, preferring BLAKE3 when both
+    /// are present so every build that understands both functions verifies one artifact the same way.
     ///
-    /// The preference is what makes a mixed catalog behave: a row can carry the older digest for
-    /// builds that predate the newer one and the newer one for builds that have it, and every build
-    /// that understands both takes the same arm, so two clients never verify one artifact differently.
+    /// Returns `None` when neither spelling decodes; callers turn that into their own bad-pin error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_fetch::{DigestPin, HexPins};
+    ///
+    /// let hex = "ab".repeat(32);
+    /// let pin = DigestPin::from_hex(HexPins { blake3: Some(&hex), sha256: None });
+    /// assert!(matches!(pin, Some(DigestPin::Blake3(_))));
+    /// ```
     #[must_use]
     pub fn from_hex(pins: HexPins<'_>) -> Option<Self> {
         if let Some(hex) = pins.blake3 {
@@ -68,11 +76,11 @@ impl DigestPin {
 
 /// A running whole-file hash, in whichever function the download's pin named.
 ///
-/// The BLAKE3 state is boxed: it carries a 55-deep stack of chaining values and is more than an
-/// order of magnitude larger than a SHA256 state, and an inline variant would widen every value of
-/// this type (one per in-flight transfer) to the larger of the two.
+/// The BLAKE3 state is boxed: unboxed, its much larger chaining-value stack would widen every value
+/// of this type, one per in-flight transfer, to match it.
 pub(crate) enum FileHasher {
     Sha256(Sha256),
+    // ~55 chaining values deep and more than an order of magnitude larger than a Sha256 state.
     Blake3(Box<blake3::Hasher>),
 }
 
@@ -135,8 +143,8 @@ mod tests {
     const A: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     const B: &str = "0000000000000000000000000000000000000000000000000000000000000002";
 
-    /// The transition rule: a row that carries both is read as the newer function, so every build
-    /// that understands both verifies one artifact the same way.
+    /// Reading a mixed row as BLAKE3 is what keeps two builds that both understand it from verifying
+    /// the same artifact differently.
     #[test]
     fn a_row_carrying_both_pins_is_read_as_blake3() {
         let pin = DigestPin::from_hex(HexPins {
@@ -148,7 +156,7 @@ mod tests {
         assert_eq!(pin.bytes()[31], 1);
     }
 
-    /// Either spelling on its own is accepted, so a catalog can be re-signed one row at a time.
+    /// Accepting either spelling alone is what lets a catalog be re-signed one row at a time.
     #[test]
     fn either_pin_alone_is_accepted_and_keeps_its_function() {
         assert!(matches!(
@@ -168,9 +176,9 @@ mod tests {
         assert_eq!(DigestPin::from_hex(HexPins::default()), None);
     }
 
-    /// A malformed BLAKE3 pin is not silently answered by a well-formed SHA256 one beside it: the
-    /// row named a function, and falling through would verify against a digest the publisher did not
-    /// intend for that build.
+    /// A malformed BLAKE3 pin does not fall through to a well-formed SHA256 one beside it: the row
+    /// named a function, and falling through would verify against a digest the publisher didn't
+    /// intend.
     #[test]
     fn a_bad_blake3_pin_does_not_fall_through_to_a_good_sha256_one() {
         assert_eq!(
@@ -182,8 +190,8 @@ mod tests {
         );
     }
 
-    /// Both halves of the decoder: the length, and the digits. A pin of the right length made of
-    /// wrong characters is the one that would otherwise decode to silently wrong bytes.
+    /// Exercises both decoder checks, length and digit validity: right-length wrong-character input
+    /// is the case that would otherwise silently decode to wrong bytes.
     #[test]
     fn a_pin_must_be_64_hex_digits() {
         for bad in ["", "ab", &A[..63], &format!("{A}0"), &"g".repeat(64)] {
@@ -192,8 +200,8 @@ mod tests {
         assert_eq!(decode_hex(&A.to_uppercase()), decode_hex(A));
     }
 
-    /// The two hashers agree with their reference implementations over a multi-chunk input, and a
-    /// reset leaves a hasher indistinguishable from a fresh one (the restart-from-zero path).
+    /// Both hashers match their reference implementations over a multi-chunk input, and a reset
+    /// leaves one indistinguishable from fresh.
     #[test]
     fn each_hasher_matches_its_reference_and_survives_a_reset() {
         // Past BLAKE3's 1 KiB chunk boundary, so the chaining-value stack is exercised.

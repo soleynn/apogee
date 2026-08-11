@@ -13,18 +13,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::sync::mpsc;
 
 /// A snapshot of a download's progress, relayed over a channel the caller owns. A plain, clockless
-/// data struct: the consumer derives rate and ETA from successive `bytes_done`, so the same event
-/// serves the shell, the CLI, and tests identically.
+/// data struct: the consumer derives rate and ETA from successive `bytes_done`.
 ///
 /// `#[non_exhaustive]`: consumers read these fields but never construct the struct (it is minted by
 /// the engine and relayed verbatim, e.g. through `apogee-runtime`'s event enum), so a future field
-/// can be added without breaking them.
-///
-/// [`Default`] is what keeps that from also making the relays untestable. A `#[non_exhaustive]`
-/// struct cannot be written as a literal from outside this crate, but its public fields can still be
-/// set on a value obtained some other way, so a consumer builds the event it wants to relay by
-/// mutating a default one. Without it the only way to get a `Progress` is to run a download, and the
-/// seams that flatten this struct would go untested for exactly that reason.
+/// can be added without breaking them. [`Default`] is what keeps that from also making the relays
+/// untestable: a `#[non_exhaustive]` struct cannot be written as a literal from outside this crate,
+/// but its public fields can still be set on a value obtained some other way, so a consumer builds
+/// the event it wants to relay by mutating a default one.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Progress {
@@ -58,25 +54,20 @@ pub enum Phase {
 /// What a transfer has recovered from, counted from the moment it started.
 ///
 /// Every one of these is a situation the engine handles and carries on from, so none of them
-/// reaches the caller as a [`FetchError`](crate::FetchError). That is the point: a transfer that
-/// retried forty times and one that never retried both end in the same `Ok`, and without a tally
-/// the two are indistinguishable from outside the process. The crate's error taxonomy carries this
-/// same triage data (which block, which offset, how many attempts) but only ever builds it at the
-/// point of failure, which is exactly the case where nobody needed telling.
+/// reaches the caller as a [`FetchError`](crate::FetchError): a transfer that retried forty times
+/// and one that never retried both end in the same `Ok`, and without this tally the two are
+/// indistinguishable from outside the process.
 ///
 /// Running totals for one call, never reset and never decremented, so a consumer can difference
 /// successive events the way it already does for `bytes_done`. A resumed transfer starts from zero:
 /// these count this process's work, not the file's history.
 ///
-/// Exhaustive, unlike the [`Progress`] carrying it, and deliberately so at the version freeze: a
-/// consumer that destructures every field (the CLI's renderer does, on purpose) is the enforcement
-/// that keeps a future counter from rotting write-only, and `#[non_exhaustive]` would forbid exactly
-/// that destructure. Sealing would still leave the struct buildable from outside (field assignment
-/// onto a [`Default`] survives; a literal and functional-update syntax do not), so constructibility
-/// is not what decides this; the destructure guard is. The cost is that a seventh counter is a
-/// breaking change consumers must acknowledge rather than absorb silently, which is the direction
-/// worth failing in: the field above this one is `phase`, which every relay in this workspace
-/// quietly drops, and nothing anywhere went red about it.
+/// Deliberately exhaustive, unlike [`Progress`]: a consumer that destructures every field (as this
+/// crate's own CLI renderer does, on purpose) is what keeps a future counter from rotting
+/// write-only, and `#[non_exhaustive]` would forbid exactly that destructure. A new counter is
+/// therefore a breaking change consumers must acknowledge rather than one that can land silently -
+/// `phase` on [`Progress`] took the silent route, and every relay in this workspace still drops it
+/// unnoticed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Recoveries {
     /// Attempts charged to the retry budget after a failed one, over every unit of work the
@@ -92,9 +83,9 @@ pub struct Recoveries {
     /// the body inactivity timer. A stall costs an attempt, so each of these has a `retries` bump
     /// beside it unless it was the attempt that ran the budget out.
     pub stalls: u32,
-    /// Blocks that failed their SHA-1 and were cleared for a targeted re-fetch. Bytes that arrived
-    /// corrupt and had to be asked for again, which is the one counter here that says the wire, the
-    /// disk, or the source is actually wrong rather than merely slow.
+    /// Blocks that failed their SHA-1 and were cleared for a targeted re-fetch: bytes that arrived
+    /// corrupt and had to be asked for again, the one counter here that says the wire, the disk, or
+    /// the source is actually wrong rather than merely slow.
     pub blocks_refetched: u32,
     /// Mirrors dropped from the rotation for answering a ranged request with a whole body. Never
     /// counts the primary: a whole body from the primary is a changed source, not a capability
@@ -107,8 +98,7 @@ pub struct Recoveries {
 }
 
 impl Recoveries {
-    /// Whether the transfer has had nothing to recover from. The ordinary case, and the one a
-    /// consumer renders by saying nothing at all.
+    /// Whether the transfer has had nothing to recover from.
     ///
     /// # Examples
     ///
@@ -127,8 +117,8 @@ impl Recoveries {
 ///
 /// Atomics rather than one lock: the segmented engine bumps these from each connection worker and
 /// from the block verifier, which do not otherwise coordinate, and each counter is an independent
-/// running total that nothing branches on. `Relaxed` is therefore enough, and a snapshot may pair a
-/// rotation one worker has just counted with a stall another has not yet. It is a tally, not a
+/// running total that nothing branches on. `Relaxed` is therefore enough; a snapshot may pair a
+/// rotation one worker has just counted with a stall another has not yet, but it is a tally, not a
 /// consistent instant, and `bytes_done` beside it is no different.
 #[derive(Debug, Default)]
 pub(crate) struct Counters {
@@ -141,11 +131,9 @@ pub(crate) struct Counters {
 }
 
 impl Counters {
-    /// Charge one retry, and a rotation with it when the next try goes to a different source.
-    ///
-    /// The two are counted together because rotation is a pure function of the attempt count
-    /// (see [`rotate`](crate::retry::rotate)), so there is no rotation that is not also a retry, and
-    /// counting them apart would let the pair drift at a site that forgot one.
+    /// Charge one retry, and a rotation with it when the next try goes to a different source. The
+    /// two are counted together because rotation is a pure function of the attempt count (see
+    /// [`rotate`](crate::retry::rotate)), so there is no rotation that is not also a retry.
     pub(crate) fn retry(&self, from: usize, to: usize) {
         self.retries.fetch_add(1, Ordering::Relaxed);
         if from != to {
@@ -237,8 +225,7 @@ mod tests {
         assert!(counters.snapshot().is_clean());
     }
 
-    /// Each counter reaches its own field and no other, so a consumer reading one recovery is not
-    /// shown another.
+    /// Each counter reaches its own field and no other.
     #[test]
     fn every_counter_lands_in_its_own_field() {
         let counters = Counters::default();
@@ -273,8 +260,8 @@ mod tests {
         assert_eq!(counters.snapshot().rotations, 1);
     }
 
-    /// The snapshot rides the event, so a consumer reading one `Progress` sees the tally as it
-    /// stood when that event was sent rather than a later one.
+    /// The snapshot rides the event, so a consumer reading one `Progress` sees the tally as it stood
+    /// when that event was sent rather than a later one.
     #[tokio::test]
     async fn an_event_carries_the_counters_as_they_stood() {
         let (tx, mut rx) = mpsc::unbounded_channel();

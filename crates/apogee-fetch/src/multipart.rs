@@ -1,6 +1,6 @@
 //! An incremental `multipart/byteranges` response parser for the multi-range engine.
 //!
-//! The parser is **length-driven, not boundary-scanning**: each part carries a
+//! The parser is length-driven, not boundary-scanning: each part carries a
 //! `Content-Range: bytes first-last/total` header, so the body length is exactly `last - first + 1`.
 //! Once a part's header block is parsed and validated, that many body bytes are routed straight to
 //! the sink and the parser then expects the trailing delimiter. It never searches a body for the
@@ -8,19 +8,18 @@
 //! a part body, so its footprint is `O(boundary + header cap)` regardless of body or part size.
 //!
 //! Bytes arrive in arbitrary chunk sizes (from `reqwest`'s `bytes_stream`); the parser holds its
-//! state across [`feed`](MultipartParser::feed) calls. Body bytes are handed to the sink as
-//! zero-copy views into the caller's chunk, tagged with their absolute source-file offset (seeded
-//! from the validated `Content-Range`), which is exactly what the range consumer keys on.
+//! state across [`MultipartParser::feed`] calls. Body bytes are handed to the sink as zero-copy views
+//! into the caller's chunk, tagged with their absolute source-file offset, which is what the range
+//! consumer keys on.
 //!
-//! The framing bytes (delimiters and header blocks) drive a small per-byte state machine; body bytes
-//! are emitted in bulk, so the per-byte cost falls only on the tiny framing fraction. All input is
-//! hostile: every field is a checked parse, header blocks are size-capped, the boundary and part
-//! count are bounded, and there is no panic path (the `fetch_multipart` fuzz target pins this).
+//! All input is hostile: every field is a checked parse, header blocks are size-capped, and the
+//! boundary and part count are bounded. There is no panic path, pinned by the `fetch_multipart` fuzz
+//! target.
 
 use crate::error::FetchError;
 
-/// The callback the range engine hands each fetched span to, as `(absolute_offset, bytes)`. Shared by
-/// the multipart parser and `Fetcher::fetch_ranges`; a returned error aborts the fetch.
+/// The callback the range engine hands each fetched span to, as `(absolute_offset, bytes)`. A
+/// returned error aborts the fetch.
 pub(crate) type RangeSink<'a> = dyn FnMut(u64, &[u8]) -> Result<(), FetchError> + 'a;
 
 /// A boundary token longer than this is rejected: real `multipart/byteranges` boundaries are short,
@@ -49,25 +48,15 @@ pub(crate) struct RangeExpect {
 /// `matches!` in tests.
 #[derive(Debug)]
 pub(crate) enum MultipartError {
-    /// The `Content-Type` carried no boundary, or it was empty.
     MissingBoundary,
-    /// The boundary token exceeded [`BOUNDARY_CAP`].
     BoundaryTooLong,
-    /// A part's header block ran past [`MAX_HEADER_BYTES`] without terminating.
     HeaderTooLarge,
-    /// A part had no `Content-Range` header.
     MissingContentRange,
-    /// A `Content-Range` header could not be parsed as `bytes first-last/total`.
     MalformedContentRange,
-    /// A part's `total` disagreed with the expected source length.
     TotalMismatch,
-    /// A part's byte span fell outside what the request asked for.
     RangeNotRequested,
-    /// The response carried more parts than [`MAX_PARTS`].
     TooManyParts,
-    /// The byte stream did not follow the boundary/delimiter framing.
     Framing,
-    /// The stream ended before the closing delimiter.
     Truncated,
     /// The sink rejected a delivered part; the wrapped error is surfaced verbatim by the caller.
     Sink(FetchError),
@@ -143,6 +132,7 @@ impl MultipartParser {
     /// `expect`.
     ///
     /// # Errors
+    ///
     /// [`MultipartError::MissingBoundary`] for an empty boundary, [`MultipartError::BoundaryTooLong`]
     /// past [`BOUNDARY_CAP`].
     pub(crate) fn new(boundary: &[u8], expect: RangeExpect) -> Result<Self, MultipartError> {
@@ -167,12 +157,13 @@ impl MultipartParser {
         })
     }
 
-    /// Feed one arriving chunk, emitting each part's body bytes to `sink` as `(absolute_offset, bytes)`
-    /// views into `chunk`.
+    /// Feed one arriving chunk, emitting each part's body bytes to `sink` as `(absolute_offset,
+    /// bytes)` views into `chunk`.
     ///
     /// # Errors
-    /// A [`MultipartError`] on any framing or validation fault, or [`MultipartError::Sink`] wrapping a
-    /// sink rejection.
+    ///
+    /// A [`MultipartError`] on any framing or validation fault, or [`MultipartError::Sink`] wrapping
+    /// a sink rejection.
     pub(crate) fn feed(
         &mut self,
         chunk: &[u8],
@@ -287,6 +278,7 @@ impl MultipartParser {
     /// The stream ended.
     ///
     /// # Errors
+    ///
     /// [`MultipartError::Truncated`] if the closing delimiter was never seen.
     pub(crate) fn finish(&self) -> Result<(), MultipartError> {
         match self.state {
@@ -295,7 +287,6 @@ impl MultipartParser {
         }
     }
 
-    /// Enter the header-accumulation state for a fresh part.
     fn begin_headers(&mut self) {
         self.state = State::Headers;
         self.scratch.clear();
@@ -331,7 +322,7 @@ impl MultipartParser {
     }
 }
 
-/// Whether `block` ends with a blank-line terminator (CRLF or bare LF leniency).
+/// Whether `block` ends with a blank-line terminator (CRLF, or a bare LF leniently).
 fn header_block_complete(block: &[u8]) -> bool {
     block.ends_with(b"\r\n\r\n") || block.ends_with(b"\n\n")
 }
@@ -349,7 +340,8 @@ fn parse_part_headers(block: &[u8]) -> Result<(u64, u64, Option<u64>), Multipart
     Err(MultipartError::MissingContentRange)
 }
 
-/// The bytes after a case-insensitive `name` prefix on `line`, or `None` if `line` is a different header.
+/// The bytes after a case-insensitive `name` prefix on `line`, or `None` if `line` is a different
+/// header.
 fn header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     if line.len() < name.len() {
         return None;

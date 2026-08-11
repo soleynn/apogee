@@ -27,8 +27,25 @@ pub struct DownloadSpec {
 }
 
 impl DownloadSpec {
-    /// Start building a download of `url` to `dest`, verified by `validator`. Resuming is on by
+    /// Start building a download of `url` to `dest`, verified by `validator`; resuming is on by
     /// default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_fetch::{DownloadSpec, Validator};
+    ///
+    /// let spec = DownloadSpec::builder(
+    ///     "https://example.invalid/patch.zip".parse().unwrap(),
+    ///     "/tmp/patch.zip",
+    ///     Validator::Sha256([0; 32]),
+    /// )
+    /// .expected_len(1024)
+    /// .build()
+    /// .unwrap();
+    /// assert_eq!(spec.expected_len(), Some(1024));
+    /// assert!(spec.resume());
+    /// ```
     #[must_use]
     pub fn builder(
         url: Url,
@@ -49,8 +66,8 @@ impl DownloadSpec {
         }
     }
 
-    /// The primary source URL. Also the resume identity key, so rotating to a mirror never invalidates
-    /// journaled progress.
+    /// The primary source URL. Also the resume identity key, so rotating to a mirror never
+    /// invalidates journaled progress.
     #[must_use]
     pub fn url(&self) -> &Url {
         &self.url
@@ -145,12 +162,12 @@ impl DownloadSpecBuilder {
     }
 
     /// Re-fetch even when the destination already satisfies the request, replacing it on success
-    /// (off by default). The point is the unpinned download: with no digest and no declared length
-    /// the engine treats any existing file at the destination as already satisfying the request,
-    /// correctly, since it has nothing to check it against, so a mutable artifact (a signed
-    /// catalog, a manifest) fetched to a fixed path would be served back forever. Publication is
-    /// the same atomic rename either way: a failed or truncated transfer never disturbs the
-    /// existing file.
+    /// (off by default).
+    ///
+    /// Needed for a mutable artifact (a signed catalog, a manifest) fetched to a fixed path: with no
+    /// digest or declared length to check against, an unpinned download otherwise treats any existing
+    /// file as already satisfying the request and serves it back forever. Either way, publication is
+    /// the same atomic rename, so a failed or truncated transfer never disturbs the existing file.
     #[must_use]
     pub fn overwrite(mut self) -> Self {
         self.overwrite = true;
@@ -167,27 +184,20 @@ impl DownloadSpecBuilder {
 
     /// Add one alternate source URL, tried after the primary when work repeatedly fails.
     ///
-    /// A mirror serves any part of the transfer the primary will not: a segment whose connection
-    /// keeps dying, a range the primary answers with a throttling status, a block that fails its hash,
-    /// or the whole of a transfer that runs on one connection because the file is small, its length is
-    /// unknown, or the primary would not serve ranges.
-    ///
-    /// It is asked only after the failing source has had one more try, so a transient blip does not
-    /// give up a warm connection, and each further failure steps one source along. A mirror that
-    /// answers a ranged request with the whole body is dropped from a segmented transfer's rotation,
-    /// since it can serve neither a segment nor a block repair; a single-connection transfer keeps
-    /// using it, because a whole body is what that one asked for anyway.
-    ///
-    /// A mirror is never sent the validator the primary issued, nor its own recorded for a later
-    /// resume against the primary, so the file's own validator is what proves a transfer assembled
-    /// from more than one source.
+    /// A mirror can serve any part of the transfer the primary won't, from a single dying segment up
+    /// to a whole single-connection transfer, and steps in only after the failing source gets one
+    /// more try (so a transient blip doesn't give up a warm connection). A mirror that won't serve
+    /// ranges drops out of a segmented transfer's rotation but stays in a single-connection one. No
+    /// mirror is ever sent the primary's validator, so it's the downloaded file's own validator, not
+    /// the source, that proves a transfer assembled from more than one URL.
     #[must_use]
     pub fn mirror(mut self, url: Url) -> Self {
         self.mirrors.push(url);
         self
     }
 
-    /// Add alternate source URLs, tried in turn after the primary when work repeatedly fails.
+    /// Add alternate source URLs, tried in turn after the primary when work repeatedly fails; see
+    /// [`mirror`](Self::mirror) for how each is used.
     #[must_use]
     pub fn mirrors(mut self, urls: impl IntoIterator<Item = Url>) -> Self {
         self.mirrors.extend(urls);
@@ -201,7 +211,7 @@ impl DownloadSpecBuilder {
         self
     }
 
-    /// Acknowledge that `Validator::None` leaves the bytes unverified. Required for an unverified
+    /// Acknowledge that [`Validator::None`] leaves the bytes unverified. Required for an unverified
     /// download, and still rejected over plain HTTP.
     #[must_use]
     pub fn allow_unverified(mut self) -> Self {
@@ -212,12 +222,13 @@ impl DownloadSpecBuilder {
     /// Finish the spec, enforcing the source-safety and block-layout rules.
     ///
     /// # Errors
+    ///
     /// [`SpecError::UnsupportedScheme`] for a non-http(s) primary or mirror URL;
-    /// [`SpecError::UnverifiedOverPlainHttp`] for `Validator::None` over `http://`;
-    /// [`SpecError::UnverifiedNotAcknowledged`] for `Validator::None` over `https://` without
+    /// [`SpecError::UnverifiedOverPlainHttp`] for [`Validator::None`] over `http://`;
+    /// [`SpecError::UnverifiedNotAcknowledged`] for [`Validator::None`] over `https://` without
     /// [`allow_unverified`](Self::allow_unverified); [`SpecError::ExternalRequiresLength`] for a
-    /// `Validator::External` with no declared length; [`SpecError::BlockLayout`] for a
-    /// `Validator::BlockSha1` whose block map is inconsistent with the declared length.
+    /// [`Validator::External`] with no declared length; [`SpecError::BlockLayout`] for a
+    /// [`Validator::BlockSha1`] whose block map is inconsistent with the declared length.
     pub fn build(self) -> Result<DownloadSpec, SpecError> {
         for url in std::iter::once(&self.url).chain(self.mirrors.iter()) {
             match url.scheme() {
@@ -288,6 +299,7 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
+    /// The happy path: a verified https download builds with resume on by default.
     #[test]
     fn a_sha256_download_over_https_builds() {
         let spec = DownloadSpec::builder(
@@ -302,6 +314,7 @@ mod tests {
         assert!(spec.resume());
     }
 
+    /// `allow_unverified` cannot override the plain-http refusal.
     #[test]
     fn unverified_over_plain_http_is_refused_even_when_acknowledged() {
         let err = DownloadSpec::builder(url("http://host.invalid/f"), "/tmp/f", Validator::None)
@@ -311,6 +324,7 @@ mod tests {
         assert!(matches!(err, SpecError::UnverifiedOverPlainHttp { .. }));
     }
 
+    /// `Validator::None` over https is refused unless acknowledged.
     #[test]
     fn unverified_https_must_be_acknowledged() {
         let err = DownloadSpec::builder(url("https://host.invalid/f"), "/tmp/f", Validator::None)
@@ -319,6 +333,7 @@ mod tests {
         assert!(matches!(err, SpecError::UnverifiedNotAcknowledged));
     }
 
+    /// Acknowledging the risk lets an unverified https download build.
     #[test]
     fn acknowledged_unverified_https_builds() {
         DownloadSpec::builder(url("https://host.invalid/f"), "/tmp/f", Validator::None)
@@ -327,6 +342,7 @@ mod tests {
             .unwrap();
     }
 
+    /// `Validator::External` is allowed over plain http when a length is declared.
     #[test]
     fn external_over_plain_http_builds_with_a_declared_length() {
         // The boot-patch shape: no fetch-side hash, plain HTTP, length-checked, downstream-verified.
@@ -342,6 +358,7 @@ mod tests {
         assert_eq!(spec.expected_len(), Some(300));
     }
 
+    /// `Validator::External` requires a declared length.
     #[test]
     fn external_without_a_declared_length_is_refused() {
         let err = DownloadSpec::builder(
@@ -354,6 +371,7 @@ mod tests {
         assert!(matches!(err, SpecError::ExternalRequiresLength));
     }
 
+    /// A non-http(s) primary URL is refused.
     #[test]
     fn a_non_http_scheme_is_refused() {
         let err = DownloadSpec::builder(
@@ -373,6 +391,7 @@ mod tests {
         }
     }
 
+    /// A consistent block layout builds, and a mirror is counted in `sources()`.
     #[test]
     fn a_well_formed_block_download_builds_with_mirrors() {
         let spec =
@@ -386,6 +405,7 @@ mod tests {
         assert_eq!(spec.sources()[0], *spec.url());
     }
 
+    /// Block-hash validation needs a declared length to check the hash count against.
     #[test]
     fn block_validation_requires_a_declared_length() {
         let err =
@@ -395,6 +415,7 @@ mod tests {
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 
+    /// The hash count must match the length and block size.
     #[test]
     fn a_hash_count_that_disagrees_with_the_length_is_refused() {
         let err =
@@ -405,6 +426,7 @@ mod tests {
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 
+    /// An empty hash list is refused even with a matching length.
     #[test]
     fn an_empty_block_hash_list_is_refused() {
         let err =
@@ -415,6 +437,7 @@ mod tests {
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 
+    /// A zero block size is refused.
     #[test]
     fn a_zero_block_size_is_refused() {
         let v = Validator::BlockSha1 {
@@ -428,6 +451,7 @@ mod tests {
         assert!(matches!(err, SpecError::BlockLayout { .. }));
     }
 
+    /// A mirror URL is held to the same scheme rule as the primary.
     #[test]
     fn a_mirror_with_a_bad_scheme_is_refused() {
         let err = DownloadSpec::builder(

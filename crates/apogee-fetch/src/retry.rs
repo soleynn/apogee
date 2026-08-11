@@ -1,17 +1,14 @@
-//! Backoff, jitter, and the one place that decides what a failure is worth.
+//! Backoff, jitter, and the one place that decides what a failure is worth retrying.
 //!
-//! Every retry site in the crate asks the same three questions: is this failure the kind that could
-//! succeed on a second try, how long should the transfer wait first, and which source should it ask.
-//! [`classify_status`] answers the first for an HTTP status, [`RetryPolicy::delay`] answers the
-//! second, [`rotate`] answers the third, and both engines route through them so a status cannot be
-//! retryable on one transfer path and fatal on the other, nor fail over on one and give up on the
-//! other.
+//! [`classify_status`] decides whether an HTTP status is worth another try, [`RetryPolicy::delay`]
+//! decides how long to wait, and [`rotate`] decides which source to ask next; both transfer engines
+//! route through the same three functions.
 //!
-//! The delay is exponential with equal jitter: half the computed backoff, plus a random draw over
-//! the other half. Equal jitter (rather than a full-range draw) keeps a guaranteed floor under every
-//! wait, so a retry storm still spreads out but a client can never re-request immediately. The
-//! randomness comes from a small counter-based generator seeded once from the operating system; it
-//! decides nothing but wait times, so it is never security-bearing.
+//! The wait is exponential backoff keyed on the attempt count, jittered with equal jitter: half the
+//! computed backoff, plus a random draw over the other half. That keeps a floor under every wait, so
+//! a retry storm still spreads out but no client ever re-requests immediately. The draw comes from a
+//! small counter-based generator seeded once from the operating system; it only ever picks a wait
+//! time, so it carries no security weight.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -25,20 +22,17 @@ const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 /// What a failed attempt is worth: another try, or an immediate failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Class {
-    /// A throttling or overload answer: back off and ask the same source again, honoring any
-    /// `Retry-After` the response carried.
+    /// Back off and ask the same source again, honoring any `Retry-After` the response carried.
     Retryable,
-    /// A failure that will not become a success: fail the transfer now.
+    /// Fail the transfer now; a second try would not change the answer.
     Fatal,
 }
 
-/// Whether a status the transfer cannot use is worth asking again.
+/// Classifies a status the transfer cannot use into retryable or fatal.
 ///
-/// Retryable is the throttle-and-overload set: `408` (the server gave up waiting for the request),
-/// `429` (rate limited), and the `500`/`502`/`503`/`504` bad-gateway-and-overload group a CDN emits
-/// while a node restarts. Everything else, notably every other `4xx`, describes a request that will
-/// be refused identically forever. Statuses a transfer *can* use (`200`, `206`, `416`) never reach
-/// here: each engine settles those against its own resume disposition first.
+/// Retryable is the throttle-and-overload set: `408`, `429`, and the `500`/`502`/`503`/`504`
+/// bad-gateway group. Everything else, notably every other `4xx`, is refused identically forever.
+/// Statuses a transfer can use directly (`200`, `206`, `416`) never reach here.
 pub(crate) fn classify_status(status: u16) -> Class {
     match status {
         408 | 429 | 500 | 502 | 503 | 504 => Class::Retryable,
@@ -46,29 +40,20 @@ pub(crate) fn classify_status(status: u16) -> Class {
     }
 }
 
-/// Which source a unit of work goes to on its next try, given how many times it has already failed:
-/// the same source once more, then one step further along the list per failure after that.
+/// Which source index a unit of work goes to on its next try: the same source once, then one step
+/// further along the list per failure after that.
 ///
-/// The one free retry absorbs the common transient blip without giving up a warm connection, and
-/// every failure past it steps on, so a dead host costs one unit of work two attempts instead of its
-/// whole budget. Which failure it was does not matter: a refused connection, a body that dropped, a
-/// silence past the stall timeout, a throttling status and a block that failed its hash all rotate
-/// the same way, because all of them mean "this source did not deliver these bytes".
-///
-/// Rotation is a pure function of the attempt count and never a step of its own, so failing over can
-/// only ever spend an attempt the retry budget already paid for. That is what bounds both engines: no
-/// path through either moves work to another source without also moving the counter that bounds it.
+/// A pure function of the failure count, so failing over only ever spends an attempt the retry
+/// budget already accounted for.
 pub(crate) fn rotate(failures: u32, sources: usize) -> usize {
     (failures as usize).saturating_sub(1) % sources.max(1)
 }
 
 /// Whether a request that never produced a response is worth sending again.
 ///
-/// Almost all of them are: a refused connection, a reset handshake, a name that did not resolve yet.
-/// The exception is the client's own redirect policy declining to follow a hop, which is a verdict on
-/// where the source points rather than a fault in reaching it. Re-sending asks an identical question
-/// and gets an identical refusal, so it burns the whole attempt budget and its backoffs to arrive at
-/// the failure the first send already had.
+/// Almost always yes (a refused connection, a reset handshake, an unresolved name). The exception is
+/// a hop refused by [`policy`](crate::redirect::policy): that is a verdict on where the source
+/// points, not a transport fault, so re-sending would just repeat it.
 pub(crate) fn classify_send_error(error: &reqwest::Error) -> Class {
     if crate::redirect::refusal(error).is_some() {
         Class::Fatal
@@ -79,12 +64,9 @@ pub(crate) fn classify_send_error(error: &reqwest::Error) -> Class {
 
 /// The pause a `Retry-After` header asked for, in its delta-seconds form only.
 ///
-/// The HTTP-date form yields `None`, and so does anything unparseable, which sends the caller to its
-/// computed backoff instead. Parsing dates would mean either a date crate or an in-house parser for
-/// three date formats, to gain nothing a bounded exponential backoff does not already provide: a
-/// server that wants a longer pause than the ceiling does not get one either way (see
-/// [`RetryPolicy::delay`]). Total and allocation-free on hostile bytes: a non-ASCII value fails
-/// `to_str`, and the parse is bounded by the header's own length.
+/// The HTTP-date form and anything unparseable both yield `None`, sending the caller to
+/// [`RetryPolicy::delay`]'s computed backoff instead; a server-named pause is clamped to the same
+/// ceiling either way, so parsing dates would gain nothing.
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let raw = headers.get(RETRY_AFTER)?.to_str().ok()?;
     raw.trim().parse::<u64>().ok().map(Duration::from_secs)
@@ -93,16 +75,11 @@ pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// How a transfer retries: how many attempts one unit of work gets, and how long it waits between
 /// them.
 ///
-/// Exponential backoff from [`base_delay`](Self::base_delay), multiplied per attempt, capped at
-/// [`max_delay`](Self::max_delay), and jittered. One policy covers every retry site: a segment whose
-/// connection dropped or went silent, a block that failed its hash, the range probe, and a
-/// single-connection transfer that was cut off mid-body.
-///
-/// The defaults are 8 attempts, 500 ms doubling to a 30 s ceiling. 500 ms is short enough to be
-/// invisible on a transient blip and long enough for a CDN node to finish restarting; doubling to a
-/// 30 s ceiling keeps a throttled client polite without letting a server-named pause become an
-/// unbounded hang; and eight attempts spends about a minute on one stuck range before reporting a
-/// precise failure, so a genuinely dead source fails inside a patch session rather than hanging it.
+/// Exponential backoff from [`base_delay`](Self::base_delay), multiplied per attempt by
+/// [`multiplier`](Self::multiplier), capped at [`max_delay`](Self::max_delay), and jittered. Defaults
+/// to 8 attempts, 500 ms doubling to a 30 s ceiling. One policy covers every retry site in the crate:
+/// a segment whose connection dropped or went silent, a block that failed its hash, the range probe,
+/// and a single-connection transfer cut off mid-body.
 ///
 /// # Examples
 ///
@@ -139,7 +116,7 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     /// How many times one unit of work is attempted in total, the first try included (default 8).
-    /// Clamped to at least 1, so a policy can disable retrying but never disable the work.
+    /// Clamped to at least 1, so a policy can shorten retrying but never disable the first attempt.
     #[must_use]
     pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts.max(1);
@@ -172,14 +149,14 @@ impl RetryPolicy {
         attempts < self.max_attempts
     }
 
-    /// How long to wait after `attempts` failures, honoring a server-named `retry_after` but never
-    /// trusting it.
+    /// How long to wait after `attempts` failures, honoring a server-named `retry_after` without
+    /// trusting it unclamped.
     ///
-    /// The computed backoff is `base * multiplier^(attempts - 1)`, capped at the ceiling and then
-    /// jittered into the top half of that interval. A `Retry-After` is clamped to the same ceiling
-    /// before it is applied, because it is server-controlled input and an unclamped one is a hang
-    /// the server gets to choose; whichever of the two is longer wins, so the transfer is never less
-    /// polite than the server asked and never parks for longer than the policy allows.
+    /// The computed backoff is `base * multiplier^(attempts - 1)`, capped at
+    /// [`max_delay`](Self::max_delay) and jittered into the top half of that interval. A
+    /// `retry_after` is clamped to the same ceiling first; whichever of the two is longer wins, so
+    /// the transfer is never less polite than the server asked and never parks past the policy's
+    /// ceiling.
     pub(crate) fn delay(
         self,
         attempts: u32,
@@ -227,7 +204,7 @@ impl Default for Jitter {
 
 impl Jitter {
     /// Seed from the system generator, falling back to the wall clock if it is unavailable. Nothing
-    /// here is security-bearing, so a weak fallback is a worse spread, never a weak secret.
+    /// here is security-bearing, so a weak fallback only means a worse spread, never a weak secret.
     pub(crate) fn new() -> Self {
         let seed = getrandom::u64().unwrap_or_else(|_| {
             std::time::SystemTime::now()
@@ -284,8 +261,8 @@ mod tests {
         map
     }
 
-    /// The throttle-and-overload set retries; every other status, including the 4xx family that will
-    /// be refused identically forever, is fatal.
+    /// The throttle-and-overload set retries; every other status, including the 4xx family, is
+    /// fatal.
     #[test]
     fn only_throttle_and_overload_statuses_are_retryable() {
         for status in [408, 429, 500, 502, 503, 504] {
@@ -296,8 +273,8 @@ mod tests {
         }
     }
 
-    /// The first failure is a free same-source retry; each one past it steps along the list, wrapping.
-    /// Both engines share this, so a mirror is reached after exactly one wasted try either way.
+    /// The first failure is a free same-source retry; each one past it steps along the list,
+    /// wrapping.
     #[test]
     fn rotation_retries_the_same_source_once_then_steps_along_the_list() {
         // No failures yet, and the first failure, both stay on the primary.
@@ -313,8 +290,7 @@ mod tests {
         }
     }
 
-    /// A degenerate source count cannot panic on the modulo or index past a real list: the crate
-    /// always has at least one source, so `0` is unreachable, but it must still resolve to an index.
+    /// A degenerate source count still resolves to an index rather than panicking on the modulo.
     #[test]
     fn rotation_over_an_empty_source_list_still_names_an_index() {
         assert_eq!(rotate(0, 0), 0);
@@ -323,7 +299,7 @@ mod tests {
     }
 
     /// Only the delta-seconds form of `Retry-After` is read; a date or garbage falls back to the
-    /// computed backoff rather than to a guess.
+    /// computed backoff.
     #[test]
     fn retry_after_reads_delta_seconds_only() {
         assert_eq!(retry_after(&headers("120")), Some(Duration::from_secs(120)));
@@ -337,8 +313,7 @@ mod tests {
         assert_eq!(retry_after(&HeaderMap::new()), None);
     }
 
-    /// A `Retry-After` far past the ceiling is clamped to it, so a hostile or buggy server cannot
-    /// park a transfer for an hour.
+    /// A `Retry-After` far past the ceiling is clamped to it.
     #[test]
     fn a_retry_after_past_the_ceiling_is_clamped_to_it() {
         let policy = RetryPolicy::default()
@@ -355,8 +330,7 @@ mod tests {
         }
     }
 
-    /// A `Retry-After` inside the ceiling is honored when it is longer than the computed backoff,
-    /// and ignored when the backoff is already longer (later is always allowed, sooner is not).
+    /// A `Retry-After` inside the ceiling only ever lengthens the wait, never shortens it.
     #[test]
     fn a_retry_after_inside_the_ceiling_only_ever_lengthens_the_wait() {
         let policy = RetryPolicy::default()
@@ -392,8 +366,8 @@ mod tests {
         }
     }
 
-    /// Jitter actually varies the wait, so a fleet of clients retrying together spreads out instead
-    /// of arriving in lockstep.
+    /// Jitter actually varies the wait, so clients retrying together spread out instead of arriving
+    /// in lockstep.
     #[test]
     fn jitter_spreads_repeated_draws() {
         let policy = RetryPolicy::default().base_delay(Duration::from_secs(1));
@@ -404,8 +378,8 @@ mod tests {
         assert!(seen.len() > 16, "only {} distinct delays", seen.len());
     }
 
-    /// A degenerate policy still terminates: a zero multiplier is clamped to 1 and a zero attempt
-    /// budget to a single attempt, so neither can produce an endless retry loop.
+    /// A zero multiplier and a zero attempt budget are both clamped, so neither can produce an
+    /// endless retry loop.
     #[test]
     fn a_degenerate_policy_still_terminates() {
         let policy = RetryPolicy::default().multiplier(0).max_attempts(0);
@@ -425,8 +399,7 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
-    /// The backoff really elapses: under virtual time the full delay passes before the caller is
-    /// allowed to retry.
+    /// Under virtual time, the full delay elapses before the caller is allowed to retry.
     #[tokio::test(start_paused = true)]
     async fn a_backoff_elapses_in_full() {
         let cancel = CancellationToken::new();

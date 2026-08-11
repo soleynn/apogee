@@ -1,33 +1,35 @@
-//! The redirect policy every request runs under.
+//! The redirect policy every request in the crate runs under.
 //!
 //! A redirect policy is a client-wide setting, not a per-request one, so this is a floor rather than
-//! something a caller configures: no [`DownloadSpec`](crate::DownloadSpec) can widen it. Three hops,
-//! no hop that leaves `https` for plaintext, and no hop to a scheme that is not HTTP.
+//! something a [`DownloadSpec`](crate::DownloadSpec) can widen: at most 3 hops, no hop that leaves
+//! `https` for plaintext, and no hop to a scheme other than `http`/`https`.
 //!
-//! The downgrade rule is the load-bearing one. `DownloadSpecBuilder::build` refuses an unverified
-//! source over plain `http://`, so an unverified download is only ever admitted over TLS; a redirect
-//! from `https` to `http` reaches exactly the state that was refused, except after the check has
-//! already run. Plain HTTP with an out-of-band validator stays allowed, because that shape was
-//! admitted on the strength of the validator rather than the transport, and it does not become less
-//! safe by staying where it started.
+//! The downgrade rule carries the real security weight.
+//! [`DownloadSpecBuilder::build`](crate::DownloadSpecBuilder::build) refuses an unverified source
+//! over plain `http://`, so an unverified download is only ever admitted over TLS. Without the
+//! downgrade rule, a redirect from `https` to `http` would land the request in exactly the state
+//! that refusal exists to block, just one hop after the check already ran. Plain HTTP paired with an
+//! out-of-band validator is still allowed to redirect within plaintext: that shape was admitted on
+//! the strength of the validator rather than the transport, so it loses nothing by staying where it
+//! started.
 //!
-//! A custom policy gets no loop detection from `reqwest` (the limit-based default's is not shared),
-//! so the hop cap here is what ends a redirect cycle: without it a server that redirects to itself
-//! spins forever inside one `send`.
+//! A custom [`Policy`] gets no loop detection from `reqwest` of its own; only the limit-based default
+//! policy counts hops, and that protection is not shared with a custom one. So the hop cap enforced
+//! here is what actually ends a redirect cycle: without it, a server that redirects to itself would
+//! spin forever inside one `send`.
 
 use reqwest::redirect::Policy;
 use url::Url;
 
 /// How many redirects one request may follow.
 ///
-/// Observed chains are one hop (a release asset handing off to its object store) or none (a patch
-/// CDN serving directly), so three leaves room for a host that canonicalizes a path or picks a
-/// region before handing over, and still ends a redirect cycle after four requests.
+/// Real chains observed are one hop (a release asset handing off to its object store) or none (a
+/// patch CDN serving directly); three leaves room for a host that canonicalizes a path or picks a
+/// region first, and still ends a redirect cycle after four requests.
 const MAX_HOPS: usize = 3;
 
-/// Why a redirect was refused. Travels as the cause of the [`reqwest::Error`] the policy raises and
-/// is read back by [`refusal`], which is the only way to tell a refusal apart from a transport fault
-/// once it has crossed `send`.
+/// Why a redirect was refused. Carried as the cause of the [`reqwest::Error`] the policy raises, and
+/// read back by [`refusal`] to tell a refusal apart from a transport fault after `send`.
 #[derive(Debug)]
 struct Refused(&'static str);
 
@@ -50,9 +52,9 @@ pub(crate) fn policy() -> Policy {
 /// Why the hop from `previous` (every URL already requested, oldest first) to `next` must not be
 /// followed, or `None` to follow it.
 ///
-/// The rules overlap, so the order decides which reason a caller is told: a hop from `https` to
-/// `ftp` is both a foreign scheme and a departure from TLS. The scheme is checked first because it
-/// is the more specific answer, and the detail exists to be read during triage.
+/// Checked in order: foreign scheme, then downgrade, then hop count. A hop from `https` to `ftp` is
+/// both a foreign scheme and a downgrade, so this order decides which reason a caller is told; the
+/// scheme is checked first because it is the more specific answer.
 fn refuse(previous: &[Url], next: &Url) -> Option<&'static str> {
     foreign_scheme(next)
         .or_else(|| downgrade(previous, next))
@@ -69,15 +71,15 @@ fn downgrade(previous: &[Url], next: &Url) -> Option<&'static str> {
 /// A hop to something that is not HTTP at all.
 ///
 /// `reqwest` refuses some of these itself, but as a builder error rather than a redirect error,
-/// which every retry site would read as a transient connect fault and try again. Refusing here
-/// instead makes it one of ours, and so terminal.
+/// which a retry site would read as a transient connect fault and try again. Refusing it here instead
+/// makes it a redirect refusal, and so terminal.
 fn foreign_scheme(next: &Url) -> Option<&'static str> {
     let scheme = next.scheme();
     (scheme != "http" && scheme != "https").then_some("redirect targets a non-http scheme")
 }
 
 /// A chain past the hop cap. `previous` is `1` long at the first redirect decision, so it reaches
-/// `MAX_HOPS` at the last hop that may be followed.
+/// `MAX_HOPS` at the last hop that may still be followed.
 fn too_many_hops(previous: &[Url]) -> Option<&'static str> {
     (previous.len() > MAX_HOPS).then_some("redirect chain exceeds the hop cap")
 }
@@ -132,8 +134,7 @@ mod tests {
         );
     }
 
-    /// The cap admits exactly `MAX_HOPS` and refuses the one after, which is what ends a cycle, and
-    /// it sits under the 10 `reqwest` would otherwise allow.
+    /// The cap admits exactly `MAX_HOPS` and refuses the one after, which is what ends a cycle.
     #[test]
     fn the_cap_admits_its_own_number_of_hops_and_no_more() {
         let chain = ["http://a/1", "http://a/2", "http://a/3", "http://a/4"];
@@ -163,9 +164,8 @@ mod tests {
         assert_eq!(decide(&["http://host/a"], "https://host/a"), None);
     }
 
-    /// A hop out of HTTP entirely is refused whatever the chain looked like, and is named for the
-    /// scheme rather than for the downgrade. Leaving `https` for `ftp` is both, and the detail rides
-    /// in the error a caller reads, so it should name the more specific of the two.
+    /// A hop out of HTTP entirely is refused whatever the chain looked like, named for the scheme
+    /// rather than for the downgrade when a hop is both.
     #[test]
     fn a_hop_to_a_foreign_scheme_is_refused() {
         for target in ["ftp://host/x", "file:///etc/passwd", "javascript:0"] {

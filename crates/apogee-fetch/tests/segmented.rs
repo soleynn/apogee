@@ -266,9 +266,9 @@ async fn a_server_length_that_disagrees_fails_before_publishing() {
 }
 
 /// Dropping the `download` future must stop the transfer, not detach it. The engine cancels its own
-/// end token when the future driving it is dropped; without that, the spawned workers keep
-/// streaming into the `.part` with nobody left to publish, fail, or cancel the job, and they hold
-/// global connection permits the whole time.
+/// end token when the future driving it is dropped; without that, the spawned workers keep streaming
+/// into the `.part` with nobody left to publish, fail, or cancel the job, and they hold global
+/// connection permits the whole time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropping_the_download_future_stops_the_workers() {
     let dir = tempfile::tempdir().unwrap();

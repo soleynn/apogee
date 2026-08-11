@@ -1,9 +1,7 @@
 //! A shared, live-adjustable token-bucket speed limiter.
 //!
-//! One [`LimitHandle`] is cloned to every connection of every job, so they all draw from a single
-//! budget counted on payload bytes read off the socket. [`set`](LimitHandle::set) retargets the cap
-//! mid-transfer (or lifts it with `None`), matching the reference launcher's live speed control. The
-//! bucket runs on `tokio::time`, so a paused-time test drives it deterministically.
+//! One [`LimitHandle`] is cloned to every connection of every job, so all of them draw from a
+//! single budget counted on bytes read off the socket.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,14 +15,14 @@ pub struct LimitHandle {
 
 #[derive(Debug)]
 struct Bucket {
-    /// The cap in bytes per second, or `None` for uncapped. A rate of `0` is treated as uncapped.
+    /// Cap in bytes per second; `None` or `0` means uncapped.
     rate: Option<u64>,
-    /// Available tokens (bytes), kept fractional to avoid rounding drift.
+    /// Available tokens in bytes, kept fractional to avoid rounding drift.
     tokens: f64,
-    /// The burst ceiling tokens accrue to after an idle gap; bounds post-idle catch-up.
+    /// Burst ceiling tokens accrue to after an idle gap.
     capacity: f64,
-    /// When `tokens` was last refilled; `None` until the first draw so no `Instant` is minted outside
-    /// the runtime.
+    /// When `tokens` was last refilled; `None` until the first draw so no `Instant` is minted
+    /// outside the runtime.
     last: Option<Instant>,
 }
 
@@ -53,8 +51,8 @@ impl LimitHandle {
         }
     }
 
-    /// Retarget the limit live. `None` lifts it; a new rate re-scales the burst ceiling and clamps any
-    /// accumulated tokens to it.
+    /// Retarget the limit live, matching the reference launcher's live speed control. `None` lifts
+    /// it; a new rate re-scales the burst ceiling and clamps any buffered tokens to it.
     pub fn set(&self, bytes_per_second: Option<u64>) {
         let mut b = self.lock();
         b.rate = bytes_per_second;
@@ -64,9 +62,9 @@ impl LimitHandle {
         }
     }
 
-    /// Wait until `n` bytes' worth of tokens are available, then consume them. Returns immediately when
-    /// uncapped. A request larger than the burst ceiling is still served (the ceiling stretches to it
-    /// for that draw), so a large chunk cannot deadlock.
+    /// Wait until `n` bytes' worth of tokens are available, then consume them. Returns immediately
+    /// when uncapped; a request larger than the burst ceiling still stretches it to fit, so a large
+    /// chunk cannot deadlock.
     pub(crate) async fn acquire(&self, n: u64) {
         if n == 0 {
             return;

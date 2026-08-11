@@ -1,35 +1,29 @@
 //! Download failures and the reasons a download request is refused.
 //!
-//! Two surfaces. [`SpecError`] rejects a request that must never be attempted (an unverified
-//! plain-HTTP source, an unacknowledged skip of verification, an unsupported scheme) at the single
-//! construction site, so an unsafe request is unrepresentable rather than merely unchecked.
-//! [`FetchError`] is the runtime taxonomy for a transfer that was attempted and failed; expected,
-//! recoverable situations are values in the result types, not variants here.
+//! [`SpecError`] rejects a request that must never be attempted (an unverified plain-HTTP source, an
+//! unacknowledged skip of verification, an unsupported scheme) at the single construction site, so an
+//! unsafe request is unrepresentable rather than merely unchecked. [`FetchError`] is the runtime
+//! taxonomy for a transfer that was attempted and failed; expected, recoverable situations are values
+//! in the result types, not variants here.
 //!
 //! # Stability
 //!
-//! Every variant of both enums has a construction site in this crate. A variant naming a situation
-//! the crate cannot produce is dead code in whoever matches it, so there are none.
+//! Every variant of both enums has a construction site in this crate. Two situations that could look
+//! like failures have none, because both are recoveries handled internally: a server that refuses byte
+//! ranges demotes the transfer to a single connection, and a journal that fails to decode restarts the
+//! download from zero. Neither reaches a caller.
 //!
-//! Two situations deliberately have no variant, because both are recoveries rather than failures: a
-//! server that will not serve byte ranges demotes the transfer to a single streaming connection, and
-//! a journal that will not decode restarts the download from zero. Neither can reach a caller.
+//! Both enums are `#[non_exhaustive]`, so matching either needs a `_` arm; [`Validator`](crate::Validator)
+//! is open for the same reason. The transient cases are listed positively in
+//! [`FetchError::is_transient`], so `_` there reads as "permanent, do not retry": a variant added later
+//! cannot become a retry loop by default.
 //!
-//! Both enums stay `#[non_exhaustive]`, so matching one needs a `_` arm. [`Validator`](crate::Validator)
-//! is open for the same reason: a failure shape a server has not shown us yet earns a variant rather
-//! than widening an existing one into vagueness. The transient cases are listed positively in
-//! [`FetchError::is_transient`] and `_` reads there as "permanent, do not retry", so a variant added
-//! here cannot become a retry loop by default, and cannot silently change the answer a consumer gets
-//! from a crate that never saw it added.
-//!
-//! Openness is decided per variant, not only per enum. A variant no consumer has reason to construct
-//! is itself `#[non_exhaustive]`, so it can gain a triage field (a cause, a URL, an offset) without a
-//! major version. The variants consumers build in their own tests, or take apart field by field
-//! ([`Io`](FetchError::Io), [`LengthMismatch`](FetchError::LengthMismatch),
-//! [`FileVerifyFailed`](FetchError::FileVerifyFailed),
-//! [`BlockVerifyFailed`](FetchError::BlockVerifyFailed), and the field-less
-//! [`Cancelled`](FetchError::Cancelled)), stay open: their field lists are the commitment, because a
-//! sealed struct variant cannot be built outside this crate at all.
+//! Openness is also decided per variant. A variant no consumer has reason to construct is itself
+//! `#[non_exhaustive]`, so it can gain a field (a cause, a URL, an offset) without a major version. The
+//! variants consumers build directly or take apart field by field ([`FetchError::Io`],
+//! [`FetchError::LengthMismatch`], [`FetchError::FileVerifyFailed`], [`FetchError::BlockVerifyFailed`],
+//! and the field-less [`FetchError::Cancelled`]) stay open instead: their field lists are the
+//! commitment.
 
 use std::path::PathBuf;
 
@@ -39,7 +33,7 @@ use url::Url;
 use crate::retry::{Class, classify_status};
 
 /// A download request that must not be attempted, rejected when the
-/// [`DownloadSpec`](crate::DownloadSpec) is built. Distinct from [`FetchError`]: these are caller or
+/// [`DownloadSpec`](crate::DownloadSpec) is built. Distinct from [`FetchError`]: these are
 /// configuration mistakes caught before any network contact, not transfer failures.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -66,14 +60,13 @@ pub enum SpecError {
         scheme: String,
     },
 
-    /// A `Validator::External` download without a declared length. The length check is the only
-    /// fetch-side guarantee for externally-verified bytes, so it is required rather than optional.
+    /// A `Validator::External` download without a declared length.
     #[error("externally-verified downloads require a declared length")]
     ExternalRequiresLength,
 
-    /// A `Validator::BlockSha1` whose block layout is inconsistent: no declared length, a zero block
-    /// size, an empty hash list, or a hash count that disagrees with the block count the length and
-    /// block size imply. Caught before any request so a mis-specified block map cannot start a transfer.
+    /// A `Validator::BlockSha1` block layout that is inconsistent: no declared length, a zero block
+    /// size, an empty hash list, or a hash count that disagrees with what the length and block size
+    /// imply.
     #[error("invalid block-hash layout: {reason}")]
     #[non_exhaustive]
     BlockLayout {
@@ -121,9 +114,8 @@ pub enum FetchError {
     },
 
     /// A redirect the client's policy would not follow: a chain past the hop cap, a hop leaving
-    /// `https` for plaintext, or a hop to a scheme that is not HTTP. Distinct from
-    /// [`Connect`](FetchError::Connect) because the host answered perfectly well, and because a
-    /// refusal is a verdict on the source rather than a transient fault, so it is never retried.
+    /// `https` for plaintext, or a hop to a scheme that is not HTTP. Never retried: the host answered
+    /// fine, so this is a verdict on the source rather than a transient fault.
     #[error("refused a redirect while fetching {url}: {detail}")]
     #[non_exhaustive]
     RedirectRefused {
@@ -144,10 +136,8 @@ pub enum FetchError {
     },
 
     /// One range failed on every source in turn until its attempt budget ran out. Distinct from
-    /// [`Stalled`](FetchError::Stalled), which is a lone source going quiet with nowhere to fail over
-    /// to: the fact worth triaging here is that failover itself was exhausted, so `sources` and
-    /// `attempts` say how wide and how hard the transfer tried. `url` names the primary, the source
-    /// list's head and the transfer's identity.
+    /// [`Stalled`](FetchError::Stalled): the fact worth triaging here is that failover itself was
+    /// exhausted, so `sources` and `attempts` say how wide and how hard the transfer tried.
     #[error("all {sources} sources failed {url} after {attempts} attempt(s), {at_bytes} bytes in")]
     #[non_exhaustive]
     AllSourcesFailed {
@@ -170,11 +160,7 @@ pub enum FetchError {
         got: u64,
     },
 
-    /// The source changed underneath an in-flight resume in a way the transfer could not absorb:
-    /// `url` is the primary (the resume identity), `detail` says what it did. The `If-Range` value
-    /// that went stale is on the tracing event beside this; carried there rather than here to keep
-    /// the variant inside clippy's `result_large_err` budget, and the seal means it can move in
-    /// later without a major version.
+    /// The source changed underneath an in-flight resume in a way the transfer could not absorb.
     #[error("server file changed mid-resume for {url}: {detail}")]
     #[non_exhaustive]
     ServerFileChanged {
@@ -204,8 +190,8 @@ pub enum FetchError {
         got: String,
     },
 
-    /// A filesystem operation failed. Disk-full carries its own [`std::io::ErrorKind`], which
-    /// [`into_out_of_space`](FetchError::into_out_of_space) is the way to route on.
+    /// A filesystem operation failed. Disk-full carries its own [`std::io::ErrorKind`]; see
+    /// [`into_out_of_space`](FetchError::into_out_of_space) for the routed form.
     #[error("io error at {path:?}")]
     Io {
         /// The path the filesystem refused.
@@ -236,9 +222,9 @@ pub enum FetchError {
         detail: &'static str,
     },
 
-    /// A source shape the streaming path cannot handle: the multi-range transport, and the defensive
-    /// guard for a block validator that somehow reached the engine without a declared length (the spec
-    /// builder normally rejects that first).
+    /// A source shape the streaming path cannot handle: the multi-range transport, or a block
+    /// validator that reached the engine without a declared length (the spec builder normally rejects
+    /// that first).
     #[error("unsupported: {what}")]
     #[non_exhaustive]
     Unsupported {
@@ -247,10 +233,7 @@ pub enum FetchError {
     },
 
     /// A fetcher configuration the engine cannot serve, refused by
-    /// [`FetcherBuilder::build`](crate::FetcherBuilder::build) before any client exists: the caps
-    /// must satisfy `max_files * max_connections_per_file <= max_connections_total`, or admitted
-    /// files park segment workers on the global semaphore and go silent for multiples of the stall
-    /// timeout while aggregate throughput looks healthy.
+    /// [`FetcherBuilder::build`](crate::FetcherBuilder::build) before any client exists.
     #[error("fetcher configuration rejected: {detail}")]
     #[non_exhaustive]
     Config {
@@ -259,8 +242,7 @@ pub enum FetchError {
     },
 
     /// The engine itself failed: a transfer task panicked or the runtime tore it down. A defect in
-    /// this crate rather than a property of the source, the disk, or the caller's request, so it is
-    /// bug-report data, not something a retry loop should chew on.
+    /// this crate rather than a property of the source, the disk, or the caller's request.
     #[error("internal engine failure: {detail}")]
     #[non_exhaustive]
     Internal {
@@ -277,21 +259,10 @@ pub enum FetchError {
 }
 
 impl FetchError {
-    /// Whether asking again could succeed: the network faults, plus the two cases only this crate can
-    /// answer.
-    ///
-    /// An [`Http`](FetchError::Http) status is transient exactly when the crate's own backoff treats
-    /// it as such, the throttle-and-overload set (`408`, `429`, `500`, `502`, `503`, `504`). A
-    /// transfer with a single source hands that status back verbatim once its internal budget is
-    /// spent, so a caller reading the variant alone stops on a throttling `503` that a longer pause
-    /// would have cleared. [`ServerFileChanged`](FetchError::ServerFileChanged) is raised only after
-    /// the journal is deleted, so what it asks for is a clean restart rather than a resume against
-    /// bytes that moved underneath one.
-    ///
-    /// Everything else is permanent, `_` included: a consumer restating this list has to be re-edited
-    /// whenever a variant is added, from a crate that cannot see it being added, and until then
-    /// classifies the new failure by whichever way its own `_` arm happened to fall. Answered beside
-    /// the code that constructs these, where the conservative default is also the local one.
+    /// Whether asking again could succeed: the network faults, plus an [`Http`](FetchError::Http)
+    /// status in the crate's own retryable set, plus [`ServerFileChanged`](FetchError::ServerFileChanged)
+    /// (raised only after the journal is deleted, so what it asks for is a clean restart). Everything
+    /// else, `_` included, is permanent.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
@@ -305,8 +276,6 @@ impl FetchError {
         }
     }
 
-    /// Build an [`Io`](FetchError::Io) at `path`, the single tidy build site for the crate's
-    /// filesystem failures.
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
             path: path.into(),
@@ -315,20 +284,15 @@ impl FetchError {
     }
 
     /// Take this failure apart as a full disk: the path the filesystem refused and the `ENOSPC` it
-    /// raised. `Err(self)` hands the failure back untouched when it is not one.
+    /// raised.
     ///
-    /// Answered here rather than by each caller, because which variants can carry `ENOSPC` is this
-    /// crate's knowledge and it is not obvious from the outside: preallocation raises it before a
-    /// payload byte streams, and a write into a `.part` raises it mid-transfer on a filesystem with
-    /// no reservation support, but both arrive as [`Io`](FetchError::Io) while a network fault with
-    /// its own `io::Error` inside does not. A caller matching the enum itself would have to know
-    /// that, and would silently stop covering the case if a later variant ever carried it too.
+    /// Only [`Io`](FetchError::Io) can carry it: preallocation and a `.part` write both raise
+    /// `StorageFull` through that variant, while a network fault's own `io::Error` never does. A
+    /// caller matching the enum directly would have to know that boundary, and would silently stop
+    /// covering it if a later variant carried `StorageFull` too.
     ///
-    /// This is the whole distinction between a full disk and any other filesystem fault, so a caller
-    /// that routes on it gets a typed answer instead of walking the source chain for an
-    /// [`ErrorKind`](std::io::ErrorKind). It yields the pair rather than the whole error because
-    /// those two are all a disk-full [`Io`](FetchError::Io) holds: a caller re-wrapping the original
-    /// beside a path it just read out of it would be storing the path twice.
+    /// # Errors
+    /// The failure itself, unchanged, when it is not a full disk.
     ///
     /// # Examples
     ///
@@ -349,9 +313,6 @@ impl FetchError {
     /// };
     /// assert!(denied.into_out_of_space().is_err());
     /// ```
-    ///
-    /// # Errors
-    /// The failure itself, unchanged, when it is not a full disk.
     pub fn into_out_of_space(self) -> Result<(PathBuf, std::io::Error), Self> {
         match self {
             Self::Io { path, source } if source.kind() == std::io::ErrorKind::StorageFull => {
@@ -373,10 +334,10 @@ mod tests {
         std::io::Error::from(kind)
     }
 
-    /// The transience every variant is committed to, as an exhaustive match: adding a variant fails
-    /// this compile until the variant is classified here and sampled in the tests below, so a new
-    /// failure cannot fall into `is_transient`'s `_` arm unexamined. `None` is status-dependent
-    /// ([`FetchError::Http`]), swept over every status in its own test.
+    // The transience every variant is committed to, as an exhaustive match: adding a variant fails
+    // this compile until it is classified here and sampled in the tests below, so a new failure
+    // cannot fall into `is_transient`'s `_` arm unexamined. `None` is status-dependent (`Http`),
+    // swept over every status in its own test.
     fn expected_transience(error: &FetchError) -> Option<bool> {
         match error {
             FetchError::Connect { .. }
@@ -399,9 +360,9 @@ mod tests {
         }
     }
 
-    /// Which variants a full disk can arrive in, as an exhaustive match: [`FetchError::Io`] alone.
-    /// A variant added later must take a row here, which is the prompt to decide whether
-    /// `into_out_of_space` has to start looking inside it too.
+    // Which variants a full disk can arrive in, as an exhaustive match: `Io` alone. A variant added
+    // later must take a row here, which is the prompt to decide whether `into_out_of_space` has to
+    // start looking inside it too.
     fn may_carry_a_full_disk(error: &FetchError) -> bool {
         match error {
             FetchError::Io { .. } => true,
@@ -424,9 +385,8 @@ mod tests {
         }
     }
 
-    /// The faults a second attempt exists for: reaching the host, streaming from it, a source that
-    /// went quiet, a failover that ran out of sources, and a source that stopped honoring ranges
-    /// mid-transfer (whose journal is already gone, so the retry starts clean).
+    /// Network faults, a stalled source, exhausted failover, and a mid-resume source change are all
+    /// transient.
     #[test]
     fn the_network_faults_and_a_changed_source_are_transient() {
         let url = Url::parse("https://example.test/artifact.bin").unwrap();
@@ -459,8 +419,7 @@ mod tests {
         }
     }
 
-    /// Bytes that failed a check, a request shape the source refused, a local fault, and a caller
-    /// that asked to stop: none of them become a success by being asked again.
+    /// A failed check, a refusal, a local fault, and a cancellation are all permanent.
     #[test]
     fn a_failed_check_a_refusal_and_a_cancellation_are_permanent() {
         let url = Url::parse("https://example.test/artifact.bin").unwrap();
@@ -507,9 +466,8 @@ mod tests {
         }
     }
 
-    /// A status reads the same to a consumer as it does to the crate's own backoff, over the whole
-    /// range a server can send. Restating the set instead would let the two drift, which is how a
-    /// throttling `503` that outlasts the internal budget stops an outer retry loop dead.
+    /// `is_transient` for `Http` agrees with the crate's own backoff classification across every
+    /// status 100..=599, so an outer retry loop never disagrees with the internal one.
     #[test]
     fn a_status_is_transient_exactly_when_the_backoff_would_retry_it() {
         let url = Url::parse("https://example.test/artifact.bin").unwrap();
@@ -526,7 +484,6 @@ mod tests {
         }
     }
 
-    /// A `FetchError::Io` at a fixed `.part`, for the disk-full routing tests below.
     fn io_failure(kind: ErrorKind) -> FetchError {
         FetchError::io("/dest/out.part", io(kind))
     }

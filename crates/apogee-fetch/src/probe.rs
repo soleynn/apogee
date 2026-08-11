@@ -1,18 +1,14 @@
 //! Per-host range-capability probing and its session cache.
 //!
-//! Segmentation needs the server to honor `Range`. The first ranged request to a host reveals this:
-//! a `206 Partial Content` means ranges work and the transfer can fan out; a `200` (the range
-//! ignored, whole body returned) demotes the job to a single streaming connection, correct but
-//! slower. The verdict is cached per `host:port` for the session, so later jobs to the same host skip
-//! the probe.
+//! The first ranged request to a host reveals whether it honors `Range`: a `206` means the transfer
+//! can segment across connections, a `200` (the range ignored) demotes it to a single connection,
+//! correct but slower. The verdict is cached per `host:port` for the session, so later jobs to the
+//! same host skip the probe.
 //!
-//! Probing rather than assuming is also what absorbs a forward proxy, which these transfers run
-//! through whenever `HTTP_PROXY` is set. A proxy that drops the `Range` on the way out, or strips
-//! `Content-Range` and rewrites the `206` to a `200` on the way back, is indistinguishable here from
-//! a server that ignores ranges, and it demotes down the same path: measured against both on
-//! 2026-08-10, a 64 MiB transfer arrived byte-identical on one connection instead of four. Nothing
-//! needs to detect the proxy, because the only thing worth knowing about it is what the probe
-//! already asks.
+//! Probing rather than assuming also absorbs a forward proxy transparently: one that drops the
+//! `Range` on the way out, or rewrites a `206` back to a `200` on the way back, looks identical here
+//! to a server that ignores ranges and demotes down the same path, confirmed against a real proxy
+//! doing exactly that.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -22,15 +18,13 @@ use url::Url;
 /// Whether a host serves byte ranges (segmentable) or ignores them (single connection).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
-    /// The host answered a ranged request with `206`; the transfer can segment.
     Segmentable,
-    /// The host ignored the range (`200`); the transfer must stream on one connection.
     SingleConnection,
 }
 
 /// Classify a ranged probe response. Only `200`/`206` are expected here; any other status is a
-/// transport error handled before classification. A `206` proves the server served the requested
-/// range, so ranges are usable; anything else is treated as an ignored range.
+/// transport error handled before this is called. A `206` proves the range was served, so anything
+/// else is treated as ignored.
 pub(crate) fn classify(resp: &reqwest::Response) -> Capability {
     if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         Capability::Segmentable

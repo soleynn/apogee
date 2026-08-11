@@ -1,25 +1,24 @@
-//! The segmented transfer engine and the single/segmented dispatch.
+//! The multi-connection segmented download engine.
 //!
-//! A file of known length whose host serves ranges is divided into segments, each pulled by its own
-//! worker writing at its own offset into one preallocated `.part`. A work queue plus that pool of
-//! workers is the whole mechanism: a segment that stalls or drops re-queues the *remaining* bytes of
-//! its own range (nothing already durable is lost), and the completed-interval journal lets the whole
-//! transfer resume across a restart. When the length is unknown, the file is small, or the host
-//! ignores ranges, the transfer falls back to the single-connection engine in [`crate::download`].
+//! A file whose length is known and whose host serves byte ranges is split into segments, each
+//! streamed by its own worker into one preallocated `.part` at its own offset. A shared work queue
+//! plus that pool of workers is the whole mechanism: a segment that stalls or drops re-queues only
+//! its own remaining bytes, and a completed-interval journal lets the whole transfer resume across a
+//! restart. [`dispatch`] falls back to the single-connection engine in [`crate::download`] when the
+//! length is unknown, the file is too small to be worth splitting, or the host turns out to ignore
+//! ranges.
 //!
-//! **What a segment costs in sockets is the server's decision, not this engine's.** Over HTTP/1.1
-//! each concurrent segment needs a connection of its own; an h2 host multiplexes every one of them
-//! onto a single connection, where they are streams sharing one congestion window. So the caps and
-//! slots named for connections, here and on the scheduler, bound *concurrent segment requests*, which
-//! is the same number as connections only in the first case.
+//! What a segment costs in sockets is the server's choice, not this engine's: over HTTP/1.1 each
+//! concurrent segment needs a connection of its own, but an h2 host multiplexes every one of them
+//! onto a single connection, as streams sharing one congestion window. So the caps named here and on
+//! [`crate::scheduler`] bound *concurrent segment requests*, which equals connection count only in
+//! the HTTP/1.1 case.
 //!
-//! Re-queued work does not have to go back to the source that failed it. Every unit of work carries
-//! the source it was asked from, and every failure of it - a refused connection, a dropped body, a
-//! silence past the stall timeout, a throttling status, a block that failed its hash - steps that
-//! choice along the spec's source list by the same rule ([`rotate`](crate::retry::rotate)), which the
-//! single-connection engine's retry path shares. A mirror that turns out not to serve ranges at all is
-//! taken out of the rotation for the rest of the transfer rather than being re-asked for every later
-//! block.
+//! A re-queued unit of work does not have to go back to the source that failed it: every [`Task`]
+//! carries the source it was asked from, and every kind of failure rotates that choice along the
+//! source list by the same [`rotate`](crate::retry::rotate) rule the single-connection engine's retry
+//! path shares. A mirror found not to serve ranges at all is dropped from the rotation for the rest
+//! of the transfer rather than re-asked on every later block.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::SeekFrom;
@@ -60,8 +59,8 @@ const BATCH: u64 = 1024 * 1024;
 /// The floor on segment size; a file no larger than this is not worth splitting.
 const MIN_SEGMENT: u64 = 8 * 1024 * 1024;
 
-/// How many block hashes may run on the shared blocking pool at once. Bounded to the host's parallelism
-/// (capped) so a burst of newly-durable blocks never starves the transfer's own disk I/O.
+/// How many block hashes may run on the shared blocking pool at once, capped to the host's
+/// parallelism so a burst of newly-durable blocks cannot starve the transfer's own disk I/O.
 fn hash_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -70,14 +69,15 @@ fn hash_concurrency() -> usize {
 }
 
 /// One unit of transfer work: a byte range and which source to fetch it from (`0` is the primary,
-/// higher indices are mirrors). A re-queue re-picks the source from the work's own attempt count.
+/// higher indices are mirrors).
 struct Task {
     range: Range<u64>,
     source: usize,
 }
 
-/// Decide single vs segmented and run the transfer. The single-connection engine owns the
-/// unknown-length, small-file, and range-ignored (demoted) cases; the segmented engine owns the rest.
+/// Choose the single-connection or segmented engine for `spec` and run the transfer. The
+/// single-connection engine in [`crate::download`] owns the unknown-length, small-file, and
+/// range-ignored (demoted) cases; segmentation owns the rest.
 pub(crate) async fn dispatch(
     client: &reqwest::Client,
     spec: &DownloadSpec,
@@ -191,14 +191,8 @@ struct Probe {
 }
 
 /// Probe range support with a one-byte ranged request, classifying the response and capturing its
-/// validators, then dropping its body (so a range-ignoring `200` wastes only a socket buffer, never
-/// the whole file).
-///
-/// The probe is the transfer's first request, so a throttled or restarting host would otherwise fail
-/// a whole job before a byte was asked for: a connect failure or a retryable status backs off here
-/// under the same policy the segment workers use, and rotates through the sources by the same rule,
-/// so a primary that is down cannot fail a job the mirrors could have served. Exhausting the budget
-/// reports the last source's own failure, which names a host and carries the cause.
+/// validators for a later resume. The body is dropped either way, so a range-ignoring `200` costs
+/// only a socket buffer, never the whole file.
 async fn probe(
     client: &reqwest::Client,
     spec: &DownloadSpec,
@@ -208,6 +202,11 @@ async fn probe(
 ) -> Result<Probe, FetchError> {
     let sources = spec.sources();
     let mut attempts = 0u32;
+    // The probe is the transfer's first request, so a throttled or restarting host must not fail the
+    // whole job before a byte was asked for: a connect failure or retryable status backs off and
+    // rotates through the sources under the same policy the segment workers use, so a down primary
+    // cannot fail a job the mirrors could have served. Exhausting the budget reports the last
+    // source's own failure.
     loop {
         let source = rotate(attempts, sources.len());
         let url = &sources[source];
@@ -294,11 +293,11 @@ async fn probe(
     }
 }
 
-/// Shared state for one segmented transfer: the work queue, the durable-byte counter, the journal, and
-/// the terminal outcome. One `Arc` is held by every worker plus the progress aggregator.
+/// Shared state for one segmented transfer: the work queue, the durable-byte counter, the journal,
+/// and the terminal outcome. One `Arc` is held by every worker plus the progress aggregator.
 struct TransferState {
     client: reqwest::Client,
-    /// The primary URL, followed by any mirrors: a [`Task`]'s `source` indexes this list. Index `0` is
+    /// The primary URL, followed by any mirrors: a [`Task::source`] indexes this list. Index `0` is
     /// the primary and the resume identity key, so rotating to a mirror never invalidates the journal.
     sources: Vec<Url>,
     part: PathBuf,
@@ -310,9 +309,8 @@ struct TransferState {
     if_range: Option<Vec<u8>>,
     limiter: crate::limiter::LimitHandle,
     scheduler: Arc<crate::scheduler::Scheduler>,
-    /// The progress channel and this transfer's recovery counters. Held here rather than passed to
-    /// each worker: a re-queue, a dropped mirror and a dirty block are all counted deep inside the
-    /// worker tree, where the reporter is the one thing already reachable through `state`.
+    /// The progress channel and this transfer's recovery counters, reachable through `state` from
+    /// anywhere in the worker tree.
     reporter: Reporter,
     /// How a re-queued range or a dirty block waits, and how many attempts each gets.
     retry: RetryPolicy,
@@ -322,23 +320,17 @@ struct TransferState {
     progress_notify: Notify,
     durable: AtomicU64,
     /// The live durable byte set (not just its length), so the block verifier can tell which whole
-    /// blocks are on disk. Seeded from the resume set; grown in `commit_batch`, shrunk when a dirty
-    /// block is cleared. Its length always equals `durable`.
+    /// blocks are on disk. Its length always equals `durable`.
     covered: Mutex<IntervalSet>,
     attempts: Mutex<HashMap<u64, u32>>,
-    /// Sources found unable to serve byte ranges, by index. A mirror that answers a ranged request
-    /// with a whole body cannot serve a segment or a block repair, and it will answer the next one
-    /// the same way, so the verdict is taken once and holds for the rest of the transfer instead of
-    /// costing every later block a wasted request. Index `0` is never in here: a whole body from the
-    /// primary is a changed source, not a capability, and that is what leaves at least one source
+    /// Sources found unable to serve byte ranges, by index. Index `0` is never in here: a whole body
+    /// from the primary means a changed source, not a capability, which is why at least one source is
     /// always eligible.
     ranges_ignored: Mutex<HashSet<usize>>,
     journal: tokio::sync::Mutex<Option<Journal>>,
     /// Present only in block mode: the per-block verification state and its wake channel.
     verify: Option<Arc<BlockVerify>>,
-    /// Caps how many block hashes run on the shared blocking pool at once, so a burst of newly-durable
-    /// blocks (e.g. resuming a fully-durable multi-thousand-block patch) cannot starve the transfer's
-    /// own disk I/O, which shares that pool.
+    /// Caps concurrent block hashing on the shared blocking pool; see [`hash_concurrency`].
     hash_limit: Arc<Semaphore>,
     done: CancellationToken,
     end: Mutex<Option<Result<(), FetchError>>>,
@@ -354,21 +346,18 @@ impl TransferState {
         }
     }
 
-    /// The primary source (index `0`): the resume identity key and the target for top-level errors.
+    /// The primary source (index `0`), used as the resume identity key and the target named in
+    /// top-level errors.
     fn primary(&self) -> &Url {
         &self.sources[0]
     }
 
-    /// This transfer's recovery counters.
     fn counters(&self) -> &crate::progress::Counters {
         self.reporter.counters()
     }
 
-    /// The source work used on its previous try and the one its `attempts`-th failure sends it to.
-    ///
-    /// Both ends come from the same rotation over the same eligible set, and the attempt count is
-    /// keyed to the unit of work, so the pair is exact rather than a guess: at one failure the two
-    /// are equal (the free same-source retry) and they diverge on the step that reaches a mirror.
+    /// The source a unit of work was last tried on, and the source its `attempts`-th failure sends it
+    /// to next.
     fn rotation(&self, attempts: u32) -> (usize, usize) {
         (
             self.next_source(attempts.saturating_sub(1)),
@@ -385,8 +374,9 @@ impl TransferState {
         self.notify.notify_one();
     }
 
-    /// Take the next pending task, waiting for one to appear. `None` when the transfer is finished or
-    /// cancelled (never inferred from an empty queue, so a mid-re-queue gap cannot end the job early).
+    /// Take the next pending task, waiting for one to appear. Returns `None` only when the transfer
+    /// finished or was cancelled, never merely because the queue is empty (a mid-re-queue gap must
+    /// not end the job early).
     async fn pop_or_wait(&self, cancel: &CancellationToken) -> Option<Task> {
         loop {
             if let Some(task) = lock(&self.queue).pop_front() {
@@ -406,12 +396,9 @@ impl TransferState {
         }
     }
 
-    /// Increment and return the attempt count for a stuck offset.
-    ///
-    /// The key is the offset the re-queued range starts at, so the count measures consecutive
-    /// failures that gained *no bytes*: a source that delivered part of a segment moves the key
-    /// along, which resets both the budget and the rotation back to the primary. Only work that is
-    /// genuinely stuck escalates through the source list.
+    /// Increment and return the attempt count for a stuck offset. The count is keyed to the range's
+    /// start offset, so a source that delivers partial progress moves the key forward and resets the
+    /// budget and rotation; only work that gains no bytes at all escalates through the source list.
     fn bump_attempt(&self, start: u64) -> u32 {
         let mut attempts = lock(&self.attempts);
         let counter = attempts.entry(start).or_insert(0);
@@ -419,14 +406,15 @@ impl TransferState {
         *counter
     }
 
-    /// Record that `source` answered a ranged request with a whole body, so later picks pass over it.
-    /// `true` when this call is what recorded it, `false` for a worker that raced to the same verdict.
+    /// Record that `source` answered a ranged request with a whole body. Returns `true` only for the
+    /// call that first recorded it, so a worker that raced to the same verdict can tell it lost the
+    /// race.
     fn mark_ranges_ignored(&self, source: usize) -> bool {
         lock(&self.ranges_ignored).insert(source)
     }
 
-    /// The first source at or after `from`, wrapping, that has not been found unable to serve ranges.
-    /// Total: the primary is never marked, so the walk always lands somewhere within one lap.
+    /// The first source at or after `from`, wrapping, that has not been marked unable to serve
+    /// ranges. The primary is never marked, so the walk always lands somewhere within one lap.
     fn eligible_from(&self, from: usize) -> usize {
         let count = self.sources.len();
         let ignored = lock(&self.ranges_ignored);
@@ -441,11 +429,8 @@ impl TransferState {
         self.eligible_from(rotate(attempts, self.sources.len()))
     }
 
-    /// The failure to report for a range whose attempt budget ran out.
-    ///
-    /// A transfer with mirrors has spent that budget across its whole source list, so it reports the
-    /// failover it exhausted; one with a single source had nowhere to go, so the stall of the one
-    /// source it had is still the whole story.
+    /// The failure to report for a range whose attempt budget ran out: [`FetchError::AllSourcesFailed`]
+    /// when there were mirrors to fail over to, otherwise a plain [`FetchError::Stalled`].
     fn exhausted(&self, attempts: u32) -> FetchError {
         let at_bytes = self.durable.load(Ordering::SeqCst);
         if self.sources.len() > 1 {
@@ -463,12 +448,10 @@ impl TransferState {
         }
     }
 
-    /// Wait out the backoff for work that has failed `attempts` times, honoring a server-named pause.
-    /// `false` means the transfer ended or was cancelled while waiting, so the caller must stop
-    /// rather than re-queue.
-    /// Wait out a computed backoff delay, watching both tokens. The delay is computed at the call
-    /// site (`RetryPolicy::delay` draws jitter, so two calls differ) so the event logged beside it
-    /// names the exact wait being served.
+    /// Wait out a backoff `delay`, watching both cancellation tokens. `false` means the transfer
+    /// ended or was cancelled during the wait, so the caller must stop rather than re-queue. `delay`
+    /// is computed by the caller (jitter makes each call's value distinct), so the event logged
+    /// beside it names the exact wait being served.
     async fn wait(&self, delay: Duration, cancel: &CancellationToken) -> bool {
         tokio::select! {
             biased;
@@ -670,25 +653,17 @@ async fn aggregator(state: Arc<TransferState>, progress: Reporter, len: u64) {
     }
 }
 
-/// Why a segment went back on the queue, named on the retry event beside the backoff, mirroring
-/// the single-connection engine's `reason`. Without it the log said a segment was re-queued and not
-/// what failed, which on a patch day is the difference between "the CDN is throttling" and "the
-/// wire is corrupting".
+/// Why a segment went back on the queue, named on the retry event beside the backoff, mirroring the
+/// single-connection engine's `reason`. Distinguishing this from a bare "re-queued" log line is the
+/// difference between diagnosing a throttling host and a corrupting link.
 #[derive(Clone, Copy)]
 enum RequeueCause {
-    /// The request got no response headers within the deadline.
     NoResponseHeaders,
-    /// The connection could not be established (a transient connect fault).
     Connect,
-    /// A throttling or overload status.
     Throttled(u16),
-    /// The body was cut off before the range completed.
     BodyDropped,
-    /// The body went quiet past the inactivity timeout.
     BodyStalled,
-    /// A `206` delivered fewer bytes than the range asked for.
     ShortRange,
-    /// A worker raced another to a mirror's already-recorded ranges-ignored verdict.
     RangesIgnored,
 }
 
@@ -710,19 +685,16 @@ impl std::fmt::Display for RequeueCause {
 enum SegmentResult {
     /// The segment's range is fully durable.
     Done,
-    /// The connection dropped or stalled, or the server refused with a retryable status; the
-    /// remaining bytes must be re-fetched after a backoff. `asked` carries a `Retry-After` the
-    /// server named, which the policy clamps before honoring, and `cause` names what failed for the
-    /// retry event beside the backoff.
+    /// The remaining bytes must be re-fetched after a backoff; `asked` carries a server-named
+    /// `Retry-After`, and `cause` names what failed.
     Requeue {
         range: Range<u64>,
         asked: Option<Duration>,
         cause: RequeueCause,
     },
-    /// The primary returned a `200` where a `206` was expected (the source changed under us).
+    /// The primary returned a `200` where a `206` was expected: the source changed under us.
     SourceChanged,
-    /// A mirror returned a `200` where a `206` was expected: it will not serve ranges, so it can
-    /// serve neither a segment nor a block repair. Costs the transfer that one source, not the job.
+    /// A mirror returned a `200` where a `206` was expected: it will not serve ranges.
     RangesIgnored { range: Range<u64> },
     /// The transfer is ending (finished or cancelled); stop working.
     Stop,
@@ -814,11 +786,9 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
 }
 
 /// Charge a failed range one attempt and put it back on the queue, or fail the transfer once its
-/// budget is gone. Returns whether the worker may carry on with its loop: `false` only when the
-/// transfer ended or a cancel landed while the range was waiting out its backoff.
-///
-/// Exhausting the budget records the outcome and returns `true`, leaving the worker's own completion
-/// check to notice the transfer has finished, exactly as every other terminal path here does.
+/// budget is gone. Returns `false` only when the transfer ended or was cancelled while the range
+/// waited out its backoff; exhausting the budget still returns `true`, leaving the worker's own
+/// completion check to notice the transfer has finished.
 async fn requeue(
     state: &TransferState,
     range: Range<u64>,
@@ -936,8 +906,9 @@ fn spawn_hash(
     });
 }
 
-/// A block passed: mark it verified and, if it was the last, finish the transfer. A late result landing
-/// after an external cancel must not publish a cancelled job, so the completion is gated on `!cancel`.
+/// A block passed: mark it verified and, if it was the last, finish the transfer. A late result
+/// landing after an external cancel must not publish a cancelled job, so completion is gated on
+/// `!cancel.is_cancelled()`.
 fn on_verified(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &CancellationToken) {
     if state.done.is_cancelled() {
         return;
@@ -948,8 +919,8 @@ fn on_verified(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &Can
     }
 }
 
-/// A block failed its hash: spend one retry and either re-fetch just that block (clearing its bytes so
-/// `durable` and `covered` stay consistent) or, once the budget is gone, fail the whole file.
+/// A block failed its hash: spend one retry and either re-fetch just that block (clearing its bytes
+/// so `durable` and `covered` stay consistent) or, once the budget is gone, fail the whole file.
 async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &CancellationToken) {
     if state.done.is_cancelled() || cancel.is_cancelled() {
         return;

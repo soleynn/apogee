@@ -1,17 +1,11 @@
-//! Scatter-gather multi-range fetch: the transport half of game repair.
+//! Scatter-gather multi-range fetch: pulls a set of byte ranges of one URL via [`fetch_ranges`],
+//! packing them into `Range` requests bounded by both count and header byte length, and handling
+//! whichever of a single `206`, a multipart `206`, or a range-ignoring `200` the server answers with.
+//! Nothing buffers a whole body: spans are sliced from the stream and delivered as they arrive.
 //!
-//! [`fetch_ranges`] pulls a set of byte ranges of one URL and hands each fetched span to a sink with
-//! its absolute offset. Ranges are packed into requests capped both by count (≤ 256, below XL's 400
-//! for CDN header headroom) and by the `Range` header's byte length, so a request never trips a
-//! server's header-size limit. Each request's response is handled in whichever of the three shapes a
-//! server chose: a single `206` (parse the `Content-Range`, slice), a `206 multipart/byteranges`
-//! (drive the in-house incremental parser), or a degenerate `200` that ignored the ranges (stream the
-//! whole body and slice out what was asked). Nothing buffers a whole body: spans are sliced from the
-//! transfer stream and delivered as they arrive.
-//!
-//! This layer only guarantees "these bytes came from that offset of that URL"; the consumer
-//! (`apogee-zipatch`'s repair) CRC-checks each part before writing. Mirror rotation, retry, and
-//! local-first policy live in the caller, so `fetch_ranges` is a single attempt against one URL.
+//! This layer only guarantees that a delivered span came from its claimed offset of the URL; the
+//! caller CRC-checks each part and owns mirror rotation and retry, since [`fetch_ranges`] is a single
+//! attempt against one URL.
 
 use std::ops::Range;
 
@@ -27,13 +21,13 @@ use crate::headers::apply_headers;
 use crate::multipart::{MultipartError, MultipartParser, RangeExpect, parse_content_range};
 use crate::range_source::HttpSource;
 
-/// The hard cap on ranges per request, independent of the byte budget: below XL's 400 for headroom
-/// against CDN header limits, and the parser's part cap.
+/// Hard cap on ranges per request, independent of the byte budget: below XL's 400 for CDN header
+/// headroom, and matches the multipart parser's own part cap.
 const MAX_RANGES_PER_REQUEST: usize = 256;
 
-/// How ranges are packed into `Range` requests. A request holds at most `max_ranges` ranges, and its
-/// `bytes=…` header value stays at or below `max_range_header_bytes` (a single range always gets its
-/// own request even if it alone exceeds the budget, so progress is guaranteed).
+/// How ranges are packed into `Range` requests: at most `max_ranges` ranges, and a `bytes=…` header
+/// value at or below `max_range_header_bytes` (a single oversized range still gets its own request,
+/// so progress is guaranteed).
 ///
 /// `#[non_exhaustive]`: start from [`default`](Self::default) and adjust through the setters, so a
 /// packing cap added later does not break every literal.
@@ -80,13 +74,14 @@ pub(crate) struct Engine<'a> {
     pub(crate) shared: &'a Shared,
 }
 
-/// Fetch `ranges` (sorted, non-overlapping) of `source`, delivering each fetched span to `sink` as
-/// `(absolute_offset, bytes)`. The source's `expected_len` is cross-checked against each response's
-/// `Content-Range` total. Single attempt against one URL.
+/// Fetches `ranges` (sorted, non-overlapping) of `source`, delivering each fetched span to `sink` as
+/// `(absolute_offset, bytes)`. A single attempt against one URL.
 ///
 /// # Errors
-/// A [`FetchError`] for any transport, HTTP-status, length, or malformed-response fault, or the sink's
-/// own error propagated verbatim.
+///
+/// A transport, HTTP-status, length, or malformed-response [`FetchError`] (for example
+/// [`FetchError::Http`] or [`FetchError::MalformedRangeResponse`]), [`FetchError::Cancelled`] if
+/// `cancel` fires, or the sink's own error propagated verbatim.
 pub(crate) async fn fetch_ranges<F>(
     engine: &Engine<'_>,
     source: &HttpSource,
@@ -111,7 +106,7 @@ where
     Ok(())
 }
 
-/// Split `ranges` greedily into request-sized groups honoring both packing caps.
+/// Splits `ranges` greedily into request-sized groups honoring both packing caps.
 fn pack_ranges<'a>(ranges: &'a [Range<u64>], packing: &RangePacking) -> Vec<&'a [Range<u64>]> {
     let max_ranges = packing.max_ranges.clamp(1, MAX_RANGES_PER_REQUEST);
     let mut groups = Vec::new();
@@ -138,17 +133,17 @@ fn pack_ranges<'a>(ranges: &'a [Range<u64>], packing: &RangePacking) -> Vec<&'a 
     groups
 }
 
-/// Decimal length of one range's `a-b` header token.
+/// Decimal digit count of one range's `a-b` header token.
 fn token_len(r: &Range<u64>) -> usize {
     digits(r.start) + 1 + digits(r.end.saturating_sub(1))
 }
 
-/// Number of decimal digits in `n`.
+/// Decimal digit count of `n`; `0` counts as one digit.
 fn digits(n: u64) -> usize {
     if n == 0 { 1 } else { (n.ilog10() + 1) as usize }
 }
 
-/// Fetch one packed group of ranges in a single request and dispatch on the response shape.
+/// Fetches one packed group of ranges in a single request and dispatches on the response shape.
 async fn fetch_group<F>(
     engine: &Engine<'_>,
     source: &HttpSource,
@@ -269,8 +264,8 @@ fn range_header(group: &[Range<u64>]) -> String {
     out
 }
 
-/// The `[start, end)` envelope a group spans (its first range's start to its last range's end);
-/// group is non-empty and sorted, so this is the min start and max end.
+/// The half-open `[start, end)` envelope of a sorted, non-empty `group`: its first range's start to
+/// the max of its ends.
 fn envelope(group: &[Range<u64>]) -> (u64, u64) {
     let start = group.first().map_or(0, |r| r.start);
     let end = group.iter().map(|r| r.end).max().unwrap_or(0);
@@ -303,7 +298,8 @@ fn multipart_boundary(resp: &reqwest::Response) -> Option<Vec<u8>> {
     None
 }
 
-/// Handle a single `206`: validate its `Content-Range`, then stream-and-slice the body from `first`.
+/// Handles a single `206`: validates its `Content-Range`, then streams and slices the body from
+/// `first`.
 async fn stream_single_206<F>(
     shared: &Shared,
     url: &Url,
@@ -343,9 +339,9 @@ where
     stream_and_slice(shared, url, group, first, resp, cancel, sink).await
 }
 
-/// Stream a body whose first byte sits at absolute offset `base`, delivering to `sink` only the bytes
-/// that fall inside one of the requested `group` ranges. Buffers nothing: each arriving chunk is
-/// intersected with the (sorted) ranges and the overlaps are emitted.
+/// Streams a body whose first byte sits at absolute offset `base`, delivering to `sink` only the
+/// bytes inside one of `group`'s ranges. Buffers nothing: each chunk is intersected with the sorted
+/// ranges as it arrives.
 async fn stream_and_slice<F>(
     shared: &Shared,
     url: &Url,
@@ -386,7 +382,8 @@ where
     Ok(())
 }
 
-/// Stream a `multipart/byteranges` body through the incremental parser, delivering each part's bytes.
+/// Streams a `multipart/byteranges` body through the incremental parser, delivering each part's
+/// bytes.
 async fn stream_multipart<F>(
     shared: &Shared,
     source: &HttpSource,
@@ -426,10 +423,9 @@ where
     parser.finish().map_err(|e| multipart_to_fetch(url, e))
 }
 
-/// Pull the next body chunk, racing the cancel token and the inactivity timeout. `Ok(None)` is a
-/// clean end of body. The single-attempt rule stands: elapsing is an error handed to the caller, not
-/// a retry, but without this bound a body that goes quiet parked the repair planner forever, since
-/// `send` is bounded only up to the response headers.
+/// Pulls the next body chunk, racing `cancel` and the inactivity timeout; `Ok(None)` is a clean end
+/// of body. Elapsing is an error, not a retry: `send` only bounds the wait for response headers, so
+/// nothing else stops a quiet body from parking the caller forever.
 async fn next_chunk<S>(
     shared: &Shared,
     url: &Url,
@@ -456,8 +452,8 @@ where
     }
 }
 
-/// Draw limiter tokens for `n` bytes, racing the cancel token: at a low rate this wait is n over
-/// rate long, and the tokens are only debited when the wait completes.
+/// Draws limiter tokens for `n` bytes, racing `cancel`; at a low rate the wait is `n / rate` long,
+/// and tokens are debited only once the wait completes.
 async fn throttle(shared: &Shared, n: u64, cancel: &CancellationToken) -> Result<(), FetchError> {
     tokio::select! {
         biased;
@@ -466,8 +462,8 @@ async fn throttle(shared: &Shared, n: u64, cancel: &CancellationToken) -> Result
     }
 }
 
-/// Map a parser error to a [`FetchError`]: a sink rejection is surfaced verbatim (it is the sink's own
-/// error), any framing/validation fault becomes a [`FetchError::MalformedRangeResponse`].
+/// Maps a parser error to a [`FetchError`]: a sink rejection surfaces verbatim, any
+/// framing/validation fault becomes [`FetchError::MalformedRangeResponse`].
 fn multipart_to_fetch(url: &Url, err: MultipartError) -> FetchError {
     match err {
         MultipartError::Sink(inner) => inner,
@@ -489,6 +485,7 @@ mod tests {
         }
     }
 
+    /// Zero counts as one digit, not zero.
     #[test]
     fn digits_counts_decimal_places() {
         assert_eq!(digits(0), 1);
@@ -497,6 +494,7 @@ mod tests {
         assert_eq!(digits(999), 3);
     }
 
+    /// A large `max_ranges` budget still splits into groups of at most `max_ranges`.
     #[test]
     fn packing_respects_the_range_count_cap() {
         let ranges: Vec<Range<u64>> = (0..10).map(|i| (i * 100)..(i * 100 + 10)).collect();
@@ -507,6 +505,7 @@ mod tests {
         );
     }
 
+    /// A tiny header-byte budget forces one range per request even with room under the count cap.
     #[test]
     fn packing_respects_the_header_byte_budget() {
         let ranges: Vec<Range<u64>> = (0..6).map(|i| (i * 1000)..(i * 1000 + 100)).collect();
@@ -516,6 +515,8 @@ mod tests {
         assert_eq!(groups.len(), 6);
     }
 
+    /// A single range that alone exceeds the byte budget still gets its own request rather than
+    /// stalling.
     #[test]
     fn packing_never_stalls_on_an_oversized_single_range() {
         let ranges: Vec<Range<u64>> = std::iter::once(0u64..100).collect();
@@ -524,11 +525,13 @@ mod tests {
         assert_eq!(groups[0].len(), 1);
     }
 
+    /// The header's end token is inclusive (`end - 1`), not the half-open `end`.
     #[test]
     fn range_header_formats_inclusive_tokens() {
         assert_eq!(range_header(&[0..10, 100..150]), "bytes=0-9,100-149");
     }
 
+    /// The envelope is the min start and max end, not just the first and last range.
     #[test]
     fn envelope_spans_first_start_to_last_end() {
         assert_eq!(envelope(&[10..20, 100..150]), (10, 150));
