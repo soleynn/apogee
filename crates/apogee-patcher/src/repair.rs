@@ -193,7 +193,6 @@ fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, Pat
     }
 
     let root = store::repo_root(&ctx.game_root, repo);
-    let (local_files, http_sources) = resolve_sources(&index, repo_req)?;
 
     // The initial full pass: broken parts, wrong lengths, missing files, and strays.
     let _ = ctx
@@ -213,6 +212,19 @@ fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, Pat
             count: report.stray_files.len(),
         });
         recycler::quarantine(&ctx.game_root, repo, &ctx.batch, &report.stray_files)?
+    };
+
+    // Addressing the chain's source patches is deferred until the verify says something has to be
+    // pulled from one. A repo can reference sources this request cannot form a URL for (no cached copy
+    // and no base to derive one under), and that is only a failure when a broken part actually has to
+    // come from one: a repo that verifies clean has nothing to fetch and must not fail for want of a
+    // source it never reads. Resolving up front made one unaddressable repo abort the whole run,
+    // healthy or not, which on an install whose patch cache is gone is every repo the base URL does
+    // not cover.
+    let (local_files, http_sources) = if has_work(&report) {
+        resolve_sources(&index, repo_req)?
+    } else {
+        (None, Vec::new())
     };
 
     // The reattempt loop: pass 0 trusts local patch files when the whole chain is cached, every pass
@@ -329,8 +341,9 @@ fn compose_source(
 /// whole chain is cached locally) a local file per patch. A source the index references is taken from
 /// the request's explicit [`patch_sources`](RepairRepo::patch_sources) when listed there, else formed
 /// as `{source_base_url}/{name}` when a base is set (an HTTP-only source, no local copy). A source that
-/// neither supplies is a hard [`PatchError::IndexUnavailable`]: a repair cannot proceed missing a
-/// source the index depends on.
+/// neither supplies is a hard [`PatchError::IndexUnavailable`]: a repair that has bytes to pull cannot
+/// proceed missing a source the index depends on. Called only once the verify has found work, so an
+/// unaddressable source costs nothing on a repo that turns out to be healthy.
 type ResolvedSources = (Option<Vec<PathBuf>>, Vec<HttpSource>);
 
 fn resolve_sources(index: &Index, repo_req: &RepairRepo) -> Result<ResolvedSources, PatchError> {
