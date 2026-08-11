@@ -17,13 +17,15 @@ use std::ops::Range;
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::download::{self, connect_error, transport_error};
 use crate::error::FetchError;
 use crate::fetcher::Shared;
-use crate::headers::{HeaderPolicy, apply_headers};
+use crate::headers::apply_headers;
 use crate::multipart::{MultipartError, MultipartParser, RangeExpect, parse_content_range};
+use crate::range_source::HttpSource;
 
 /// The hard cap on ranges per request, independent of the byte budget: below XL's 400 for headroom
 /// against CDN header limits, and the parser's part cap.
@@ -78,20 +80,19 @@ pub(crate) struct Engine<'a> {
     pub(crate) shared: &'a Shared,
 }
 
-/// Fetch `ranges` (sorted, non-overlapping) of `url`, delivering each fetched span to `sink` as
-/// `(absolute_offset, bytes)`. `expected_len` is the source file's length, cross-checked against each
-/// response's `Content-Range` total. Single attempt against one URL.
+/// Fetch `ranges` (sorted, non-overlapping) of `source`, delivering each fetched span to `sink` as
+/// `(absolute_offset, bytes)`. The source's `expected_len` is cross-checked against each response's
+/// `Content-Range` total. Single attempt against one URL.
 ///
 /// # Errors
 /// A [`FetchError`] for any transport, HTTP-status, length, or malformed-response fault, or the sink's
 /// own error propagated verbatim.
 pub(crate) async fn fetch_ranges<F>(
     engine: &Engine<'_>,
-    url: &Url,
-    expected_len: u64,
+    source: &HttpSource,
     ranges: &[Range<u64>],
-    policy: Option<&HeaderPolicy>,
     packing: RangePacking,
+    cancel: &CancellationToken,
     mut sink: F,
 ) -> Result<(), FetchError>
 where
@@ -102,7 +103,10 @@ where
     // the public entry point total for a degenerate caller.
     let ranges: Vec<Range<u64>> = ranges.iter().filter(|r| r.start < r.end).cloned().collect();
     for group in pack_ranges(&ranges, &packing) {
-        fetch_group(engine, url, expected_len, group, policy, &mut sink).await?;
+        if cancel.is_cancelled() {
+            return Err(FetchError::Cancelled);
+        }
+        fetch_group(engine, source, group, cancel, &mut sink).await?;
     }
     Ok(())
 }
@@ -147,23 +151,35 @@ fn digits(n: u64) -> usize {
 /// Fetch one packed group of ranges in a single request and dispatch on the response shape.
 async fn fetch_group<F>(
     engine: &Engine<'_>,
-    url: &Url,
-    expected_len: u64,
+    source: &HttpSource,
     group: &[Range<u64>],
-    policy: Option<&HeaderPolicy>,
+    cancel: &CancellationToken,
     sink: &mut F,
 ) -> Result<(), FetchError>
 where
     F: FnMut(u64, &[u8]) -> Result<(), FetchError>,
 {
-    let _conn = engine.shared.scheduler.acquire_connection().await;
-    let req =
-        apply_headers(engine.client.get(url.clone()), policy).header(RANGE, range_header(group));
+    let (url, expected_len) = (&source.url, source.expected_len);
+    // The wait for a global connection slot is unbounded when the fetcher is busy, so it is raced
+    // against the token: without that, a cancelled repair still queued behind every download in
+    // flight before it could notice.
+    let _conn = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(FetchError::Cancelled),
+        conn = engine.shared.scheduler.acquire_connection() => conn,
+    };
+    let req = apply_headers(engine.client.get(url.clone()), source.policy.as_ref())
+        .header(RANGE, range_header(group));
     let shared = engine.shared;
     // A single attempt is still a bounded one. Recovery belongs to the caller, but only if it is ever
     // handed back control: a host that takes the request and answers nothing would otherwise park a
     // repair inside this `send` with no body to time out and no attempt budget to spend.
-    let resp = match download::send_bounded(req, shared.stall_timeout).await {
+    let sent = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(FetchError::Cancelled),
+        sent = download::send_bounded(req, shared.stall_timeout) => sent,
+    };
+    let resp = match sent {
         Ok(sent) => sent.map_err(|e| connect_error(url, e))?,
         Err(_elapsed) => {
             // No counter beside this one: the multi-range transport carries no progress channel, so
@@ -200,20 +216,29 @@ where
                 if let Some(boundary) = multipart_boundary(&resp) {
                     stream_multipart(
                         shared,
-                        url,
-                        expected_len,
+                        source,
                         group,
                         &boundary,
                         resp,
+                        cancel,
                         &mut counting,
                     )
                     .await
                 } else {
-                    stream_single_206(shared, url, expected_len, group, resp, &mut counting).await
+                    stream_single_206(
+                        shared,
+                        url,
+                        expected_len,
+                        group,
+                        resp,
+                        cancel,
+                        &mut counting,
+                    )
+                    .await
                 }
             }
             // Range ignored: the whole body arrived. Stream it and slice out the requested ranges.
-            200 => stream_and_slice(shared, url, group, 0, resp, &mut counting).await,
+            200 => stream_and_slice(shared, url, group, 0, resp, cancel, &mut counting).await,
             status => Err(FetchError::Http {
                 status,
                 url: url.clone(),
@@ -285,6 +310,7 @@ async fn stream_single_206<F>(
     expected_len: u64,
     group: &[Range<u64>],
     resp: reqwest::Response,
+    cancel: &CancellationToken,
     sink: &mut F,
 ) -> Result<(), FetchError>
 where
@@ -314,7 +340,7 @@ where
             detail: "content-range outside requested ranges",
         });
     }
-    stream_and_slice(shared, url, group, first, resp, sink).await
+    stream_and_slice(shared, url, group, first, resp, cancel, sink).await
 }
 
 /// Stream a body whose first byte sits at absolute offset `base`, delivering to `sink` only the bytes
@@ -326,6 +352,7 @@ async fn stream_and_slice<F>(
     group: &[Range<u64>],
     base: u64,
     resp: reqwest::Response,
+    cancel: &CancellationToken,
     sink: &mut F,
 ) -> Result<(), FetchError>
 where
@@ -333,10 +360,13 @@ where
 {
     let mut stream = Box::pin(resp.bytes_stream());
     let mut pos = base;
-    while let Some(item) = stream.next().await {
+    loop {
+        let Some(item) = next_chunk(shared, url, &mut stream, pos, cancel).await? else {
+            break;
+        };
         let chunk = item.map_err(|e| transport_error(url, e))?;
         let bytes: &[u8] = chunk.as_ref();
-        shared.limiter.acquire(bytes.len() as u64).await;
+        throttle(shared, bytes.len() as u64, cancel).await?;
         let chunk_start = pos;
         let chunk_end = pos + bytes.len() as u64;
         for r in group {
@@ -359,16 +389,17 @@ where
 /// Stream a `multipart/byteranges` body through the incremental parser, delivering each part's bytes.
 async fn stream_multipart<F>(
     shared: &Shared,
-    url: &Url,
-    expected_len: u64,
+    source: &HttpSource,
     group: &[Range<u64>],
     boundary: &[u8],
     resp: reqwest::Response,
+    cancel: &CancellationToken,
     sink: &mut F,
 ) -> Result<(), FetchError>
 where
     F: FnMut(u64, &[u8]) -> Result<(), FetchError>,
 {
+    let (url, expected_len) = (&source.url, source.expected_len);
     let (start, end) = envelope(group);
     let expect = RangeExpect {
         start,
@@ -379,15 +410,60 @@ where
         MultipartParser::new(boundary, expect).map_err(|e| multipart_to_fetch(url, e))?;
     let mut deliver = |off: u64, bytes: &[u8]| sink(off, bytes);
     let mut stream = Box::pin(resp.bytes_stream());
-    while let Some(item) = stream.next().await {
+    let mut fed: u64 = 0;
+    loop {
+        let Some(item) = next_chunk(shared, url, &mut stream, fed, cancel).await? else {
+            break;
+        };
         let chunk = item.map_err(|e| transport_error(url, e))?;
         let bytes: &[u8] = chunk.as_ref();
-        shared.limiter.acquire(bytes.len() as u64).await;
+        throttle(shared, bytes.len() as u64, cancel).await?;
+        fed += bytes.len() as u64;
         parser
             .feed(bytes, &mut deliver)
             .map_err(|e| multipart_to_fetch(url, e))?;
     }
     parser.finish().map_err(|e| multipart_to_fetch(url, e))
+}
+
+/// Pull the next body chunk, racing the cancel token and the inactivity timeout. `Ok(None)` is a
+/// clean end of body. The single-attempt rule stands: elapsing is an error handed to the caller, not
+/// a retry, but without this bound a body that goes quiet parked the repair planner forever, since
+/// `send` is bounded only up to the response headers.
+async fn next_chunk<S>(
+    shared: &Shared,
+    url: &Url,
+    stream: &mut S,
+    at_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<Option<S::Item>, FetchError>
+where
+    S: futures_util::Stream + Unpin,
+{
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(FetchError::Cancelled),
+        () = tokio::time::sleep(shared.stall_timeout) => {
+            tracing::warn!(
+                url = %url,
+                at_bytes,
+                timeout_ms = shared.stall_timeout.as_millis(),
+                "a range response's body went quiet past the inactivity timeout",
+            );
+            Err(FetchError::Stalled { url: url.clone(), at_bytes })
+        }
+        item = stream.next() => Ok(item),
+    }
+}
+
+/// Draw limiter tokens for `n` bytes, racing the cancel token: at a low rate this wait is n over
+/// rate long, and the tokens are only debited when the wait completes.
+async fn throttle(shared: &Shared, n: u64, cancel: &CancellationToken) -> Result<(), FetchError> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(FetchError::Cancelled),
+        () = shared.limiter.acquire(n) => Ok(()),
+    }
 }
 
 /// Map a parser error to a [`FetchError`]: a sink rejection is surfaced verbatim (it is the sink's own

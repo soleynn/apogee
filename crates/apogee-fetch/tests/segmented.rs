@@ -306,14 +306,21 @@ async fn dropping_the_download_future_stops_the_workers() {
     // at segment offsets into a preallocated file, so its *size* is fixed; the moving measure is
     // how much the journal has banked.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let settled = tokio::fs::metadata(sidecar(&dest, ".apdl")).await.map_or(0, |m| m.len());
+    let settled = tokio::fs::metadata(sidecar(&dest, ".apdl"))
+        .await
+        .map_or(0, |m| m.len());
     tokio::time::sleep(Duration::from_millis(600)).await;
-    let later = tokio::fs::metadata(sidecar(&dest, ".apdl")).await.map_or(0, |m| m.len());
+    let later = tokio::fs::metadata(sidecar(&dest, ".apdl"))
+        .await
+        .map_or(0, |m| m.len());
     assert_eq!(
         later, settled,
         "workers kept streaming and journaling after the future was dropped",
     );
-    assert!(part.exists(), "the partial file survives for a later resume");
+    assert!(
+        part.exists(),
+        "the partial file survives for a later resume"
+    );
     assert!(
         !dest.exists(),
         "a dropped transfer must never publish its destination",

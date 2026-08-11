@@ -14,6 +14,7 @@
 
 use std::ops::Range;
 
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::error::FetchError;
@@ -66,6 +67,7 @@ pub struct HttpRangeSource {
     handle: tokio::runtime::Handle,
     sources: Vec<HttpSource>,
     packing: RangePacking,
+    cancel: CancellationToken,
 }
 
 impl HttpRangeSource {
@@ -79,6 +81,7 @@ impl HttpRangeSource {
             handle,
             sources,
             packing: RangePacking::default(),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -86,6 +89,20 @@ impl HttpRangeSource {
     #[must_use]
     pub fn with_packing(mut self, packing: RangePacking) -> Self {
         self.packing = packing;
+        self
+    }
+
+    /// Watch `cancel` while fetching, so a repair pass driven through this adapter is interruptible
+    /// mid-transfer rather than only between the planner's requests. A cancelled fetch surfaces to
+    /// the planner as an i/o read fault (the seam's taxonomy has no cancel of its own), which ends
+    /// the repair with an error exactly as the caller asked. Default: a token nothing cancels.
+    ///
+    /// No progress counterpart, deliberately: only the repair planner knows what a delivered span
+    /// means to the file it is mending, so per-file progress belongs to its report callback rather
+    /// than to a byte tally here.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
         self
     }
 }
@@ -109,11 +126,10 @@ impl apogee_zipatch::RangeSource for HttpRangeSource {
         // the real error re-surfaced afterward (the sink's own return value never reaches the caller).
         let mut captured: Option<apogee_zipatch::Error> = None;
         let fetch = self.fetcher.fetch_ranges(
-            &source.url,
-            source.expected_len,
+            source,
             ranges,
-            source.policy.as_ref(),
             self.packing,
+            self.cancel.clone(),
             |off, bytes| match out(off, bytes) {
                 Ok(()) => Ok(()),
                 Err(err) => {

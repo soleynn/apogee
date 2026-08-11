@@ -137,7 +137,11 @@ mod tests {
     /// that understands both verifies one artifact the same way.
     #[test]
     fn a_row_carrying_both_pins_is_read_as_blake3() {
-        let pin = DigestPin::from_hex(HexPins { blake3: Some(A), sha256: Some(B) }).expect("decodes");
+        let pin = DigestPin::from_hex(HexPins {
+            blake3: Some(A),
+            sha256: Some(B),
+        })
+        .expect("decodes");
         assert!(matches!(pin, DigestPin::Blake3(_)));
         assert_eq!(pin.bytes()[31], 1);
     }
@@ -146,11 +150,17 @@ mod tests {
     #[test]
     fn either_pin_alone_is_accepted_and_keeps_its_function() {
         assert!(matches!(
-            DigestPin::from_hex(HexPins { blake3: Some(A), sha256: None }),
+            DigestPin::from_hex(HexPins {
+                blake3: Some(A),
+                sha256: None
+            }),
             Some(DigestPin::Blake3(_))
         ));
         assert!(matches!(
-            DigestPin::from_hex(HexPins { blake3: None, sha256: Some(A) }),
+            DigestPin::from_hex(HexPins {
+                blake3: None,
+                sha256: Some(A)
+            }),
             Some(DigestPin::Sha256(_))
         ));
         assert_eq!(DigestPin::from_hex(HexPins::default()), None);
@@ -161,7 +171,13 @@ mod tests {
     /// intend for that build.
     #[test]
     fn a_bad_blake3_pin_does_not_fall_through_to_a_good_sha256_one() {
-        assert_eq!(DigestPin::from_hex(HexPins { blake3: Some("not-hex"), sha256: Some(A) }), None);
+        assert_eq!(
+            DigestPin::from_hex(HexPins {
+                blake3: Some("not-hex"),
+                sha256: Some(A)
+            }),
+            None
+        );
     }
 
     /// Both halves of the decoder: the length, and the digits. A pin of the right length made of

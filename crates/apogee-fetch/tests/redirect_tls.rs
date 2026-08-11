@@ -18,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 /// policy, which is what makes the request-count assertion below worth making: were a refusal
 /// treated as a transient fault, the count would be the full attempt budget rather than one.
 fn fetcher(cert_der: &[u8]) -> Result<Fetcher, Box<dyn std::error::Error>> {
-    Ok(Fetcher::builder().extra_root_certificate(cert_der).build()?)
+    Ok(Fetcher::builder()
+        .extra_root_certificate(cert_der)
+        .build()?)
 }
 
 #[tokio::test]
