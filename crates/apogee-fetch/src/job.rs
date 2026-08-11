@@ -1,7 +1,6 @@
 //! The handle to a submitted download.
 
 use std::future::{Future, IntoFuture};
-use std::path::PathBuf;
 use std::pin::Pin;
 
 use tokio::sync::mpsc;
@@ -59,9 +58,12 @@ impl Job {
         match self.handle.await {
             Ok(result) => result,
             Err(join) if join.is_cancelled() => Err(FetchError::Cancelled),
-            // The engine never panics by design; surface a task panic as an i/o failure rather than
-            // unwinding the caller.
-            Err(join) => Err(FetchError::io(PathBuf::new(), std::io::Error::other(join))),
+            // The engine never panics by design; surface a task panic as the engine defect it is
+            // rather than unwinding the caller.
+            Err(join) => Err(FetchError::Internal {
+                detail: "the transfer task panicked",
+                source: std::io::Error::other(join),
+            }),
         }
     }
 }

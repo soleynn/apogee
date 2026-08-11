@@ -9,8 +9,7 @@
 //! # Stability
 //!
 //! Every variant of both enums has a construction site in this crate. A variant naming a situation
-//! the crate cannot produce is dead code in whoever matches it, so there are none, and neither the
-//! variants nor their fields change without a major version.
+//! the crate cannot produce is dead code in whoever matches it, so there are none.
 //!
 //! Two situations deliberately have no variant, because both are recoveries rather than failures: a
 //! server that will not serve byte ranges demotes the transfer to a single streaming connection, and
@@ -22,6 +21,15 @@
 //! [`FetchError::is_transient`] and `_` reads there as "permanent, do not retry", so a variant added
 //! here cannot become a retry loop by default, and cannot silently change the answer a consumer gets
 //! from a crate that never saw it added.
+//!
+//! Openness is decided per variant, not only per enum. A variant no consumer has reason to construct
+//! is itself `#[non_exhaustive]`, so it can gain a triage field (a cause, a URL, an offset) without a
+//! major version. The variants consumers build in their own tests, or take apart field by field
+//! ([`Io`](FetchError::Io), [`LengthMismatch`](FetchError::LengthMismatch),
+//! [`FileVerifyFailed`](FetchError::FileVerifyFailed),
+//! [`BlockVerifyFailed`](FetchError::BlockVerifyFailed), and the field-less
+//! [`Cancelled`](FetchError::Cancelled)), stay open: their field lists are the commitment, because a
+//! sealed struct variant cannot be built outside this crate at all.
 
 use std::path::PathBuf;
 
@@ -39,6 +47,7 @@ pub enum SpecError {
     /// An unverified download (`Validator::None`) over a plain-`http://` source. Plain HTTP is
     /// allowed only when an out-of-band validator authenticates the bytes.
     #[error("refusing an unverified download over plain http: {url}")]
+    #[non_exhaustive]
     UnverifiedOverPlainHttp { url: Url },
 
     /// `Validator::None` was requested without the explicit opt-in acknowledging the bytes go
@@ -48,6 +57,7 @@ pub enum SpecError {
 
     /// The source scheme is neither `http` nor `https`.
     #[error("unsupported url scheme: {scheme}")]
+    #[non_exhaustive]
     UnsupportedScheme { scheme: String },
 
     /// A `Validator::External` download without a declared length. The length check is the only
@@ -59,6 +69,7 @@ pub enum SpecError {
     /// size, an empty hash list, or a hash count that disagrees with the block count the length and
     /// block size imply. Caught before any request so a mis-specified block map cannot start a transfer.
     #[error("invalid block-hash layout: {reason}")]
+    #[non_exhaustive]
     BlockLayout { reason: &'static str },
 }
 
@@ -68,6 +79,7 @@ pub enum SpecError {
 pub enum FetchError {
     /// The connection could not be established.
     #[error("connect to {host} failed")]
+    #[non_exhaustive]
     Connect {
         host: String,
         #[source]
@@ -78,6 +90,7 @@ pub enum FetchError {
     /// or a TLS error while streaming the response body. Distinct from [`Connect`](FetchError::Connect)
     /// so a mid-stream drop is not mistaken for an unreachable host.
     #[error("transport error for {url}")]
+    #[non_exhaustive]
     Transport {
         url: Url,
         #[source]
@@ -86,6 +99,7 @@ pub enum FetchError {
 
     /// The server answered with a status the download cannot accept.
     #[error("http {status} for {url}")]
+    #[non_exhaustive]
     Http { status: u16, url: Url },
 
     /// A redirect the client's policy would not follow: a chain past the hop cap, a hop leaving
@@ -93,10 +107,12 @@ pub enum FetchError {
     /// [`Connect`](FetchError::Connect) because the host answered perfectly well, and because a
     /// refusal is a verdict on the source rather than a transient fault, so it is never retried.
     #[error("refused a redirect while fetching {url}: {detail}")]
+    #[non_exhaustive]
     RedirectRefused { url: Url, detail: &'static str },
 
     /// The transfer made no progress for too long, with no other source to try.
     #[error("stalled at {at_bytes} bytes: {url}")]
+    #[non_exhaustive]
     Stalled { url: Url, at_bytes: u64 },
 
     /// One range failed on every source in turn until its attempt budget ran out. Distinct from
@@ -105,6 +121,7 @@ pub enum FetchError {
     /// `attempts` say how wide and how hard the transfer tried. `url` names the primary, the source
     /// list's head and the transfer's identity.
     #[error("all {sources} sources failed {url} after {attempts} attempt(s), {at_bytes} bytes in")]
+    #[non_exhaustive]
     AllSourcesFailed {
         url: Url,
         sources: usize,
@@ -116,9 +133,14 @@ pub enum FetchError {
     #[error("length mismatch: expected {expected}, got {got}")]
     LengthMismatch { expected: u64, got: u64 },
 
-    /// The source changed underneath an in-flight resume in a way the transfer could not absorb.
-    #[error("server file changed mid-resume: {validator}")]
-    ServerFileChanged { validator: String },
+    /// The source changed underneath an in-flight resume in a way the transfer could not absorb:
+    /// `url` is the primary (the resume identity), `detail` says what it did. The `If-Range` value
+    /// that went stale is on the tracing event beside this; carried there rather than here to keep
+    /// the variant inside clippy's `result_large_err` budget, and the seal means it can move in
+    /// later without a major version.
+    #[error("server file changed mid-resume for {url}: {detail}")]
+    #[non_exhaustive]
+    ServerFileChanged { url: Url, detail: &'static str },
 
     /// A block failed its hash after exhausting its retry budget.
     #[error("block {block} at offset {offset} failed verification after {attempts} attempt(s)")]
@@ -143,6 +165,7 @@ pub enum FetchError {
 
     /// The HTTP client could not be constructed (the TLS backend failed to initialize).
     #[error("http client setup failed")]
+    #[non_exhaustive]
     Client {
         #[source]
         source: std::io::Error,
@@ -152,13 +175,35 @@ pub enum FetchError {
     /// `multipart/byteranges` body, a part whose `Content-Range` fell outside the requested ranges, or
     /// a boundary the `Content-Type` never declared.
     #[error("malformed range response for {url}: {detail}")]
+    #[non_exhaustive]
     MalformedRangeResponse { url: Url, detail: &'static str },
 
     /// A source shape the streaming path cannot handle: the multi-range transport, and the defensive
     /// guard for a block validator that somehow reached the engine without a declared length (the spec
     /// builder normally rejects that first).
     #[error("unsupported: {what}")]
+    #[non_exhaustive]
     Unsupported { what: &'static str },
+
+    /// A fetcher configuration the engine cannot serve, refused by
+    /// [`FetcherBuilder::build`](crate::FetcherBuilder::build) before any client exists: the caps
+    /// must satisfy `max_files * max_connections_per_file <= max_connections_total`, or admitted
+    /// files park segment workers on the global semaphore and go silent for multiples of the stall
+    /// timeout while aggregate throughput looks healthy.
+    #[error("fetcher configuration rejected: {detail}")]
+    #[non_exhaustive]
+    Config { detail: String },
+
+    /// The engine itself failed: a transfer task panicked or the runtime tore it down. A defect in
+    /// this crate rather than a property of the source, the disk, or the caller's request, so it is
+    /// bug-report data, not something a retry loop should chew on.
+    #[error("internal engine failure: {detail}")]
+    #[non_exhaustive]
+    Internal {
+        detail: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 
     /// The caller cancelled the transfer; the partial file and its journal survive for a resume.
     #[error("cancelled")]
@@ -262,6 +307,57 @@ mod tests {
         std::io::Error::from(kind)
     }
 
+    /// The transience every variant is committed to, as an exhaustive match: adding a variant fails
+    /// this compile until the variant is classified here and sampled in the tests below, so a new
+    /// failure cannot fall into `is_transient`'s `_` arm unexamined. `None` is status-dependent
+    /// ([`FetchError::Http`]), swept over every status in its own test.
+    fn expected_transience(error: &FetchError) -> Option<bool> {
+        match error {
+            FetchError::Connect { .. }
+            | FetchError::Transport { .. }
+            | FetchError::Stalled { .. }
+            | FetchError::AllSourcesFailed { .. }
+            | FetchError::ServerFileChanged { .. } => Some(true),
+            FetchError::Http { .. } => None,
+            FetchError::RedirectRefused { .. }
+            | FetchError::LengthMismatch { .. }
+            | FetchError::BlockVerifyFailed { .. }
+            | FetchError::FileVerifyFailed { .. }
+            | FetchError::Io { .. }
+            | FetchError::Client { .. }
+            | FetchError::MalformedRangeResponse { .. }
+            | FetchError::Unsupported { .. }
+            | FetchError::Config { .. }
+            | FetchError::Internal { .. }
+            | FetchError::Cancelled => Some(false),
+        }
+    }
+
+    /// Which variants a full disk can arrive in, as an exhaustive match: [`FetchError::Io`] alone.
+    /// A variant added later must take a row here, which is the prompt to decide whether
+    /// `into_out_of_space` has to start looking inside it too.
+    fn may_carry_a_full_disk(error: &FetchError) -> bool {
+        match error {
+            FetchError::Io { .. } => true,
+            FetchError::Connect { .. }
+            | FetchError::Transport { .. }
+            | FetchError::Http { .. }
+            | FetchError::RedirectRefused { .. }
+            | FetchError::Stalled { .. }
+            | FetchError::AllSourcesFailed { .. }
+            | FetchError::ServerFileChanged { .. }
+            | FetchError::LengthMismatch { .. }
+            | FetchError::BlockVerifyFailed { .. }
+            | FetchError::FileVerifyFailed { .. }
+            | FetchError::Client { .. }
+            | FetchError::MalformedRangeResponse { .. }
+            | FetchError::Unsupported { .. }
+            | FetchError::Config { .. }
+            | FetchError::Internal { .. }
+            | FetchError::Cancelled => false,
+        }
+    }
+
     /// The faults a second attempt exists for: reaching the host, streaming from it, a source that
     /// went quiet, a failover that ran out of sources, and a source that stopped honoring ranges
     /// mid-transfer (whose journal is already gone, so the retry starts clean).
@@ -288,10 +384,12 @@ mod tests {
                 at_bytes: 4096,
             },
             FetchError::ServerFileChanged {
-                validator: "range ignored mid-transfer".to_owned(),
+                url: url.clone(),
+                detail: "range ignored mid-transfer",
             },
         ] {
             assert!(error.is_transient(), "{error:?}");
+            assert_eq!(expected_transience(&error), Some(true), "{error:?}");
         }
     }
 
@@ -329,9 +427,17 @@ mod tests {
             FetchError::Unsupported {
                 what: "multi-range transport",
             },
+            FetchError::Config {
+                detail: "5 files x 6 connections per file exceeds the global cap of 24".to_owned(),
+            },
+            FetchError::Internal {
+                detail: "transfer task panicked",
+                source: io(ErrorKind::Other),
+            },
             FetchError::Cancelled,
         ] {
             assert!(!error.is_transient(), "{error:?}");
+            assert_eq!(expected_transience(&error), Some(false), "{error:?}");
         }
     }
 
@@ -389,13 +495,22 @@ mod tests {
 
     #[test]
     fn a_transport_failure_carrying_an_io_error_is_not_a_full_disk() {
-        // Connect/Transport wrap an `io::Error` of their own, so a caller matching on "has an
-        // io::Error inside" would misread a network fault as a disk one.
-        let err = FetchError::Transport {
-            url: Url::parse("https://example.invalid/f.bin").expect("static url"),
-            source: std::io::ErrorKind::StorageFull.into(),
-        };
-        assert!(err.into_out_of_space().is_err());
-        assert!(FetchError::Cancelled.into_out_of_space().is_err());
+        // Connect/Transport/Internal wrap an `io::Error` of their own, so a caller matching on "has
+        // an io::Error inside" would misread a network fault or an engine defect as a disk one.
+        for err in [
+            FetchError::Transport {
+                url: Url::parse("https://example.invalid/f.bin").expect("static url"),
+                source: std::io::ErrorKind::StorageFull.into(),
+            },
+            FetchError::Internal {
+                detail: "transfer task panicked",
+                source: std::io::ErrorKind::StorageFull.into(),
+            },
+            FetchError::Cancelled,
+        ] {
+            assert!(!may_carry_a_full_disk(&err), "{err:?}");
+            assert!(err.into_out_of_space().is_err());
+        }
+        assert!(may_carry_a_full_disk(&io_failure(ErrorKind::StorageFull)));
     }
 }

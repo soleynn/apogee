@@ -133,10 +133,10 @@ impl apogee_zipatch::RangeSource for HttpRangeSource {
 /// A throwaway error the sink returns to abort a fetch after the planner's callback failed; its
 /// contents never surface (the captured zipatch error wins), so only its role matters.
 fn sink_abort() -> FetchError {
-    FetchError::io(
-        std::path::PathBuf::new(),
-        std::io::Error::other("range sink aborted"),
-    )
+    FetchError::Internal {
+        detail: "range sink aborted",
+        source: std::io::Error::other("range sink aborted"),
+    }
 }
 
 /// Map a transport failure into the zipatch error taxonomy: a malformed range response is corrupt

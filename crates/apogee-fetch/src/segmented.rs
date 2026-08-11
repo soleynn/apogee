@@ -727,14 +727,20 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
             }
             SegmentResult::SourceChanged => {
                 // A changed source restarts clean: drop the stale journal and surface the typed
-                // changed-source error so a retry re-downloads from scratch.
+                // changed-source error so a retry re-downloads from scratch. The stale `If-Range`
+                // value rides the event here; the error carries the pair that fits its size budget.
                 tracing::warn!(
                     url = %state.primary(),
+                    stale_validator = state
+                        .if_range
+                        .as_deref()
+                        .map(|v| String::from_utf8_lossy(v).into_owned()),
                     "the primary answered a conditional range with a whole body; the file changed under the transfer",
                 );
                 let _ = tokio::fs::remove_file(&state.apdl).await;
                 state.finish(Err(FetchError::ServerFileChanged {
-                    validator: "range ignored mid-transfer".to_owned(),
+                    url: state.primary().clone(),
+                    detail: "the primary answered a conditional range with a whole body",
                 }));
             }
             SegmentResult::Stop => return,

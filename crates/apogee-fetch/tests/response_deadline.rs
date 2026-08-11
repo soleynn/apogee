@@ -77,7 +77,7 @@ async fn a_source_that_never_answers_ends_the_transfer_instead_of_hanging() {
     .unwrap_err();
 
     match err {
-        FetchError::Stalled { ref url, at_bytes } => {
+        FetchError::Stalled { ref url, at_bytes, .. } => {
             assert_eq!(url, &server.url("f.bin"));
             assert_eq!(at_bytes, 0, "nothing was ever delivered to stall past");
         }
@@ -310,7 +310,7 @@ async fn a_silent_host_hands_a_range_fetch_back_instead_of_parking_it() {
     .unwrap();
 
     match err {
-        FetchError::Stalled { ref url, at_bytes } => {
+        FetchError::Stalled { ref url, at_bytes, .. } => {
             assert_eq!(url, &server.url("f.bin"));
             assert_eq!(
                 at_bytes, 4096,

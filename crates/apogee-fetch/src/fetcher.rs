@@ -328,8 +328,26 @@ impl FetcherBuilder {
     /// Build the configured [`Fetcher`].
     ///
     /// # Errors
-    /// [`FetchError::Client`] if the HTTP client cannot be constructed.
+    /// [`FetchError::Config`] if `max_files * max_connections_per_file` exceeds
+    /// `max_connections_total` (see [`FetcherBuilder::default`] for why that combination cannot be
+    /// served); [`FetchError::Client`] if the HTTP client cannot be constructed.
     pub fn build(self) -> Result<Fetcher, FetchError> {
+        // The scheduler clamps each cap to at least 1, so the invariant is checked over the values
+        // that will actually run.
+        let (files, per_file, total) = (
+            self.max_files.max(1),
+            self.max_connections_per_file.max(1),
+            self.max_connections_total.max(1),
+        );
+        if files * per_file > total {
+            return Err(FetchError::Config {
+                detail: format!(
+                    "{files} file(s) x {per_file} connection(s) per file exceeds the global cap of \
+                     {total}: admitted files would park segment workers on the semaphore and go \
+                     silent while the others transfer",
+                ),
+            });
+        }
         let client = reqwest::Client::builder()
             // Keep the on-wire bytes identical to the body bytes: verification and the length
             // cross-check must see exactly what the server sent, never a transparently decoded stream.
