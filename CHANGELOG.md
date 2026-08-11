@@ -75,6 +75,9 @@ is tagged with its change type. Versioning aims to follow
 - Match the seal and probe claims to the code (#158) _(documentation)_
 - Fuzz the exported password table, and decode it from bytes (#160) _(testing)_
 
+### apogee-test-support
+- Stop a corpus gate passing when it cannot run (#189) _(fixed)_
+
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
 
