@@ -30,7 +30,6 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -41,7 +40,7 @@ use crate::hash::{DigestPin, FileHasher};
 use crate::headers::apply_headers;
 use crate::journal::{self, Identity, Journal};
 use crate::prealloc::preallocate;
-use crate::progress::{Phase, Progress};
+use crate::progress::{Phase, Reporter};
 use crate::retry::{
     Class, classify_send_error, classify_status, retry_after, rotate, sleep_or_cancel,
 };
@@ -78,7 +77,7 @@ pub(crate) async fn run(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     verify: Verify,
-    progress: Option<mpsc::UnboundedSender<Progress>>,
+    progress: Reporter,
     cancel: CancellationToken,
     shared: &Shared,
 ) -> Result<VerifiedFile, FetchError> {
@@ -172,6 +171,7 @@ pub(crate) async fn run(
                 if_range: &mut if_range,
             },
             shared,
+            &progress,
             &cancel,
             &mut attempts,
         )
@@ -181,14 +181,7 @@ pub(crate) async fn run(
         // The first progress event of an attempt is emitted only after the resume disposition is
         // settled, so it never names bytes a `200` has just discarded.
         high = high.max(start);
-        emit(
-            &progress,
-            Progress {
-                bytes_done: high,
-                total: spec.expected_len(),
-                phase: Phase::Connecting,
-            },
-        );
+        progress.emit(high, spec.expected_len(), Phase::Connecting);
 
         if let (Some(exp), Some(cl)) = (spec.expected_len(), resp.content_length()) {
             let server_total = start.saturating_add(cl);
@@ -277,11 +270,31 @@ pub(crate) async fn run(
                 written,
                 source: cause,
             } => {
+                let from = source;
                 attempts += 1;
                 if !shared.retry.may_retry(attempts) {
+                    tracing::warn!(
+                        url = %url,
+                        attempts,
+                        at_bytes = written,
+                        reason = %cause,
+                        "the body kept failing and the attempt budget is spent",
+                    );
                     return Err(exhausted(&sources, attempts, written, cause));
                 }
+                let to = rotate(attempts, sources.len());
+                progress.counters().retry(from, to);
                 let delay = shared.retry.delay(attempts, None, &shared.jitter);
+                tracing::debug!(
+                    url = %url,
+                    attempts,
+                    at_bytes = written,
+                    from,
+                    to,
+                    delay_ms = delay.as_millis(),
+                    reason = %cause,
+                    "the body was cut off; resuming after a backoff",
+                );
                 if !sleep_or_cancel(delay, &cancel).await {
                     return Err(FetchError::Cancelled);
                 }
@@ -303,14 +316,7 @@ pub(crate) async fn run(
     }
 
     if let (Some(h), Some(pin)) = (hasher.take(), verify.digest) {
-        emit(
-            &progress,
-            Progress {
-                bytes_done: written,
-                total,
-                phase: Phase::Verifying,
-            },
-        );
+        progress.emit(written, total, Phase::Verifying);
         let exp = pin.bytes();
         let got = h.finalize();
         if got != exp {
@@ -335,14 +341,7 @@ pub(crate) async fn run(
     // block from disk now. Without ranges a bad block cannot be re-fetched in isolation, so a mismatch
     // fails the file and drops the journal (a retry restarts clean).
     if let Some(plan) = &verify.blocks {
-        emit(
-            &progress,
-            Progress {
-                bytes_done: written,
-                total,
-                phase: Phase::Verifying,
-            },
-        );
+        progress.emit(written, total, Phase::Verifying);
         if let Some(block) = verify_blocks_seq(&part, plan).await? {
             let _ = tokio::fs::remove_file(&apdl).await;
             return Err(FetchError::BlockVerifyFailed {
@@ -464,7 +463,7 @@ async fn stream_body(
     journal: &mut Option<Journal>,
     apdl: &Path,
     cursor: Cursor<'_>,
-    progress: &Option<mpsc::UnboundedSender<Progress>>,
+    progress: &Reporter,
     cancel: &CancellationToken,
     shared: &Shared,
 ) -> Result<Outcome, FetchError> {
@@ -474,14 +473,7 @@ async fn stream_body(
     let mut batch: Vec<u8> = Vec::with_capacity(BATCH as usize);
     let tick = |written: u64, high: &mut u64, phase: Phase| {
         *high = (*high).max(written);
-        emit(
-            progress,
-            Progress {
-                bytes_done: *high,
-                total,
-                phase,
-            },
-        );
+        progress.emit(*high, total, phase);
     };
     tick(written, high, Phase::Downloading);
     loop {
@@ -490,10 +482,16 @@ async fn stream_body(
         let cut_off = tokio::select! {
             biased;
             () = cancel.cancelled() => Some(FetchError::Cancelled),
-            () = tokio::time::sleep(shared.stall_timeout) => Some(FetchError::Stalled {
-                url: url.clone(),
-                at_bytes: written,
-            }),
+            () = tokio::time::sleep(shared.stall_timeout) => {
+                progress.counters().stall();
+                tracing::warn!(
+                    url = %url,
+                    at_bytes = written,
+                    timeout_ms = shared.stall_timeout.as_millis(),
+                    "the body went quiet past the inactivity timeout",
+                );
+                Some(FetchError::Stalled { url: url.clone(), at_bytes: written })
+            }
             item = stream.next() => match item {
                 None => break,
                 Some(Ok(chunk)) => {
@@ -560,12 +558,14 @@ async fn stream_body(
 /// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Stalled`] if
 /// it answered with no headers at all, [`FetchError::Cancelled`] if `cancel` fired, or
 /// [`FetchError::Io`] if truncating the `.part` for a restart failed.
+#[allow(clippy::too_many_arguments)]
 async fn obtain_response(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     sources: &[Url],
     mut partial: Partial<'_>,
     shared: &Shared,
+    progress: &Reporter,
     cancel: &CancellationToken,
     attempts: &mut u32,
 ) -> Result<Attempt, FetchError> {
@@ -599,13 +599,22 @@ async fn obtain_response(
         let (failure, asked) = match sent {
             // The source took the request and sent no headers within the deadline: no progress, with
             // nothing delivered to resume from, which is the same verdict a body going quiet earns.
-            Err(_elapsed) => (
-                FetchError::Stalled {
-                    url: url.clone(),
-                    at_bytes: *partial.start,
-                },
-                None,
-            ),
+            Err(_elapsed) => {
+                progress.counters().stall();
+                tracing::warn!(
+                    url = %url,
+                    at_bytes = *partial.start,
+                    timeout_ms = shared.stall_timeout.as_millis(),
+                    "the source sent no response headers within the deadline",
+                );
+                (
+                    FetchError::Stalled {
+                        url: url.clone(),
+                        at_bytes: *partial.start,
+                    },
+                    None,
+                )
+            }
             Ok(Ok(resp)) => {
                 let status = resp.status().as_u16();
                 if status == 200 {
@@ -641,9 +650,28 @@ async fn obtain_response(
         };
         *attempts += 1;
         if !shared.retry.may_retry(*attempts) {
+            tracing::warn!(
+                url = %url,
+                attempts = *attempts,
+                at_bytes = *partial.start,
+                reason = %failure,
+                "no source answered and the attempt budget is spent",
+            );
             return Err(exhausted(sources, *attempts, *partial.start, failure));
         }
+        let to = rotate(*attempts, sources.len());
+        progress.counters().retry(source, to);
         let delay = shared.retry.delay(*attempts, asked, &shared.jitter);
+        tracing::debug!(
+            url = %url,
+            attempts = *attempts,
+            at_bytes = *partial.start,
+            from = source,
+            to,
+            delay_ms = delay.as_millis(),
+            reason = %failure,
+            "retrying the request after a backoff",
+        );
         if !sleep_or_cancel(delay, cancel).await {
             return Err(FetchError::Cancelled);
         }
@@ -785,21 +813,14 @@ pub(crate) async fn publish(
     apdl: &Path,
     bytes: u64,
     total: Option<u64>,
-    progress: &Option<mpsc::UnboundedSender<Progress>>,
+    progress: &Reporter,
 ) -> Result<VerifiedFile, FetchError> {
     tokio::fs::rename(part, dest)
         .await
         .map_err(|e| FetchError::io(dest, e))?;
     sync_parent_dir(dest).await;
     let _ = tokio::fs::remove_file(apdl).await;
-    emit(
-        progress,
-        Progress {
-            bytes_done: bytes,
-            total,
-            phase: Phase::Complete,
-        },
-    );
+    progress.emit(bytes, total, Phase::Complete);
     Ok(VerifiedFile::mint(dest))
 }
 
@@ -864,20 +885,13 @@ pub(crate) async fn check_existing_dest(
     dest: &Path,
     verify: &Verify,
     expected_len: Option<u64>,
-    progress: &Option<mpsc::UnboundedSender<Progress>>,
+    progress: &Reporter,
 ) -> Result<Option<VerifiedFile>, FetchError> {
     if let Ok(meta) = tokio::fs::metadata(dest).await
         && meta.is_file()
         && dest_satisfies(dest, meta.len(), verify, expected_len).await?
     {
-        emit(
-            progress,
-            Progress {
-                bytes_done: meta.len(),
-                total: expected_len,
-                phase: Phase::Complete,
-            },
-        );
+        progress.emit(meta.len(), expected_len, Phase::Complete);
         return Ok(Some(VerifiedFile::mint(dest)));
     }
     Ok(None)
@@ -1008,12 +1022,6 @@ pub(crate) fn sidecar(dest: &Path, suffix: &str) -> PathBuf {
     let mut name: OsString = dest.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
-}
-
-pub(crate) fn emit(progress: &Option<mpsc::UnboundedSender<Progress>>, event: Progress) {
-    if let Some(tx) = progress {
-        let _ = tx.send(event);
-    }
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

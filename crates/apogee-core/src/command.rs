@@ -8,6 +8,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use apogee_fetch::Recoveries;
 use apogee_otp::OtpSource;
 use apogee_patcher::PatchProgress;
 use apogee_secrets::Secret;
@@ -342,11 +343,20 @@ pub enum FlowState {
     Cancelled,
 }
 
-/// A completion ratio relayed from a subsystem. Numeric only: the shell supplies any label.
+/// A completion ratio relayed from a subsystem, and what the transfer behind it had to recover from.
+/// Numeric only: the shell supplies any label.
+///
+/// Both halves are numbers, which is what that rule is about. It forbids presentation below the
+/// shell, not detail: [`Recoveries`] is five counters and a flag with no string in it, so the shell
+/// still decides whether "3 retries" is worth showing and in what words.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Progress {
     pub completed: u64,
     pub total: u64,
+    /// What the download behind this ratio recovered from: retries, stalls, a dropped mirror, a
+    /// demotion, a re-fetched block. Every one of those ends in success, so this is the only thing
+    /// that distinguishes a slow artifact download from a healthy one.
+    pub recoveries: Recoveries,
 }
 
 /// Which pre-login display surface a [`Command::Frontier`] asks for.

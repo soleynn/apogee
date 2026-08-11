@@ -16,13 +16,16 @@ use apogee_core::{
     EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore, ForeignKey,
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
     KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, Notice,
-    OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile, Region,
-    RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend,
-    SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile,
+    Recoveries, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
+    SecretBackend, SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use zeroize::Zeroizing;
 
 #[cfg(feature = "fixtures")]
@@ -34,8 +37,47 @@ type CliError = Box<dyn Error>;
 #[derive(Parser)]
 #[command(name = "apogee-cli", version, about = "Headless Linux FFXIV launcher")]
 struct Cli {
+    /// Diagnostic logging, off unless asked for: a level (`debug`) or per-target directives
+    /// (`warn,apogee_fetch=debug`). Also read from `APOGEE_LOG`. Goes to stderr.
+    #[arg(long, global = true, value_name = "FILTER")]
+    log: Option<String>,
     #[command(subcommand)]
     command: Commands,
+}
+
+/// The environment variable read when `--log` is absent, so a filter can be set for a session or for
+/// a launch this process did not compose its own arguments for (a Steam launch option, a desktop
+/// entry) without editing either.
+const LOG_ENV: &str = "APOGEE_LOG";
+
+/// Install the diagnostic log subscriber, or leave the events unconsumed when nothing asked for
+/// them.
+///
+/// The libraries below emit a `tracing` event at every recovery and refusal worth triaging, and
+/// until there is a subscriber every one of them is a no-op. Off by default and on stderr when on:
+/// the event lines `drive` prints are this program's interface, and a log interleaved into them on
+/// stdout would make it two.
+///
+/// # Errors
+/// The filter string, when it does not parse: a named level that is not one (`apogee_fetch=loud`).
+/// A bare word is not checked and cannot be, since `target` alone is the legitimate directive for
+/// "every level from this target", so `--log dbeug` enables a target nothing is named after and
+/// quietly logs nothing.
+fn init_logging(flag: Option<&str>) -> Result<(), CliError> {
+    let Some(filter) = flag
+        .map(str::to_owned)
+        .or_else(|| std::env::var(LOG_ENV).ok())
+    else {
+        return Ok(());
+    };
+    let targets: Targets = filter
+        .parse()
+        .map_err(|e| format!("invalid log filter {filter:?}: {e}"))?;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(io::stderr))
+        .with(targets)
+        .init();
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -504,10 +546,15 @@ fn keep_this_process_off_disk() {
 async fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     keep_this_process_off_disk();
-    match run(Cli::parse()).await {
+    let cli = Cli::parse();
+    if let Err(err) = init_logging(cli.log.as_deref()) {
+        eprintln!("error: {err}");
+        return ExitCode::FAILURE;
+    }
+    match run(cli).await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err}");
+            eprintln!("error: {}", describe(err.as_ref()));
             ExitCode::FAILURE
         }
     }
@@ -2052,11 +2099,37 @@ fn prompt_line(prompt: &str) -> io::Result<String> {
     Ok(line.trim().to_owned())
 }
 
+/// One line naming a failure and everything under it that says something new.
+///
+/// Each layer's message interpolates the one below it, so a cause is appended only when the line
+/// does not already end with it, and a chain that repeats itself renders once. What this recovers is
+/// the bottom of the chain, which is where the fact worth acting on is: an artifact whose digest did
+/// not match reaches the top as "runner download failed" and names neither the digest expected nor
+/// the one measured, and a filesystem refusal arrives without the path it refused.
+fn describe(error: &dyn Error) -> String {
+    let mut line = error.to_string();
+    let mut below = error.source();
+    while let Some(cause) = below {
+        let text = cause.to_string();
+        if !line.ends_with(&text) {
+            line.push_str(": ");
+            line.push_str(&text);
+        }
+        below = cause.source();
+    }
+    line
+}
+
 /// Render one core event as a line of terminal text. Presentation lives in the shell.
 fn render(event: &Event) -> String {
     match event {
         Event::State(state) => render_state(state),
-        Event::Progress(progress) => format!("progress: {}/{}", progress.completed, progress.total),
+        Event::Progress(progress) => format!(
+            "progress: {}/{}{}",
+            progress.completed,
+            progress.total,
+            render_recoveries(&progress.recoveries),
+        ),
         Event::Patch(patch) => render_patch(patch),
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
@@ -2064,7 +2137,7 @@ fn render(event: &Event) -> String {
         Event::Prefix(report) => render_health(report),
         Event::Notice(notice) => render_notice(notice),
         Event::LaunchProgramExited(exit) => render_launch_program_exit(exit),
-        Event::Error(err) => format!("error: {err}"),
+        Event::Error(err) => format!("error: {}", describe(err)),
         _ => "unrecognized event".to_owned(),
     }
 }
@@ -2203,9 +2276,11 @@ fn render_setup(event: &SetupEvent) -> String {
             what,
             bytes_done,
             total,
+            recoveries,
         } => format!(
-            "setup: {what} downloading {bytes_done}/{}",
-            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
+            "setup: {what} downloading {bytes_done}/{}{}",
+            total.map_or_else(|| "?".to_owned(), |t| t.to_string()),
+            render_recoveries(recoveries),
         ),
         SetupEvent::Installing { what, version } => format!("setup: installing {what} {version}"),
         SetupEvent::Installed { what } => format!("setup: installed {what}"),
@@ -2234,6 +2309,49 @@ fn render_setup(event: &SetupEvent) -> String {
     }
 }
 
+/// The trailing " (2 retries, 1 stall)" on a download line, or nothing at all when the transfer has
+/// had nothing to recover from.
+///
+/// Silent in the ordinary case on purpose: these lines are printed per progress frame, so a counter
+/// rendered unconditionally would put "0 retries" on every line of a healthy patch day and train the
+/// reader to skip exactly the field worth noticing.
+fn render_recoveries(recoveries: &Recoveries) -> String {
+    // Destructured rather than read field by field, and `Recoveries` is exhaustive so this compiles
+    // only while it names every counter. That is the enforcement the stream was missing: `phase` has
+    // ridden `apogee_fetch::Progress` since the beginning and every relay drops it, because nothing
+    // anywhere had to acknowledge it existed. A seventh counter breaks this build instead.
+    let Recoveries {
+        retries,
+        rotations,
+        stalls,
+        blocks_refetched,
+        sources_dropped,
+        demoted,
+    } = *recoveries;
+
+    let mut parts = Vec::new();
+    for (count, singular, plural) in [
+        (retries, "1 retry", "retries"),
+        (rotations, "1 failover", "failovers"),
+        (stalls, "1 stall", "stalls"),
+        (blocks_refetched, "1 bad block", "bad blocks"),
+        (sources_dropped, "1 source dropped", "sources dropped"),
+    ] {
+        match count {
+            0 => {}
+            1 => parts.push(singular.to_owned()),
+            n => parts.push(format!("{n} {plural}")),
+        }
+    }
+    if demoted {
+        parts.push("one connection".to_owned());
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(" ({})", parts.join(", "))
+}
+
 /// Render one patch/repair progress frame as a plain line. Byte counts and versions only: no secret
 /// (the session credential never appears in a `PatchProgress`).
 fn render_patch(patch: &PatchProgress) -> String {
@@ -2243,19 +2361,18 @@ fn render_patch(patch: &PatchProgress) -> String {
             index,
             bytes_done,
             total,
+            recoveries,
         } => format!(
-            "patch: {repo:?} #{index} downloading {bytes_done}/{}",
-            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
+            "patch: {repo:?} #{index} downloading {bytes_done}/{}{}",
+            total.map_or_else(|| "?".to_owned(), |t| t.to_string()),
+            render_recoveries(recoveries),
         ),
+        // No denominator: apply has no declared end, so the line reports bytes, not a fraction.
         PatchProgress::Applying {
             repo,
             index,
             bytes_done,
-            total,
-        } => format!(
-            "patch: {repo:?} #{index} applying {bytes_done}/{}",
-            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
-        ),
+        } => format!("patch: {repo:?} #{index} applying {bytes_done}"),
         PatchProgress::Applied {
             repo,
             index,
@@ -2295,6 +2412,113 @@ mod tests {
         erased_text(typed);
         erased_secret(read_line_erased);
     };
+
+    /// A transfer with nothing wrong adds nothing to the line, so a healthy patch day reads exactly
+    /// as it did before the counters existed.
+    #[test]
+    fn a_clean_transfer_renders_no_suffix() {
+        assert_eq!(render_recoveries(&Recoveries::default()), "");
+    }
+
+    /// Every counter reaches the line, and none of them reaches it as "0". The pluralisation is
+    /// checked here because the singular is the case a reader actually sees on a bad connection.
+    #[test]
+    fn each_recovery_is_named_once_and_only_when_it_happened() {
+        let one = Recoveries {
+            retries: 1,
+            stalls: 1,
+            blocks_refetched: 1,
+            sources_dropped: 1,
+            ..Recoveries::default()
+        };
+        assert_eq!(
+            render_recoveries(&one),
+            " (1 retry, 1 stall, 1 bad block, 1 source dropped)",
+        );
+
+        let many = Recoveries {
+            retries: 40,
+            rotations: 2,
+            stalls: 3,
+            demoted: true,
+            ..Recoveries::default()
+        };
+        assert_eq!(
+            render_recoveries(&many),
+            " (40 retries, 2 failovers, 3 stalls, one connection)",
+        );
+    }
+
+    /// The two relays that used to flatten the tally away now render it, so an artifact download and
+    /// a component download say what a patch download says.
+    #[test]
+    fn an_artifact_and_a_component_download_both_report_their_tally() {
+        let recoveries = Recoveries {
+            retries: 2,
+            stalls: 1,
+            ..Recoveries::default()
+        };
+
+        let artifact = render(&Event::Progress(apogee_core::Progress {
+            completed: 512,
+            total: 2048,
+            recoveries,
+        }));
+        assert_eq!(artifact, "progress: 512/2048 (2 retries, 1 stall)");
+
+        let component = render_setup(&SetupEvent::Downloading {
+            what: "Dalamud".to_owned(),
+            bytes_done: 512,
+            total: Some(2048),
+            recoveries,
+        });
+        assert_eq!(
+            component,
+            "setup: Dalamud downloading 512/2048 (2 retries, 1 stall)",
+        );
+    }
+
+    /// And a clean one reads exactly as it did before either carried a tally.
+    #[test]
+    fn a_clean_artifact_or_component_download_reads_unchanged() {
+        assert_eq!(
+            render(&Event::Progress(apogee_core::Progress::default())),
+            "progress: 0/0",
+        );
+        assert_eq!(
+            render_setup(&SetupEvent::Downloading {
+                what: "Dalamud".to_owned(),
+                bytes_done: 512,
+                total: Some(2048),
+                recoveries: Recoveries::default(),
+            }),
+            "setup: Dalamud downloading 512/2048",
+        );
+    }
+
+    /// A demotion is the one recovery that is neither a count nor a failure, so it would be the easy
+    /// one to leave off the line entirely.
+    #[test]
+    fn a_demotion_alone_still_says_something() {
+        let demoted = Recoveries {
+            demoted: true,
+            ..Recoveries::default()
+        };
+        assert_eq!(render_recoveries(&demoted), " (one connection)");
+    }
+
+    /// A level and a per-target directive are both accepted; a level that is not one is refused
+    /// rather than starting a run that logs nothing.
+    #[test]
+    fn a_log_filter_is_checked_before_the_run_starts() {
+        for good in ["debug", "warn,apogee_fetch=trace", "off"] {
+            assert!(
+                good.parse::<Targets>().is_ok(),
+                "{good} should be a usable filter",
+            );
+        }
+        assert!("apogee_fetch=loud".parse::<Targets>().is_err());
+    }
 
     fn report(missing: Option<&[&str]>) -> PrefixReport {
         PrefixReport {
@@ -2365,5 +2589,59 @@ mod tests {
             render_launch_program_exit(&exited("/l/L.exe", apogee_core::ProgramStatus::Signal(9)));
         assert!(signalled.contains("signal 9"), "{signalled}");
         assert!(!signalled.contains("exit code"), "{signalled}");
+    }
+
+    /// One link of a chain: `text` is what it says, `below` is what it wraps.
+    #[derive(Debug)]
+    struct Link {
+        text: String,
+        below: Option<Box<Link>>,
+    }
+
+    impl Link {
+        fn new(text: &str, below: Option<Link>) -> Self {
+            Self {
+                text: text.to_owned(),
+                below: below.map(Box::new),
+            }
+        }
+    }
+
+    impl std::fmt::Display for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.text)
+        }
+    }
+
+    impl Error for Link {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.below
+                .as_deref()
+                .map(|link| link as &(dyn Error + 'static))
+        }
+    }
+
+    /// The shape a failed artifact pin arrives in: three layers, of which only the innermost names
+    /// the digests. The outer two already carry the sentence below them, and the top-level renderer
+    /// prints only the outermost, which is how the fact worth reading got lost.
+    #[test]
+    fn a_failure_is_described_down_to_the_cause_that_says_something_new() {
+        let verify = Link::new("file verification failed: expected aa, got bb", None);
+        let download = Link::new("runner download failed", Some(verify));
+        let core = Link::new("runtime: runner download failed", Some(download));
+
+        assert_eq!(
+            describe(&core),
+            "runtime: runner download failed: file verification failed: expected aa, got bb"
+        );
+    }
+
+    /// A chain whose every layer only restates the one below renders as one sentence, not as the
+    /// same sentence three times.
+    #[test]
+    fn a_chain_that_only_repeats_itself_is_said_once() {
+        let inner = Link::new("the disk is full", None);
+        let outer = Link::new("the disk is full", Some(inner));
+        assert_eq!(describe(&outer), "the disk is full");
     }
 }

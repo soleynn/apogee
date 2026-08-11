@@ -146,6 +146,14 @@ where
     let resp = match download::send_bounded(req, shared.stall_timeout).await {
         Ok(sent) => sent.map_err(|e| connect_error(url, e))?,
         Err(_elapsed) => {
+            // No counter beside this one: the multi-range transport carries no progress channel, so
+            // the log is the whole of its observability.
+            tracing::warn!(
+                url = %url,
+                ranges = group.len(),
+                timeout_ms = shared.stall_timeout.as_millis(),
+                "a range request got no response headers within the deadline",
+            );
             return Err(FetchError::Stalled {
                 url: url.clone(),
                 at_bytes: group.first().map_or(0, |r| r.start),

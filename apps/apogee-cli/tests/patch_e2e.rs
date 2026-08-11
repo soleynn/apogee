@@ -117,6 +117,22 @@ async fn patch_downloads_and_applies_a_game_patch_over_the_chaos_server()
         "expected an applied frame: {stdout}"
     );
 
+    // Apply reports bytes and nothing else. A rendered denominator here would be the unknown total
+    // printed as `?`, which is what the applying frames carried for a whole live install.
+    let applying: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("applying"))
+        .map(str::trim)
+        .collect();
+    assert!(!applying.is_empty(), "expected applying frames: {stdout}");
+    for line in &applying {
+        let bytes = line.rsplit(' ').next().unwrap_or_default();
+        assert!(
+            bytes.parse::<u64>().is_ok(),
+            "an applying line ends in its byte count: {line:?}",
+        );
+    }
+
     // The patch's dat landed under game/, and the game `.ver` advanced to the applied version.
     let applied = install.path().join("game").join(fixtures::DAT0_PATH);
     assert!(

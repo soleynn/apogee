@@ -102,6 +102,9 @@ pub use external::{
 };
 pub use launch::{Contribution, LaunchEdit, Redirect};
 pub use manifest::{ComponentManifest, ManifestError, VerifiedManifest};
+// Re-exported because `SetupEvent::Downloading` carries one: a consumer that reads the field must be
+// able to name its type without depending on `apogee-fetch` itself.
+pub use apogee_fetch::Recoveries;
 pub use setup::{SetupEvent, SetupEvents, SetupState};
 
 /// Crate result over [`AddonError`].

@@ -4,6 +4,7 @@
 //! these are facts about setting a prefix up, and folding them into either of those would make every
 //! consumer of those match on variants it can never see.
 
+use apogee_fetch::Recoveries;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Something that happened while preparing a prefix or installing an injectable.
@@ -18,6 +19,10 @@ pub enum SetupEvent {
         bytes_done: u64,
         /// The total, when the server declared one.
         total: Option<u64>,
+        /// What the transfer recovered from to get this far. Relayed rather than dropped: every
+        /// recovery it counts ends in a download that succeeded, so nothing else here would say a
+        /// component took four attempts to arrive.
+        recoveries: Recoveries,
     },
     /// Files are going into place.
     Installing {

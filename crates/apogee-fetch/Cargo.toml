@@ -44,6 +44,8 @@ apogee-test-support = { path = "../apogee-test-support" }
 apogee-zipatch = { path = "../apogee-zipatch", features = ["test-fixtures"] }
 tempfile.workspace = true
 proptest.workspace = true
+# Captures this crate's own tracing output so the triage events are asserted rather than assumed.
+tracing-subscriber.workspace = true
 trybuild.workspace = true
 # test-util adds paused virtual time for the limiter and stall-detector tests.
 tokio = { workspace = true, features = ["test-util"] }

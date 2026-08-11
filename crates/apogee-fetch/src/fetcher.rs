@@ -11,7 +11,7 @@ use crate::error::FetchError;
 use crate::job::Job;
 use crate::limiter::LimitHandle;
 use crate::probe::CapabilityCache;
-use crate::progress::Progress;
+use crate::progress::{Progress, Reporter};
 use crate::retry::{Jitter, RetryPolicy};
 use crate::scheduler::Scheduler;
 use crate::spec::DownloadSpec;
@@ -100,7 +100,14 @@ impl Fetcher {
             });
         }
         let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
-        crate::segmented::dispatch(&self.client, spec, progress, cancel, &self.shared).await
+        crate::segmented::dispatch(
+            &self.client,
+            spec,
+            Reporter::new(progress),
+            cancel,
+            &self.shared,
+        )
+        .await
     }
 
     /// Download `spec`'s externally-verified source and hand back the landed path, never a
@@ -129,8 +136,14 @@ impl Fetcher {
         // The `External` plan verifies nothing beyond length, so the proof `dispatch` mints is over
         // length-checked bytes only; it is unwrapped to a bare path here and never handed out, so no
         // consumer receives a `VerifiedFile` the bytes did not earn.
-        let landed =
-            crate::segmented::dispatch(&self.client, spec, progress, cancel, &self.shared).await?;
+        let landed = crate::segmented::dispatch(
+            &self.client,
+            spec,
+            Reporter::new(progress),
+            cancel,
+            &self.shared,
+        )
+        .await?;
         Ok(landed.path().to_path_buf())
     }
 
@@ -157,7 +170,8 @@ impl Fetcher {
         let job_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
             let _job = shared.scheduler.acquire_job(spec.priority()).await;
-            crate::segmented::dispatch(&client, &spec, Some(tx), job_cancel, &shared).await
+            crate::segmented::dispatch(&client, &spec, Reporter::new(Some(tx)), job_cancel, &shared)
+                .await
         });
         Job::new(handle, rx, cancel)
     }
