@@ -26,11 +26,11 @@ use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
 use apogee_test_support::chaos::ChaosServer;
 use tokio_util::sync::CancellationToken;
 
-/// A client that trusts `certs` and nothing else new.
-fn client_trusting(certs: &[&[u8]]) -> Result<reqwest::Client, Box<dyn Error>> {
-    let mut builder = reqwest::Client::builder().gzip(false).deflate(false);
+/// The shipped fetcher, trusting `certs` and nothing else new.
+fn fetcher_trusting(certs: &[&[u8]]) -> Result<Fetcher, Box<dyn Error>> {
+    let mut builder = Fetcher::builder();
     for der in certs {
-        builder = builder.add_root_certificate(reqwest::Certificate::from_der(der)?);
+        builder = builder.extra_root_certificate(der);
     }
     Ok(builder.build()?)
 }
@@ -79,9 +79,8 @@ impl Servers {
                 .to_vec())
         };
         let (m, g, b) = (der(&self.manifest)?, der(&self.good)?, der(&self.bad)?);
-        let client = client_trusting(&[&m, &g, &b])?;
         Ok(Runtime::new(
-            Fetcher::from_client(client),
+            fetcher_trusting(&[&m, &g, &b])?,
             RuntimePaths {
                 runners: root.join("runners"),
                 prefixes: root.join("prefixes"),

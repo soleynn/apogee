@@ -55,28 +55,6 @@ impl Fetcher {
         FetcherBuilder::default()
     }
 
-    /// Construct a fetcher over a caller-supplied client. Test-only (gated behind the `testing`
-    /// feature, never compiled into a release build): it lets a test inject a client that trusts a
-    /// loopback test certificate, which the safe builder deliberately cannot be configured to do.
-    #[cfg(feature = "testing")]
-    #[must_use]
-    pub fn from_client(client: reqwest::Client) -> Self {
-        Self {
-            client,
-            shared: FetcherBuilder::default().shared(),
-        }
-    }
-
-    /// The redirect policy the safe builder installs. Test-only (gated behind the `testing` feature
-    /// alongside [`from_client`](Self::from_client)): a redirect policy can only be set while a
-    /// client is being built, so an injected client has no other way to carry the shipped one, and a
-    /// test that reimplemented it would prove nothing about what ships.
-    #[cfg(feature = "testing")]
-    #[must_use]
-    pub fn redirect_policy() -> reqwest::redirect::Policy {
-        crate::redirect::policy()
-    }
-
     /// Download `spec`'s source to its destination, returning proof it verified.
     ///
     /// Progress snapshots are sent on `progress` when provided; the sender is dropped when the
@@ -221,6 +199,10 @@ pub struct FetcherBuilder {
     speed_limit: Option<LimitHandle>,
     stall_timeout: Duration,
     retry: RetryPolicy,
+    /// DER roots a test fixture asks the client to trust, beside (never instead of) the system
+    /// store. Exists only under the `testing` feature; a release build has no way to hold one.
+    #[cfg(feature = "testing")]
+    extra_roots: Vec<Vec<u8>>,
 }
 
 impl Default for FetcherBuilder {
@@ -246,6 +228,8 @@ impl Default for FetcherBuilder {
             speed_limit: None,
             stall_timeout: DEFAULT_STALL_TIMEOUT,
             retry: RetryPolicy::default(),
+            #[cfg(feature = "testing")]
+            extra_roots: Vec::new(),
         }
     }
 }
@@ -309,6 +293,20 @@ impl FetcherBuilder {
         self
     }
 
+    /// Trust one additional root certificate (DER), for a test standing up a loopback TLS fixture.
+    /// Test-only (gated behind the `testing` feature, never compiled into a release build) and
+    /// outside the crate's version commitment, which covers the default feature set. This is
+    /// dependency injection, not a certificate bypass: the built client still validates the server
+    /// against that root, and everything else about it is exactly what ships, the shipped redirect
+    /// policy and flow-control window included, so a test through this knob exercises the real
+    /// client rather than a hand-rebuilt approximation.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn extra_root_certificate(mut self, der: &[u8]) -> Self {
+        self.extra_roots.push(der.to_vec());
+        self
+    }
+
     /// Assemble the shared scheduler/limiter/cache from the configured caps.
     fn shared(&self) -> Arc<Shared> {
         Arc::new(Shared {
@@ -348,7 +346,7 @@ impl FetcherBuilder {
                 ),
             });
         }
-        let client = reqwest::Client::builder()
+        let client_builder = reqwest::Client::builder()
             // Keep the on-wire bytes identical to the body bytes: verification and the length
             // cross-check must see exactly what the server sent, never a transparently decoded stream.
             .gzip(false)
@@ -382,11 +380,18 @@ impl FetcherBuilder {
             // The origin URL is none of the redirect target's business. reqwest adds a `Referer`
             // carrying it by default, which hands a third-party host the full path a transfer
             // started from, including a patch file's name. Nothing we fetch needs one.
-            .referer(false)
-            .build()
-            .map_err(|e| FetchError::Client {
-                source: std::io::Error::other(e),
-            })?;
+            .referer(false);
+        #[cfg(feature = "testing")]
+        let client_builder = self.extra_roots.iter().try_fold(client_builder, |b, der| {
+            reqwest::Certificate::from_der(der)
+                .map(|cert| b.add_root_certificate(cert))
+                .map_err(|e| FetchError::Client {
+                    source: std::io::Error::other(e),
+                })
+        })?;
+        let client = client_builder.build().map_err(|e| FetchError::Client {
+            source: std::io::Error::other(e),
+        })?;
         let shared = self.shared();
         Ok(Fetcher { client, shared })
     }

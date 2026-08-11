@@ -164,15 +164,14 @@ impl Distribution {
         }
     }
 
-    /// A client trusting all five loopback certificates and nothing else new, with compression off so
-    /// the bytes that arrive are exactly what was served.
+    /// The shipped fetcher, trusting all five loopback certificates and nothing else new.
     fn fetcher(&self) -> Result<Fetcher, Box<dyn Error>> {
-        let mut builder = reqwest::Client::builder().gzip(false).deflate(false);
+        let mut builder = Fetcher::builder();
         for server in self.servers() {
             let der = server.cert_der().ok_or("server is not running over tls")?;
-            builder = builder.add_root_certificate(reqwest::Certificate::from_der(der)?);
+            builder = builder.extra_root_certificate(der);
         }
-        Ok(Fetcher::from_client(builder.build()?))
+        Ok(builder.build()?)
     }
 }
 
