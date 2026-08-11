@@ -28,6 +28,8 @@ is tagged with its change type. Versioning aims to follow
 - Report the setup a prefix is missing in its health check (#163) _(fixed)_
 - Refuse every redirect on the client that carries a credential (#174) _(added)_
 - Make the TLS escape hatch reach this machine's trust store (#184) _(fixed)_
+- Remember where each repo's patches are served (#197) _(added)_
+- Relay a download's recovery tally through the last two seams (#200) _(added)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
@@ -45,6 +47,7 @@ is tagged with its change type. Versioning aims to follow
 - Pin the unknown-length path and correct the connection-count claims (#186) _(testing)_
 - Raise the HTTP/2 flow-control window off hyper's defaults (#187) _(performance)_
 - Pin the signed catalogs on BLAKE3 (#188) _(added)_
+- Make retries, stalls, demotions and dropped mirrors observable (#199) _(added)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
@@ -74,6 +77,12 @@ is tagged with its change type. Versioning aims to follow
 - Stop the store directory repair following a symlink (#156) _(fixed)_
 - Match the seal and probe claims to the code (#158) _(documentation)_
 - Fuzz the exported password table, and decode it from bytes (#160) _(testing)_
+
+### apogee-test-support
+- Stop a corpus gate passing when it cannot run (#189) _(fixed)_
+
+### apogee-zipatch
+- Drop the dead total from apply progress (#198) _(changed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_

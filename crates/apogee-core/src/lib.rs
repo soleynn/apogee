@@ -33,6 +33,7 @@ pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, T
 // be accepted for, and says that the user asked for a port on their network to be opened. The handle,
 // the profile, the code, the clock offset, the listener and its configuration all stay behind the
 // core, which is why the pushed-code source carries no payload.
+pub use apogee_fetch::Recoveries;
 pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
 pub use apogee_patcher::PatchProgress;
 pub use apogee_runtime::{

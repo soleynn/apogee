@@ -32,7 +32,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -46,7 +46,7 @@ use crate::intervals::IntervalSet;
 use crate::journal::{self, Identity, Journal};
 use crate::prealloc::preallocate;
 use crate::probe::{Capability, classify};
-use crate::progress::{Phase, Progress};
+use crate::progress::{Phase, Reporter};
 use crate::retry::{
     Class, Jitter, RetryPolicy, classify_send_error, classify_status, retry_after, rotate,
     sleep_or_cancel,
@@ -81,7 +81,7 @@ struct Task {
 pub(crate) async fn dispatch(
     client: &reqwest::Client,
     spec: &DownloadSpec,
-    progress: Option<mpsc::UnboundedSender<Progress>>,
+    progress: Reporter,
     cancel: CancellationToken,
     shared: &Shared,
 ) -> Result<VerifiedFile, FetchError> {
@@ -119,7 +119,7 @@ pub(crate) async fn dispatch(
             last_modified: None,
         },
         None => {
-            let probed = probe(client, spec, &cancel, shared).await?;
+            let probed = probe(client, spec, &progress, &cancel, shared).await?;
             shared
                 .capabilities
                 .set(&spec.sources()[probed.source], probed.capability);
@@ -151,6 +151,13 @@ pub(crate) async fn dispatch(
         // not availability: the single-connection engine rotates through this same source list on
         // failure, so a demoted transfer whose primary then dies still finishes off a mirror.
         Capability::SingleConnection if from_primary => {
+            progress.counters().demote();
+            tracing::info!(
+                url = %spec.url(),
+                len,
+                seg_size,
+                "the primary ignored the probe's range; streaming on one connection instead",
+            );
             download::run(client, spec, verify, progress, cancel, shared).await
         }
         Capability::SingleConnection | Capability::Segmentable => {
@@ -193,6 +200,7 @@ struct Probe {
 async fn probe(
     client: &reqwest::Client,
     spec: &DownloadSpec,
+    progress: &Reporter,
     cancel: &CancellationToken,
     shared: &Shared,
 ) -> Result<Probe, FetchError> {
@@ -213,13 +221,21 @@ async fn probe(
         let (failure, asked) = match sent {
             // No headers within the deadline. The probe has no bytes of its own to be short of, so
             // the stall it reports is at zero: the transfer never started.
-            Err(_elapsed) => (
-                FetchError::Stalled {
-                    url: url.clone(),
-                    at_bytes: 0,
-                },
-                None,
-            ),
+            Err(_elapsed) => {
+                progress.counters().stall();
+                tracing::warn!(
+                    url = %url,
+                    timeout_ms = shared.stall_timeout.as_millis(),
+                    "the capability probe got no response headers within the deadline",
+                );
+                (
+                    FetchError::Stalled {
+                        url: url.clone(),
+                        at_bytes: 0,
+                    },
+                    None,
+                )
+            }
             Ok(Ok(resp)) => match resp.status().as_u16() {
                 200 | 206 => {
                     return Ok(Probe {
@@ -250,9 +266,27 @@ async fn probe(
         };
         attempts += 1;
         if !shared.retry.may_retry(attempts) {
+            tracing::warn!(
+                url = %url,
+                attempts,
+                reason = %failure,
+                "the capability probe exhausted its attempt budget",
+            );
             return Err(failure);
         }
-        if !sleep_or_cancel(shared.retry.delay(attempts, asked, &shared.jitter), cancel).await {
+        let to = rotate(attempts, sources.len());
+        progress.counters().retry(source, to);
+        let delay = shared.retry.delay(attempts, asked, &shared.jitter);
+        tracing::debug!(
+            url = %url,
+            attempts,
+            from = source,
+            to,
+            delay_ms = delay.as_millis(),
+            reason = %failure,
+            "retrying the capability probe after a backoff",
+        );
+        if !sleep_or_cancel(delay, cancel).await {
             return Err(FetchError::Cancelled);
         }
     }
@@ -274,6 +308,10 @@ struct TransferState {
     if_range: Option<Vec<u8>>,
     limiter: crate::limiter::LimitHandle,
     scheduler: Arc<crate::scheduler::Scheduler>,
+    /// The progress channel and this transfer's recovery counters. Held here rather than passed to
+    /// each worker: a re-queue, a dropped mirror and a dirty block are all counted deep inside the
+    /// worker tree, where the reporter is the one thing already reachable through `state`.
+    reporter: Reporter,
     /// How a re-queued range or a dirty block waits, and how many attempts each gets.
     retry: RetryPolicy,
     jitter: Arc<Jitter>,
@@ -317,6 +355,23 @@ impl TransferState {
     /// The primary source (index `0`): the resume identity key and the target for top-level errors.
     fn primary(&self) -> &Url {
         &self.sources[0]
+    }
+
+    /// This transfer's recovery counters.
+    fn counters(&self) -> &crate::progress::Counters {
+        self.reporter.counters()
+    }
+
+    /// The source work used on its previous try and the one its `attempts`-th failure sends it to.
+    ///
+    /// Both ends come from the same rotation over the same eligible set, and the attempt count is
+    /// keyed to the unit of work, so the pair is exact rather than a guess: at one failure the two
+    /// are equal (the free same-source retry) and they diverge on the step that reaches a mirror.
+    fn rotation(&self, attempts: u32) -> (usize, usize) {
+        (
+            self.next_source(attempts.saturating_sub(1)),
+            self.next_source(attempts),
+        )
     }
 
     /// Push a pending task and wake one waiting worker. An empty range is dropped.
@@ -446,7 +501,7 @@ async fn transfer(
     verify: Verify,
     etag: Option<Vec<u8>>,
     last_modified: Option<Vec<u8>>,
-    progress: Option<mpsc::UnboundedSender<Progress>>,
+    progress: Reporter,
     cancel: CancellationToken,
     shared: &Shared,
 ) -> Result<VerifiedFile, FetchError> {
@@ -488,14 +543,7 @@ async fn transfer(
 
     let gaps = covered.complement(len);
     let already = covered.covered_len();
-    download::emit(
-        &progress,
-        Progress {
-            bytes_done: already,
-            total: Some(len),
-            phase: Phase::Connecting,
-        },
-    );
+    progress.emit(already, Some(len), Phase::Connecting);
 
     // Block mode always runs the engine, even with no gaps: a resume-complete file still has to have
     // every durable block re-hashed from disk before it can be trusted (the block analogue of the
@@ -544,6 +592,7 @@ async fn transfer(
             if_range,
             limiter: shared.limiter.clone(),
             scheduler: shared.scheduler.clone(),
+            reporter: progress.clone(),
             retry: shared.retry,
             jitter: shared.jitter.clone(),
             queue: Mutex::new(queue),
@@ -594,11 +643,7 @@ async fn transfer(
 /// Emit a monotonic download snapshot on every progress tick, so concurrent workers cannot interleave
 /// a smaller `bytes_done` after a larger one. A dirty block clears its bytes and drops `durable`, so
 /// the snapshot is clamped to a high-water mark: progress never regresses across a block repair.
-async fn aggregator(
-    state: Arc<TransferState>,
-    progress: Option<mpsc::UnboundedSender<Progress>>,
-    len: u64,
-) {
+async fn aggregator(state: Arc<TransferState>, progress: Reporter, len: u64) {
     let mut high = state.durable.load(Ordering::SeqCst);
     loop {
         tokio::select! {
@@ -606,14 +651,7 @@ async fn aggregator(
             () = state.done.cancelled() => return,
             () = state.progress_notify.notified() => {
                 high = high.max(state.durable.load(Ordering::SeqCst));
-                download::emit(
-                    &progress,
-                    Progress {
-                        bytes_done: high,
-                        total: Some(len),
-                        phase: Phase::Downloading,
-                    },
-                );
+                progress.emit(high, Some(len), Phase::Downloading);
             }
         }
     }
@@ -670,8 +708,17 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
                 // attempt like any other failure. Between them, no source can hand out an unbudgeted
                 // lap of the work queue.
                 if state.mark_ranges_ignored(source) {
+                    let moved_to = state.eligible_from(source + 1);
+                    state.counters().source_dropped();
+                    tracing::warn!(
+                        url = %state.sources[source],
+                        source,
+                        moved_to,
+                        offset = range.start,
+                        "a mirror answered a ranged request with a whole body; dropping it from the rotation",
+                    );
                     state.push_task(Task {
-                        source: state.eligible_from(source + 1),
+                        source: moved_to,
                         range,
                     });
                 } else if !requeue(&state, range, None, &cancel).await {
@@ -681,6 +728,10 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
             SegmentResult::SourceChanged => {
                 // A changed source restarts clean: drop the stale journal and surface the typed
                 // changed-source error so a retry re-downloads from scratch.
+                tracing::warn!(
+                    url = %state.primary(),
+                    "the primary answered a conditional range with a whole body; the file changed under the transfer",
+                );
                 let _ = tokio::fs::remove_file(&state.apdl).await;
                 state.finish(Err(FetchError::ServerFileChanged {
                     validator: "range ignored mid-transfer".to_owned(),
@@ -717,9 +768,27 @@ async fn requeue(
 ) -> bool {
     let attempts = state.bump_attempt(range.start);
     if !state.retry.may_retry(attempts) {
+        tracing::warn!(
+            url = %state.primary(),
+            offset = range.start,
+            remaining = range.end - range.start,
+            attempts,
+            "a segment exhausted its attempt budget",
+        );
         state.finish(Err(state.exhausted(attempts)));
         return true;
     }
+    let (from, to) = state.rotation(attempts);
+    state.counters().retry(from, to);
+    tracing::debug!(
+        url = %state.sources[to],
+        offset = range.start,
+        remaining = range.end - range.start,
+        attempts,
+        from,
+        to,
+        "re-queueing a segment after a backoff",
+    );
     if !state.backoff(attempts, asked, cancel).await {
         return false;
     }
@@ -812,6 +881,12 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
     let range = verify.block_range(i);
     let attempts = verify.bump_attempt(i);
     if !state.retry.may_retry(attempts) {
+        tracing::warn!(
+            block = i,
+            offset = range.start,
+            attempts,
+            "a block failed its hash on every attempt; failing the file",
+        );
         // Drop the journal so a retry restarts clean rather than trusting the bad interval.
         let _ = tokio::fs::remove_file(&state.apdl).await;
         state.finish(Err(FetchError::BlockVerifyFailed {
@@ -829,10 +904,21 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
     state
         .durable
         .fetch_sub(range.end - range.start, Ordering::SeqCst);
+    let (from, source) = state.rotation(attempts);
+    state.counters().block_refetched();
+    state.counters().retry(from, source);
+    tracing::warn!(
+        block = i,
+        offset = range.start,
+        len = range.end - range.start,
+        attempts,
+        from,
+        source,
+        "a block failed its hash; clearing it for a re-fetch",
+    );
     if !state.backoff(attempts, None, cancel).await {
         return; // the transfer ended or was cancelled during the backoff
     }
-    let source = state.next_source(attempts);
     state.push_task(Task { range, source });
 }
 
@@ -872,7 +958,16 @@ async fn stream_segment(
             // the segment goes back on the queue and rotates, exactly as a dropped body does. Without
             // this the worker parked here forever, holding its connection slot, and the transfer's
             // stall detection never saw it because no body had begun.
-            Err(_elapsed) => return SegmentResult::Requeue { range, asked: None },
+            Err(_elapsed) => {
+                state.counters().stall();
+                tracing::warn!(
+                    url = %url,
+                    offset = range.start,
+                    timeout_ms = state.stall_timeout.as_millis(),
+                    "a segment got no response headers within the deadline",
+                );
+                return SegmentResult::Requeue { range, asked: None };
+            }
             // A connect error is transient: re-queue the whole range. A redirect this client's policy
             // refused is not - the source keeps pointing where it points - so it fails the transfer
             // rather than spending the range's whole attempt budget on the same refusal.
@@ -953,6 +1048,14 @@ async fn stream_segment(
                 if let Err(err) = commit_batch(&mut file, &mut batch, &mut committed, state).await {
                     return SegmentResult::Fatal(err);
                 }
+                state.counters().stall();
+                tracing::warn!(
+                    url = %url,
+                    offset = range.start,
+                    gained = committed - range.start,
+                    timeout_ms = state.stall_timeout.as_millis(),
+                    "a segment's body went quiet past the inactivity timeout",
+                );
                 return SegmentResult::Requeue {
                     range: committed..range.end,
                     asked: None,
@@ -1066,17 +1169,10 @@ async fn verify_and_publish(
     apdl: &Path,
     len: u64,
     pin: Option<DigestPin>,
-    progress: &Option<mpsc::UnboundedSender<Progress>>,
+    progress: &Reporter,
 ) -> Result<VerifiedFile, FetchError> {
     if let Some(pin) = pin {
-        download::emit(
-            progress,
-            Progress {
-                bytes_done: len,
-                total: Some(len),
-                phase: Phase::Verifying,
-            },
-        );
+        progress.emit(len, Some(len), Phase::Verifying);
         let expected = pin.bytes();
         let got = download::hash_file(part, pin).await?;
         if got != expected {

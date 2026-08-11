@@ -28,13 +28,14 @@ use crate::parse::PatchReader;
 use crate::seam::{DataSource, KeepFilter, PatchSink, SafePath, TargetPath};
 
 /// One progress frame emitted between commands. Clockless and advisory: a closed or absent receiver
-/// is not an error. `total` is `None` for boot patches, whose `FHDR` carries no command counts.
+/// is not an error.
 #[derive(Debug, Clone)]
 pub struct ApplyProgress {
-    /// Payload bytes written to sinks so far.
+    /// Payload bytes written to sinks so far, rising monotonically over a run. Apply has no known
+    /// end: nothing in the format declares how many bytes reach disk, and the counts a `v3` header
+    /// does carry are not a usable denominator either ([`crate::FileHeaderV3`]). A consumer reports a
+    /// rate, not a fraction.
     pub bytes_done: u64,
-    /// The expected total, when the patch declares it.
-    pub total: Option<u64>,
 }
 
 /// How an [`apply`] run reports and cancels. Progress is an owned channel (the caller drains it, e.g.
@@ -71,7 +72,7 @@ pub fn apply<R: Read, S: PatchSink>(
             return Err(Error::Cancelled);
         }
         match chunk {
-            // Metadata: the command counts drive progress totals, but boot's v2 header carries none.
+            // Metadata: parsed for the model, with no sink call of its own.
             Chunk::FileHeader(_) | Chunk::ApplyOption(_) | Chunk::ApplyFreeSpace(_) => {}
             Chunk::AddDirectory(d) => sink.make_dir_tree(&SafePath::confine(&d.path)?)?,
             Chunk::DeleteDirectory(d) => sink.remove_dir(&SafePath::confine(&d.path)?)?,
@@ -79,13 +80,7 @@ pub fn apply<R: Read, S: PatchSink>(
             Chunk::EndOfFile => break,
             Chunk::Padding => {}
         }
-        emit(
-            opts.progress,
-            ApplyProgress {
-                bytes_done,
-                total: None,
-            },
-        );
+        emit(opts.progress, ApplyProgress { bytes_done });
     }
     Ok(())
 }

@@ -241,6 +241,61 @@ async fn repair_derives_source_urls_from_the_base_url_with_no_explicit_sources()
     Ok(())
 }
 
+/// An expansion heals over HTTP from a base alone, which is the case a repair could not reach while
+/// nothing carried an expansion's CDN path id. Nothing else in this file repairs an expansion repo, so
+/// this is also where the shared-subtree layout gets exercised: an expansion verifies against
+/// `game/`, the same root as the base game, but finalizes its own `game/sqpack/ex{n}/ex{n}.ver`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expansion_heals_over_http_from_its_base_url_alone() -> Result<(), Box<dyn Error>> {
+    let chain = vec![fixtures::patch_a()];
+    let game_root = tempfile::tempdir()?;
+    let baseline = install_game(&chain, game_root.path())?;
+    let repo = game_root.path().join("game");
+
+    let store = tempfile::tempdir()?;
+    let index_path = store.path().join("ex1.apzi");
+    write_index_file(&chain, VERSION, &index_path)?;
+
+    corrupt_byte(&repo.join(fixtures::DAT0_PATH), 0)?;
+
+    let servers = serve(&chain).await?;
+
+    // No cached patches at all: the base is the only way to address a source, which is what an
+    // install run with keep-patches off leaves behind.
+    let req = RepairRequest {
+        game_root: game_root.path().to_path_buf(),
+        repos: vec![RepairRepo {
+            repo: Repo::Expansion(1),
+            target_version: VERSION.to_owned(),
+            index: IndexSource::LocalFile(index_path),
+            patch_sources: Vec::new(),
+            source_base_url: Some(servers[0].base_url().clone()),
+            headers: SePatch::boot(),
+        }],
+    };
+    let outcome = patcher(store.path())?.repair(req).await?;
+
+    tree_manifest::assert_tree_matches(
+        &repo,
+        &baseline,
+        Some(&is_ver_or_bck as &dyn Fn(&Path) -> bool),
+    );
+    assert!(
+        outcome.bytes_refetched > 0,
+        "the broken range must be pulled over HTTP"
+    );
+    // The expansion's own version file, not the base game's.
+    assert_eq!(
+        std::fs::read_to_string(repo.join("sqpack/ex1/ex1.ver"))?,
+        VERSION
+    );
+    assert!(
+        !repo.join("ffxivgame.ver").exists(),
+        "an expansion repair advanced the base game's version"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repair_without_a_source_or_a_base_url_is_index_unavailable() -> Result<(), Box<dyn Error>>
 {

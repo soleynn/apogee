@@ -8,7 +8,8 @@
 //!
 //! [`IndexCatalog::from_json_bytes`] is a pure, total parser over untrusted input (the fuzz entry
 //! point); [`IndexCatalog::parse_and_verify`] gates it behind the signature check. A resolved
-//! [`IndexEntry`] hands back the [`IndexSource`] a repair fetches under.
+//! [`IndexEntry`] hands back the [`IndexSource`] a repair fetches under, and the base its source
+//! patches are served under ([`IndexEntry::source_base`]) when the row names one.
 
 use apogee_fetch::DigestPin;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -33,7 +34,8 @@ pub const INDEX_CATALOG_PUBLIC_KEY: [u8; 32] = [
 ];
 
 /// One repo-and-version block index: which repo and version it describes, where its `.apzi` is
-/// served, and the digest pin authenticating the fetched bytes.
+/// served, the digest pin authenticating the fetched bytes, and where the source patches that index
+/// references are served.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
     pub repo: Repo,
@@ -41,6 +43,15 @@ pub struct IndexEntry {
     pub url: Url,
     /// The whole-file digest, carrying which function a row pinned it under.
     pub pin: DigestPin,
+    /// The base the repo's source patches are served under, so a repair forms each source's URL as
+    /// `{base}/{name}` with no patch cache to draw on. `None` leaves the caller on whatever it knows.
+    ///
+    /// This is here because the base is not derivable from the repo alone. Square Enix serves each
+    /// repo under an opaque path id (`game/ex1/6b936f08/`), and only the boot and base-game ids hold
+    /// still enough to compile in; an expansion's is read off that expansion's patchlist URLs, which
+    /// a repair never fetches (it registers no session, and needs none). So the id travels with the
+    /// row that already has to exist for this repo and version, under the same signature.
+    pub source_base: Option<Url>,
 }
 
 impl IndexEntry {
@@ -68,7 +79,8 @@ impl IndexCatalog {
     /// verified the signature (see [`parse_and_verify`](Self::parse_and_verify)).
     ///
     /// # Errors
-    /// [`IndexCatalogError`] for malformed JSON, an unsupported version, or a bad repo/pin/url.
+    /// [`IndexCatalogError`] for malformed JSON, an unsupported version, or a bad
+    /// repo/pin/url/source base.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, IndexCatalogError> {
         let raw: RawCatalog =
             serde_json::from_slice(bytes).map_err(IndexCatalogError::Malformed)?;
@@ -137,6 +149,8 @@ pub enum IndexCatalogError {
     BadPin { repo: String, version: String },
     #[error("{repo} {version}: not a valid absolute url")]
     BadUrl { repo: String, version: String },
+    #[error("{repo} {version}: source base is not an absolute http(s) url ending in `/`")]
+    BadSourceBase { repo: String, version: String },
 }
 
 // ---- raw deserialization + validation -------------------------------------------------------
@@ -160,6 +174,8 @@ struct RawIndex {
     blake3: Option<String>,
     #[serde(default)]
     sha256: Option<String>,
+    #[serde(default)]
+    source_base: Option<String>,
 }
 
 impl TryFrom<RawCatalog> for IndexCatalog {
@@ -198,12 +214,41 @@ fn build_entry(r: RawIndex) -> Result<IndexEntry, IndexCatalogError> {
         repo: r.repo.clone(),
         version: r.version.clone(),
     })?;
+    let source_base = r
+        .source_base
+        .as_deref()
+        .map(parse_source_base)
+        .transpose()
+        .map_err(|()| IndexCatalogError::BadSourceBase {
+            repo: r.repo.clone(),
+            version: r.version.clone(),
+        })?;
     Ok(IndexEntry {
         repo,
         version: r.version,
         url,
         pin,
+        source_base,
     })
+}
+
+/// Parse a row's source base, which must be an absolute `http`/`https` URL whose path ends in `/`.
+///
+/// The trailing slash is the whole of the check worth having, and it is refused rather than repaired.
+/// `Url::join` replaces the last path segment, so a base written without one silently drops the very
+/// path id it exists to carry: `.../game/ex1/6b936f08` joined with `D2024.patch` addresses
+/// `.../game/ex1/D2024.patch`. That URL is well-formed and 404s, so the repair reads as a repo whose
+/// patches are gone rather than as a manifest with a typo in it.
+///
+/// The scheme is bounded because patch delivery is plain HTTP (see `apogee_core`'s trust module on
+/// why there is no handshake there to constrain), so anything else in this field is a mistake in a
+/// manifest we signed rather than a deployment anyone runs.
+fn parse_source_base(raw: &str) -> Result<Url, ()> {
+    let url = Url::parse(raw).map_err(|_| ())?;
+    let usable = !url.cannot_be_a_base()
+        && matches!(url.scheme(), "http" | "https")
+        && url.path().ends_with('/');
+    usable.then_some(url).ok_or(())
 }
 
 /// Map a manifest repo label to a [`Repo`]: `boot`, `game`, or `ex{n}` (an expansion, `n` a `u8`).
@@ -236,7 +281,19 @@ mod tests {
         )
     }
 
+    /// The same manifest with a `source_base` field carrying `base` on its single row.
+    fn manifest_based(repo: &str, base: &str) -> String {
+        manifest(repo, GOOD_PIN).replace(
+            &format!("\"sha256\": \"{GOOD_PIN}\""),
+            &format!("\"sha256\": \"{GOOD_PIN}\", \"source_base\": \"{base}\""),
+        )
+    }
+
     const GOOD_PIN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// An expansion's live base, in the shape the patchlist gives it: the opaque path id is the part
+    /// that cannot be compiled in, and is the whole reason the row carries this.
+    const EX1_BASE: &str = "http://patch-dl.ffxiv.com/game/ex1/6b936f08/";
 
     #[test]
     fn parses_and_resolves_each_repo_label() {
@@ -349,6 +406,80 @@ mod tests {
         ));
     }
 
+    /// A row names where its source patches are served, and a row that does not says so as `None`
+    /// rather than as some invented default. The join is asserted rather than the field alone,
+    /// because forming `{base}/{name}` is the only thing a repair does with it.
+    #[test]
+    fn a_row_carries_the_base_its_source_patches_are_served_under() {
+        let cat = IndexCatalog::from_json_bytes(manifest_based("ex1", EX1_BASE).as_bytes())
+            .expect("parse");
+        let entry = cat
+            .resolve(Repo::Expansion(1), "2024.03.28.0000.0000")
+            .expect("resolve");
+        let base = entry.source_base.as_ref().expect("the row named a base");
+        assert_eq!(
+            base.join("D2024.03.28.0000.0000.patch")
+                .expect("the base forms a source url")
+                .as_str(),
+            "http://patch-dl.ffxiv.com/game/ex1/6b936f08/D2024.03.28.0000.0000.patch",
+        );
+
+        let bare =
+            IndexCatalog::from_json_bytes(manifest("ex1", GOOD_PIN).as_bytes()).expect("parse");
+        assert_eq!(
+            bare.resolve(Repo::Expansion(1), "2024.03.28.0000.0000")
+                .expect("resolve")
+                .source_base,
+            None,
+            "a row that names no base must not be read as naming one",
+        );
+    }
+
+    /// A base written without its trailing slash is refused, and this is the case the check exists
+    /// for: `Url::join` replaces the last segment, so such a base drops the path id it is here to
+    /// carry and addresses a well-formed URL that 404s. The control is the join itself, computed
+    /// here, so the test states what the accepted form would have done rather than asserting a rule
+    /// whose consequence is left off-screen.
+    #[test]
+    fn a_source_base_that_would_drop_its_path_id_is_refused() {
+        let no_slash = EX1_BASE.trim_end_matches('/');
+        assert_eq!(
+            Url::parse(no_slash)
+                .expect("it parses; being well-formed is the problem")
+                .join("D2024.03.28.0000.0000.patch")
+                .expect("and it joins")
+                .as_str(),
+            "http://patch-dl.ffxiv.com/game/ex1/D2024.03.28.0000.0000.patch",
+            "the id-dropping join this refusal exists to prevent no longer happens",
+        );
+        assert!(matches!(
+            IndexCatalog::from_json_bytes(manifest_based("ex1", no_slash).as_bytes()),
+            Err(IndexCatalogError::BadSourceBase { .. })
+        ));
+    }
+
+    /// The field takes an absolute http(s) base and nothing else: a relative path has no host to
+    /// resolve against, and another scheme is a manifest we signed with a mistake in it rather than
+    /// anything patch delivery serves.
+    #[test]
+    fn a_source_base_must_be_an_absolute_http_base() {
+        for base in [
+            "/game/ex1/6b936f08/",
+            "patch-dl.ffxiv.com/game/ex1/6b936f08/",
+            "file:///srv/patches/",
+            "mailto:patches@example.invalid",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    IndexCatalog::from_json_bytes(manifest_based("ex1", base).as_bytes()),
+                    Err(IndexCatalogError::BadSourceBase { .. })
+                ),
+                "{base:?} was accepted as a source base",
+            );
+        }
+    }
+
     #[test]
     fn malformed_json_is_a_typed_error_not_a_panic() {
         for bytes in [
@@ -411,6 +542,18 @@ mod tests {
             entry.pin,
             DigestPin::Blake3(apogee_test_support::chaos::blake3_of(artifact)),
             "the manifest pin must match the committed artifact",
+        );
+        // The base survived the signing ceremony in a form that forms source URLs. A row reformatted
+        // by hand is the way this comes back wrong, and the trailing slash is what it loses.
+        assert_eq!(
+            entry
+                .source_base
+                .as_ref()
+                .expect("the hosted row names where its source patches are served")
+                .join("D2024.03.28.0000.0000.patch")
+                .expect("the hosted base forms a source url")
+                .as_str(),
+            "http://patch-dl.ffxiv.com/game/4e9a232b/D2024.03.28.0000.0000.patch",
         );
     }
 }

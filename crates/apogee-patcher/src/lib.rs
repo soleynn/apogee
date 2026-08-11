@@ -44,6 +44,9 @@ pub use catalog::{
 };
 pub use job::Job;
 pub use progress::PatchProgress;
+// Re-exported because `PatchProgress::Downloading` carries one: a consumer that reads the field must
+// be able to name its type without depending on `apogee-fetch` itself.
+pub use apogee_fetch::Recoveries;
 pub use repair::{RepairOutcome, RepairedRepo};
 pub use request::{
     IndexSource, InstallRequest, Installed, RepairPatchSource, RepairRepo, RepairRequest, SePatch,
