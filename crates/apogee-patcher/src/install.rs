@@ -412,7 +412,6 @@ async fn apply_one(
                     repo,
                     index,
                     bytes_done: p.bytes_done,
-                    total: p.total,
                 });
             }
         })

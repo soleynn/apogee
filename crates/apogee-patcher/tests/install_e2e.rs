@@ -221,6 +221,28 @@ async fn apply_stays_in_list_order_under_out_of_order_downloads() -> Result<(), 
         .collect();
     assert_eq!(applied_order, vec![0, 1], "apply must follow list order");
 
+    // Apply carries no total, so its frames are only useful if `bytes_done` rises: a consumer reads a
+    // rate off successive frames. Per index, since each patch restarts the count at zero.
+    for want in [0, 1] {
+        let bytes: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                PatchProgress::Applying {
+                    index, bytes_done, ..
+                } if *index == want => Some(*bytes_done),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            bytes.last().is_some_and(|&last| last > 0),
+            "patch {want} should report applied bytes, got {bytes:?}",
+        );
+        assert!(
+            bytes.windows(2).all(|w| w[1] >= w[0]),
+            "patch {want} apply progress must not go backwards, got {bytes:?}",
+        );
+    }
+
     // The later patch finished downloading before the earlier one applied.
     let last_dl_1 = events
         .iter()
