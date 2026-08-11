@@ -186,7 +186,17 @@ impl SecretStore for OsKeyring {
     fn get(&self, account: Uuid, kind: SecretKind) -> Result<Option<Secret>, SecretsError> {
         match entry_for(account, kind)?.get_secret() {
             Ok(bytes) => Ok(Some(Secret::new(bytes))),
-            Err(keyring_core::Error::NoEntry) => Ok(None),
+            // A miss is not yet an absence on the Secret Service: the store reads by searching the
+            // service and writes by resolving the default collection, so a provider that has never
+            // been initialized answers "nothing found" to every read and refuses every write. The
+            // round trip that separates the two is paid only when nothing was found.
+            Err(keyring_core::Error::NoEntry) => {
+                #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+                if crate::probe::no_default_collection() {
+                    return Err(SecretsError::NoCollection);
+                }
+                Ok(None)
+            }
             // `get_secret` rather than `get_password`: the string reader is the one call that can
             // hand back an error carrying the raw secret when the stored bytes are not UTF-8.
             Err(err) => Err(map_error(&err, "read")),

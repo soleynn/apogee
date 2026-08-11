@@ -44,6 +44,30 @@ pub(crate) enum BusFailure {
 /// never return. A wedged bus proxy and a hung `dbus-daemon` both produce it.
 const BUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Whether the store has no default collection, asked of an absence the read path reported.
+///
+/// The store searches the whole service to read and resolves the default collection to write, so
+/// against a provider that has never been initialized a read finds nothing and reports an absence
+/// while the write that would follow it fails outright. An absence is the answer that sends a caller
+/// off to prompt for a password this store will then refuse to keep, so a miss is checked against
+/// the collection before it is believed.
+///
+/// `false` whenever the question cannot be answered, including on the deadline: a caller that
+/// already has an absence in hand keeps it rather than being handed a condition this could not
+/// establish. Bounded for the reason [`probe`] is, because the same handshake hangs the same way.
+#[must_use]
+pub(crate) fn no_default_collection() -> bool {
+    within(BUS_DEADLINE, false, || {
+        let Ok(service) = SecretService::connect(EncryptionType::Dh) else {
+            return false;
+        };
+        matches!(
+            service.get_default_collection(),
+            Err(secret_service::Error::NoResult)
+        )
+    })
+}
+
 pub(crate) fn probe() -> BackendReport {
     let (state, sandbox) = probe_within(BUS_DEADLINE);
     BackendReport {
