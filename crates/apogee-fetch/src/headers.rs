@@ -32,7 +32,10 @@ pub enum HeaderPolicy {
     /// Constructed through [`se_patch`](Self::se_patch): the field list is `#[non_exhaustive]`, so
     /// a later header input widens the constructor rather than breaking every literal.
     #[non_exhaustive]
-    SePatch { unique_id: Option<String> },
+    SePatch {
+        /// The session's `X-Patch-Unique-Id`; `None` for a boot patch, which carries none.
+        unique_id: Option<String>,
+    },
 }
 
 impl HeaderPolicy {

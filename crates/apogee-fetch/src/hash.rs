@@ -15,7 +15,9 @@ use sha2::{Digest as _, Sha256};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DigestPin {
+    /// A SHA256 digest, the function the pre-BLAKE3 catalogs pinned under.
     Sha256([u8; 32]),
+    /// A BLAKE3 digest, what our own signed manifests pin under today.
     Blake3([u8; 32]),
 }
 

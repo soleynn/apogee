@@ -48,7 +48,10 @@ pub enum SpecError {
     /// allowed only when an out-of-band validator authenticates the bytes.
     #[error("refusing an unverified download over plain http: {url}")]
     #[non_exhaustive]
-    UnverifiedOverPlainHttp { url: Url },
+    UnverifiedOverPlainHttp {
+        /// The plain-`http://` source that was refused.
+        url: Url,
+    },
 
     /// `Validator::None` was requested without the explicit opt-in acknowledging the bytes go
     /// unverified.
@@ -58,7 +61,10 @@ pub enum SpecError {
     /// The source scheme is neither `http` nor `https`.
     #[error("unsupported url scheme: {scheme}")]
     #[non_exhaustive]
-    UnsupportedScheme { scheme: String },
+    UnsupportedScheme {
+        /// The scheme the URL carried.
+        scheme: String,
+    },
 
     /// A `Validator::External` download without a declared length. The length check is the only
     /// fetch-side guarantee for externally-verified bytes, so it is required rather than optional.
@@ -70,7 +76,10 @@ pub enum SpecError {
     /// block size imply. Caught before any request so a mis-specified block map cannot start a transfer.
     #[error("invalid block-hash layout: {reason}")]
     #[non_exhaustive]
-    BlockLayout { reason: &'static str },
+    BlockLayout {
+        /// Which consistency rule the block map broke.
+        reason: &'static str,
+    },
 }
 
 /// Download failures.
@@ -81,7 +90,9 @@ pub enum FetchError {
     #[error("connect to {host} failed")]
     #[non_exhaustive]
     Connect {
+        /// The host that could not be reached.
         host: String,
+        /// The underlying connect fault.
         #[source]
         source: std::io::Error,
     },
@@ -92,7 +103,9 @@ pub enum FetchError {
     #[error("transport error for {url}")]
     #[non_exhaustive]
     Transport {
+        /// The source that was streaming when the transport failed.
         url: Url,
+        /// The underlying stream fault.
         #[source]
         source: std::io::Error,
     },
@@ -100,7 +113,12 @@ pub enum FetchError {
     /// The server answered with a status the download cannot accept.
     #[error("http {status} for {url}")]
     #[non_exhaustive]
-    Http { status: u16, url: Url },
+    Http {
+        /// The status the server answered with.
+        status: u16,
+        /// The source that answered it.
+        url: Url,
+    },
 
     /// A redirect the client's policy would not follow: a chain past the hop cap, a hop leaving
     /// `https` for plaintext, or a hop to a scheme that is not HTTP. Distinct from
@@ -108,12 +126,22 @@ pub enum FetchError {
     /// refusal is a verdict on the source rather than a transient fault, so it is never retried.
     #[error("refused a redirect while fetching {url}: {detail}")]
     #[non_exhaustive]
-    RedirectRefused { url: Url, detail: &'static str },
+    RedirectRefused {
+        /// The source whose redirect was refused.
+        url: Url,
+        /// Which floor rule the hop broke.
+        detail: &'static str,
+    },
 
     /// The transfer made no progress for too long, with no other source to try.
     #[error("stalled at {at_bytes} bytes: {url}")]
     #[non_exhaustive]
-    Stalled { url: Url, at_bytes: u64 },
+    Stalled {
+        /// The lone source that went quiet.
+        url: Url,
+        /// How far the transfer had come when it did.
+        at_bytes: u64,
+    },
 
     /// One range failed on every source in turn until its attempt budget ran out. Distinct from
     /// [`Stalled`](FetchError::Stalled), which is a lone source going quiet with nowhere to fail over
@@ -123,15 +151,24 @@ pub enum FetchError {
     #[error("all {sources} sources failed {url} after {attempts} attempt(s), {at_bytes} bytes in")]
     #[non_exhaustive]
     AllSourcesFailed {
+        /// The primary: the source list's head and the transfer's identity.
         url: Url,
+        /// How many sources the rotation covered.
         sources: usize,
+        /// How many attempts the stuck range spent.
         attempts: u32,
+        /// How far the transfer had come when the budget ran out.
         at_bytes: u64,
     },
 
     /// The server's advertised length disagreed with the caller's expectation before bytes flowed.
     #[error("length mismatch: expected {expected}, got {got}")]
-    LengthMismatch { expected: u64, got: u64 },
+    LengthMismatch {
+        /// The caller's declared length.
+        expected: u64,
+        /// The length the server advertised.
+        got: u64,
+    },
 
     /// The source changed underneath an in-flight resume in a way the transfer could not absorb:
     /// `url` is the primary (the resume identity), `detail` says what it did. The `If-Range` value
@@ -140,25 +177,40 @@ pub enum FetchError {
     /// later without a major version.
     #[error("server file changed mid-resume for {url}: {detail}")]
     #[non_exhaustive]
-    ServerFileChanged { url: Url, detail: &'static str },
+    ServerFileChanged {
+        /// The primary, whose validator the resume presented.
+        url: Url,
+        /// What the source did that reads as a change.
+        detail: &'static str,
+    },
 
     /// A block failed its hash after exhausting its retry budget.
     #[error("block {block} at offset {offset} failed verification after {attempts} attempt(s)")]
     BlockVerifyFailed {
+        /// The block's index in the validator's hash list.
         block: u32,
+        /// The block's byte offset in the file.
         offset: u64,
+        /// How many attempts its re-fetches spent.
         attempts: u32,
     },
 
     /// The finished file's whole-file hash did not match the expected digest.
     #[error("file verification failed: expected {expected}, got {got}")]
-    FileVerifyFailed { expected: String, got: String },
+    FileVerifyFailed {
+        /// The pinned digest, in hex.
+        expected: String,
+        /// The digest the finished file hashed to, in hex.
+        got: String,
+    },
 
     /// A filesystem operation failed. Disk-full carries its own [`std::io::ErrorKind`], which
     /// [`into_out_of_space`](FetchError::into_out_of_space) is the way to route on.
     #[error("io error at {path:?}")]
     Io {
+        /// The path the filesystem refused.
         path: PathBuf,
+        /// The underlying fault; disk-full rides its `ErrorKind`.
         #[source]
         source: std::io::Error,
     },
@@ -167,6 +219,7 @@ pub enum FetchError {
     #[error("http client setup failed")]
     #[non_exhaustive]
     Client {
+        /// What the TLS backend reported.
         #[source]
         source: std::io::Error,
     },
@@ -176,14 +229,22 @@ pub enum FetchError {
     /// a boundary the `Content-Type` never declared.
     #[error("malformed range response for {url}: {detail}")]
     #[non_exhaustive]
-    MalformedRangeResponse { url: Url, detail: &'static str },
+    MalformedRangeResponse {
+        /// The source whose response could not be honored.
+        url: Url,
+        /// Which shape rule the response broke.
+        detail: &'static str,
+    },
 
     /// A source shape the streaming path cannot handle: the multi-range transport, and the defensive
     /// guard for a block validator that somehow reached the engine without a declared length (the spec
     /// builder normally rejects that first).
     #[error("unsupported: {what}")]
     #[non_exhaustive]
-    Unsupported { what: &'static str },
+    Unsupported {
+        /// The shape the path cannot handle.
+        what: &'static str,
+    },
 
     /// A fetcher configuration the engine cannot serve, refused by
     /// [`FetcherBuilder::build`](crate::FetcherBuilder::build) before any client exists: the caps
@@ -192,7 +253,10 @@ pub enum FetchError {
     /// timeout while aggregate throughput looks healthy.
     #[error("fetcher configuration rejected: {detail}")]
     #[non_exhaustive]
-    Config { detail: String },
+    Config {
+        /// The caps that were asked for and why they cannot run.
+        detail: String,
+    },
 
     /// The engine itself failed: a transfer task panicked or the runtime tore it down. A defect in
     /// this crate rather than a property of the source, the disk, or the caller's request, so it is
@@ -200,7 +264,9 @@ pub enum FetchError {
     #[error("internal engine failure: {detail}")]
     #[non_exhaustive]
     Internal {
+        /// What the engine was doing when it failed.
         detail: &'static str,
+        /// What the runtime reported.
         #[source]
         source: std::io::Error,
     },

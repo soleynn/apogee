@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 //! Resumable, verified HTTP downloads.
 //!
 //! A download streams to a sidecar `.part` file, is checked against its [`Validator`], and is

@@ -17,7 +17,9 @@ use crate::hash::DigestPin;
 pub enum Validator {
     /// One SHA1 per fixed-size block, from the patchlist.
     BlockSha1 {
+        /// The fixed block size the hash list is laid out over.
         block_size: u32,
+        /// One SHA1 per block, in file order.
         hashes: Vec<[u8; 20]>,
     },
     /// A single SHA256 over the whole file.
