@@ -91,6 +91,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-zipatch
 - Drop the dead total from apply progress (#198) _(changed)_
+- Make the parser gate run, and fail when it cannot (#206) _(fixed)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
