@@ -421,6 +421,30 @@ mod tests {
         );
     }
 
+    /// The combination the default docs warn about: it built and then quietly parked a quarter of
+    /// its workers, which read as multi-second per-file silences over a live install. Now it is
+    /// refused where the numbers are chosen.
+    #[test]
+    fn a_cap_triple_that_parks_workers_is_refused_at_build() {
+        let err = Fetcher::builder()
+            .max_files(4)
+            .max_connections_per_file(8)
+            .max_connections_total(24)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Config { .. }), "got {err:?}");
+
+        // The boundary itself is fine: every admitted file can run all of its segments.
+        assert!(
+            Fetcher::builder()
+                .max_files(4)
+                .max_connections_per_file(6)
+                .max_connections_total(24)
+                .build()
+                .is_ok()
+        );
+    }
+
     // Both guards fire before any scheduler or network contact, so these need no server.
 
     #[tokio::test]
