@@ -159,6 +159,9 @@ pub(crate) async fn download_verified(
         }
     });
 
+    // Each pass is a fresh `download` call with its own counters, so a restart here resets the
+    // recovery tally the relay above reports: it measures what one transfer recovered from, not what
+    // this loop did on top. A whole-download restart is visible in the tracing log instead.
     let mut attempt = 0u32;
     let outcome: Result<VerifiedFile, FetchError> = loop {
         attempt += 1;

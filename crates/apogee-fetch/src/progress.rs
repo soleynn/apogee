@@ -19,7 +19,13 @@ use tokio::sync::mpsc;
 /// `#[non_exhaustive]`: consumers read these fields but never construct the struct (it is minted by
 /// the engine and relayed verbatim, e.g. through `apogee-runtime`'s event enum), so a future field
 /// can be added without breaking them.
-#[derive(Debug, Clone)]
+///
+/// [`Default`] is what keeps that from also making the relays untestable. A `#[non_exhaustive]`
+/// struct cannot be written as a literal from outside this crate, but its public fields can still be
+/// set on a value obtained some other way, so a consumer builds the event it wants to relay by
+/// mutating a default one. Without it the only way to get a `Progress` is to run a download, and the
+/// seams that flatten this struct would go untested for exactly that reason.
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Progress {
     /// Bytes durably written and hashed so far. Monotonic within a run.
@@ -34,10 +40,12 @@ pub struct Progress {
 }
 
 /// The stage a download has reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Phase {
-    /// Opening the connection and reading response headers.
+    /// Opening the connection and reading response headers. The default: every download starts
+    /// here, so a [`Progress`] built for a test names a stage it could really be at.
+    #[default]
     Connecting,
     /// Streaming the body to disk.
     Downloading,

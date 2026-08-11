@@ -133,10 +133,14 @@ async fn download(
                 what: name.clone(),
                 bytes_done: progress.bytes_done,
                 total: progress.total,
+                recoveries: progress.recoveries,
             });
         }
     });
 
+    // Each pass is a fresh `download` call with its own counters, so a restart here resets the
+    // recovery tally the relay above reports: it measures what one transfer recovered from, not what
+    // this loop did on top. A whole-download restart is visible in the tracing log instead.
     let mut attempt = 0u32;
     let outcome: std::result::Result<VerifiedFile, FetchError> = loop {
         attempt += 1;
