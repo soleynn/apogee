@@ -2103,7 +2103,12 @@ fn prompt_line(prompt: &str) -> io::Result<String> {
 fn render(event: &Event) -> String {
     match event {
         Event::State(state) => render_state(state),
-        Event::Progress(progress) => format!("progress: {}/{}", progress.completed, progress.total),
+        Event::Progress(progress) => format!(
+            "progress: {}/{}{}",
+            progress.completed,
+            progress.total,
+            render_recoveries(&progress.recoveries),
+        ),
         Event::Patch(patch) => render_patch(patch),
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
@@ -2250,9 +2255,11 @@ fn render_setup(event: &SetupEvent) -> String {
             what,
             bytes_done,
             total,
+            recoveries,
         } => format!(
-            "setup: {what} downloading {bytes_done}/{}",
-            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
+            "setup: {what} downloading {bytes_done}/{}{}",
+            total.map_or_else(|| "?".to_owned(), |t| t.to_string()),
+            render_recoveries(recoveries),
         ),
         SetupEvent::Installing { what, version } => format!("setup: installing {what} {version}"),
         SetupEvent::Installed { what } => format!("setup: installed {what}"),
@@ -2288,22 +2295,26 @@ fn render_setup(event: &SetupEvent) -> String {
 /// rendered unconditionally would put "0 retries" on every line of a healthy patch day and train the
 /// reader to skip exactly the field worth noticing.
 fn render_recoveries(recoveries: &Recoveries) -> String {
-    if recoveries.is_clean() {
-        return String::new();
-    }
-    // Every counter is rendered, so "not clean" and "says something" cannot come apart: a recovery
-    // this list forgot would otherwise print an empty pair of brackets and name nothing.
+    // Destructured rather than read field by field, and `Recoveries` is exhaustive so this compiles
+    // only while it names every counter. That is the enforcement the stream was missing: `phase` has
+    // ridden `apogee_fetch::Progress` since the beginning and every relay drops it, because nothing
+    // anywhere had to acknowledge it existed. A seventh counter breaks this build instead.
+    let Recoveries {
+        retries,
+        rotations,
+        stalls,
+        blocks_refetched,
+        sources_dropped,
+        demoted,
+    } = *recoveries;
+
     let mut parts = Vec::new();
     for (count, singular, plural) in [
-        (recoveries.retries, "1 retry", "retries"),
-        (recoveries.rotations, "1 failover", "failovers"),
-        (recoveries.stalls, "1 stall", "stalls"),
-        (recoveries.blocks_refetched, "1 bad block", "bad blocks"),
-        (
-            recoveries.sources_dropped,
-            "1 source dropped",
-            "sources dropped",
-        ),
+        (retries, "1 retry", "retries"),
+        (rotations, "1 failover", "failovers"),
+        (stalls, "1 stall", "stalls"),
+        (blocks_refetched, "1 bad block", "bad blocks"),
+        (sources_dropped, "1 source dropped", "sources dropped"),
     ] {
         match count {
             0 => {}
@@ -2311,8 +2322,11 @@ fn render_recoveries(recoveries: &Recoveries) -> String {
             n => parts.push(format!("{n} {plural}")),
         }
     }
-    if recoveries.demoted {
+    if demoted {
         parts.push("one connection".to_owned());
+    }
+    if parts.is_empty() {
+        return String::new();
     }
     format!(" ({})", parts.join(", "))
 }
@@ -2411,6 +2425,53 @@ mod tests {
         assert_eq!(
             render_recoveries(&many),
             " (40 retries, 2 failovers, 3 stalls, one connection)",
+        );
+    }
+
+    /// The two relays that used to flatten the tally away now render it, so an artifact download and
+    /// a component download say what a patch download says.
+    #[test]
+    fn an_artifact_and_a_component_download_both_report_their_tally() {
+        let recoveries = Recoveries {
+            retries: 2,
+            stalls: 1,
+            ..Recoveries::default()
+        };
+
+        let artifact = render(&Event::Progress(apogee_core::Progress {
+            completed: 512,
+            total: 2048,
+            recoveries,
+        }));
+        assert_eq!(artifact, "progress: 512/2048 (2 retries, 1 stall)");
+
+        let component = render_setup(&SetupEvent::Downloading {
+            what: "Dalamud".to_owned(),
+            bytes_done: 512,
+            total: Some(2048),
+            recoveries,
+        });
+        assert_eq!(
+            component,
+            "setup: Dalamud downloading 512/2048 (2 retries, 1 stall)",
+        );
+    }
+
+    /// And a clean one reads exactly as it did before either carried a tally.
+    #[test]
+    fn a_clean_artifact_or_component_download_reads_unchanged() {
+        assert_eq!(
+            render(&Event::Progress(apogee_core::Progress::default())),
+            "progress: 0/0",
+        );
+        assert_eq!(
+            render_setup(&SetupEvent::Downloading {
+                what: "Dalamud".to_owned(),
+                bytes_done: 512,
+                total: Some(2048),
+                recoveries: Recoveries::default(),
+            }),
+            "setup: Dalamud downloading 512/2048",
         );
     }
 
