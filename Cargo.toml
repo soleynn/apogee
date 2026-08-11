@@ -63,7 +63,7 @@ keyring          = "3"
 # A direct dependency of apogee-secrets alongside keyring, which folds "no session bus", "nothing
 # owns the name" and "collection locked" into one opaque variant. Backend classification reads the
 # Secret Service error itself, so it must resolve to the single version keyring also picks.
-secret-service   = "4"
+secret-service   = "5"
 # The D-Bus error names the classification above reads. Already in the graph under secret-service;
 # named here so the match is on typed variants rather than on a rendered string.
 zbus             = "4"
