@@ -1,10 +1,13 @@
 //! The boot apply gate: applying the real boot patch chain reproduces the committed oracle tree
 //! byte-for-byte (per-file path, length, SHA256). The reference applier authored `boot.tree.json`
 //! out of process; CI only diffs against it, so no Square Enix bytes and no reference build enter the
-//! repo. Skips when the corpus cache is absent, exactly like the parser gate.
+//! repo. Skips when the corpus cache is empty and nothing declared it required, which is a
+//! contributor running without network; a cache holding only part of the chain, or an empty one after
+//! a step that was supposed to fill it, fails instead of skipping.
 
 use std::path::PathBuf;
 
+use apogee_test_support::corpus;
 use apogee_test_support::tree_manifest::{self, TreeManifest};
 use apogee_zipatch::{ApplyOptions, DiskSink, PatchReader, apply};
 use serde::Deserialize;
@@ -43,18 +46,23 @@ fn boot_chain_applies_to_the_oracle_tree() {
     let manifest: Manifest = serde_json::from_str(MANIFEST_JSON).expect("parse corpus manifest");
     let cache = cache_dir();
 
+    let digests: Vec<&str> = manifest.entries.iter().map(|e| e.sha256.as_str()).collect();
+    match corpus::readiness(&cache, &digests) {
+        Ok(corpus::Readiness::Primed) => {}
+        Ok(corpus::Readiness::Unprimed) => {
+            eprintln!(
+                "skipping: boot corpus not primed under {} (no-network run)",
+                cache.display()
+            );
+            return;
+        }
+        Err(unusable) => panic!("{unusable}"),
+    }
     let patches: Vec<PathBuf> = manifest
         .entries
         .iter()
         .map(|e| cache.join(&e.sha256))
         .collect();
-    if patches.iter().any(|p| !p.exists()) {
-        eprintln!(
-            "skipping: boot corpus not primed under {} (no-network run)",
-            cache.display()
-        );
-        return;
-    }
 
     let out = tempfile::tempdir().expect("tempdir");
 
