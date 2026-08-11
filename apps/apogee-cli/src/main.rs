@@ -278,6 +278,10 @@ struct ProfileEnvArgs {
     /// Ask the system for its game performance profile.
     #[arg(long)]
     gamemode: Option<bool>,
+    /// Install DXVK's nvapi companion into the prefix, so the game sees the NVIDIA driver features
+    /// it exposes. Takes effect on the next `prefix create` or launch, which is what installs it.
+    #[arg(long)]
+    nvapi: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -961,8 +965,11 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
 /// anything left unset resolves against the host and the runner at launch time rather than here.
 fn profile_env(core: &Core, args: ProfileEnvArgs) -> Result<(), CliError> {
     let mut profile = resolve_profile(core, &args.profile)?;
-    let changing =
-        args.sync.is_some() || args.hud.is_some() || args.gpu.is_some() || args.gamemode.is_some();
+    let changing = args.sync.is_some()
+        || args.hud.is_some()
+        || args.gpu.is_some()
+        || args.gamemode.is_some()
+        || args.nvapi.is_some();
 
     if let Some(spec) = &args.sync {
         profile.launch.sync = parse_sync(spec)?;
@@ -976,6 +983,9 @@ fn profile_env(core: &Core, args: ProfileEnvArgs) -> Result<(), CliError> {
     if let Some(v) = args.gamemode {
         profile.launch.gamemode = v;
     }
+    if let Some(v) = args.nvapi {
+        profile.launch.nvapi = v;
+    }
     if changing {
         core.save_profile(&profile)?;
     }
@@ -984,6 +994,7 @@ fn profile_env(core: &Core, args: ProfileEnvArgs) -> Result<(), CliError> {
     println!("hud       {}", render_hud(&profile.launch.hud));
     println!("gpu       {}", render_gpu(&profile.launch.gpu));
     println!("gamemode  {}", profile.launch.gamemode);
+    println!("nvapi     {}", profile.launch.nvapi);
     Ok(())
 }
 

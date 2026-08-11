@@ -506,6 +506,10 @@ fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) 
     assert_eq!(loaded.launch.gpu, apogee_runtime::GpuSelect::Default);
     assert!(loaded.launch.gamescope.is_none());
     assert!(!loaded.launch.gamemode);
+    // The companion arrives off for the reason Dalamud does: it is a third-party artifact this
+    // launcher downloads, and turning it on for a profile that never asked would install it on the
+    // next launch.
+    assert!(!loaded.launch.nvapi);
 
     // A re-save rewrites the envelope at the current schema version, without the set it shed.
     store.save_profile(&loaded).unwrap();
