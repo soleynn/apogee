@@ -19,7 +19,7 @@ use crate::install::download_verified;
 use crate::metadata::{DxvkRef, PrefixMetadata, RunnerRef, SetupRecord};
 use crate::plan::Prefix;
 use crate::progress::{Progress, RuntimeEvent};
-use crate::{SetupStep, error::HealthIssue};
+use crate::{SetupStep, error::HealthIssue, error::PrefixWants};
 
 /// The 64-bit `dxvk-nvapi` DLL, checked additionally when nvapi was installed.
 const NVAPI_DLL: &str = "nvapi64.dll";
@@ -84,16 +84,38 @@ pub(crate) fn expected_dlls(dxvk: &DxvkRef) -> Vec<String> {
     dlls
 }
 
-/// Report any recorded DXVK DLL missing from the prefix's 64-bit `system32`. Intentionally scoped to
-/// the 64-bit DLLs the game (`ffxiv_dx11.exe`) actually loads; the 32-bit `syswow64` copies do not
-/// affect a 64-bit launch, so a missing one is not treated as a health problem.
-pub(crate) fn check(wine_root: &Path, dxvk: &DxvkRef, issues: &mut Vec<HealthIssue>) {
-    let system32 = wine_root.join("drive_c/windows/system32");
-    for dll in expected_dlls(dxvk) {
-        let path = system32.join(&dll);
-        if !path.exists() {
-            issues.push(HealthIssue::MissingDxvkDll { dll, path });
+/// Whether the prefix lacks the companion that was asked for.
+///
+/// A free function so it goes red on its own. It reads the *record* rather than the DLLs, and has to:
+/// a Proton prefix carries its runner's own `nvapi64.dll` from the moment it is built (measured
+/// byte-identical to GE-Proton 11-1's `files/lib/wine/nvapi/x86_64-windows/nvapi64.dll` on a prefix
+/// recording `nvapi: false`), so a file check would call the companion installed on every Proton
+/// prefix and never report the one thing this exists to report.
+pub(crate) fn nvapi_missing(recorded: Option<&DxvkRef>, wanted: bool) -> bool {
+    wanted && !recorded.is_some_and(|dxvk| dxvk.nvapi)
+}
+
+/// Report any recorded DXVK DLL missing from the prefix's 64-bit `system32`, and a companion that was
+/// wanted and is not recorded. The DLL half is intentionally scoped to the 64-bit DLLs the game
+/// (`ffxiv_dx11.exe`) actually loads; the 32-bit `syswow64` copies do not affect a 64-bit launch, so a
+/// missing one is not treated as a health problem.
+pub(crate) fn check(
+    wine_root: &Path,
+    recorded: Option<&DxvkRef>,
+    wants: &PrefixWants,
+    issues: &mut Vec<HealthIssue>,
+) {
+    if let Some(dxvk) = recorded {
+        let system32 = wine_root.join("drive_c/windows/system32");
+        for dll in expected_dlls(dxvk) {
+            let path = system32.join(&dll);
+            if !path.exists() {
+                issues.push(HealthIssue::MissingDxvkDll { dll, path });
+            }
         }
+    }
+    if nvapi_missing(recorded, wants.nvapi) {
+        issues.push(HealthIssue::MissingNvapi);
     }
 }
 
@@ -254,4 +276,31 @@ fn record(prefix: &Prefix, version: &str, nvapi: bool) -> Result<(), RuntimeErro
     });
     meta.record(SetupRecord::ok_with(SetupStep::DxvkInstall, version));
     meta.save(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recorded(nvapi: bool) -> DxvkRef {
+        DxvkRef {
+            version: "3.0.2".to_owned(),
+            nvapi,
+        }
+    }
+
+    /// Both halves of the comparison, including the two that are not drift.
+    ///
+    /// A prefix that has the companion nobody asked for is not a problem: the record is per prefix and
+    /// the wish is per profile, so two profiles sharing one prefix disagree by design, and the launch
+    /// that does not want it says so in its environment instead.
+    #[test]
+    fn the_companion_is_missing_only_where_it_was_wanted_and_is_not_recorded() {
+        assert!(nvapi_missing(Some(&recorded(false)), true));
+        assert!(nvapi_missing(None, true));
+        assert!(!nvapi_missing(Some(&recorded(true)), true));
+        assert!(!nvapi_missing(Some(&recorded(true)), false));
+        assert!(!nvapi_missing(Some(&recorded(false)), false));
+        assert!(!nvapi_missing(None, false));
+    }
 }

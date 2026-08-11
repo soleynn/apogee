@@ -227,6 +227,30 @@ pub enum HealthIssue {
     /// A DXVK DLL `prefix.json` records as installed is missing from the prefix. Reinstalling it needs
     /// the catalog, so the fix is to re-run the DXVK install, not an in-place repair.
     MissingDxvkDll { dll: String, path: PathBuf },
+    /// The caller asked for the `dxvk-nvapi` companion and the prefix does not have it
+    /// ([`PrefixWants::nvapi`](crate::PrefixWants)). Placing it needs the catalog, so the fix is the
+    /// DXVK install, as above.
+    ///
+    /// The only issue whose other half comes from outside the prefix. Every other one is drift between
+    /// the prefix and its own record, which is why the check needed nothing but the prefix until this
+    /// existed: a record can say what a prefix *has* and never what was wanted of it. Carries nothing,
+    /// because nothing distinguishes one instance from another; what resolves it is the catalog, which
+    /// the caller holds.
+    MissingNvapi,
+}
+
+/// What the caller wanted of the prefix, for the half of the health check the prefix cannot answer
+/// about itself.
+///
+/// The check's oracle is `prefix.json`, and a record can only ever say what a prefix *has*. Whatever
+/// the caller asked for and never got is invisible to it, so that half is handed in. Kept to what this
+/// crate can both diagnose and see resolved: which runner a prefix should have is already its own
+/// record, and the setup a prefix should carry belongs to the layer above (`apogee-addons`), which is
+/// why this is one field rather than a picture of a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrefixWants {
+    /// Whether the caller asked for DXVK's `dxvk-nvapi` companion.
+    pub nvapi: bool,
 }
 
 /// The outcome of a prefix health check: the drift found, if any.

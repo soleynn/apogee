@@ -280,6 +280,8 @@ struct ProfileEnvArgs {
     gamemode: Option<bool>,
     /// Install DXVK's nvapi companion into the prefix, so the game sees the NVIDIA driver features
     /// it exposes. Takes effect on the next `prefix create` or launch, which is what installs it.
+    /// Turning it back off stops future installs and stops the DLLs loading; it never deletes them,
+    /// since on a Proton prefix they are the runner's own.
     #[arg(long)]
     nvapi: Option<bool>,
 }
@@ -1176,6 +1178,11 @@ fn render_health_issue(issue: &HealthIssue) -> String {
         ),
         HealthIssue::MissingDxvkDll { dll, .. } => {
             format!("{dll} is recorded as installed but is not there (fix reinstalls it)")
+        }
+        HealthIssue::MissingNvapi => {
+            "this profile asks for the dxvk-nvapi companion and the prefix does not have it \
+             (fix installs it, where the catalog publishes one)"
+                .to_owned()
         }
         _ => "an unrecognized problem".to_owned(),
     }
@@ -2537,6 +2544,15 @@ mod tests {
             missing_setup: missing
                 .map(|names| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>()),
         }
+    }
+
+    /// The companion the profile asked for and the prefix does not have reads as a problem with a
+    /// resolution, not as the fallback sentence a variant this build does not know about gets.
+    #[test]
+    fn a_wanted_companion_the_prefix_lacks_is_named_and_not_left_unrecognized() {
+        let line = render_health_issue(&HealthIssue::MissingNvapi);
+        assert!(line.contains("dxvk-nvapi"), "{line}");
+        assert!(line.contains("fix installs it"), "{line}");
     }
 
     /// "Nothing wrong" is the one sentence that has to be earned. A prefix the runtime finds intact is

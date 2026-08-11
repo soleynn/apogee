@@ -18,6 +18,16 @@ use serde::{Deserialize, Serialize};
 /// drift apart.
 pub(crate) const DXVK_DLL_STEMS: [&str; 4] = ["d3d9", "d3d10core", "d3d11", "dxgi"];
 
+/// The DLL stems `dxvk-nvapi` provides, which is every `.dll` its archive carries across both
+/// architectures (measured against the pinned v0.9.2 build: `x64/nvapi64.dll`, `x64/nvofapi64.dll`,
+/// `x32/nvapi.dll`).
+///
+/// Wider than the set the health check requires on disk, and deliberately: naming a stem a given
+/// build does not ship costs nothing, because an override only decides what happens when something
+/// loads that name, while *requiring* one would report a prefix as broken for a file its companion
+/// never had.
+pub(crate) const NVAPI_DLL_STEMS: [&str; 3] = ["nvapi", "nvapi64", "nvofapi64"];
+
 /// Which wine synchronization primitive the user wants. `Auto` resolves to the best the host supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,14 +93,37 @@ pub struct Gamescope {
     pub extra: Vec<String>,
 }
 
+/// What a launch says about `dxvk-nvapi`'s DLLs.
+///
+/// Three states rather than a flag, because saying nothing is not the same as saying no. The
+/// companion's DLLs have no builtin behind them, so wine loads whichever copy is in `system32` when
+/// nothing names them (measured on wine 10.0), which means an install that ran once keeps loading
+/// forever unless a launch says otherwise; and a prefix nobody installed into may still have the
+/// runner's own build, which is not this launcher's to switch off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NvapiOverride {
+    /// Name the DLLs to nobody: whatever the prefix and the runner resolve on their own stands. The
+    /// answer wherever this launcher did not install the companion, in either direction — overriding
+    /// to native would name a file that may not exist, and disabling would take away a runner's own
+    /// build nobody here provided.
+    #[default]
+    Unset,
+    /// Override them to the native `dxvk-nvapi` build the prefix has.
+    Native,
+    /// Disable them, so nothing loads them. This is what turning an installed companion off means: the
+    /// DLLs are never removed (they may be the runner's own, and an uninstall that guessed would delete
+    /// files this launcher did not write), so refusing to load them is the whole of "off".
+    Disabled,
+}
+
 /// The DXVK runtime environment, present when a prefix has DXVK installed. Distinct from the DXVK
 /// *install* (the DLLs on disk): this is only the env that activates and tunes it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DxvkEnv {
     /// Where DXVK persists its shader state cache (`DXVK_STATE_CACHE_PATH`); `None` leaves the default.
     pub state_cache: Option<PathBuf>,
-    /// Whether `dxvk-nvapi`'s DLLs are installed and should be overridden to native too.
-    pub nvapi: bool,
+    /// What this launch says about `dxvk-nvapi`'s DLLs.
+    pub nvapi: NvapiOverride,
 }
 
 /// The user/profile-chosen environment knobs Apogee resolves into an [`Environment`].
@@ -259,17 +292,24 @@ fn apply_hud(vars: &mut BTreeMap<String, String>, hud: &Hud) {
 }
 
 fn apply_dxvk(vars: &mut BTreeMap<String, String>, dxvk: &DxvkEnv) {
-    // Override the Direct3D DLLs (and nvapi, when installed) to the native DXVK builds.
-    let mut dlls = DXVK_DLL_STEMS.to_vec();
-    if dxvk.nvapi {
-        dlls.push("nvapi");
-        dlls.push("nvapi64");
+    // Override the Direct3D DLLs (and nvapi, when this launch activates it) to the native DXVK
+    // builds. Turning the companion off adds a second group instead: an empty right-hand side is
+    // wine's "load nothing for this name", which is what stops DLLs an earlier install placed from
+    // being loaded by a launch that no longer wants them.
+    let mut native = DXVK_DLL_STEMS.to_vec();
+    let mut disabled = Vec::new();
+    match dxvk.nvapi {
+        NvapiOverride::Unset => {}
+        NvapiOverride::Native => native.extend(NVAPI_DLL_STEMS),
+        NvapiOverride::Disabled => disabled.extend(NVAPI_DLL_STEMS),
     }
-    dlls.sort_unstable();
-    vars.insert(
-        "WINEDLLOVERRIDES".into(),
-        format!("{}=native", dlls.join(",")),
-    );
+    native.sort_unstable();
+    disabled.sort_unstable();
+    let mut overrides = format!("{}=native", native.join(","));
+    if !disabled.is_empty() {
+        overrides.push_str(&format!(";{}=", disabled.join(",")));
+    }
+    vars.insert("WINEDLLOVERRIDES".into(), overrides);
     if let Some(cache) = &dxvk.state_cache {
         // Both spellings. The 2.x builds read the first and the 3.x builds renamed it to the second,
         // and which one a prefix has is a catalog row rather than something decided here. A build
@@ -465,33 +505,43 @@ mod tests {
         assert!(!mango.vars.contains_key("DXVK_HUD"));
     }
 
+    /// The override the three nvapi states produce.
+    ///
+    /// The disabled arm is the one that carries weight. Measured on wine 10.0 with a companion's DLL
+    /// in `system32`: with no override naming it, `LoadLibraryA("nvapi64.dll")` loads it from
+    /// `C:\windows\system32`; with the empty override it fails with 126. Nothing else stops it, since
+    /// wine ships no builtin `nvapi64` for the loader to prefer, so this string is the whole of what
+    /// turning the companion off does at launch.
     #[test]
-    fn dxvk_overrides_include_nvapi_only_when_enabled() {
-        let plain = compute_environment(
-            &EnvConfig {
-                dxvk: Some(DxvkEnv::default()),
-                ..Default::default()
-            },
-            &caps(false, true),
-        );
-        assert_eq!(
-            plain.vars.get("WINEDLLOVERRIDES").map(String::as_str),
-            Some("d3d10core,d3d11,d3d9,dxgi=native")
-        );
-        let with_nvapi = compute_environment(
-            &EnvConfig {
-                dxvk: Some(DxvkEnv {
-                    nvapi: true,
+    fn the_nvapi_dlls_are_named_by_what_the_launch_decided() {
+        let cases = [
+            (NvapiOverride::Unset, "d3d10core,d3d11,d3d9,dxgi=native"),
+            (
+                NvapiOverride::Native,
+                "d3d10core,d3d11,d3d9,dxgi,nvapi,nvapi64,nvofapi64=native",
+            ),
+            (
+                NvapiOverride::Disabled,
+                "d3d10core,d3d11,d3d9,dxgi=native;nvapi,nvapi64,nvofapi64=",
+            ),
+        ];
+        for (nvapi, expected) in cases {
+            let out = compute_environment(
+                &EnvConfig {
+                    dxvk: Some(DxvkEnv {
+                        nvapi,
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            &caps(false, true),
-        );
-        assert_eq!(
-            with_nvapi.vars.get("WINEDLLOVERRIDES").map(String::as_str),
-            Some("d3d10core,d3d11,d3d9,dxgi,nvapi,nvapi64=native")
-        );
+                },
+                &caps(false, true),
+            );
+            assert_eq!(
+                out.vars.get("WINEDLLOVERRIDES").map(String::as_str),
+                Some(expected),
+                "{nvapi:?}"
+            );
+        }
     }
 
     #[test]
@@ -538,7 +588,7 @@ mod tests {
             &EnvConfig {
                 dxvk: Some(DxvkEnv {
                     state_cache: Some(PathBuf::from("/prefix/dxvk_cache")),
-                    nvapi: false,
+                    nvapi: NvapiOverride::Unset,
                 }),
                 ..Default::default()
             },
@@ -581,7 +631,7 @@ mod tests {
             gpu: GpuSelect::NvidiaPrime,
             dxvk: Some(DxvkEnv {
                 state_cache: Some(PathBuf::from("/prefix/dxvk_cache")),
-                nvapi: true,
+                nvapi: NvapiOverride::Native,
             }),
             gamescope: Some(Gamescope {
                 width: Some(1920),

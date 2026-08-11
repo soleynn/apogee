@@ -10,7 +10,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apogee_fetch::Fetcher;
-use apogee_runtime::{HealthIssue, Prefix, Progress, RunnerKind, Runtime, RuntimePaths};
+use apogee_runtime::{
+    HealthIssue, Prefix, PrefixWants, Progress, RunnerKind, Runtime, RuntimePaths,
+};
 use tokio_util::sync::CancellationToken;
 
 /// A `wine` stand-in: on `wineboot` it lays down the prefix skeleton the real one would, then exits 0.
@@ -77,7 +79,7 @@ async fn prepare_initializes_and_records_a_fresh_prefix() {
 
     assert!(
         runtime
-            .check_prefix(&prefix)
+            .check_prefix(&prefix, &PrefixWants::default())
             .await
             .expect("check")
             .is_healthy(),
@@ -117,7 +119,10 @@ async fn a_broken_drive_map_is_repaired_without_delete() {
     std::fs::remove_file(&z).expect("remove z:");
     std::os::unix::fs::symlink("/tmp", &z).expect("wrong z:");
 
-    let health = runtime.check_prefix(&prefix).await.expect("check");
+    let health = runtime
+        .check_prefix(&prefix, &PrefixWants::default())
+        .await
+        .expect("check");
     assert!(matches!(
         health.issues.as_slice(),
         [HealthIssue::DriveMapping { letter: 'z', .. }]
@@ -127,6 +132,7 @@ async fn a_broken_drive_map_is_repaired_without_delete() {
         .repair_prefix(
             &prefix,
             &health.issues,
+            &PrefixWants::default(),
             &CancellationToken::new(),
             &Progress::none(),
         )
@@ -171,7 +177,7 @@ async fn recreate_wipes_and_rebuilds_the_prefix() {
     assert!(!marker.exists(), "recreate wiped the old prefix");
     assert!(
         runtime
-            .check_prefix(&fresh)
+            .check_prefix(&fresh, &PrefixWants::default())
             .await
             .expect("check")
             .is_healthy(),
