@@ -60,6 +60,7 @@ impl HttpSource {
 
 /// An `apogee-zipatch` `RangeSource` that pulls broken byte ranges over HTTP. Built from a `Fetcher`,
 /// a runtime handle, and the per-patch source table; see the module docs for the off-runtime rule.
+#[derive(Debug)]
 pub struct HttpRangeSource {
     fetcher: Fetcher,
     handle: tokio::runtime::Handle,

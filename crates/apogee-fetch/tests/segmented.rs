@@ -39,7 +39,7 @@ async fn segmented_download_reassembles_correctly() {
 
     // Submit as a job and drain its progress stream, exercising the Job handle.
     let mut job = fetcher.submit(spec);
-    let mut progress = job.progress().into_inner();
+    let mut progress = job.progress();
     let watcher = tokio::spawn(async move {
         let mut last = 0;
         while let Some(p) = progress.recv().await {
