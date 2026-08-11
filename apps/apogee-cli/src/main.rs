@@ -280,6 +280,8 @@ struct ProfileEnvArgs {
     gamemode: Option<bool>,
     /// Install DXVK's nvapi companion into the prefix, so the game sees the NVIDIA driver features
     /// it exposes. Takes effect on the next `prefix create` or launch, which is what installs it.
+    /// Turning it back off stops future installs and stops the DLLs loading; it never deletes them,
+    /// since on a Proton prefix they are the runner's own.
     #[arg(long)]
     nvapi: Option<bool>,
 }

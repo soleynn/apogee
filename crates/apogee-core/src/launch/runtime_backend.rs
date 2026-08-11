@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    Catalog, DxvkEnv, DxvkRef, GameSession, HostCaps, LaunchPlan, Prefix, PrefixWants, Progress,
-    RunnerKind, Runtime, RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, DxvkRef, GameSession, HostCaps, LaunchPlan, NvapiOverride, Prefix,
+    PrefixWants, Progress, RunnerKind, Runtime, RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -76,15 +76,32 @@ fn dxvk_is_current(recorded: Option<&DxvkRef>, version: &str, nvapi: bool) -> bo
     recorded.version == version && (recorded.nvapi || !nvapi)
 }
 
-/// Whether this launch overrides the prefix's nvapi DLLs onto the companion.
+/// What this launch says about the prefix's nvapi DLLs.
 ///
-/// Both halves are required, and they are different facts. The record is what the prefix physically
-/// has, which an install honors only where the catalog pins a companion to honor it with; the flag is
-/// what the profile asked for. Overriding onto DLLs that were never placed is a prefix that will not
-/// start, and overriding because they happen to be there hands a profile a companion it turned off,
-/// which is also the only way one can ever be turned off again: nothing uninstalls it.
-fn activates_nvapi(recorded: Option<&DxvkRef>, nvapi: bool) -> bool {
-    nvapi && recorded.is_some_and(|dxvk| dxvk.nvapi)
+/// Two facts, three answers. The record is what an Apogee install placed, which it does only where the
+/// catalog pins a companion; the flag is what the profile asked for. **The record gates everything**:
+/// what a launch may say about these DLLs is scoped to the install this launcher performed, in both
+/// directions.
+///
+/// - Installed, and asked for: override them to that native build.
+/// - Installed, and not asked for: **disable** them. This is the whole of "off", because nothing
+///   uninstalls the companion and a launch that merely stays quiet does not turn it off (measured on
+///   wine 10.0: a `system32` copy no override names is loaded anyway, there being no builtin `nvapi64`
+///   for the loader to prefer). Per launch rather than per prefix, which is what lets two profiles
+///   share one prefix and disagree.
+/// - Not installed, either way: say nothing. Overriding to native would name a file that may not be
+///   there; disabling would reach past this launcher's own doing and switch off a runner's built-in
+///   nvapi, which is what a Proton prefix has from the moment it is built. A user who has never touched
+///   the setting (it is off by default) must not silently lose what their runner already gave them.
+fn activates_nvapi(recorded: Option<&DxvkRef>, nvapi: bool) -> NvapiOverride {
+    if !recorded.is_some_and(|dxvk| dxvk.nvapi) {
+        return NvapiOverride::Unset;
+    }
+    if nvapi {
+        NvapiOverride::Native
+    } else {
+        NvapiOverride::Disabled
+    }
 }
 
 /// The real launch backend over `apogee-runtime`.
@@ -195,7 +212,7 @@ impl RuntimeLauncher {
 
     /// The environment that activates a prefix's translation, with its shader cache kept beside the
     /// prefix it belongs to rather than in a location shared between prefixes.
-    fn dxvk_env(&self, prefix: &Prefix, nvapi: bool) -> DxvkEnv {
+    fn dxvk_env(&self, prefix: &Prefix, nvapi: NvapiOverride) -> DxvkEnv {
         let cache = prefix.path().join("dxvk_cache");
         // Created here because the translation opens a file inside it rather than creating the path,
         // so a directory that is not there is a cache that silently never persists.
@@ -646,23 +663,71 @@ mod tests {
         assert!(dxvk_is_current(Some(&recorded("2.7", true)), "2.7", false));
     }
 
-    /// A launch overrides onto the companion only where both halves agree.
+    /// A launch speaks about these DLLs only where this launcher put them there, and then says one of
+    /// two opposite things.
     ///
-    /// The prefix's half is the one that cannot be argued with: a launch that overrides `nvapi64` onto
-    /// a DLL no install ever placed is a game that does not start. The profile's half is the only way
-    /// the companion is ever turned back off, because nothing uninstalls it: the DLLs stay in
-    /// `system32` and the override is what stops pointing at them.
+    /// The record gating both directions is the point. Overriding `nvapi64` to native onto a DLL no
+    /// install ever placed is a game that does not start; disabling one this launcher never installed
+    /// reaches past its own doing and switches off the nvapi a Proton prefix ships with, which for a
+    /// user who never touched the setting (it is off by default) is taking away something their runner
+    /// gave them. Where the install *did* run, off has to say something rather than nothing: a
+    /// `system32` copy that no override names is loaded anyway (measured on wine 10.0, which ships no
+    /// builtin `nvapi64` for the loader to prefer), so the disable is the only thing that turns the
+    /// companion off at all.
     #[rstest::rstest]
-    #[case(Some(&recorded("2.7", true)), true, true)]
-    #[case(Some(&recorded("2.7", true)), false, false)]
-    #[case(Some(&recorded("2.7", false)), true, false)]
-    #[case(None, true, false)]
-    fn the_companion_is_activated_only_where_the_prefix_has_it_and_the_profile_asked(
+    #[case(Some(&recorded("2.7", true)), true, NvapiOverride::Native)]
+    #[case(Some(&recorded("2.7", true)), false, NvapiOverride::Disabled)]
+    #[case(Some(&recorded("2.7", false)), true, NvapiOverride::Unset)]
+    #[case(Some(&recorded("2.7", false)), false, NvapiOverride::Unset)]
+    #[case(None, true, NvapiOverride::Unset)]
+    #[case(None, false, NvapiOverride::Unset)]
+    fn the_companion_is_spoken_about_only_where_this_launcher_installed_it(
         #[case] recorded: Option<&DxvkRef>,
         #[case] nvapi: bool,
-        #[case] expected: bool,
+        #[case] expected: NvapiOverride,
     ) {
         assert_eq!(activates_nvapi(recorded, nvapi), expected);
+    }
+
+    /// What a fix hands the install, for each thing a check can find.
+    ///
+    /// The companion arm is the point: a check that names it and a fix that does not act on it would
+    /// leave the one command that exists to resolve what a check reports refusing to resolve it. The
+    /// force flag stays the missing-DLL's alone, and the third case is what keeps a drive-map repair
+    /// from dragging a DXVK download along with it.
+    #[test]
+    fn the_problems_an_install_resolves_are_the_two_it_can() {
+        use apogee_runtime::HealthIssue;
+
+        let dll = HealthIssue::MissingDxvkDll {
+            dll: "dxgi.dll".to_owned(),
+            path: PathBuf::from("/prefix/drive_c/windows/system32/dxgi.dll"),
+        };
+        assert_eq!(dxvk_install_for(std::slice::from_ref(&dll)), Some(true));
+        assert_eq!(dxvk_install_for(&[HealthIssue::MissingNvapi]), Some(false));
+        assert_eq!(
+            dxvk_install_for(&[dll, HealthIssue::MissingNvapi]),
+            Some(true)
+        );
+        assert_eq!(
+            dxvk_install_for(&[HealthIssue::MissingSkeleton {
+                path: PathBuf::from("/prefix/system.reg")
+            }]),
+            None
+        );
+        assert_eq!(dxvk_install_for(&[]), None);
+    }
+
+    /// The profile's wish reaches the layer that can only see the prefix's own record.
+    #[test]
+    fn a_prefix_verb_hands_the_runtime_what_the_profile_asked_for() {
+        for nvapi in [true, false] {
+            let request = PrefixRequest {
+                runner: RunnerSelection::SystemWine,
+                nvapi,
+            };
+            assert_eq!(wants(&request), PrefixWants { nvapi });
+        }
     }
 
     /// A catalog row that pins no companion is nothing to chase.

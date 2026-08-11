@@ -60,8 +60,8 @@ pub use deck::{DeckModel, HostIdentity};
 #[cfg(target_os = "linux")]
 pub use dosdevices::DriveMap;
 pub use env::{
-    DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, SyncChoice, SyncStatus,
-    compute_environment,
+    DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, NvapiOverride,
+    SyncChoice, SyncStatus, compute_environment,
 };
 pub use error::{
     CatalogError, HealthIssue, HostTool, PrefixHealth, PrefixWants, RuntimeError, SetupStep,
