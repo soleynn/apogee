@@ -2,15 +2,16 @@
 //!
 //! Install requests arrive fully formed from the flow (the pending set comes from registration); this
 //! backend just runs them and relays progress. Repair requests do not: a [`RepairPlan`] names the
-//! repos and versions, and the backend resolves each repo's digest-pinned block index from the
-//! hosted, Ed25519-signed catalog before handing `apogee-patcher` the full request. The catalog bytes
-//! are fetched here (transport is the composition root's job); the signature check stays in
-//! `apogee-patcher` ([`IndexCatalog::verify_default`]), so no crypto lives in this crate.
+//! repos and versions, and the backend resolves each repo's digest-pinned block index, and where that
+//! index's source patches are served, from the hosted, Ed25519-signed catalog before handing
+//! `apogee-patcher` the full request. The catalog bytes are fetched here (transport is the composition
+//! root's job); the signature check stays in `apogee-patcher`
+//! ([`IndexCatalog::verify_default`]), so no crypto lives in this crate.
 
 use std::path::{Path, PathBuf};
 
 use apogee_patcher::{
-    IndexCatalog, InstallRequest, Installed, Job, PatchError, Patcher, RepairOutcome,
+    IndexCatalog, IndexEntry, InstallRequest, Installed, Job, PatchError, Patcher, RepairOutcome,
     RepairPatchSource, RepairRepo, RepairRequest, Repo, SePatch,
 };
 use async_trait::async_trait;
@@ -92,14 +93,11 @@ impl PatcherBackend {
                 index: entry.source(),
                 patch_sources,
                 // The CDN base lets the repair form each index source-ref's URL without a populated
-                // cache, so a repair works even with keep-patches off. Boot heals fully this way; a game
-                // repo's HTTP range fetch additionally needs the session's patch-download credential
-                // (this repair is credential-free), so game heals only zero/empty and locally-cached
-                // ranges until that is wired.
-                source_base_url: cdn_base_for(repo),
-                // A game repo's HTTP range fetch needs the session's patch-download credential; this
-                // credential-free repair heals boot, zero/empty, and locally-cached ranges. A live
-                // game HTTP repair carrying a real session credential is not wired yet.
+                // cache, so a repair works even with keep-patches off.
+                source_base_url: source_base_for(entry, repo),
+                // No session credential, and none is needed: patch delivery answers a ranged request
+                // for a game patch the same way it answers one for a boot patch, on the user agent
+                // alone. Measured against the live CDN, and a full game-repo heal has run over it.
                 headers: SePatch::boot(),
             });
         }
@@ -184,12 +182,27 @@ fn parse_url(raw: &str) -> Result<Url, CoreError> {
     })
 }
 
-/// The base URL under which `repo`'s source patches are served on the SE patch CDN, so a repair forms
-/// each index source-ref's URL as `{base}/{name}` without needing the patch cache. The repo path ids
-/// are the fixed SE CDN ids: boot `2b5cbc63` and base game `4e9a232b` (both observed from the live CDN,
-/// e.g. during the install-from-nothing run). Expansion ids are not fixed constants (the launcher reads
-/// them from the game patchlist URLs), and a game-repo HTTP repair also needs the session credential
-/// this credential-free repair lacks, so expansions return `None` and heal only from the cache for now.
+/// Where `repo`'s source patches are served, so a repair forms each index source-ref's URL as
+/// `{base}/{name}` with no patch cache to draw on.
+///
+/// The signed catalog row answers first. It is the only thing that can: Square Enix serves each repo
+/// under an opaque path id, and while boot's and the base game's hold still enough to compile in
+/// below, an expansion's does not (`ex1` is `6b936f08` and `ex5` is `6cfeab11` on this machine, read
+/// off the game patchlist during an install). A repair fetches no patchlist to read them from, and the
+/// row it needs for this repo and version already exists and is already verified before any of this
+/// runs, so that row is where the id lives.
+///
+/// The row also outranks the compiled-in pair rather than merely filling the gap they leave, so a
+/// re-signed catalog is enough if Square Enix ever moves boot or the base game. `None` when neither
+/// answers: the repo then heals from the cache and from what can be rebuilt locally, exactly as an
+/// expansion did before any row carried a base.
+fn source_base_for(entry: &IndexEntry, repo: Repo) -> Option<Url> {
+    entry.source_base.clone().or_else(|| cdn_base_for(repo))
+}
+
+/// The compiled-in fallback for a row that names no base: boot `2b5cbc63` and base game `4e9a232b`,
+/// both observed from the live CDN (the boot id covers a chain running from 2013 to today). No
+/// expansion has one, which is what [`source_base_for`] exists to answer.
 fn cdn_base_for(repo: Repo) -> Option<Url> {
     let path = match repo {
         Repo::Boot => "boot/2b5cbc63/",
@@ -262,5 +275,77 @@ fn collect_patches(
             visit(relative, &path);
         }
         relative.pop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use apogee_fetch::DigestPin;
+
+    use super::*;
+
+    /// A catalog row for `repo`, optionally naming the base its source patches are served under.
+    fn entry(repo: Repo, source_base: Option<&str>) -> IndexEntry {
+        IndexEntry {
+            repo,
+            version: "2024.03.28.0000.0000".to_owned(),
+            url: Url::parse("https://example.invalid/indexes/x.apzi").expect("a hosted index url"),
+            pin: DigestPin::Blake3([0u8; 32]),
+            source_base: source_base.map(|b| Url::parse(b).expect("a source base")),
+        }
+    }
+
+    /// The case this exists for: an expansion has no compiled-in id, so without the row it heals
+    /// nothing over HTTP, and with the row it heals from the CDN like any other repo. Asserted on the
+    /// formed source URL rather than the base, since forming one is all a repair does with it.
+    #[test]
+    fn an_expansions_base_comes_from_the_row_and_is_nothing_without_one() {
+        let repo = Repo::Expansion(1);
+        let base = "http://patch-dl.ffxiv.com/game/ex1/6b936f08/";
+        let resolved =
+            source_base_for(&entry(repo, Some(base)), repo).expect("the row named a base");
+        assert_eq!(
+            resolved
+                .join("D2024.03.28.0000.0000.patch")
+                .expect("the base forms a source url")
+                .as_str(),
+            "http://patch-dl.ffxiv.com/game/ex1/6b936f08/D2024.03.28.0000.0000.patch",
+        );
+
+        assert_eq!(
+            source_base_for(&entry(repo, None), repo),
+            None,
+            "an expansion with no row base must stay unaddressable rather than guess one",
+        );
+    }
+
+    /// Boot and the base game keep working against a catalog that predates the field, which is what
+    /// keeps this from being a flag day: the hosted manifest can be re-signed one row at a time.
+    #[test]
+    fn boot_and_the_base_game_fall_back_to_the_compiled_in_bases() {
+        for (repo, want) in [
+            (Repo::Boot, "http://patch-dl.ffxiv.com/boot/2b5cbc63/"),
+            (Repo::Game, "http://patch-dl.ffxiv.com/game/4e9a232b/"),
+        ] {
+            assert_eq!(
+                source_base_for(&entry(repo, None), repo)
+                    .as_ref()
+                    .map(Url::as_str),
+                Some(want),
+            );
+        }
+    }
+
+    /// A row that names a base outranks the compiled-in one, so moving a repo Square Enix has moved
+    /// costs a re-signed catalog rather than a release.
+    #[test]
+    fn a_row_outranks_the_compiled_in_base() {
+        let moved = "http://patch-dl.ffxiv.com/game/deadbeef/";
+        assert_eq!(
+            source_base_for(&entry(Repo::Game, Some(moved)), Repo::Game)
+                .as_ref()
+                .map(Url::as_str),
+            Some(moved),
+        );
     }
 }
