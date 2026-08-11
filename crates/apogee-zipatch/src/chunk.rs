@@ -115,7 +115,7 @@ pub(crate) fn expansion_folder(expansion: u8) -> String {
     }
 }
 
-/// The `FHDR` chunk: patch metadata and the command counts that drive progress reporting.
+/// The `FHDR` chunk: patch metadata, plus the command counts a `v3` header carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHeader {
     /// Format version, `2` or `3` (older boot patches are `2`, modern game patches `3`).
@@ -139,6 +139,11 @@ impl FileHeader {
 }
 
 /// The `v3`-only tail of an [`FileHeader`]: directory and per-command-kind counts.
+///
+/// Recorded as written, and read by nothing. They do not total a run: across 109 `v3` game patches
+/// (2024-2026), `commands` was zero in every one, the per-kind counts were all zero in 28, and where
+/// they were set a run still emitted up to 2.87x more progress frames than they account for, because
+/// no field counts `SQPK I` (which all 109 carry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileHeaderV3 {
     pub add_directories: u32,
