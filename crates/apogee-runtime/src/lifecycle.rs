@@ -16,7 +16,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::RunnerKind;
 use crate::dosdevices::resolve_drive_target;
-use crate::error::{HealthIssue, PrefixHealth, RuntimeError, SetupStep, StepCancelled};
+use crate::error::{
+    HealthIssue, PrefixHealth, PrefixWants, RuntimeError, SetupStep, StepCancelled,
+};
 use crate::metadata::{PrefixMetadata, RunnerRef, SetupRecord};
 use crate::plan::{Prefix, RunnerHandle};
 use crate::progress::{Progress, RuntimeEvent};
@@ -94,9 +96,12 @@ async fn initialize(
     Ok(())
 }
 
-/// Diagnose a prefix against its recorded metadata and the wine skeleton, returning every drift found
-/// without touching the prefix. Read-only.
-pub(crate) async fn check(prefix: &Prefix) -> Result<PrefixHealth, RuntimeError> {
+/// Diagnose a prefix against its recorded metadata, the wine skeleton, and what `wants` asked of it,
+/// returning every drift found without touching the prefix. Read-only.
+pub(crate) async fn check(
+    prefix: &Prefix,
+    wants: &PrefixWants,
+) -> Result<PrefixHealth, RuntimeError> {
     let wine_root = prefix.wine_root();
     let mut issues = Vec::new();
 
@@ -125,9 +130,12 @@ pub(crate) async fn check(prefix: &Prefix) -> Result<PrefixHealth, RuntimeError>
         }
     }
 
-    // A runner change is drift, and any DXVK the record claims must be on disk. A corrupt
-    // `prefix.json` is treated as "no record" (a warning, not a hard error) so `check` stays total
-    // over a broken-but-present prefix — the same tolerance `is_initialized` applies before reinit.
+    // A runner change is drift, any DXVK the record claims must be on disk, and a companion that was
+    // wanted must be in the record. A corrupt `prefix.json` is treated as "no record" (a warning, not
+    // a hard error) so `check` stays total over a broken-but-present prefix — the same tolerance
+    // `is_initialized` applies before reinit. The wanted-companion half sits inside that same
+    // tolerance deliberately: with no readable record there is nothing to compare a wish against, and
+    // reporting one anyway would name the same prefix's missing record twice.
     if let Some(meta) = recorded_metadata(prefix)? {
         let current = RunnerRef::from(prefix.runner());
         if meta.runner != current {
@@ -136,9 +144,7 @@ pub(crate) async fn check(prefix: &Prefix) -> Result<PrefixHealth, RuntimeError>
                 expected: current,
             });
         }
-        if let Some(dxvk) = &meta.dxvk {
-            crate::dxvk::check(&wine_root, dxvk, &mut issues);
-        }
+        crate::dxvk::check(&wine_root, meta.dxvk.as_ref(), wants, &mut issues);
     }
 
     Ok(PrefixHealth { issues })
@@ -166,6 +172,7 @@ fn recorded_metadata(prefix: &Prefix) -> Result<Option<PrefixMetadata>, RuntimeE
 pub(crate) async fn repair(
     prefix: &Prefix,
     issues: &[HealthIssue],
+    wants: &PrefixWants,
     umu: Option<&Path>,
     cancel: &CancellationToken,
     progress: &Progress,
@@ -190,9 +197,12 @@ pub(crate) async fn repair(
                 }
             }
             HealthIssue::MissingSkeleton { .. } => regenerate_skeleton = true,
-            // Both need an action the local repair cannot take (a recreate; a DXVK reinstall via the
-            // catalog), so they are left to reappear in the residual health.
-            HealthIssue::RunnerMismatch { .. } | HealthIssue::MissingDxvkDll { .. } => {}
+            // All three need an action the local repair cannot take (a recreate; a DXVK install via
+            // the catalog, which also places the companion), so they are left to reappear in the
+            // residual health.
+            HealthIssue::RunnerMismatch { .. }
+            | HealthIssue::MissingDxvkDll { .. }
+            | HealthIssue::MissingNvapi => {}
         }
     }
 
@@ -206,7 +216,10 @@ pub(crate) async fn repair(
         }
     }
 
-    check(prefix).await
+    // Re-checked against the same wants, so an issue this repair could not resolve is still in the
+    // residual. Dropping them here would let a fix report a prefix as clean for the one reason a
+    // check would not.
+    check(prefix, wants).await
 }
 
 /// Destructively recreate a prefix: delete it entirely, then reinitialize (`wineboot -i` + a fresh
@@ -504,7 +517,12 @@ mod tests {
     #[tokio::test]
     async fn a_pristine_prefix_is_healthy() {
         let (_dir, prefix) = healthy_prefix("wine", "custom");
-        assert!(check(&prefix).await.expect("check").is_healthy());
+        assert!(
+            check(&prefix, &PrefixWants::default())
+                .await
+                .expect("check")
+                .is_healthy()
+        );
     }
 
     #[tokio::test]
@@ -515,7 +533,9 @@ mod tests {
         std::fs::remove_file(&z).expect("remove z:");
         symlink("/tmp", &z).expect("wrong z:");
 
-        let health = check(&prefix).await.expect("check");
+        let health = check(&prefix, &PrefixWants::default())
+            .await
+            .expect("check");
         assert!(matches!(
             health.issues.as_slice(),
             [HealthIssue::DriveMapping { letter: 'z', .. }]
@@ -524,6 +544,7 @@ mod tests {
         let residual = repair(
             &prefix,
             &health.issues,
+            &PrefixWants::default(),
             None,
             &CancellationToken::new(),
             &Progress::none(),
@@ -539,7 +560,9 @@ mod tests {
     async fn a_missing_drive_symlink_is_detected() {
         let (_dir, prefix) = healthy_prefix("wine", "custom");
         std::fs::remove_file(prefix.wine_root().join("dosdevices/c:")).expect("remove c:");
-        let health = check(&prefix).await.expect("check");
+        let health = check(&prefix, &PrefixWants::default())
+            .await
+            .expect("check");
         assert!(matches!(
             health.issues.as_slice(),
             [HealthIssue::DriveMapping {
@@ -554,7 +577,9 @@ mod tests {
     async fn a_missing_skeleton_file_is_detected() {
         let (_dir, prefix) = healthy_prefix("wine", "custom");
         std::fs::remove_file(prefix.wine_root().join("system.reg")).expect("remove reg");
-        let health = check(&prefix).await.expect("check");
+        let health = check(&prefix, &PrefixWants::default())
+            .await
+            .expect("check");
         assert!(
             health
                 .issues
@@ -574,7 +599,9 @@ mod tests {
             "8.5.r4",
         );
         let prefix_b = Prefix::new(prefix_a.path().to_path_buf(), handle);
-        let health = check(&prefix_b).await.expect("check");
+        let health = check(&prefix_b, &PrefixWants::default())
+            .await
+            .expect("check");
         assert!(matches!(
             health.issues.as_slice(),
             [HealthIssue::RunnerMismatch { .. }]

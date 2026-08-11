@@ -1591,7 +1591,7 @@ async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
     let launch = Arc::new(
         FakeLaunchBackend::exiting().with_dxvk(apogee_runtime::DxvkEnv {
             state_cache: Some(std::path::PathBuf::from("/prefix/dxvk_cache")),
-            nvapi: false,
+            nvapi: apogee_runtime::NvapiOverride::Unset,
         }),
     );
     let ctx = context(&h, transport, launch.clone(), NOW);
@@ -1607,6 +1607,34 @@ async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
     assert_eq!(
         plan.env().get("DXVK_STATE_CACHE_PATH").map(String::as_str),
         Some("/prefix/dxvk_cache")
+    );
+}
+
+/// A prefix whose companion this launch has turned off spawns with it disabled.
+///
+/// Asserted on the plan the launch was handed, because the whole failure this closes was a setting
+/// with no route to the process: the DLLs stay in `system32` forever, so a launch that does not name
+/// them loads them anyway (measured on wine 10.0). Whether the environment reaches the spawn is a
+/// different question from whether it computes correctly, and only this end of it answers it.
+#[tokio::test]
+async fn a_launch_that_turned_the_companion_off_spawns_with_its_dlls_disabled() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting().with_dxvk(apogee_runtime::DxvkEnv {
+            state_cache: None,
+            nvapi: apogee_runtime::NvapiOverride::Disabled,
+        }),
+    );
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let plan = launch.last_plan().unwrap();
+    assert_eq!(
+        plan.env().get("WINEDLLOVERRIDES").map(String::as_str),
+        Some("d3d10core,d3d11,d3d9,dxgi=native;nvapi,nvapi64,nvofapi64=")
     );
 }
 

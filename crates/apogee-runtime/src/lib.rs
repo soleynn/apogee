@@ -60,11 +60,12 @@ pub use deck::{DeckModel, HostIdentity};
 #[cfg(target_os = "linux")]
 pub use dosdevices::DriveMap;
 pub use env::{
-    DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, SyncChoice, SyncStatus,
-    compute_environment,
+    DxvkEnv, EnvConfig, Environment, Gamescope, GpuSelect, HostCaps, Hud, NvapiOverride,
+    SyncChoice, SyncStatus, compute_environment,
 };
 pub use error::{
-    CatalogError, HealthIssue, HostTool, PrefixHealth, RuntimeError, SetupStep, StepCancelled,
+    CatalogError, HealthIssue, HostTool, PrefixHealth, PrefixWants, RuntimeError, SetupStep,
+    StepCancelled,
 };
 pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
@@ -318,24 +319,37 @@ impl Runtime {
         lifecycle::ensure_ready(handle, prefix_dir, umu.as_deref(), cancel, progress).await
     }
 
-    /// Diagnose a prefix against its `prefix.json` and the wine skeleton, returning every drift found
-    /// (drive-map breakage, a missing skeleton file, a runner change) without touching it.
-    pub async fn check_prefix(&self, prefix: &Prefix) -> Result<PrefixHealth, RuntimeError> {
-        lifecycle::check(prefix).await
+    /// Diagnose a prefix against its `prefix.json`, the wine skeleton, and what `wants` asked of it,
+    /// returning every drift found (drive-map breakage, a missing skeleton file, a runner change, a
+    /// companion that was asked for and is not there) without touching it.
+    ///
+    /// `wants` is the one input the prefix cannot supply about itself: its record says what it has,
+    /// never what was wanted of it. `PrefixWants::default()` is a caller asking for nothing beyond
+    /// what the prefix already claims.
+    pub async fn check_prefix(
+        &self,
+        prefix: &Prefix,
+        wants: &PrefixWants,
+    ) -> Result<PrefixHealth, RuntimeError> {
+        lifecycle::check(prefix, wants).await
     }
 
     /// Apply targeted fixes for the given `issues` and return the residual health. Rewrites a broken
     /// drive symlink in place and regenerates a missing skeleton with `wineboot -u`; never deletes the
-    /// prefix. A runner mismatch is left for an explicit [`recreate_prefix`](Self::recreate_prefix).
+    /// prefix. A runner mismatch is left for an explicit [`recreate_prefix`](Self::recreate_prefix),
+    /// and the two DXVK issues for an [`install_dxvk`](Self::install_dxvk) the caller drives with a
+    /// catalog in hand. `wants` is what the residual re-check is taken against, so an issue nothing
+    /// resolved is still reported.
     pub async fn repair_prefix(
         &self,
         prefix: &Prefix,
         issues: &[HealthIssue],
+        wants: &PrefixWants,
         cancel: &tokio_util::sync::CancellationToken,
         progress: &Progress,
     ) -> Result<PrefixHealth, RuntimeError> {
         let umu = self.umu_for(prefix.runner().kind());
-        lifecycle::repair(prefix, issues, umu.as_deref(), cancel, progress).await
+        lifecycle::repair(prefix, issues, wants, umu.as_deref(), cancel, progress).await
     }
 
     /// Destructively recreate a prefix: delete it and reinitialize from scratch. Explicit and
@@ -655,7 +669,11 @@ impl Runtime {
     }
 
     /// Runner management is Linux-only at this phase.
-    pub async fn check_prefix(&self, _prefix: &Prefix) -> Result<PrefixHealth, RuntimeError> {
+    pub async fn check_prefix(
+        &self,
+        _prefix: &Prefix,
+        _wants: &PrefixWants,
+    ) -> Result<PrefixHealth, RuntimeError> {
         Err(RuntimeError::Unsupported {
             what: "runner management is Linux-only at this phase",
         })
@@ -666,6 +684,7 @@ impl Runtime {
         &self,
         _prefix: &Prefix,
         _issues: &[HealthIssue],
+        _wants: &PrefixWants,
         _cancel: &tokio_util::sync::CancellationToken,
         _progress: &Progress,
     ) -> Result<PrefixHealth, RuntimeError> {

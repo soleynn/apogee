@@ -10,8 +10,8 @@ use std::path::Path;
 
 use apogee_fetch::{DigestPin, Fetcher};
 use apogee_runtime::{
-    ArchiveFormat, DxvkEntry, HealthIssue, NvapiRef, Prefix, Progress, RunnerKind, Runtime,
-    RuntimePaths,
+    ArchiveFormat, DxvkEntry, HealthIssue, NvapiRef, Prefix, PrefixWants, Progress, RunnerKind,
+    Runtime, RuntimePaths,
 };
 use apogee_test_support::chaos::{ChaosServer, blake3_of};
 use tokio_util::sync::CancellationToken;
@@ -130,7 +130,7 @@ async fn install_dxvk_places_dlls_and_records_the_prefix() {
     assert!(!recorded.nvapi);
     assert!(
         runtime
-            .check_prefix(&prefix)
+            .check_prefix(&prefix, &PrefixWants::default())
             .await
             .expect("check")
             .is_healthy()
@@ -184,6 +184,87 @@ async fn install_dxvk_with_nvapi_adds_the_nvapi_dll() {
     );
     let meta = prefix.metadata().expect("load").expect("prefix.json");
     assert!(meta.dxvk.expect("dxvk").nvapi, "nvapi recorded");
+    assert!(
+        runtime
+            .check_prefix(&prefix, &PrefixWants { nvapi: true })
+            .await
+            .expect("check")
+            .is_healthy(),
+        "a prefix that has the companion is healthy when one is wanted"
+    );
+}
+
+/// A prefix that was built without the companion, asked for by a caller that wants one.
+///
+/// The gap this closes: the check's oracle is the prefix's own record, and a record can only say what
+/// the prefix has. Without the wish handed in, the same prefix reads as healthy while a launch is
+/// about to install into it, so `prefix health` says nothing about a real difference between what was
+/// asked for and what is there.
+#[tokio::test]
+async fn a_wanted_companion_the_prefix_does_not_have_is_reported() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = runtime_over(root.path()).expect("runtime");
+    let prefix = prepared(&runtime, root.path()).await.expect("prepare");
+
+    let tar = dll_targz("dxvk-2.4.1", DXVK_DLLS).expect("tar");
+    let server = ChaosServer::serving(tar.clone())
+        .start()
+        .await
+        .expect("server");
+    let dxvk = DxvkEntry {
+        version: "2.4.1".to_owned(),
+        url: server.url("dxvk.tar.gz"),
+        pin: DigestPin::Blake3(blake3_of(&tar)),
+        format: ArchiveFormat::TarGz,
+        nvapi: None,
+    };
+    runtime
+        .install_dxvk(
+            &dxvk,
+            &prefix,
+            false,
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await
+        .expect("install dxvk");
+
+    // Nobody asked for it: the prefix is exactly what it records.
+    assert!(
+        runtime
+            .check_prefix(&prefix, &PrefixWants::default())
+            .await
+            .expect("check")
+            .is_healthy()
+    );
+
+    let health = runtime
+        .check_prefix(&prefix, &PrefixWants { nvapi: true })
+        .await
+        .expect("check");
+    assert!(
+        matches!(health.issues.as_slice(), [HealthIssue::MissingNvapi]),
+        "the wanted companion is the one problem: {:?}",
+        health.issues
+    );
+
+    // And the repair leaves it in the residual rather than reporting it away: placing the companion
+    // needs the catalog, which is the caller's to hold.
+    let residual = runtime
+        .repair_prefix(
+            &prefix,
+            &health.issues,
+            &PrefixWants { nvapi: true },
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await
+        .expect("repair");
+    assert!(
+        matches!(residual.issues.as_slice(), [HealthIssue::MissingNvapi]),
+        "an unresolved wish is still reported: {:?}",
+        residual.issues
+    );
 }
 
 #[tokio::test]
@@ -218,7 +299,10 @@ async fn health_check_flags_a_missing_dxvk_dll() {
     // Delete a DLL the record says is installed.
     std::fs::remove_file(prefix.path().join("drive_c/windows/system32/dxgi.dll")).expect("rm dxgi");
 
-    let health = runtime.check_prefix(&prefix).await.expect("check");
+    let health = runtime
+        .check_prefix(&prefix, &PrefixWants::default())
+        .await
+        .expect("check");
     assert!(
         health
             .issues
