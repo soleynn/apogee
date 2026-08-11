@@ -2247,15 +2247,12 @@ fn render_patch(patch: &PatchProgress) -> String {
             "patch: {repo:?} #{index} downloading {bytes_done}/{}",
             total.map_or_else(|| "?".to_owned(), |t| t.to_string())
         ),
+        // No denominator: apply has no declared end, so the line reports bytes, not a fraction.
         PatchProgress::Applying {
             repo,
             index,
             bytes_done,
-            total,
-        } => format!(
-            "patch: {repo:?} #{index} applying {bytes_done}/{}",
-            total.map_or_else(|| "?".to_owned(), |t| t.to_string())
-        ),
+        } => format!("patch: {repo:?} #{index} applying {bytes_done}"),
         PatchProgress::Applied {
             repo,
             index,
