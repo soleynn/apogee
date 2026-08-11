@@ -11,6 +11,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use apogee_fetch::{
     DownloadSpec, FetchError, Fetcher, HeaderPolicy, Priority, Progress, Validator, VerifiedFile,
@@ -283,14 +284,19 @@ async fn acquire_one(
 ) -> Result<Admitted, PatchError> {
     match repo {
         Repo::Boot => {
-            let path = with_progress_relay(
-                |tx| fetcher.download_external(spec, Some(tx), cancel.clone()),
-                repo,
-                index,
-                progress,
+            let path = retry_transient(
+                || {
+                    with_progress_relay(
+                        |tx| fetcher.download_external(spec, Some(tx), cancel.clone()),
+                        repo,
+                        index,
+                        progress,
+                    )
+                },
+                &cancel,
             )
             .await
-            .map_err(acquire_err)?;
+            .map_err(|e| acquire_err(e, repo, index))?;
             // Chunk-CRC admission reads the whole patch: run it off the async runtime.
             tokio::task::spawn_blocking(move || Admitted::scan_boot(path, index))
                 .await
@@ -300,35 +306,85 @@ async fn acquire_one(
                 })?
         }
         Repo::Game | Repo::Expansion(_) => {
-            let verified = with_progress_relay(
-                |tx| fetcher.download(spec, Some(tx), cancel.clone()),
-                repo,
-                index,
-                progress,
+            let verified = retry_transient(
+                || {
+                    with_progress_relay(
+                        |tx| fetcher.download(spec, Some(tx), cancel.clone()),
+                        repo,
+                        index,
+                        progress,
+                    )
+                },
+                &cancel,
             )
             .await
-            .map_err(acquire_err)?;
+            .map_err(|e| acquire_err(e, repo, index))?;
             Ok(Admitted::from_verified(verified))
+        }
+    }
+}
+
+/// How many whole-download passes one patch gets when a transfer fails transiently, and the pause
+/// between them. The engine's own budget covers a range that keeps failing inside one transfer;
+/// this covers the transfer itself failing (a throttling storm outliving the internal backoff, a
+/// source going quiet, a file changing mid-resume), where a runner tarball already restarts and a
+/// game patch used to give up. Restarts are cheap here: the journal resumes at the watermark, so a
+/// pass re-fetches almost nothing it already banked.
+const MAX_ACQUIRE_PASSES: u32 = 4;
+/// The pause between passes: the engine's internal backoff has already waited its ceiling by the
+/// time a transient failure escapes it, so this only has to separate the passes, not shape them.
+const ACQUIRE_RESTART_DELAY: Duration = Duration::from_millis(500);
+
+/// Re-run a whole transfer while it fails transiently, up to [`MAX_ACQUIRE_PASSES`]. Each pass is a
+/// fresh download call with its own recovery counters (a recorded seam: the tally on the progress
+/// stream measures one transfer, and the restart shows in the tracing log instead). A cancel during
+/// the pause returns at once as [`FetchError::Cancelled`].
+async fn retry_transient<T, Fut, F>(mut pass: F, cancel: &CancellationToken) -> Result<T, FetchError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, FetchError>>,
+{
+    let mut passes = 0u32;
+    loop {
+        passes += 1;
+        match pass().await {
+            Ok(value) => return Ok(value),
+            Err(e) if passes < MAX_ACQUIRE_PASSES && e.is_transient() => {
+                tracing::warn!(
+                    pass = passes,
+                    error = %e,
+                    "a patch download failed transiently; restarting the transfer",
+                );
+                tokio::select! {
+                    () = cancel.cancelled() => return Err(FetchError::Cancelled),
+                    () = tokio::time::sleep(ACQUIRE_RESTART_DELAY) => {}
+                }
+            }
+            Err(e) => return Err(e),
         }
     }
 }
 
 /// Map a fetch failure into the patcher taxonomy: a cancellation stays [`PatchError::Cancelled`], a
 /// full disk becomes [`PatchError::OutOfSpace`], everything else is an [`PatchError::Acquire`]
-/// carrying fetch's block/offset/attempt context.
+/// naming which patch of which repo failed, over fetch's block/offset/attempt context.
 ///
 /// The disk-full arm is what makes [`preflight`](crate::preflight)'s backstop real. Preflight is an
 /// estimate over patchlist lengths and can be skipped outright, so the case it exists to catch is
 /// exactly the one it cannot see: the disk filling mid-transfer. Fetch detects that eagerly and
 /// reports it with an intact [`std::io::ErrorKind`], and without this arm the most actionable
 /// failure a 120 GB install has would reach a caller as a generic acquire fault.
-fn acquire_err(err: FetchError) -> PatchError {
+fn acquire_err(err: FetchError, repo: Repo, index: u32) -> PatchError {
     if matches!(err, FetchError::Cancelled) {
         return PatchError::Cancelled;
     }
     match err.into_out_of_space() {
         Ok((path, source)) => PatchError::OutOfSpace { path, source },
-        Err(other) => PatchError::Acquire(other),
+        Err(source) => PatchError::Acquire {
+            repo,
+            index,
+            source,
+        },
     }
 }
 
@@ -497,10 +553,14 @@ mod tests {
     /// target rather than only where a memory-backed filesystem exists.
     #[test]
     fn a_disk_full_acquire_failure_is_routed_out_of_the_generic_arm() {
-        let err = acquire_err(FetchError::Io {
-            path: PathBuf::from("/store/game/D2024.01.01.0000.0000.patch.part"),
-            source: std::io::ErrorKind::StorageFull.into(),
-        });
+        let err = acquire_err(
+            FetchError::Io {
+                path: PathBuf::from("/store/game/D2024.01.01.0000.0000.patch.part"),
+                source: std::io::ErrorKind::StorageFull.into(),
+            },
+            Repo::Game,
+            3,
+        );
         let PatchError::OutOfSpace { path, .. } = &err else {
             panic!("a full disk must not arrive as a generic acquire failure, got {err:?}");
         };
@@ -517,26 +577,40 @@ mod tests {
     #[test]
     fn other_acquire_failures_keep_their_existing_arms() {
         assert!(matches!(
-            acquire_err(FetchError::Cancelled),
+            acquire_err(FetchError::Cancelled, Repo::Game, 0),
             PatchError::Cancelled
         ));
-        let denied = acquire_err(FetchError::Io {
-            path: PathBuf::from("/store/game/p.patch.part"),
-            source: std::io::ErrorKind::PermissionDenied.into(),
-        });
+        let denied = acquire_err(
+            FetchError::Io {
+                path: PathBuf::from("/store/game/p.patch.part"),
+                source: std::io::ErrorKind::PermissionDenied.into(),
+            },
+            Repo::Game,
+            0,
+        );
         assert!(
-            matches!(denied, PatchError::Acquire(FetchError::Io { .. })),
+            matches!(denied, PatchError::Acquire {
+                source: FetchError::Io { .. },
+                ..
+            }),
             "a permission fault is not a space fault, got {denied:?}",
         );
-        let verify = acquire_err(FetchError::BlockVerifyFailed {
-            block: 2,
-            offset: 128,
-            attempts: 3,
-        });
+        let verify = acquire_err(
+            FetchError::BlockVerifyFailed {
+                block: 2,
+                offset: 128,
+                attempts: 3,
+            },
+            Repo::Game,
+            0,
+        );
         assert!(
             matches!(
                 verify,
-                PatchError::Acquire(FetchError::BlockVerifyFailed { .. })
+                PatchError::Acquire {
+                source: FetchError::BlockVerifyFailed { .. },
+                ..
+            }
             ),
             "got {verify:?}",
         );
