@@ -288,6 +288,40 @@ async fn an_existing_destination_is_returned_without_a_request() {
     );
 }
 
+/// The opt-out for the skip above, made for the unpinned download: with nothing to check an
+/// existing file against, a mutable artifact fetched to a fixed path would be served back forever.
+/// The sharpest proof available over a pinned spec is a destination that fully satisfies it, which
+/// the sibling test above shows is served back with zero requests; `overwrite` must ask the network
+/// anyway and land the answer through the same verify-then-publish path.
+#[tokio::test]
+async fn overwrite_refetches_an_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("catalog.json");
+    let len = 1000;
+    tokio::fs::write(&dest, generated_vec(2, 0, len as usize))
+        .await
+        .unwrap();
+    let server = ChaosServer::builder(2, len).start().await.unwrap();
+    let spec = spec_builder(&server, &dest, 2, len)
+        .overwrite()
+        .build()
+        .unwrap();
+
+    let verified = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        server.stats().requests() > 0,
+        "a satisfied destination must still be re-fetched under overwrite",
+    );
+    let bytes = tokio::fs::read(verified.path()).await.unwrap();
+    assert_eq!(sha256_of(&bytes), body_sha256(2, len), "replaced in place");
+}
+
 #[tokio::test]
 async fn a_block_hashed_download_verifies_and_publishes() {
     let dir = tempfile::tempdir().unwrap();

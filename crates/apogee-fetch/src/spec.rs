@@ -21,6 +21,7 @@ pub struct DownloadSpec {
     expected_len: Option<u64>,
     validator: Validator,
     resume: bool,
+    overwrite: bool,
     priority: Priority,
     header_policy: Option<HeaderPolicy>,
 }
@@ -41,6 +42,7 @@ impl DownloadSpec {
             expected_len: None,
             validator,
             resume: true,
+            overwrite: false,
             priority: Priority::default(),
             allow_unverified: false,
             header_policy: None,
@@ -98,6 +100,12 @@ impl DownloadSpec {
         self.resume
     }
 
+    /// Whether an existing destination is re-fetched rather than served back.
+    #[must_use]
+    pub fn overwrite(&self) -> bool {
+        self.overwrite
+    }
+
     /// The scheduling priority: how this job is admitted relative to others in flight.
     #[must_use]
     pub fn priority(&self) -> Priority {
@@ -114,6 +122,7 @@ pub struct DownloadSpecBuilder {
     expected_len: Option<u64>,
     validator: Validator,
     resume: bool,
+    overwrite: bool,
     priority: Priority,
     allow_unverified: bool,
     header_policy: Option<HeaderPolicy>,
@@ -132,6 +141,19 @@ impl DownloadSpecBuilder {
     #[must_use]
     pub fn resume(mut self, on: bool) -> Self {
         self.resume = on;
+        self
+    }
+
+    /// Re-fetch even when the destination already satisfies the request, replacing it on success
+    /// (off by default). The point is the unpinned download: with no digest and no declared length
+    /// the engine treats any existing file at the destination as already satisfying the request,
+    /// correctly, since it has nothing to check it against, so a mutable artifact (a signed
+    /// catalog, a manifest) fetched to a fixed path would be served back forever. Publication is
+    /// the same atomic rename either way: a failed or truncated transfer never disturbs the
+    /// existing file.
+    #[must_use]
+    pub fn overwrite(mut self) -> Self {
+        self.overwrite = true;
         self
     }
 
@@ -251,6 +273,7 @@ impl DownloadSpecBuilder {
             expected_len: self.expected_len,
             validator: self.validator,
             resume: self.resume,
+            overwrite: self.overwrite,
             priority: self.priority,
             header_policy: self.header_policy,
         })

@@ -197,12 +197,11 @@ pub(crate) async fn fetch_manifest(
     keys: &[[u8; 32]],
     cancel: &CancellationToken,
 ) -> Result<VerifiedManifest> {
-    // Into a staging directory that is removed first, and not straight onto the cache path. A
-    // manifest is fetched with no content pin and no declared length, and under those terms the
-    // fetcher treats any existing file at the destination as already satisfying the request
-    // (correctly, since it has nothing to check it against), so the destination has to be a path
-    // nothing is at. Downloading onto the cache path would serve the first manifest ever fetched
-    // back forever, and an edit to the hosted file would never reach this build.
+    // Into a staging directory that is removed first, and not straight onto the cache path. The
+    // fetcher's `overwrite` knob could force the re-fetch on its own, but staging buys the part
+    // that knob cannot: the manifest and its signature verify as a pair before either replaces the
+    // last good copy, so a fetch that lands one file and fails the other (or serves bytes that do
+    // not verify) never leaves a half-updated cache behind.
     let staging = cache_dir.join(STAGING_DIR);
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging)

@@ -35,7 +35,8 @@ fn signatures() {
     let _: fn(FetcherBuilder, usize) -> FetcherBuilder = FetcherBuilder::max_connections_per_file;
     let _: fn(FetcherBuilder, usize) -> FetcherBuilder = FetcherBuilder::max_connections_total;
     let _: fn(FetcherBuilder, LimitHandle) -> FetcherBuilder = FetcherBuilder::speed_limit;
-    let _: fn(FetcherBuilder, std::time::Duration) -> FetcherBuilder = FetcherBuilder::stall_timeout;
+    let _: fn(FetcherBuilder, std::time::Duration) -> FetcherBuilder =
+        FetcherBuilder::stall_timeout;
     let _: fn(FetcherBuilder, RetryPolicy) -> FetcherBuilder = FetcherBuilder::retry_policy;
     let _: fn(FetcherBuilder) -> Result<Fetcher, FetchError> = FetcherBuilder::build;
 
@@ -52,6 +53,7 @@ fn signatures() {
     let _: fn(&DownloadSpec) -> Option<u64> = DownloadSpec::expected_len;
     let _: fn(&DownloadSpec) -> &Validator = DownloadSpec::validator;
     let _: fn(&DownloadSpec) -> bool = DownloadSpec::resume;
+    let _: fn(&DownloadSpec) -> bool = DownloadSpec::overwrite;
     let _: fn(&DownloadSpec) -> Priority = DownloadSpec::priority;
 
     // DownloadSpecBuilder
@@ -66,6 +68,7 @@ fn signatures() {
     let _: fn(DownloadSpecBuilder, HeaderPolicy) -> DownloadSpecBuilder =
         DownloadSpecBuilder::header_policy;
     let _: fn(DownloadSpecBuilder) -> DownloadSpecBuilder = DownloadSpecBuilder::allow_unverified;
+    let _: fn(DownloadSpecBuilder) -> DownloadSpecBuilder = DownloadSpecBuilder::overwrite;
     let _: fn(DownloadSpecBuilder) -> Result<DownloadSpec, SpecError> = DownloadSpecBuilder::build;
 
     // Job

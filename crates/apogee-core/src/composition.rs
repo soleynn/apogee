@@ -416,17 +416,11 @@ impl Core {
                 ..PatcherConfig::default()
             },
         );
-        // The catalog-fetch client for repair: separate from the injected `transport` (which serves
-        // the login/register/boot-check protocol) and from fetch's download client, it pulls the
-        // small signed index manifest. reqwest's default already serves HTTP/1.1 over plain HTTP and
-        // negotiates HTTP/2 via ALPN over TLS, which is the patch-CDN-vs-artifact-host split we want.
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|e| CoreError::Init {
-                detail: e.to_string(),
-            })?;
+        // The signed index catalog for repair rides the same download engine as everything else, so
+        // its fetch sits under the engine's redirect floor and stall bounds rather than a second,
+        // differently-configured client's.
         let patch: Arc<dyn PatchBackend> =
-            Arc::new(PatcherBackend::new(patcher, http, patch_store));
+            Arc::new(PatcherBackend::new(patcher, fetcher.clone(), patch_store));
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),

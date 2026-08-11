@@ -194,12 +194,11 @@ const CATALOG_STAGING: &str = ".fetching";
 /// path with a signature it can produce.
 ///
 /// It downloads into a staging directory that is removed first, and that is load-bearing rather than
-/// tidiness. A catalog is fetched with no content pin and no declared length, and under those terms the
-/// fetcher treats any existing file at the destination as already satisfying the request, correctly,
-/// since it has nothing to check it against. Downloading straight onto the cache path would therefore
-/// serve the first catalog ever fetched back forever, which is exactly the property "a runner bump is a
-/// manifest edit" denies. Publishing only after the signature verifies also means a failed or truncated
-/// fetch cannot destroy the last good copy.
+/// tidiness. The fetcher's `overwrite` knob could force the re-fetch on its own (an unpinned
+/// destination is otherwise served back forever, which is exactly the property "a runner bump is a
+/// manifest edit" denies), but staging buys the part that knob cannot: the catalog and its detached
+/// signature verify as a pair before either replaces the last good copy, so a failed, truncated, or
+/// unverifiable fetch never leaves a half-updated cache behind.
 pub(crate) async fn fetch_catalog(
     fetcher: &Fetcher,
     manifest_url: &Url,

@@ -85,8 +85,9 @@ pub(crate) async fn run(
     let part = sidecar(dest, ".part");
     let apdl = sidecar(dest, ".apdl");
 
-    if let Some(verified) =
-        check_existing_dest(dest, &verify, spec.expected_len(), &progress, &cancel).await?
+    if !spec.overwrite()
+        && let Some(verified) =
+            check_existing_dest(dest, &verify, spec.expected_len(), &progress, &cancel).await?
     {
         return Ok(verified);
     }

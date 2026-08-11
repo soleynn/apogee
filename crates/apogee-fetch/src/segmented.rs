@@ -101,8 +101,10 @@ pub(crate) async fn dispatch(
     }
 
     // Skip a satisfied destination before spending a probe request.
-    if let Some(verified) =
-        download::check_existing_dest(spec.dest(), &verify, Some(len), &progress, &cancel).await?
+    if !spec.overwrite()
+        && let Some(verified) =
+            download::check_existing_dest(spec.dest(), &verify, Some(len), &progress, &cancel)
+                .await?
     {
         return Ok(verified);
     }
