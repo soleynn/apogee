@@ -18,7 +18,8 @@ use std::path::Path;
 
 use apogee_addons::dalamud::Endpoints;
 use apogee_addons::{
-    AddonPaths, Dalamud, DalamudConfig, DalamudPaths, Injectable, SetupEvents, VerifiedManifest,
+    AddonPaths, Dalamud, DalamudConfig, DalamudPaths, Injectable, SetupEvent, SetupEvents,
+    VerifiedManifest,
 };
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, RunnerKind};
@@ -86,7 +87,29 @@ impl Distribution {
     // idiom for a test's own error type.
     #[allow(clippy::future_not_send)]
     async fn start(runtime_required: bool, asset_version: u32) -> Result<Self, Box<dyn Error>> {
-        let release = ChaosServer::serving(release_zip()?).tls().start().await?;
+        Self::start_inner(runtime_required, asset_version, None).await
+    }
+
+    /// The same distribution with the release archive's first download cut off after `after` bytes,
+    /// so the transfer has to recover and has a tally to report for it.
+    #[allow(clippy::future_not_send)]
+    async fn start_flaky(asset_version: u32, after: u64) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(false, asset_version, Some(after)).await
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn start_inner(
+        runtime_required: bool,
+        asset_version: u32,
+        drop_release_after: Option<u64>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut release_builder = ChaosServer::serving(release_zip()?).tls();
+        if let Some(after) = drop_release_after {
+            // Chunked, or there is nothing to cut: the archive is a few hundred bytes and goes out in
+            // one write, which the drop threshold never gets between.
+            release_builder = release_builder.drop_after(after).chunk(16);
+        }
+        let release = release_builder.start().await?;
         let assets = ChaosServer::serving(asset_zip()?).tls().start().await?;
         let version_info = format!(
             r#"{{ "assemblyVersion": "{ASSEMBLY_VERSION}",
@@ -230,6 +253,52 @@ async fn a_full_install_lands_the_release_and_its_assets() -> Result<(), Box<dyn
     assert_eq!(installed.supported_game_ver, GAME_VERSION);
     assert_eq!(installed.asset_version, 432);
     assert_eq!(installed.track, "release");
+    Ok(())
+}
+
+/// A download that had to recover says so on the setup stream.
+///
+/// The whole reason the tally exists is that a recovery ends in success, so this install looks
+/// identical to a clean one from every other angle: the same files land and `ensure` returns `Ok`.
+/// Before the tally was relayed, "the release archive took two attempts" was reachable from nowhere
+/// outside the fetch crate's own process.
+#[tokio::test]
+async fn a_recovered_download_reports_its_tally_on_the_setup_stream() -> Result<(), Box<dyn Error>>
+{
+    let root = tempfile::tempdir()?;
+    // The release archive's first body is cut off part way, so the transfer retries and completes.
+    let dist = Distribution::start_flaky(432, 64).await?;
+    let dalamud = dalamud(root.path(), &dist)?;
+    let prefix = prefix(&root.path().join("prefix"))?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    dalamud
+        .ensure(&prefix, &CancellationToken::new(), &SetupEvents::new(tx))
+        .await?;
+
+    let mut seen = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SetupEvent::Downloading { recoveries, .. } = event {
+            seen.push(recoveries);
+        }
+    }
+    assert!(
+        !seen.is_empty(),
+        "a download must report progress on the setup stream",
+    );
+    let worst = seen.iter().map(|r| r.retries).max().unwrap_or(0);
+    assert_eq!(
+        worst, 1,
+        "the cut-off release archive retried once and the tally should say so: {seen:?}",
+    );
+    // The install still succeeded, which is exactly why nothing else would have said this.
+    let paths = paths(root.path());
+    assert!(
+        paths
+            .addon
+            .join(format!("Hooks/{ASSEMBLY_VERSION}/Dalamud.Injector.exe"))
+            .is_file(),
+    );
     Ok(())
 }
 

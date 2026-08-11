@@ -414,6 +414,7 @@ fn to_core_event(event: RuntimeEvent) -> Option<Event> {
         RuntimeEvent::Download(p) => Some(Event::Progress(CoreProgress {
             completed: p.bytes_done,
             total: p.total.unwrap_or(0),
+            recoveries: p.recoveries,
         })),
         // Passed through with the status untouched. This layer knows a program was redirected and not
         // which companion did it, so it adds nothing and hides nothing.
@@ -478,6 +479,44 @@ fn launch_io(path: &Path) -> impl Fn(std::io::Error) -> CoreError + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download's recovery tally survives the seam into the core event stream.
+    ///
+    /// This is the exact conversion that has always dropped `phase`, and it drops it silently
+    /// because nothing here has to acknowledge the field. The tally would have gone the same way.
+    #[test]
+    fn a_download_relays_its_recovery_tally_to_the_shell() {
+        let mut progress = apogee_fetch::Progress::default();
+        progress.bytes_done = 4096;
+        progress.total = Some(8192);
+        progress.recoveries.retries = 3;
+        progress.recoveries.stalls = 1;
+        progress.recoveries.demoted = true;
+
+        let event = to_core_event(RuntimeEvent::Download(progress));
+
+        let Some(Event::Progress(relayed)) = event else {
+            panic!("a download must relay as a progress event, got {event:?}");
+        };
+        assert_eq!(relayed.completed, 4096);
+        assert_eq!(relayed.total, 8192);
+        assert_eq!(relayed.recoveries.retries, 3);
+        assert_eq!(relayed.recoveries.stalls, 1);
+        assert!(relayed.recoveries.demoted);
+    }
+
+    /// The ordinary case still arrives clean, so the field above is the transfer's own trouble and
+    /// not something this seam invents.
+    #[test]
+    fn a_healthy_download_relays_a_clean_tally() {
+        let mut progress = apogee_fetch::Progress::default();
+        progress.bytes_done = 1024;
+        progress.total = Some(1024);
+        let Some(Event::Progress(relayed)) = to_core_event(RuntimeEvent::Download(progress)) else {
+            panic!("a download must relay as a progress event");
+        };
+        assert!(relayed.recoveries.is_clean());
+    }
 
     #[test]
     fn synthesize_system_wine_writes_executable_shims() {
