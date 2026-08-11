@@ -21,13 +21,25 @@ separate. Artifacts are served from `artifacts/` beside this manifest.
     { "repo": "game", "version": "<YYYY.MM.DD.PPPP.RRRR>",
       "url": "https://<host>/indexes/artifacts/<repo>-<version>.apzi",
       "blake3": "<64 hex>",
-      "sha256": "<64 hex>" }
+      "sha256": "<64 hex>",
+      "source_base": "http://patch-dl.ffxiv.com/<repo path>/<path id>/" }
   ]
 }
 ```
 
 `repo` is `boot`, `game`, or `ex{n}` (an expansion). `version` is the version the chain brings the repo
 to (repair cross-checks it against the index's own recorded version).
+
+`source_base` is where the source patches this index references are served, so a repair forms each one
+as `{source_base}/{name}` and heals a repo whose patch cache is gone. Take it from the patchlist
+entries for that repo, path and all: Square Enix serves each repo under an opaque id
+(`game/ex1/6b936f08/`), only boot's and the base game's are stable enough for the client to compile in,
+and a repair fetches no patchlist to read the rest from.
+
+It is optional. A row without one leaves the client on those two compiled-in bases, so an expansion
+without one heals only from a populated cache. It must otherwise be an absolute `http` or `https` URL
+**ending in `/`**, or the manifest is refused: without the slash the join drops the last path segment,
+which is the id, and every source resolves to a well-formed URL that 404s.
 
 A row may pin under `blake3`, under `sha256`, or under both, and a client that reads both prefers
 `blake3`. Publish both: the older key keeps a client released before BLAKE3 reading this file, and the
@@ -42,7 +54,7 @@ come from one read of the file (below) rather than from two separate commands.
      index artifacts/<repo>-<version>.apzi <version> <patch>...
    ```
 2. **Pin**: hash the artifact once and paste both lines into the row in `manifest.json` (repo,
-   version, hosted url, pins):
+   version, hosted url, pins, and the `source_base` read off this repo's patchlist entries):
    ```
    cargo run --manifest-path ../../tools/catalog-sign/Cargo.toml -- \
      pin artifacts/<repo>-<version>.apzi
