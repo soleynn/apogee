@@ -234,6 +234,20 @@ for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios; do
   fi
 done
 
+# The same split on Linux, where the classification this crate does most of reads the Secret Service
+# error out of what the store boxed. A live job does catch this one, by asserting a locked collection
+# still classifies as locked; it is asserted here as well because that job is not a required check,
+# and because the graph says which package resolved without needing a bus to say it.
+for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+  linux=$(cargo metadata --format-version 1 --filter-platform "$target")
+  jq -e '.packages[]|select(.name=="zbus-secret-service-keyring-store")' <<<"$linux" >/dev/null \
+    || report "no Secret Service store resolves on $target" \
+      "zbus-secret-service-keyring-store is not in the resolved graph"
+  detail=$(same_package_under "$linux" secret_service apogee-secrets zbus-secret-service-keyring-store) \
+    || report "apogee-secrets and the Secret Service store read different secret-service packages on $target" \
+      "$detail"
+done
+
 # 9a. The same trap one layer up, in this repository's own code. `apogee-secrets/mock` compiles an
 #    in-process map that answers every call, and it exists for other crates' tests. Two dev-dependency
 #    edges turn it on, and a dev edge is invisible to a release; but Cargo unifies features across
