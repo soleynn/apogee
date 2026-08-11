@@ -3,12 +3,18 @@
 //! patches), fetched by URL+SHA256 into a content-addressed cache that is never checked in.
 //!
 //! The test reads the cache directly, so it is hermetic given a primed cache and **skips** when the
-//! cache is absent (the every-push no-network job) rather than failing. A dedicated corpus step (or
-//! a developer, like the first authoring run) primes `.corpus-cache` first; then this dumps the real
-//! bytes and proves the framing, CRC, and command decoders survive current SE output.
+//! cache is empty and nothing declared it required (the every-push no-network job) rather than
+//! failing. A dedicated corpus step (or a developer, like the first authoring run) primes
+//! `.corpus-cache` first; then this dumps the real bytes and proves the framing, CRC, and command
+//! decoders survive current SE output.
+//!
+//! A cache holding only part of the chain, or an empty one after a step that was supposed to fill it,
+//! fails instead of skipping: the same posture as the two gates beside it, since a gate that cannot
+//! run must not be able to pass.
 
 use std::path::PathBuf;
 
+use apogee_test_support::corpus;
 use apogee_zipatch::{Chunk, PatchReader};
 use serde::Deserialize;
 
@@ -43,22 +49,23 @@ fn cache_dir() -> PathBuf {
 fn dumps_every_fixture_boot_patch_without_error() {
     let manifest: Manifest = serde_json::from_str(MANIFEST_JSON).expect("parse corpus manifest");
     let cache = cache_dir();
-    if !cache.is_dir() {
-        eprintln!(
-            "skipping: corpus cache {} absent (no-network run)",
-            cache.display()
-        );
-        return;
+
+    let digests: Vec<&str> = manifest.entries.iter().map(|e| e.sha256.as_str()).collect();
+    match corpus::readiness(&cache, &digests) {
+        Ok(corpus::Readiness::Primed) => {}
+        Ok(corpus::Readiness::Unprimed) => {
+            eprintln!(
+                "skipping: boot corpus not primed under {} (no-network run)",
+                cache.display()
+            );
+            return;
+        }
+        Err(unusable) => panic!("{unusable}"),
     }
 
     let mut dumped = 0usize;
     for entry in &manifest.entries {
         let path = cache.join(&entry.sha256);
-        if !path.exists() {
-            eprintln!("skipping {}: {} not in cache", entry.name, entry.sha256);
-            continue;
-        }
-
         let file = std::fs::File::open(&path).expect("open cached patch");
         let mut patch = PatchReader::open(std::io::BufReader::new(file)).expect("valid magic");
 
@@ -86,10 +93,13 @@ fn dumps_every_fixture_boot_patch_without_error() {
         dumped += 1;
     }
 
-    if dumped == 0 {
-        eprintln!(
-            "skipping: no cached fixtures present under {}",
-            cache.display()
-        );
-    }
+    // Past the readiness check every digest is cached, so dumping nothing means the manifest named
+    // nothing to dump. That used to print "skipping" and pass, which is the one way this gate could
+    // still report success for work it did not do.
+    assert_eq!(
+        dumped,
+        manifest.entries.len(),
+        "the corpus manifest named {} patches but {dumped} were dumped",
+        manifest.entries.len(),
+    );
 }
