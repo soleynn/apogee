@@ -230,9 +230,7 @@ fn build_spec(
     DownloadSpec::builder(url, dest, validator)
         .expected_len(entry.length)
         .priority(priority_for(repo))
-        .header_policy(HeaderPolicy::SePatch {
-            unique_id: headers.unique_id.clone(),
-        })
+        .header_policy(HeaderPolicy::se_patch(headers.unique_id.clone()))
         .build()
         .map_err(|e| bad(format!("cannot build download: {e}")))
 }

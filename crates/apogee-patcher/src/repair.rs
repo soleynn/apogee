@@ -392,9 +392,7 @@ fn resolve_sources(index: &Index, repo_req: &RepairRepo) -> Result<ResolvedSourc
             // The index's own length is authoritative; each HTTP response's `Content-Range` total is
             // cross-checked against it by the fetcher.
             expected_len: sref.expected_len,
-            policy: Some(HeaderPolicy::SePatch {
-                unique_id: repo_req.headers.unique_id.clone(),
-            }),
+            policy: Some(HeaderPolicy::se_patch(repo_req.headers.unique_id.clone())),
         });
         // Trust a local copy for the first attempt only if it is present *and* the right length: the
         // patch store keeps partial/interrupted downloads for later resume, and a truncated file would

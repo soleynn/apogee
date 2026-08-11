@@ -92,7 +92,7 @@ async fn a_real_boot_patch_verifies_against_its_recorded_block_hashes() {
         },
     )
     .expected_len(f.len)
-    .header_policy(HeaderPolicy::SePatch { unique_id: None })
+    .header_policy(HeaderPolicy::se_patch(None))
     .build()
     .unwrap();
 
