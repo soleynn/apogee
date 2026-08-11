@@ -9,6 +9,9 @@ license.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+# The credential-store API. Carries no store of its own, so it is the same on every target and the
+# backend is whichever store crate the target block below names.
+keyring-core.workspace = true
 # The fallback store's seal. Nothing else in this crate does cryptography of its own: the platform
 # stores encrypt their own items, and this is the backend for the sessions that have none.
 argon2.workspace = true
@@ -30,33 +33,38 @@ rustix = { workspace = true, features = ["fs"] }
 # no C system library at build time, and its error type is the one that separates "nothing owns the
 # name" from "collection locked", which is what the backend report has to say.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
-keyring = { workspace = true, features = ["async-secret-service"] }
-# Classification happens below keyring, which boxes every connection failure into one variant.
+zbus-secret-service-keyring-store = { workspace = true, features = ["rt-async-io-crypto-rust"] }
+# Classification happens below the store, which boxes every connection failure into one variant.
 # `rt-async-io-crypto-rust` names the zbus runtime here rather than relying on feature unification.
 secret-service = { workspace = true, features = ["rt-async-io-crypto-rust"] }
 zbus.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
+windows-native-keyring-store.workspace = true
 # The fallback store's directory permissions. Windows has no mode bits, so what keeps the sealed file
 # out of other accounts is its access list, and nothing in the standard library sets one.
 windows-sys.workspace = true
 
+# `keychain` is the feature that attaches a store at all: without it this crate compiles to a shell
+# that supports no operation, which is the Apple face of the in-memory-mock trap scripts/audit.sh
+# guards against.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
+apple-native-keyring-store = { workspace = true, features = ["keychain"] }
 
-# Classification happens below keyring here too: it maps five `OSStatus` values and boxes every other
-# one opaquely, and a locked keychain arrives among the others. macOS only, because keyring resolves
-# this crate's major 3 there and its major 2 on iOS, and carrying both majors to classify a target
-# nothing here builds for is dead weight. iOS keeps the unclassified answer.
+# Classification happens below the store here too: it maps a handful of `OSStatus` values and boxes
+# every other one opaquely, and a locked keychain arrives among the others. macOS only, because
+# carrying the framework crate to classify a target nothing here builds for is dead weight. iOS keeps
+# the unclassified answer.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { workspace = true }
 
 [features]
 default = ["encrypted-session"]
 # Forces the Secret Service session onto the Diffie-Hellman-agreed AES transport. A dependency's
-# features are not visible as a cfg, so this passthrough is what the build gate in lib.rs tests.
-encrypted-session = ["keyring/crypto-rust"]
+# features are not visible as a cfg, so this passthrough is what the build gate in lib.rs tests. The
+# store crate it names is only in the graph on the targets that have one, and the edge is inert on the
+# rest.
+encrypted-session = ["zbus-secret-service-keyring-store/crypto-rust"]
 # Gates the tests that need a live session bus and a real Secret Service provider. Never enabled by
 # a shipping build, and never by a dependency edge: these tests write to whatever keyring is on the
 # bus and one of them locks a collection, so on a developer's desktop they raise an unlock dialog and

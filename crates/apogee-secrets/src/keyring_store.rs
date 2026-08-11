@@ -1,6 +1,8 @@
 //! The platform credential store.
 
-use keyring::Entry;
+use std::sync::Arc;
+
+use keyring_core::{CredentialStore, Entry};
 use uuid::Uuid;
 
 use crate::{Backend, BackendReport, Secret, SecretKind, SecretStore, SecretsError};
@@ -30,10 +32,10 @@ impl OsKeyring {
 
 /// The user half of a stored key: the account and what the secret is, under one service.
 ///
-/// Only `Entry::new` is used, on every platform. `new_with_target`'s third argument means three
-/// different things across the three stores (a collection to create, the sole Credential Manager
-/// lookup key, a Keychain domain that rejects anything but four reserved words), so a build that
-/// used it would take a code path no other platform's CI could execute.
+/// No store modifiers are passed, on any platform. Each store reads its own set out of that map (a
+/// collection to create, the sole Credential Manager lookup key, a Keychain domain that rejects
+/// anything but four reserved words), so a build that set one would take a code path no other
+/// platform's CI could execute.
 ///
 /// The result is injective: a hyphenated UUID is 36 characters of `[0-9a-f-]` and contains no
 /// separator, so no account and kind pair can collide with another.
@@ -41,24 +43,60 @@ fn key_for(account: Uuid, kind: SecretKind) -> String {
     format!("{}/{}", account.hyphenated(), kind.slug())
 }
 
+/// Attach this target's credential store.
+///
+/// Built here rather than installed once as `keyring_core`'s process-wide default, because that
+/// default is a global a library has no business claiming: the last crate to set it wins for the
+/// whole process, and this one is linked into a launcher that embeds others.
+///
+/// Rebuilt per operation rather than kept, because the store owns the live connection underneath it.
+/// One held across a session bus restart addresses a socket nothing is listening on any more, and
+/// every later call fails against it with no way to ask for a fresh one. Connecting per operation is
+/// what the store layer this replaced did.
+///
+/// Raw rather than classified, because two callers read the store's own error instead of the
+/// taxonomy: the native probe, whose whole answer is what the store said, and the reader for
+/// credentials another launcher owns.
+pub(crate) fn open() -> keyring_core::Result<Arc<CredentialStore>> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+    let built = zbus_secret_service_keyring_store::Store::new()?;
+    #[cfg(target_os = "windows")]
+    let built = windows_native_keyring_store::Store::new()?;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let built = apple_native_keyring_store::keychain::Store::new()?;
+
+    Ok(built)
+}
+
+/// [`open`], with the failure folded into the taxonomy the rest of this file speaks. On Linux that
+/// fold is the whole classification: a bus that is missing, refusing or holding no collection is
+/// named here, at the connect, rather than arriving unlabelled from the operation that followed it.
+fn store() -> Result<Arc<CredentialStore>, SecretsError> {
+    open().map_err(|err| map_error(&err, "connect"))
+}
+
 fn entry_for(account: Uuid, kind: SecretKind) -> Result<Entry, SecretsError> {
-    Entry::new(SERVICE, &key_for(account, kind)).map_err(|err| map_error(&err, "address a secret"))
+    store()?
+        .build(SERVICE, &key_for(account, kind), None)
+        .map_err(|err| map_error(&err, "address a secret"))
 }
 
 /// Fold a credential-store failure into the taxonomy, dropping the platform error.
 ///
-/// The platform error is deliberately never carried: `keyring::Error::BadEncoding` holds the raw
-/// secret bytes and the enum derives `Debug`, and `Ambiguous` formats the matched credentials, which
-/// echoes the account. Either printed anywhere above this crate is the leak the crate exists to
-/// prevent, so the error is matched here and dropped.
-fn map_error(err: &keyring::Error, step: &'static str) -> SecretsError {
+/// The platform error is deliberately never carried: `keyring_core::Error::BadEncoding` and
+/// `BadDataFormat` both hold the raw secret bytes and the enum derives `Debug`, and `Ambiguous`
+/// formats the matched credentials, which echoes the account. Any of them printed anywhere above this
+/// crate is the leak the crate exists to prevent, so the error is matched here and dropped.
+fn map_error(err: &keyring_core::Error, step: &'static str) -> SecretsError {
     match err {
-        keyring::Error::Ambiguous(_) => SecretsError::Ambiguous,
-        keyring::Error::NoStorageAccess(_) => no_storage_access(err, step),
-        keyring::Error::PlatformFailure(_) => platform_failure(err, step),
+        keyring_core::Error::Ambiguous(_) => SecretsError::Ambiguous,
+        keyring_core::Error::NoStorageAccess(_) => no_storage_access(err, step),
+        keyring_core::Error::PlatformFailure(_) => platform_failure(err, step),
         // `NoEntry` is answered by the callers, which turn it into an absence rather than a
-        // failure. `TooLong`, `Invalid` and `BadEncoding` are unreachable with the keys and the
-        // binary API this crate uses, and the enum is non-exhaustive besides.
+        // failure. `TooLong`, `Invalid`, `BadEncoding` and `BadDataFormat` are unreachable with the
+        // keys and the binary API this crate uses; `NoDefaultStore` is unreachable because entries
+        // are built from an owned store rather than the process-wide one, and `NotSupportedByStore`
+        // because nothing here calls an optional operation. The enum is non-exhaustive besides.
         _ => SecretsError::Backend { step },
     }
 }
@@ -66,7 +104,7 @@ fn map_error(err: &keyring::Error, step: &'static str) -> SecretsError {
 /// A locked collection and a dismissed prompt mean the same thing to a caller: unlock and try
 /// again. A collection that did not resolve does not, and must not be folded in with them.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
-fn no_storage_access(err: &keyring::Error, step: &'static str) -> SecretsError {
+fn no_storage_access(err: &keyring_core::Error, step: &'static str) -> SecretsError {
     match source_error(err) {
         Some(secret_service::Error::Locked | secret_service::Error::Prompt) => SecretsError::Locked,
         Some(other) => classify_secret_service(other, step),
@@ -80,24 +118,24 @@ fn no_storage_access(err: &keyring::Error, step: &'static str) -> SecretsError {
 /// platform error without the code, so the read-only case cannot be told from the other three and is
 /// reported with them as no store rather than as a refusal.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
-fn no_storage_access(_err: &keyring::Error, _step: &'static str) -> SecretsError {
+fn no_storage_access(_err: &keyring_core::Error, _step: &'static str) -> SecretsError {
     SecretsError::NoBackend
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
-fn platform_failure(err: &keyring::Error, step: &'static str) -> SecretsError {
+fn platform_failure(err: &keyring_core::Error, step: &'static str) -> SecretsError {
     match source_error(err) {
         Some(inner) => classify_secret_service(inner, step),
         None => SecretsError::Backend { step },
     }
 }
 
-/// The Keychain's lock arrives here, in the variant keyring boxes everything it does not map into.
+/// The Keychain's lock arrives here, in the variant the store boxes everything it does not map into.
 /// A locked store is answered by unlocking and retrying, so it must not be reported as a failure the
 /// user can do nothing about. The Credential Manager has no lock and produces no status of this
 /// shape, so nothing changes there.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
-fn platform_failure(err: &keyring::Error, step: &'static str) -> SecretsError {
+fn platform_failure(err: &keyring_core::Error, step: &'static str) -> SecretsError {
     if crate::apple::locked(err) {
         SecretsError::Locked
     } else {
@@ -105,14 +143,14 @@ fn platform_failure(err: &keyring::Error, step: &'static str) -> SecretsError {
     }
 }
 
-/// Reach the Secret Service error keyring boxed inside its own.
+/// Reach the Secret Service error the store boxed inside its own.
 ///
-/// This returns `None` for good if keyring ever resolves to a different major version of the Secret
-/// Service crate than this one does, which would quietly flatten every classification below into
-/// `Backend`. The live integration test asserts the downcast still succeeds, because nothing about
-/// that drift is a compile error.
+/// This returns `None` for good if the store crate ever resolves to a different major version of the
+/// Secret Service crate than this one does, which would quietly flatten every classification below
+/// into `Backend`. Nothing about that drift is a compile error, so it is asserted twice: off the
+/// resolved graph by `scripts/audit.sh`, and against a real store by the live integration test.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
-fn source_error(err: &keyring::Error) -> Option<&secret_service::Error> {
+fn source_error(err: &keyring_core::Error) -> Option<&secret_service::Error> {
     use std::error::Error as _;
     err.source()?.downcast_ref::<secret_service::Error>()
 }
@@ -148,7 +186,7 @@ impl SecretStore for OsKeyring {
     fn get(&self, account: Uuid, kind: SecretKind) -> Result<Option<Secret>, SecretsError> {
         match entry_for(account, kind)?.get_secret() {
             Ok(bytes) => Ok(Some(Secret::new(bytes))),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             // `get_secret` rather than `get_password`: the string reader is the one call that can
             // hand back an error carrying the raw secret when the stored bytes are not UTF-8.
             Err(err) => Err(map_error(&err, "read")),
@@ -164,7 +202,7 @@ impl SecretStore for OsKeyring {
 
     fn delete(&self, account: Uuid, kind: SecretKind) -> Result<(), SecretsError> {
         match entry_for(account, kind)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(err) => Err(map_error(&err, "delete")),
         }
     }
@@ -221,27 +259,45 @@ mod tests {
     /// platform error had in it. The one that matters holds the raw secret bytes.
     #[test]
     fn a_mapped_error_never_renders_the_platform_error() {
-        let leaky = keyring::Error::BadEncoding(b"hunter2".to_vec());
-        let mapped = map_error(&leaky, "read");
-        let rendered = format!("{mapped} {mapped:?}");
-        assert!(!rendered.contains("hunter2"), "{rendered}");
-        assert!(matches!(mapped, SecretsError::Backend { step: "read" }));
+        // Both of the variants that hand the stored bytes back out. `BadDataFormat` renders them
+        // through the derived `Debug` of the vector it carries, and it is reachable from a store
+        // that transforms what it holds, which the Secret Service one does.
+        let leaky = [
+            keyring_core::Error::BadEncoding(b"hunter2".to_vec()),
+            keyring_core::Error::BadDataFormat(
+                b"hunter2".to_vec(),
+                Box::new(std::io::Error::other("short read")),
+            ),
+        ];
+        for err in leaky {
+            let mapped = map_error(&err, "read");
+            let rendered = format!("{mapped} {mapped:?}");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+            assert!(matches!(mapped, SecretsError::Backend { step: "read" }));
+        }
     }
 
     #[test]
     fn several_matching_items_are_their_own_condition() {
-        let err = keyring::Error::Ambiguous(Vec::new());
+        let err = keyring_core::Error::Ambiguous(Vec::new());
         assert!(matches!(map_error(&err, "read"), SecretsError::Ambiguous));
     }
 
-    /// Keyring's enum is non-exhaustive and three of its variants are unreachable with the keys and
-    /// the binary API used here, so they all land on the catch-all rather than on a guess.
+    /// The store API's enum is non-exhaustive and five of its variants are unreachable with the keys
+    /// and the binary API used here, so they all land on the catch-all rather than on a guess.
+    /// `NoDefaultStore` is among them because entries are built from an owned store rather than the
+    /// process-wide default, so the condition it reports cannot arise; it is asserted rather than
+    /// assumed, because a later edit reaching for `Entry::new` would make it the answer to every
+    /// call and it would read as an ordinary backend failure.
     #[test]
     fn unreachable_variants_land_on_the_catch_all() {
         let cases = [
-            keyring::Error::TooLong("user".to_owned(), 512),
-            keyring::Error::Invalid("service".to_owned(), "empty".to_owned()),
-            keyring::Error::NoEntry,
+            keyring_core::Error::TooLong("user".to_owned(), 512),
+            keyring_core::Error::Invalid("service".to_owned(), "empty".to_owned()),
+            keyring_core::Error::NoEntry,
+            keyring_core::Error::NoDefaultStore,
+            keyring_core::Error::NotSupportedByStore("search".to_owned()),
+            keyring_core::Error::BadStoreFormat("truncated".to_owned()),
         ];
         for err in cases {
             assert!(matches!(
@@ -257,7 +313,8 @@ mod tests {
     #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
     #[test]
     fn a_platform_failure_with_no_readable_status_stays_a_backend_failure() {
-        let err = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("something")));
+        let err =
+            keyring_core::Error::PlatformFailure(Box::new(std::io::Error::other("something")));
         assert!(matches!(
             map_error(&err, "read"),
             SecretsError::Backend { step: "read" }
@@ -271,7 +328,7 @@ mod tests {
     #[test]
     fn a_shut_keychain_maps_to_locked() {
         for code in [-25308, -25293, -128] {
-            let err = keyring::Error::PlatformFailure(Box::new(
+            let err = keyring_core::Error::PlatformFailure(Box::new(
                 security_framework::base::Error::from_code(code),
             ));
             assert!(
@@ -295,7 +352,7 @@ mod tests {
         #[test]
         fn locking_conditions_map_to_locked() {
             for err in [secret_service::Error::Locked, secret_service::Error::Prompt] {
-                let outer = keyring::Error::NoStorageAccess(boxed(err));
+                let outer = keyring_core::Error::NoStorageAccess(boxed(err));
                 assert!(matches!(map_error(&outer, "read"), SecretsError::Locked));
             }
         }
@@ -308,8 +365,8 @@ mod tests {
         #[test]
         fn an_unresolved_collection_is_not_a_lock() {
             for outer in [
-                keyring::Error::NoStorageAccess(boxed(secret_service::Error::NoResult)),
-                keyring::Error::PlatformFailure(boxed(secret_service::Error::NoResult)),
+                keyring_core::Error::NoStorageAccess(boxed(secret_service::Error::NoResult)),
+                keyring_core::Error::PlatformFailure(boxed(secret_service::Error::NoResult)),
             ] {
                 assert!(matches!(
                     map_error(&outer, "store"),
@@ -320,13 +377,14 @@ mod tests {
 
         #[test]
         fn no_bus_or_no_provider_maps_to_no_backend() {
-            let outer = keyring::Error::PlatformFailure(boxed(secret_service::Error::Unavailable));
+            let outer =
+                keyring_core::Error::PlatformFailure(boxed(secret_service::Error::Unavailable));
             assert!(matches!(map_error(&outer, "read"), SecretsError::NoBackend));
 
             let unknown = secret_service::Error::ZbusFdo(zbus::fdo::Error::ServiceUnknown(
                 "org.freedesktop.secrets".to_owned(),
             ));
-            let outer = keyring::Error::PlatformFailure(boxed(unknown));
+            let outer = keyring_core::Error::PlatformFailure(boxed(unknown));
             assert!(matches!(map_error(&outer, "read"), SecretsError::NoBackend));
         }
 
@@ -349,8 +407,8 @@ mod tests {
                     )))
                 };
                 for outer in [
-                    keyring::Error::NoStorageAccess(boxed(dead())),
-                    keyring::Error::PlatformFailure(boxed(dead())),
+                    keyring_core::Error::NoStorageAccess(boxed(dead())),
+                    keyring_core::Error::PlatformFailure(boxed(dead())),
                 ] {
                     assert!(
                         matches!(map_error(&outer, "delete"), SecretsError::NoBackend),
@@ -365,7 +423,10 @@ mod tests {
                     std::io::Error::new(std::io::ErrorKind::BrokenPipe, "socket"),
                 )));
             assert!(matches!(
-                map_error(&keyring::Error::PlatformFailure(boxed(broken)), "delete"),
+                map_error(
+                    &keyring_core::Error::PlatformFailure(boxed(broken)),
+                    "delete"
+                ),
                 SecretsError::Backend { step: "delete" }
             ));
         }
@@ -377,7 +438,7 @@ mod tests {
             let denied = secret_service::Error::ZbusFdo(zbus::fdo::Error::AccessDenied(
                 "not allowed".to_owned(),
             ));
-            let outer = keyring::Error::PlatformFailure(boxed(denied));
+            let outer = keyring_core::Error::PlatformFailure(boxed(denied));
             assert!(matches!(map_error(&outer, "read"), SecretsError::Denied));
         }
 
@@ -385,7 +446,8 @@ mod tests {
         /// fails. A source of another type must fall to the catch-all rather than be misread.
         #[test]
         fn an_unrecognized_source_falls_to_the_catch_all() {
-            let outer = keyring::Error::PlatformFailure(Box::new(std::io::Error::other("other")));
+            let outer =
+                keyring_core::Error::PlatformFailure(Box::new(std::io::Error::other("other")));
             assert!(matches!(
                 map_error(&outer, "read"),
                 SecretsError::Backend { step: "read" }

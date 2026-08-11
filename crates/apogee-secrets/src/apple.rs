@@ -1,9 +1,10 @@
 //! Whether a Keychain failure is a keychain that is merely shut.
 //!
-//! keyring maps five `OSStatus` values and boxes every other one inside `PlatformFailure`, which
-//! this crate would otherwise report as an unclassified failure. Three of the values it does not map
-//! mean "the keychain is there, it is shut, and a user can open it", and telling a caller that a
-//! working store is broken sends them to the fallback or to keeping nothing.
+//! The Keychain store maps seven `OSStatus` values and boxes every other one inside
+//! `PlatformFailure`, which this crate would otherwise report as an unclassified failure. Three of
+//! the values it does not map mean "the keychain is there, it is shut, and a user can open it", and
+//! telling a caller that a working store is broken sends them to the fallback or to keeping
+//! nothing.
 //!
 //! Split in two on purpose. Which codes mean what is a table, and it is checked by tests that run on
 //! every host, including the ones with no Keychain at all: no job in this repository has Apple
@@ -25,7 +26,7 @@ const USER_CANCELED: i32 = -128;
 ///
 /// False on every target that cannot read a status, which is the answer that changes nothing: the
 /// callers keep the classification they had before this existed.
-pub(crate) fn locked(err: &keyring::Error) -> bool {
+pub(crate) fn locked(err: &keyring_core::Error) -> bool {
     status(err).is_some_and(is_locked)
 }
 
@@ -41,13 +42,13 @@ fn is_locked(status: i32) -> bool {
     )
 }
 
-/// The `OSStatus` keyring boxed inside its own error.
+/// The `OSStatus` the store boxed inside its own error.
 ///
-/// `None` for good if keyring's macOS `security-framework` major ever drifts from the one this crate
-/// resolves, because a failed downcast is silent. That is why the audit script asserts the two agree
-/// rather than leaving it to a test no host here can run.
+/// `None` for good if the Keychain store's `security-framework` major ever drifts from the one this
+/// crate resolves, because a failed downcast is silent. That is why the audit script asserts the two
+/// agree rather than leaving it to a test no host here can run.
 #[cfg(target_os = "macos")]
-fn status(err: &keyring::Error) -> Option<i32> {
+fn status(err: &keyring_core::Error) -> Option<i32> {
     use std::error::Error as _;
 
     let code = err
@@ -57,11 +58,11 @@ fn status(err: &keyring::Error) -> Option<i32> {
     Some(code)
 }
 
-/// As above, on a target with no reader for one: every target but macOS. keyring resolves a
-/// different major of the framework crate on iOS, and the Credential Manager has no status of this
-/// shape at all.
+/// As above, on a target with no reader for one: every target but macOS. The framework crate is
+/// taken on macOS alone, because nothing here builds for iOS, and the Credential Manager has no
+/// status of this shape at all.
 #[cfg(not(target_os = "macos"))]
-fn status(_err: &keyring::Error) -> Option<i32> {
+fn status(_err: &keyring_core::Error) -> Option<i32> {
     None
 }
 
@@ -79,13 +80,13 @@ mod tests {
         assert!(is_locked(-128), "errSecUserCanceled");
     }
 
-    /// Nothing else is. The first two are codes keyring maps itself, so reading them as a lock would
-    /// contradict it; the rest are failures no unlock fixes.
+    /// Nothing else is. The first two are codes the store maps itself, so reading them as a lock
+    /// would contradict it; the rest are failures no unlock fixes.
     #[test]
     fn nothing_else_is_a_lock() {
         for status in [
-            -25291, // errSecNotAvailable, which keyring maps to NoStorageAccess
-            -25300, // errSecItemNotFound, which keyring maps to NoEntry
+            -25291, // errSecNotAvailable, which the store maps to NoStorageAccess
+            -25300, // errSecItemNotFound, which the store maps to NoEntry
             -25299, // errSecDuplicateItem
             25293,  // errSecAuthFailed with its sign lost
             -34018, // errSecMissingEntitlement
@@ -101,8 +102,8 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_target_without_a_reader_reclassifies_nothing() {
-        assert!(!locked(&keyring::Error::NoEntry));
-        assert!(!locked(&keyring::Error::PlatformFailure(Box::new(
+        assert!(!locked(&keyring_core::Error::NoEntry));
+        assert!(!locked(&keyring_core::Error::PlatformFailure(Box::new(
             std::io::Error::other("whatever the platform said")
         ))));
     }

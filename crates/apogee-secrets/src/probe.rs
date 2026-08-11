@@ -4,9 +4,11 @@
 //! `Locked` property are all plain calls that raise no prompt. A probe that popped the keyring's
 //! password dialog on every launch would be worse than no probe.
 //!
-//! The probe deliberately does not go through `keyring::Entry`. Constructing one performs no I/O at
-//! all, so a probe built on it reports a healthy store from inside a sandbox that cannot reach one,
-//! which is the exact failure this is here to name.
+//! The probe deliberately does not go through the credential path. Building an entry performs no
+//! I/O at all, and opening the store only reaches the bus, so a probe built on either answers
+//! "reachable" for a provider that owns no collection to write into and cannot make one. Resolving
+//! that collection and reading its `Locked` property are what separate the conditions below, and
+//! neither is reachable through a credential.
 
 use std::path::Path;
 
