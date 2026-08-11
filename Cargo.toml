@@ -55,6 +55,10 @@ url              = "2"
 percent-encoding = "2"
 uuid             = { version = "1", features = ["v4", "serde"] }
 tracing          = "0.1"
+# The CLI's log subscriber, and the only consumer of the `tracing` events the libraries emit. Default
+# features off and `env-filter` deliberately not among them: that feature's directive parser is built
+# on `regex-automata`, and `filter::Targets` accepts the same `target=level` syntax without it.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 zeroize          = { version = "1", features = ["derive"] }
 # domain-adjacent, gated to the crates that use them.
 # keyring has no `default` feature key: with no store feature named it selects an in-memory mock on
