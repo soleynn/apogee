@@ -55,6 +55,9 @@ is tagged with its change type. Versioning aims to follow
 - Receive a one-time code pushed to the local listener (#125) _(added)_
 - API freeze and documentation pass, bump to 1.0.0 (#161) _(miscellaneous)_
 
+### apogee-patcher
+- Stop a healthy repo failing a repair it cannot source (#192) _(fixed)_
+
 ### apogee-runtime
 - Report the exit status of a redirected launch's program (#165) _(fixed)_
 
@@ -81,6 +84,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-test-support
 - Stop a corpus gate passing when it cannot run (#189) _(fixed)_
+- Pin the boot corpus on the chain the source keeps serving (#190) _(testing)_
 
 ### apogee-zipatch
 - Drop the dead total from apply progress (#198) _(changed)_
