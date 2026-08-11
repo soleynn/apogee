@@ -2,12 +2,60 @@
   "version": 1,
   "indexes": [
     {
+      "repo": "boot",
+      "version": "2026.07.13.0000.0001",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/boot-2026.07.13.0000.0001.apzi",
+      "blake3": "ca83e2c51049f71998efb39ddae8b57e5327b0843f1cf1baf55173e0a1595487",
+      "sha256": "ab41bfc9ba0e82b572034b0e376173aa9baac6b6e8139fbe270cdecef0c4a444",
+      "source_base": "http://patch-dl.ffxiv.com/boot/2b5cbc63/"
+    },
+    {
       "repo": "game",
-      "version": "2024.03.28.0000.0000",
-      "url": "https://soleynn.github.io/apogee/indexes/artifacts/game-2024.03.28.0000.0000.apzi",
-      "blake3": "2caac653ea860af0b00cd66f45a963f3aea2e93f3bf56fbacb02184960f3e50f",
-      "sha256": "ce5f80d437b0ab7747dbaa3407bb4ce803e1cca9ffb9766750259fd08885d904",
+      "version": "2026.08.05.0000.0000",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/game-2026.08.05.0000.0000.apzi",
+      "blake3": "c3f63259c72707a1ca785811cbc5b4001e7a87768980ef1968c166b6b01bc761",
+      "sha256": "3a828d8c7967ab1572bd8ee238bca367a04297a8ca3e6500161a38f1cccf2f1c",
       "source_base": "http://patch-dl.ffxiv.com/game/4e9a232b/"
+    },
+    {
+      "repo": "ex1",
+      "version": "2026.07.03.0000.0000",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/ex1-2026.07.03.0000.0000.apzi",
+      "blake3": "8e7b4f08d4c039164ddd28ac200d1581058b1b40dd51014bca4f8ad4567384c9",
+      "sha256": "074ff79eb4197052fe0952d43100769230707c3ed9cc99f27af729d16d914f2e",
+      "source_base": "http://patch-dl.ffxiv.com/game/ex1/6b936f08/"
+    },
+    {
+      "repo": "ex2",
+      "version": "2026.07.06.0000.0000",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/ex2-2026.07.06.0000.0000.apzi",
+      "blake3": "c178659c9ca07c53944e3a1e0e801ea933263d5006ee5c087dea650af7b880e7",
+      "sha256": "0ab69a20e631cf9648c1e33239f113f660cc153e63bd21c7994a04ea24e0992d",
+      "source_base": "http://patch-dl.ffxiv.com/game/ex2/f29a3eb2/"
+    },
+    {
+      "repo": "ex3",
+      "version": "2026.08.05.0000.0000",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/ex3-2026.08.05.0000.0000.apzi",
+      "blake3": "3841b70e49f0fe039eb23f54a3e25b4827edad8c05bc684471b0f817dcb59358",
+      "sha256": "ccd8b23b0eca7c71e17e0f0b30c0b717df79c774c00077da994e3095a4fab093",
+      "source_base": "http://patch-dl.ffxiv.com/game/ex3/859d0e24/"
+    },
+    {
+      "repo": "ex4",
+      "version": "2026.08.05.0000.0000",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/ex4-2026.08.05.0000.0000.apzi",
+      "blake3": "981e7d898083d4a14d068167cc801d82b941224c90f71b918aff5b74622bfa75",
+      "sha256": "72c569f712d0270481030ca16704c5a3a4c3a5a533622c6167782dfd98e570f6",
+      "source_base": "http://patch-dl.ffxiv.com/game/ex4/1bf99b87/"
+    },
+    {
+      "repo": "ex5",
+      "version": "2026.08.05.0000.0000",
+      "url": "https://github.com/soleynn/apogee/releases/download/indexes-2026.08.05/ex5-2026.08.05.0000.0000.apzi",
+      "blake3": "43ac9ae9c9e852f1e466e5aea8f9d5bb3a62ba0615304249ca9d71f2b6c32a47",
+      "sha256": "87ac2cb492b51f153ebb3fcd870b02a0a164cded00abdad6809e99a8c3d3729b",
+      "source_base": "http://patch-dl.ffxiv.com/game/ex5/6cfeab11/"
     }
   ]
 }

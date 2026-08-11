@@ -9,8 +9,19 @@ repo and version. It is authenticated end to end:
   verified against a key compiled into the client (`apogee_patcher::INDEX_CATALOG_PUBLIC_KEY`) before
   any pin is trusted.
 
-The sample entry here is signed with a **staging** key for development; the production key ceremony is
-separate. Artifacts are served from `artifacts/` beside this manifest.
+The rows here are signed with a **staging** key for development; the production key ceremony is
+separate.
+
+**Artifacts are release assets, not committed files.** Only `manifest.json` and its signature live in
+git. A full set of indexes is around 94 MB against a 24 MiB repo history, every patch day adds
+another set, and git history keeps all of it forever, so the bytes go to a GitHub release
+(`indexes-<game version>`) and the rows point at its download URLs. Nothing is lost by this: the
+indexes are derived data, and the signature plus the pin authenticate them wherever they are served
+from, so the host is untrusted by design.
+
+Boot's artifact is the one exception, kept at `crates/apogee-patcher/tests/fixtures/` (47 KB) so the
+catalog test can check a row's pin against real bytes offline. Re-author boot and that fixture must be
+replaced too, or the test fails.
 
 ## Schema
 
@@ -19,7 +30,7 @@ separate. Artifacts are served from `artifacts/` beside this manifest.
   "version": 1,
   "indexes": [
     { "repo": "game", "version": "<YYYY.MM.DD.PPPP.RRRR>",
-      "url": "https://<host>/indexes/artifacts/<repo>-<version>.apzi",
+      "url": "https://github.com/<owner>/<repo>/releases/download/indexes-<version>/<repo>-<version>.apzi",
       "blake3": "<64 hex>",
       "sha256": "<64 hex>",
       "source_base": "http://patch-dl.ffxiv.com/<repo path>/<path id>/" }
@@ -48,19 +59,47 @@ come from one read of the file (below) rather than from two separate commands.
 
 ## Patch-day runbook
 
-1. **Build** the index from the version's patch chain (reproducible, no network):
+1. **Build** the index from the version's patch chain (reproducible, no network). `<build>` is any
+   scratch directory outside the repo, since these files are never committed:
    ```
    cargo run -p apogee-zipatch --example zipatch_tool -- \
-     index artifacts/<repo>-<version>.apzi <version> <patch>...
+     index <build>/<repo>-<version>.apzi <version> <patch>...
    ```
-2. **Pin**: hash the artifact once and paste both lines into the row in `manifest.json` (repo,
-   version, hosted url, pins, and the `source_base` read off this repo's patchlist entries):
+   The patches go in **patchlist order**, which is not the order their names sort in: a chain mixes
+   `H` hist patches with `D` deltas, and a hist series suffixes its versions (`…0000a` … `…0000ah`),
+   so sorting filenames puts the newest delta first. Take the order from an install's
+   `patch: <repo> #<n> applied -> <version>` lines, which the cache does not preserve. One entry per
+   hist series reports the bare series version there while its file carries the series' last suffix,
+   so that one is named by elimination rather than by matching.
+2. **Check** it against an install already at that version, before pinning bytes nothing has read:
+   ```
+   cargo run -p apogee-zipatch --example zipatch_tool -- verify <install>/boot <build>/boot-<v>.apzi
+   cargo run -p apogee-zipatch --example zipatch_tool -- verify <install>/game <build>/ex1-<v>.apzi
+   ```
+   The root is the repo's subtree, not the install root: boot's target paths are relative to `boot/`,
+   and the game's and every expansion's to `game/`. Pointed at the install root instead, every target
+   reads as missing.
+3. **Upload** the artifacts first, so the URLs the manifest is about to carry already resolve:
+   ```
+   gh release create indexes-<version> --latest=false \
+     --title "Repair block indexes (game <version>)" <build>/*.apzi
+   ```
+4. **Pin**: hash each artifact once and paste both lines into its row in `manifest.json` (repo,
+   version, the release download url, pins, and the `source_base`, which is the repo's directory in
+   the patch cache with the host put back: the cache mirrors the URL path, id and all):
    ```
    cargo run --manifest-path ../../tools/catalog-sign/Cargo.toml -- \
-     pin artifacts/<repo>-<version>.apzi
+     pin <build>/<repo>-<version>.apzi
    ```
-3. **Sign** the exact manifest bytes with the offline seed:
+5. **Sign** the exact manifest bytes with the offline seed:
    ```
    ./regen-catalog-sig.sh          # wraps tools/catalog-sign
    ```
-4. **Publish** `manifest.json`, `manifest.json.sig`, and the new `artifacts/*.apzi`.
+6. **Publish** `manifest.json` and `manifest.json.sig` (a push to `main` deploys them), and replace
+   `crates/apogee-patcher/tests/fixtures/boot-*.apzi` if boot was re-authored.
+7. **Prove it end to end** before calling it done, against an empty data root so nothing is cached:
+   ```
+   apogee-cli repair --profile <p>
+   ```
+   A row whose bytes were never uploaded fails on `http 404`, and one pinned over the wrong bytes
+   fails on the digest, both after the manifest signature has already passed.
