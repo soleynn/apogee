@@ -72,6 +72,9 @@
 
 use std::io;
 use std::path::Path;
+use sha2::{Digest as _, Sha256};
+
+use crate::validator::Validator;
 
 use tokio::io::AsyncWriteExt;
 
@@ -605,4 +608,35 @@ mod tests {
         different_len.expected_len = Some(9999);
         assert!(!a.matches(&different_len));
     }
+}
+
+/// A stable 32-byte fingerprint of a validator's configuration, part of the journal's identity: a
+/// resume against a different validator no longer matches and restarts from zero. A leading tag
+/// byte keeps the variants from colliding, and the one multi-byte field is committed little-endian
+/// like every other integer in this file; both choices are part of the frozen format.
+pub(crate) fn validator_config_digest(validator: &Validator) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    match validator {
+        Validator::BlockSha1 { block_size, hashes } => {
+            hasher.update([0x01]);
+            hasher.update(block_size.to_le_bytes());
+            for hash in hashes {
+                hasher.update(hash);
+            }
+        }
+        Validator::Sha256(digest) => {
+            hasher.update([0x02]);
+            hasher.update(digest);
+        }
+        Validator::None => hasher.update([0x00]),
+        Validator::External => hasher.update([0x03]),
+        // A tag of its own, and never the one SHA256 already answers to. The two digests are the
+        // same width, so without distinct tags a `.part` half-hashed under one function would
+        // resume under the other and be verified against a digest that describes different bytes.
+        Validator::Blake3(digest) => {
+            hasher.update([0x04]);
+            hasher.update(digest);
+        }
+    }
+    hasher.finalize().into()
 }

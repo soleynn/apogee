@@ -6,8 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::hash::DigestPin;
 
 /// How a downloaded file (or its blocks) is verified before it can become a [`VerifiedFile`].
@@ -44,32 +42,12 @@ impl Validator {
     /// A stable 32-byte fingerprint of this validator's configuration, recorded in the resume
     /// journal. Resuming against a different validator (a different expected digest, a different
     /// block layout) no longer matches, so the download restarts from zero instead of trusting bytes
-    /// against the wrong policy. A leading tag byte keeps the variants from colliding.
+    /// against the wrong policy.
+    ///
+    /// The encoding lives in `journal.rs`: the fingerprint is journal identity data, and that file
+    /// is the one home for every byte-layout decision the `.apdl` format freezes.
     pub(crate) fn config_digest(&self) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        match self {
-            Validator::BlockSha1 { block_size, hashes } => {
-                hasher.update([0x01]);
-                hasher.update(block_size.to_le_bytes());
-                for hash in hashes {
-                    hasher.update(hash);
-                }
-            }
-            Validator::Sha256(digest) => {
-                hasher.update([0x02]);
-                hasher.update(digest);
-            }
-            Validator::None => hasher.update([0x00]),
-            Validator::External => hasher.update([0x03]),
-            // A tag of its own, and never the one SHA256 already answers to. The two digests are the
-            // same width, so without distinct tags a `.part` half-hashed under one function would
-            // resume under the other and be verified against a digest that describes different bytes.
-            Validator::Blake3(digest) => {
-                hasher.update([0x04]);
-                hasher.update(digest);
-            }
-        }
-        hasher.finalize().into()
+        crate::journal::validator_config_digest(self)
     }
 }
 
