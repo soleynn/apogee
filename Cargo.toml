@@ -66,7 +66,7 @@ keyring          = "3"
 secret-service   = "4"
 # The D-Bus error names the classification above reads. Already in the graph under secret-service;
 # named here so the match is on typed variants rather than on a rendered string.
-zbus             = "4"
+zbus             = "5"
 # The Keychain's side of the same problem: keyring maps five status codes and boxes every other one
 # opaquely, and a locked keychain is among the others. Only `base::Error`, which carries the code, is
 # used, so the TLS-oriented default features are off. Must resolve to the version keyring picks for
