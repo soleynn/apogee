@@ -8,14 +8,14 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    Catalog, DxvkEnv, GameSession, HostCaps, LaunchPlan, Prefix, Progress, RunnerKind, Runtime,
-    RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, DxvkRef, GameSession, HostCaps, LaunchPlan, Prefix, Progress, RunnerKind,
+    Runtime, RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{Examined, GameHandle, LaunchBackend, Prepared};
+use super::{Examined, GameHandle, LaunchBackend, PrefixRequest, Prepared};
 use crate::command::{Event, LaunchProgramExit, Progress as CoreProgress};
 use crate::error::CoreError;
 use crate::model::RunnerSelection;
@@ -23,6 +23,31 @@ use crate::model::RunnerSelection;
 /// Whether a prefix has been created at `dir`, by the record every prepared one carries.
 fn prefix_exists(dir: &Path) -> bool {
     dir.join(apogee_runtime::PREFIX_JSON).is_file()
+}
+
+/// Whether the prefix already has everything an install would place: the version the catalog
+/// publishes, and the `dxvk-nvapi` companion where one was asked for.
+///
+/// A free function so the second half is reachable on its own. It is the half with no other way to
+/// be noticed: a prefix on the published version whose profile has just opted into the companion
+/// passes a version-only gate, and passing it means the companion's DLLs are never placed, because
+/// the install that would place them is the only thing that ever does.
+fn dxvk_is_current(recorded: Option<&DxvkRef>, version: &str, nvapi: bool) -> bool {
+    let Some(recorded) = recorded else {
+        return false;
+    };
+    recorded.version == version && (recorded.nvapi || !nvapi)
+}
+
+/// Whether this launch overrides the prefix's nvapi DLLs onto the companion.
+///
+/// Both halves are required, and they are different facts. The record is what the prefix physically
+/// has, which an install honors only where the catalog pins a companion to honor it with; the flag is
+/// what the profile asked for. Overriding onto DLLs that were never placed is a prefix that will not
+/// start, and overriding because they happen to be there hands a profile a companion it turned off,
+/// which is also the only way one can ever be turned off again: nothing uninstalls it.
+fn activates_nvapi(recorded: Option<&DxvkRef>, nvapi: bool) -> bool {
+    nvapi && recorded.is_some_and(|dxvk| dxvk.nvapi)
 }
 
 /// The real launch backend over `apogee-runtime`.
@@ -51,10 +76,15 @@ impl RuntimeLauncher {
     ///
     /// Installing is gated on what the prefix records, because the install itself is not idempotent:
     /// it re-downloads and re-copies every time it runs, and a launch is not the place for that.
+    ///
+    /// `nvapi` is the profile's opt-in to the `dxvk-nvapi` companion. It decides two separate things:
+    /// whether an install places the companion's DLLs, and whether this launch overrides onto them.
+    /// Only the first is permanent, which is what lets two profiles share one prefix and disagree.
     async fn ensure_dxvk(
         &self,
         prefix: &Prefix,
         catalog: Option<&Catalog>,
+        nvapi: bool,
         force: bool,
         cancel: &CancellationToken,
         progress: &Progress,
@@ -77,7 +107,7 @@ impl RuntimeLauncher {
                     Err(error) if error.is_cancellation() => return Err(error.into()),
                     Err(error) => {
                         tracing::info!(%error, "no catalog reached; leaving the prefix as it is");
-                        return Ok(self.recorded_dxvk(prefix));
+                        return Ok(self.recorded_dxvk(prefix, nvapi));
                     }
                 }
             }
@@ -85,23 +115,11 @@ impl RuntimeLauncher {
         // A catalog that publishes none leaves whatever is already there active, rather than
         // deactivating an install an earlier build made.
         let Some(entry) = catalog.default_dxvk() else {
-            return Ok(self.recorded_dxvk(prefix));
+            return Ok(self.recorded_dxvk(prefix, nvapi));
         };
 
-        let installed = prefix
-            .metadata()
-            .ok()
-            .flatten()
-            .and_then(|meta| meta.dxvk)
-            .is_some_and(|dxvk| dxvk.version == entry.version);
-        // Whatever the prefix already decided about the companion is kept: turning it off here would
-        // stop overriding libraries that are sitting in the prefix.
-        let nvapi = prefix
-            .metadata()
-            .ok()
-            .flatten()
-            .and_then(|meta| meta.dxvk)
-            .is_some_and(|dxvk| dxvk.nvapi);
+        let recorded = prefix.metadata().ok().flatten().and_then(|meta| meta.dxvk);
+        let installed = dxvk_is_current(recorded.as_ref(), &entry.version, nvapi);
         // `force` is the repair case: the record says the right version is installed and the files
         // are not there, which is the one situation where the version gate is the wrong answer.
         if force || !installed {
@@ -116,17 +134,24 @@ impl RuntimeLauncher {
                 Err(error) if error.is_cancellation() => return Err(error.into()),
                 Err(error) => {
                     tracing::warn!(%error, "graphics translation was not installed");
-                    return Ok(self.recorded_dxvk(prefix));
+                    return Ok(self.recorded_dxvk(prefix, nvapi));
                 }
             }
         }
-        Ok(Some(self.dxvk_env(prefix, nvapi)))
+        // Read again rather than reusing what the gate saw: an install rewrites the record, and what
+        // it wrote is the only account of whether the companion was actually placed.
+        let recorded = prefix.metadata().ok().flatten().and_then(|meta| meta.dxvk);
+        Ok(Some(self.dxvk_env(
+            prefix,
+            activates_nvapi(recorded.as_ref(), nvapi),
+        )))
     }
 
-    /// What the prefix already records, for the paths that could not install anything.
-    fn recorded_dxvk(&self, prefix: &Prefix) -> Option<DxvkEnv> {
+    /// What the prefix already records, for the paths that could not install anything. `nvapi` is the
+    /// profile's opt-in, resolved against the record by [`activates_nvapi`].
+    fn recorded_dxvk(&self, prefix: &Prefix, nvapi: bool) -> Option<DxvkEnv> {
         let recorded = prefix.metadata().ok().flatten()?.dxvk?;
-        Some(self.dxvk_env(prefix, recorded.nvapi))
+        Some(self.dxvk_env(prefix, activates_nvapi(Some(&recorded), nvapi)))
     }
 
     /// The environment that activates a prefix's translation, with its shader cache kept beside the
@@ -148,17 +173,18 @@ impl RuntimeLauncher {
         }
     }
 
-    /// Prepare the prefix for `runner`, downloading a managed runner (and its umu tool) when needed.
+    /// Prepare the prefix `request` asks for, downloading a managed runner (and its umu tool) when
+    /// needed.
     async fn prepare_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &Path,
         cancel: &CancellationToken,
         progress: &Progress,
     ) -> Result<Prepared, CoreError> {
         // The host's own capabilities, before the runner narrows them.
         let host = HostCaps::detect();
-        match runner {
+        match &request.runner {
             RunnerSelection::SystemWine => {
                 let dir = synthesize_system_wine(&self.runners_dir)?;
                 let prefix = self
@@ -176,7 +202,7 @@ impl RuntimeLauncher {
                 // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
                 // setting no variable, so believing in it wrongly leaves the prefix with no
                 // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
-                let dxvk = self.recorded_dxvk(&prefix);
+                let dxvk = self.recorded_dxvk(&prefix, request.nvapi);
                 Ok(Prepared {
                     prefix: Some(prefix),
                     caps: HostCaps {
@@ -211,7 +237,7 @@ impl RuntimeLauncher {
                     .runtime
                     .prepare(&entry, prefix_dir, cancel, progress)
                     .await?;
-                let dxvk = self.recorded_dxvk(&prefix);
+                let dxvk = self.recorded_dxvk(&prefix, request.nvapi);
                 Ok(Prepared {
                     prefix: Some(prefix),
                     caps: host.for_runner(&entry),
@@ -227,18 +253,25 @@ impl RuntimeLauncher {
 impl LaunchBackend for RuntimeLauncher {
     async fn prepare(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<Prepared, CoreError> {
         let progress = relay_progress(events);
         let mut prepared = self
-            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .prepare_prefix(request, prefix_dir, cancel, &progress)
             .await?;
         if let Some(prefix) = &prepared.prefix {
             prepared.dxvk = self
-                .ensure_dxvk(prefix, prepared.catalog.as_ref(), false, cancel, &progress)
+                .ensure_dxvk(
+                    prefix,
+                    prepared.catalog.as_ref(),
+                    request.nvapi,
+                    false,
+                    cancel,
+                    &progress,
+                )
                 .await?;
         }
         Ok(prepared)
@@ -246,7 +279,7 @@ impl LaunchBackend for RuntimeLauncher {
 
     async fn check_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
@@ -258,7 +291,7 @@ impl LaunchBackend for RuntimeLauncher {
         }
         let progress = relay_progress(events);
         let prepared = self
-            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .prepare_prefix(request, prefix_dir, cancel, &progress)
             .await?;
         let Some(prefix) = prepared.prefix else {
             return Ok(None);
@@ -272,14 +305,14 @@ impl LaunchBackend for RuntimeLauncher {
 
     async fn fix_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<Option<Examined>, CoreError> {
         let progress = relay_progress(events);
         let prepared = self
-            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .prepare_prefix(request, prefix_dir, cancel, &progress)
             .await?;
         let Some(prefix) = prepared.prefix else {
             return Ok(None);
@@ -296,8 +329,15 @@ impl LaunchBackend for RuntimeLauncher {
             .iter()
             .any(|issue| matches!(issue, apogee_runtime::HealthIssue::MissingDxvkDll { .. }))
         {
-            self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), true, cancel, &progress)
-                .await?;
+            self.ensure_dxvk(
+                &prefix,
+                prepared.catalog.as_ref(),
+                request.nvapi,
+                true,
+                cancel,
+                &progress,
+            )
+            .await?;
         }
         let residual = self
             .runtime
@@ -311,7 +351,7 @@ impl LaunchBackend for RuntimeLauncher {
 
     async fn recreate_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
@@ -321,7 +361,7 @@ impl LaunchBackend for RuntimeLauncher {
         // again would be paying twice for the same result.
         let existed = prefix_exists(prefix_dir);
         let prepared = self
-            .prepare_prefix(runner, prefix_dir, cancel, &progress)
+            .prepare_prefix(request, prefix_dir, cancel, &progress)
             .await?;
         let Some(prefix) = prepared.prefix else {
             return Ok(None);
@@ -333,8 +373,15 @@ impl LaunchBackend for RuntimeLauncher {
         } else {
             prefix
         };
-        self.ensure_dxvk(&prefix, prepared.catalog.as_ref(), false, cancel, &progress)
-            .await?;
+        self.ensure_dxvk(
+            &prefix,
+            prepared.catalog.as_ref(),
+            request.nvapi,
+            false,
+            cancel,
+            &progress,
+        )
+        .await?;
         Ok(Some(prefix))
     }
 
@@ -516,6 +563,71 @@ mod tests {
             panic!("a download must relay as a progress event");
         };
         assert!(relayed.recoveries.is_clean());
+    }
+
+    /// A record for `version`, with or without the companion.
+    fn recorded(version: &str, nvapi: bool) -> DxvkRef {
+        DxvkRef {
+            version: version.to_owned(),
+            nvapi,
+        }
+    }
+
+    /// The version gate on its own: a prefix on the published build has nothing to do, and one on an
+    /// older build or none at all does.
+    #[test]
+    fn the_published_version_is_installed_only_when_the_prefix_is_behind_it() {
+        assert!(dxvk_is_current(Some(&recorded("2.7", false)), "2.7", false));
+        assert!(!dxvk_is_current(
+            Some(&recorded("2.6", false)),
+            "2.7",
+            false
+        ));
+        assert!(!dxvk_is_current(None, "2.7", false));
+    }
+
+    /// Opting into the companion on a prefix that is already on the published version still installs.
+    ///
+    /// The version gate passes here, and passing it is the whole problem: the install is the only
+    /// thing that ever places the companion's DLLs, so a gate that reads the version alone leaves
+    /// the opt-in unable to take effect on any prefix that is up to date, which is all of them.
+    #[test]
+    fn asking_for_the_companion_installs_though_the_version_already_matches() {
+        assert!(!dxvk_is_current(Some(&recorded("2.7", false)), "2.7", true));
+    }
+
+    /// Once it is there, asking for it again is nothing to do: the install re-downloads and re-copies
+    /// every time it runs, and every launch would pay for it.
+    #[test]
+    fn a_prefix_that_already_has_the_companion_installs_nothing() {
+        assert!(dxvk_is_current(Some(&recorded("2.7", true)), "2.7", true));
+    }
+
+    /// Not asking for it does not reinstall to take it away. The DLLs stay where they are and the
+    /// launch simply does not override onto them, so the profile that shares this prefix and does
+    /// want them keeps working.
+    #[test]
+    fn not_asking_for_the_companion_leaves_an_installed_one_alone() {
+        assert!(dxvk_is_current(Some(&recorded("2.7", true)), "2.7", false));
+    }
+
+    /// A launch overrides onto the companion only where both halves agree.
+    ///
+    /// The prefix's half is the one that cannot be argued with: a launch that overrides `nvapi64` onto
+    /// a DLL no install ever placed is a game that does not start. The profile's half is the only way
+    /// the companion is ever turned back off, because nothing uninstalls it: the DLLs stay in
+    /// `system32` and the override is what stops pointing at them.
+    #[rstest::rstest]
+    #[case(Some(&recorded("2.7", true)), true, true)]
+    #[case(Some(&recorded("2.7", true)), false, false)]
+    #[case(Some(&recorded("2.7", false)), true, false)]
+    #[case(None, true, false)]
+    fn the_companion_is_activated_only_where_the_prefix_has_it_and_the_profile_asked(
+        #[case] recorded: Option<&DxvkRef>,
+        #[case] nvapi: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(activates_nvapi(recorded, nvapi), expected);
     }
 
     #[test]

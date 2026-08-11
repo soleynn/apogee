@@ -100,6 +100,7 @@ fn a_new_profile_chooses_nothing_and_round_trips_what_it_is_given() -> std::io::
     assert!(text.contains("hud       none"), "{text}");
     assert!(text.contains("gpu       default"), "{text}");
     assert!(text.contains("gamemode  false"), "{text}");
+    assert!(text.contains("nvapi     false"), "{text}");
 
     run(
         home.path(),
@@ -116,6 +117,8 @@ fn a_new_profile_chooses_nothing_and_round_trips_what_it_is_given() -> std::io::
             "vulkan:10de:2482",
             "--gamemode",
             "true",
+            "--nvapi",
+            "true",
         ],
     )?;
     let text = stdout(&run(home.path(), &["profile", "env", "--profile", "main"])?);
@@ -123,6 +126,7 @@ fn a_new_profile_chooses_nothing_and_round_trips_what_it_is_given() -> std::io::
     assert!(text.contains("hud       dxvk:fps"), "{text}");
     assert!(text.contains("gpu       vulkan:10de:2482"), "{text}");
     assert!(text.contains("gamemode  true"), "{text}");
+    assert!(text.contains("nvapi     true"), "{text}");
     Ok(())
 }
 

@@ -160,6 +160,15 @@ pub struct LaunchSettings {
     /// Which GPU to run on, where the machine has more than one.
     #[serde(default)]
     pub gpu: GpuSelect,
+    /// Install DXVK's `dxvk-nvapi` companion into the prefix and override its nvapi DLLs onto it, so
+    /// the game sees the driver features it exposes.
+    ///
+    /// Off by default and beside [`LaunchSettings::gpu`] rather than launcher-wide, because it is a
+    /// property of the card a profile runs on: it does nothing on a prefix whose GPU is not an
+    /// NVIDIA one, and a machine with two cards has one profile per card. While it is off, nothing
+    /// downloads the companion.
+    #[serde(default)]
+    pub nvapi: bool,
     /// Run inside a nested compositor, and how. Absent leaves the launch in whatever session started
     /// it.
     #[serde(default)]

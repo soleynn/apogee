@@ -31,7 +31,7 @@ use crate::addons::AddonBackend;
 use crate::command::{Command, Event, FlowState, Notice, PrefixAction, PrefixReport};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
-use crate::launch::LaunchBackend;
+use crate::launch::{LaunchBackend, PrefixRequest};
 use crate::model::{
     Account, AccountKind, ListenerSettings, ListenerSources, Profile, Region,
     STEAM_FREE_TRIAL_APP_ID, Settings,
@@ -1009,7 +1009,7 @@ async fn launch_game(
     emit(tx, FlowState::PreparingPrefix);
     let prepared = ctx
         .launch
-        .prepare(&profile.runner, &prefix_dir, cancel, tx)
+        .prepare(&PrefixRequest::from(profile), &prefix_dir, cancel, tx)
         .await?;
 
     let steam = is_steam(account);
@@ -1194,13 +1194,14 @@ async fn prefix(
 ) -> Result<(), CoreError> {
     let profile = ctx.store.load_profile(profile_id)?;
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
+    let request = PrefixRequest::from(&profile);
 
     match action {
         PrefixAction::Create => {
             emit(tx, FlowState::PreparingPrefix);
             let prepared = ctx
                 .launch
-                .prepare(&profile.runner, &prefix_dir, cancel, tx)
+                .prepare(&request, &prefix_dir, cancel, tx)
                 .await?;
             ctx.addons.apply_setup(prepared.prefix, cancel, tx).await;
         }
@@ -1208,7 +1209,7 @@ async fn prefix(
             emit(tx, FlowState::CheckingPrefix);
             match ctx
                 .launch
-                .check_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .check_prefix(&request, &prefix_dir, cancel, tx)
                 .await?
             {
                 Some(examined) => {
@@ -1228,7 +1229,7 @@ async fn prefix(
             emit(tx, FlowState::FixingPrefix);
             if let Some(examined) = ctx
                 .launch
-                .fix_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .fix_prefix(&request, &prefix_dir, cancel, tx)
                 .await?
             {
                 // The setup goes on after the targeted fixes, in that order because a verb is applied
@@ -1251,7 +1252,7 @@ async fn prefix(
             emit(tx, FlowState::RecreatingPrefix);
             let fresh = ctx
                 .launch
-                .recreate_prefix(&profile.runner, &prefix_dir, cancel, tx)
+                .recreate_prefix(&request, &prefix_dir, cancel, tx)
                 .await?;
             // A rebuilt prefix is a new one, so it needs the setup a new one gets. Without this, the
             // command that exists to put a prefix back in a known state leaves it in one no other
