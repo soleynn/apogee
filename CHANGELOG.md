@@ -50,6 +50,7 @@ is tagged with its change type. Versioning aims to follow
 - Pin the signed catalogs on BLAKE3 (#188) _(added)_
 - Make retries, stalls, demotions and dropped mirrors observable (#199) _(added)_
 - Make the three concurrency caps agree (#202) _(fixed)_
+- Close out the pre-freeze API review (#207) _(added)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
