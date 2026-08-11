@@ -507,7 +507,7 @@ async fn main() -> ExitCode {
     match run(Cli::parse()).await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err}");
+            eprintln!("error: {}", describe(err.as_ref()));
             ExitCode::FAILURE
         }
     }
@@ -2052,6 +2052,27 @@ fn prompt_line(prompt: &str) -> io::Result<String> {
     Ok(line.trim().to_owned())
 }
 
+/// One line naming a failure and everything under it that says something new.
+///
+/// Each layer's message interpolates the one below it, so a cause is appended only when the line
+/// does not already end with it, and a chain that repeats itself renders once. What this recovers is
+/// the bottom of the chain, which is where the fact worth acting on is: an artifact whose digest did
+/// not match reaches the top as "runner download failed" and names neither the digest expected nor
+/// the one measured, and a filesystem refusal arrives without the path it refused.
+fn describe(error: &dyn Error) -> String {
+    let mut line = error.to_string();
+    let mut below = error.source();
+    while let Some(cause) = below {
+        let text = cause.to_string();
+        if !line.ends_with(&text) {
+            line.push_str(": ");
+            line.push_str(&text);
+        }
+        below = cause.source();
+    }
+    line
+}
+
 /// Render one core event as a line of terminal text. Presentation lives in the shell.
 fn render(event: &Event) -> String {
     match event {
@@ -2064,7 +2085,7 @@ fn render(event: &Event) -> String {
         Event::Prefix(report) => render_health(report),
         Event::Notice(notice) => render_notice(notice),
         Event::LaunchProgramExited(exit) => render_launch_program_exit(exit),
-        Event::Error(err) => format!("error: {err}"),
+        Event::Error(err) => format!("error: {}", describe(err)),
         _ => "unrecognized event".to_owned(),
     }
 }
@@ -2365,5 +2386,59 @@ mod tests {
             render_launch_program_exit(&exited("/l/L.exe", apogee_core::ProgramStatus::Signal(9)));
         assert!(signalled.contains("signal 9"), "{signalled}");
         assert!(!signalled.contains("exit code"), "{signalled}");
+    }
+
+    /// One link of a chain: `text` is what it says, `below` is what it wraps.
+    #[derive(Debug)]
+    struct Link {
+        text: String,
+        below: Option<Box<Link>>,
+    }
+
+    impl Link {
+        fn new(text: &str, below: Option<Link>) -> Self {
+            Self {
+                text: text.to_owned(),
+                below: below.map(Box::new),
+            }
+        }
+    }
+
+    impl std::fmt::Display for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.text)
+        }
+    }
+
+    impl Error for Link {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.below
+                .as_deref()
+                .map(|link| link as &(dyn Error + 'static))
+        }
+    }
+
+    /// The shape a failed artifact pin arrives in: three layers, of which only the innermost names
+    /// the digests. The outer two already carry the sentence below them, and the top-level renderer
+    /// prints only the outermost, which is how the fact worth reading got lost.
+    #[test]
+    fn a_failure_is_described_down_to_the_cause_that_says_something_new() {
+        let verify = Link::new("file verification failed: expected aa, got bb", None);
+        let download = Link::new("runner download failed", Some(verify));
+        let core = Link::new("runtime: runner download failed", Some(download));
+
+        assert_eq!(
+            describe(&core),
+            "runtime: runner download failed: file verification failed: expected aa, got bb"
+        );
+    }
+
+    /// A chain whose every layer only restates the one below renders as one sentence, not as the
+    /// same sentence three times.
+    #[test]
+    fn a_chain_that_only_repeats_itself_is_said_once() {
+        let inner = Link::new("the disk is full", None);
+        let outer = Link::new("the disk is full", Some(inner));
+        assert_eq!(describe(&outer), "the disk is full");
     }
 }
