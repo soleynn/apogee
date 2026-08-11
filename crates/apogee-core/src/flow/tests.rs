@@ -1610,6 +1610,65 @@ async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
     );
 }
 
+/// What a profile chose about the `dxvk-nvapi` companion reaches the prefix that would install it.
+///
+/// The opt-in has no other route. What decided it before was the prefix's own record, and the only
+/// thing that writes that record is the install that reads it, so a prefix built without the
+/// companion could never be told to get one and every launch read back the `false` the last one
+/// wrote. The assertion is on what crossed the launch seam because that is the last point in this
+/// crate where the setting is still visible.
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn a_launch_asks_its_prefix_for_the_companion_the_profile_chose(#[case] nvapi: bool) {
+    let h = harness_customized(false, |profile| profile.launch.nvapi = nvapi);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, transport, launch.clone(), NOW);
+
+    let events = run(ctx, play_no_otp(h.profile)).await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+
+    let asked: Vec<bool> = launch.requested().iter().map(|r| r.nvapi).collect();
+    assert_eq!(
+        asked,
+        [nvapi],
+        "the profile's choice did not reach the prefix"
+    );
+}
+
+/// Every prefix verb carries it too, not only a launch. Without that, the one command that exists to
+/// bring a prefix up to what a launch would leave it is the one command that cannot.
+#[rstest::rstest]
+#[case(PrefixAction::Create)]
+#[case(PrefixAction::Check)]
+#[case(PrefixAction::Fix)]
+#[case(PrefixAction::Recreate)]
+#[tokio::test]
+async fn every_prefix_verb_carries_the_companion_the_profile_chose(#[case] action: PrefixAction) {
+    let h = harness_customized(false, |profile| profile.launch.nvapi = true);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action,
+        },
+    )
+    .await;
+
+    let asked: Vec<bool> = launch.requested().iter().map(|r| r.nvapi).collect();
+    assert_eq!(asked, [true], "the verb dropped the profile's choice");
+}
+
 /// A prefix without it overrides nothing, rather than pointing the game at libraries that are not
 /// there.
 #[tokio::test]

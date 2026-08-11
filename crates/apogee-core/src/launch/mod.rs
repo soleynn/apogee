@@ -16,9 +16,33 @@ use tokio_util::sync::CancellationToken;
 
 use crate::command::Event;
 use crate::error::CoreError;
-use crate::model::RunnerSelection;
+use crate::model::{Profile, RunnerSelection};
 
 pub(crate) mod runtime_backend;
+
+/// What a profile asks its prefix to be: the runner that builds it, and the graphics options that are
+/// the user's to choose rather than the catalog's to publish.
+///
+/// One value rather than a runner beside a loose flag, because all four prefix verbs need the whole of
+/// it and a bare `bool` next to a `&RunnerSelection` can be passed in the wrong place without anything
+/// saying so. It is not the profile itself: this seam has never needed an account, a game path, or a
+/// list of companions, and handing it one would let it start reading them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrefixRequest {
+    /// Which Wine/Proton builds and runs it.
+    pub(crate) runner: RunnerSelection,
+    /// Install DXVK's `dxvk-nvapi` companion and override the prefix's nvapi DLLs onto it.
+    pub(crate) nvapi: bool,
+}
+
+impl From<&Profile> for PrefixRequest {
+    fn from(profile: &Profile) -> Self {
+        Self {
+            runner: profile.runner.clone(),
+            nvapi: profile.launch.nvapi,
+        }
+    }
+}
 
 /// A prepared-and-spawned game the flow supervises.
 #[async_trait::async_trait]
@@ -77,7 +101,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
     /// Install the runner if needed and initialize the prefix, without launching anything.
     async fn prepare(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
@@ -91,7 +115,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
     /// while it was being asked.
     async fn check_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
@@ -100,7 +124,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
     /// Apply a targeted fix for each problem that has one, and report what is left.
     async fn fix_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
@@ -113,7 +137,7 @@ pub(crate) trait LaunchBackend: Send + Sync {
     /// real prefix, as [`Self::prepare`].
     async fn recreate_prefix(
         &self,
-        runner: &RunnerSelection,
+        request: &PrefixRequest,
         prefix_dir: &std::path::Path,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
@@ -142,7 +166,7 @@ pub(crate) mod fake {
 
     use super::{
         CancellationToken, CoreError, Event, Examined, GameHandle, LaunchBackend, LaunchPlan,
-        Prepared, RunnerSelection, UnboundedSender,
+        PrefixRequest, Prepared, UnboundedSender,
     };
 
     /// A diagnosis with no prefix behind it, for the reason `prepare` hands back none.
@@ -161,6 +185,10 @@ pub(crate) mod fake {
         /// The prefix directories `prepare` was asked for, so a flow that has to prepare one before
         /// doing anything else can be checked on rather than taken on trust.
         prepared: Mutex<Vec<std::path::PathBuf>>,
+        /// What every prefix verb was asked for, in call order. Recorded because what a profile asks
+        /// its prefix to be is carried across this seam and nowhere else, so a field that stopped
+        /// being read here would be one nothing could notice.
+        requested: Mutex<Vec<PrefixRequest>>,
         auto_exit: bool,
         /// Whether `prepare` stops the way a runner does when the token fires mid-`wineboot`.
         cancel_prepare: bool,
@@ -202,6 +230,7 @@ pub(crate) mod fake {
             Self {
                 recorded: Mutex::new(Vec::new()),
                 prepared: Mutex::new(Vec::new()),
+                requested: Mutex::new(Vec::new()),
                 auto_exit,
                 cancel_prepare: false,
                 killed: Arc::new(AtomicBool::new(false)),
@@ -261,6 +290,22 @@ pub(crate) mod fake {
                 .clone()
         }
 
+        /// What each prefix verb was asked for, in call order.
+        pub(crate) fn requested(&self) -> Vec<PrefixRequest> {
+            self.requested
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        /// Record what a prefix verb was handed.
+        fn record_request(&self, request: &PrefixRequest) {
+            self.requested
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request.clone());
+        }
+
         /// The most recently launched plan, if any.
         pub(crate) fn last_plan(&self) -> Option<LaunchPlan> {
             self.recorded
@@ -288,11 +333,12 @@ pub(crate) mod fake {
     impl LaunchBackend for FakeLaunchBackend {
         async fn prepare(
             &self,
-            _runner: &RunnerSelection,
+            request: &PrefixRequest,
             prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
         ) -> Result<Prepared, CoreError> {
+            self.record_request(request);
             self.prepared
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -316,21 +362,23 @@ pub(crate) mod fake {
 
         async fn check_prefix(
             &self,
-            _runner: &RunnerSelection,
+            request: &PrefixRequest,
             _prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
         ) -> Result<Option<Examined>, CoreError> {
+            self.record_request(request);
             Ok(self.health.clone().map(examined))
         }
 
         async fn fix_prefix(
             &self,
-            _runner: &RunnerSelection,
+            request: &PrefixRequest,
             _prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
         ) -> Result<Option<Examined>, CoreError> {
+            self.record_request(request);
             self.fixed.store(true, Ordering::SeqCst);
             // A fix resolves whatever the double was told to report, which is what lets a test tell
             // "the fix ran" from "the fix ran and something is still wrong".
@@ -339,11 +387,12 @@ pub(crate) mod fake {
 
         async fn recreate_prefix(
             &self,
-            _runner: &RunnerSelection,
+            request: &PrefixRequest,
             _prefix_dir: &std::path::Path,
             _cancel: &CancellationToken,
             _events: &UnboundedSender<Event>,
         ) -> Result<Option<apogee_runtime::Prefix>, CoreError> {
+            self.record_request(request);
             self.recreated.store(true, Ordering::SeqCst);
             // No prefix, for the reason `prepare` has none.
             Ok(None)
@@ -408,8 +457,16 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::fake::FakeLaunchBackend;
-    use super::{CancellationToken, LaunchBackend, LaunchPlan};
+    use super::{CancellationToken, LaunchBackend, LaunchPlan, PrefixRequest};
     use crate::model::RunnerSelection;
+
+    /// A request for the host's own wine with nothing else asked for.
+    fn request() -> PrefixRequest {
+        PrefixRequest {
+            runner: RunnerSelection::SystemWine,
+            nvapi: false,
+        }
+    }
 
     fn plan() -> LaunchPlan {
         LaunchPlan::new(
@@ -445,7 +502,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let prepared = backend
             .prepare(
-                &RunnerSelection::SystemWine,
+                &request(),
                 Path::new("/tmp/apogee-prefix"),
                 &CancellationToken::new(),
                 &tx,
