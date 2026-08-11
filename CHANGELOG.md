@@ -79,6 +79,9 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-test-support
 - Stop a corpus gate passing when it cannot run (#189) _(fixed)_
 
+### apogee-zipatch
+- Drop the dead total from apply progress (#198) _(changed)_
+
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
 
