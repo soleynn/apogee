@@ -46,6 +46,7 @@ is tagged with its change type. Versioning aims to follow
 - Pin the unknown-length path and correct the connection-count claims (#186) _(testing)_
 - Raise the HTTP/2 flow-control window off hyper's defaults (#187) _(performance)_
 - Pin the signed catalogs on BLAKE3 (#188) _(added)_
+- Make retries, stalls, demotions and dropped mirrors observable (#199) _(added)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
