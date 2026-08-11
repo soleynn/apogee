@@ -356,6 +356,7 @@ where
             index,
             bytes_done: p.bytes_done,
             total: p.total,
+            recoveries: p.recoveries,
         });
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();

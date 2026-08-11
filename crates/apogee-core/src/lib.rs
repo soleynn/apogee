@@ -34,7 +34,7 @@ pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, T
 // the profile, the code, the clock offset, the listener and its configuration all stay behind the
 // core, which is why the pushed-code source carries no payload.
 pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
-pub use apogee_patcher::PatchProgress;
+pub use apogee_patcher::{PatchProgress, Recoveries};
 pub use apogee_runtime::{
     BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
     ProgramStatus, SyncChoice,
