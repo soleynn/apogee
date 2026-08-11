@@ -339,7 +339,10 @@ const ACQUIRE_RESTART_DELAY: Duration = Duration::from_millis(500);
 /// fresh download call with its own recovery counters (a recorded seam: the tally on the progress
 /// stream measures one transfer, and the restart shows in the tracing log instead). A cancel during
 /// the pause returns at once as [`FetchError::Cancelled`].
-async fn retry_transient<T, Fut, F>(mut pass: F, cancel: &CancellationToken) -> Result<T, FetchError>
+async fn retry_transient<T, Fut, F>(
+    mut pass: F,
+    cancel: &CancellationToken,
+) -> Result<T, FetchError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, FetchError>>,
@@ -589,10 +592,13 @@ mod tests {
             0,
         );
         assert!(
-            matches!(denied, PatchError::Acquire {
-                source: FetchError::Io { .. },
-                ..
-            }),
+            matches!(
+                denied,
+                PatchError::Acquire {
+                    source: FetchError::Io { .. },
+                    ..
+                }
+            ),
             "a permission fault is not a space fault, got {denied:?}",
         );
         let verify = acquire_err(
@@ -608,9 +614,9 @@ mod tests {
             matches!(
                 verify,
                 PatchError::Acquire {
-                source: FetchError::BlockVerifyFailed { .. },
-                ..
-            }
+                    source: FetchError::BlockVerifyFailed { .. },
+                    ..
+                }
             ),
             "got {verify:?}",
         );

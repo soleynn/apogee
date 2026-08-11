@@ -12,21 +12,16 @@ use tokio_util::sync::CancellationToken;
 
 const MIB: u64 = 1024 * 1024;
 
-/// The shipped fetcher, with the server's root added to its trust store.
-fn fetcher_trusting(cert_der: &[u8]) -> Fetcher {
-    Fetcher::builder()
-        .extra_root_certificate(cert_der)
-        .build()
-        .unwrap()
-}
-
 #[tokio::test]
 async fn an_unverified_download_over_tls_streams_and_publishes() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.bin");
     let len = 256 * 1024;
     let server = ChaosServer::builder(4, len).tls().start().await.unwrap();
-    let fetcher = fetcher_trusting(server.cert_der().unwrap());
+    let fetcher = Fetcher::builder()
+        .extra_root_certificate(server.cert_der().unwrap())
+        .build()
+        .unwrap();
     let spec = DownloadSpec::builder(server.url("file.bin"), &dest, Validator::None)
         .expected_len(len)
         .allow_unverified()
@@ -56,7 +51,10 @@ async fn an_unverified_download_over_tls_resumes() {
         .start()
         .await
         .unwrap();
-    let fetcher = fetcher_trusting(server.cert_der().unwrap());
+    let fetcher = Fetcher::builder()
+        .extra_root_certificate(server.cert_der().unwrap())
+        .build()
+        .unwrap();
     let spec = DownloadSpec::builder(server.url("file.bin"), &dest, Validator::None)
         .expected_len(len)
         .allow_unverified()

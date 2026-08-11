@@ -290,11 +290,10 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
     let pin = DigestPin::from_hex(HexPins {
         blake3: r.blake3.as_deref(),
         sha256: r.sha256.as_deref(),
-    }).ok_or_else(|| {
-        CatalogError::BadPin {
-            name: r.name.clone(),
-            version: r.version.clone(),
-        }
+    })
+    .ok_or_else(|| CatalogError::BadPin {
+        name: r.name.clone(),
+        version: r.version.clone(),
     })?;
     let url = Url::parse(&r.url).map_err(|_| CatalogError::BadUrl {
         name: r.name.clone(),
@@ -316,11 +315,10 @@ fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
     let pin = DigestPin::from_hex(HexPins {
         blake3: t.blake3.as_deref(),
         sha256: t.sha256.as_deref(),
-    }).ok_or_else(|| {
-        CatalogError::BadPin {
-            name: t.name.clone(),
-            version: t.version.clone(),
-        }
+    })
+    .ok_or_else(|| CatalogError::BadPin {
+        name: t.name.clone(),
+        version: t.version.clone(),
     })?;
     let url = Url::parse(&t.url).map_err(|_| CatalogError::BadUrl {
         name: t.name.clone(),
@@ -339,11 +337,10 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
     let pin = DigestPin::from_hex(HexPins {
         blake3: d.blake3.as_deref(),
         sha256: d.sha256.as_deref(),
-    }).ok_or_else(|| {
-        CatalogError::BadPin {
-            name: "dxvk".to_owned(),
-            version: d.version.clone(),
-        }
+    })
+    .ok_or_else(|| CatalogError::BadPin {
+        name: "dxvk".to_owned(),
+        version: d.version.clone(),
     })?;
     let url = Url::parse(&d.url).map_err(|_| CatalogError::BadUrl {
         name: "dxvk".to_owned(),

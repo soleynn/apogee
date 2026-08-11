@@ -207,11 +207,10 @@ fn build_entry(r: RawIndex) -> Result<IndexEntry, IndexCatalogError> {
     let pin = DigestPin::from_hex(HexPins {
         blake3: r.blake3.as_deref(),
         sha256: r.sha256.as_deref(),
-    }).ok_or_else(|| {
-        IndexCatalogError::BadPin {
-            repo: r.repo.clone(),
-            version: r.version.clone(),
-        }
+    })
+    .ok_or_else(|| IndexCatalogError::BadPin {
+        repo: r.repo.clone(),
+        version: r.version.clone(),
     })?;
     let url = Url::parse(&r.url).map_err(|_| IndexCatalogError::BadUrl {
         repo: r.repo.clone(),

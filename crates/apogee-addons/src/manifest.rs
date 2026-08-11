@@ -820,13 +820,12 @@ fn build_artifact(component: &str, files: RawFiles) -> Result<Artifact, Manifest
     Ok(Artifact {
         url: parse_url(component, &files.url)?,
         pin: DigestPin::from_hex(HexPins {
-        blake3: files.blake3.as_deref(),
-        sha256: files.sha256.as_deref(),
-    }).ok_or_else(
-            || ManifestError::BadPin {
-                component: component.to_owned(),
-            },
-        )?,
+            blake3: files.blake3.as_deref(),
+            sha256: files.sha256.as_deref(),
+        })
+        .ok_or_else(|| ManifestError::BadPin {
+            component: component.to_owned(),
+        })?,
         archive: ArchiveLayout {
             format: parse_format(component, &files.archive.format)?,
             strip_prefix: files.archive.strip_prefix,

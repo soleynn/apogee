@@ -56,7 +56,9 @@ impl PatcherBackend {
             .map_err(|e| CoreError::Repair {
                 detail: format!("make {}: {e}", dir.display()),
             })?;
-        let manifest = self.fetch_bytes(&manifest_url, &dir.join("manifest.json")).await?;
+        let manifest = self
+            .fetch_bytes(&manifest_url, &dir.join("manifest.json"))
+            .await?;
         let signature = self
             .fetch_bytes(&signature_url, &dir.join("manifest.json.sig"))
             .await?;
