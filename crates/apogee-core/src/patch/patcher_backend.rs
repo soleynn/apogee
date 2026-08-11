@@ -92,14 +92,13 @@ impl PatcherBackend {
                 index: entry.source(),
                 patch_sources,
                 // The CDN base lets the repair form each index source-ref's URL without a populated
-                // cache, so a repair works even with keep-patches off. Boot heals fully this way; a game
-                // repo's HTTP range fetch additionally needs the session's patch-download credential
-                // (this repair is credential-free), so game heals only zero/empty and locally-cached
-                // ranges until that is wired.
+                // cache, so a repair works even with keep-patches off. Boot and the base game both heal
+                // fully this way; an expansion has no base to form its URLs under (below), so it heals
+                // only zero/empty and locally-cached ranges.
                 source_base_url: cdn_base_for(repo),
-                // A game repo's HTTP range fetch needs the session's patch-download credential; this
-                // credential-free repair heals boot, zero/empty, and locally-cached ranges. A live
-                // game HTTP repair carrying a real session credential is not wired yet.
+                // No session credential, and none is needed: patch delivery answers a ranged request
+                // for a game patch the same way it answers one for a boot patch, on the user agent
+                // alone. Measured against the live CDN, and a full game-repo heal has run over it.
                 headers: SePatch::boot(),
             });
         }
@@ -187,9 +186,10 @@ fn parse_url(raw: &str) -> Result<Url, CoreError> {
 /// The base URL under which `repo`'s source patches are served on the SE patch CDN, so a repair forms
 /// each index source-ref's URL as `{base}/{name}` without needing the patch cache. The repo path ids
 /// are the fixed SE CDN ids: boot `2b5cbc63` and base game `4e9a232b` (both observed from the live CDN,
-/// e.g. during the install-from-nothing run). Expansion ids are not fixed constants (the launcher reads
-/// them from the game patchlist URLs), and a game-repo HTTP repair also needs the session credential
-/// this credential-free repair lacks, so expansions return `None` and heal only from the cache for now.
+/// e.g. during the install-from-nothing run). Expansion ids are not fixed constants: the launcher reads
+/// each one from that expansion's patchlist URLs, and nothing here remembers them between runs, so an
+/// expansion returns `None` and heals only from the cache. Nothing about credentials is in the way; the
+/// CDN serves an expansion's ranges as readily as boot's.
 fn cdn_base_for(repo: Repo) -> Option<Url> {
     let path = match repo {
         Repo::Boot => "boot/2b5cbc63/",
