@@ -15,6 +15,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### apogee-cli
 - Take the one-time code on stdin and stop the launcher being dumpable (#116) _(fixed)_
+- Say what a failure was caused by, not only its outermost sentence (#191) _(fixed)_
 
 ### apogee-core
 - Keep the session id out of error text, and refuse before reading (#112) _(fixed)_
