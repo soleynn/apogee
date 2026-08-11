@@ -715,6 +715,7 @@ impl Dalamud {
                     what: name.clone(),
                     bytes_done: progress.bytes_done,
                     total: progress.total,
+                    recoveries: progress.recoveries,
                 });
             }
         });
