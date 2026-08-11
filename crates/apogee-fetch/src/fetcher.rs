@@ -211,8 +211,8 @@ impl Fetcher {
 }
 
 /// Builder for a [`Fetcher`]: the concurrency caps and the shared speed limit. `build()` with no
-/// knobs set produces the reference-parity defaults (4 files, 8 segments in flight per file, 24 in
-/// flight in total, uncapped).
+/// knobs set produces the shipped defaults (4 files, 6 segments in flight per file, 24 in flight in
+/// total, uncapped).
 #[derive(Debug)]
 pub struct FetcherBuilder {
     max_files: usize,
@@ -224,10 +224,24 @@ pub struct FetcherBuilder {
 }
 
 impl Default for FetcherBuilder {
+    /// The three caps must satisfy `max_files * max_connections_per_file <= max_connections_total`,
+    /// so that every admitted file can run all of its segments and no segment worker ever parks on the
+    /// global semaphore. Changing any one of them without the others is what breaks it.
+    ///
+    /// 4 x 8 against a total of 24 broke it, and left a quarter of the workers waiting: over a live
+    /// 207-patch install, 13 patches went 16 to 35 s between successive per-file progress frames while
+    /// aggregate throughput stayed at the link rate. Silence more than twice the stall timeout reads
+    /// exactly like the failure it is not, so a per-file progress bar built on that stream is
+    /// unreadable.
+    ///
+    /// The per-file cap gives way rather than the total, because 24 in flight is the request count
+    /// that same install measured at line rate, and because connection count is not a throughput lever
+    /// on these hosts: an h2 source serves every segment as a stream on one socket regardless. The cost
+    /// is a file split 6 ways instead of 8, paid in a dimension nothing measured cared about.
     fn default() -> Self {
         Self {
             max_files: 4,
-            max_connections_per_file: 8,
+            max_connections_per_file: 6,
             max_connections_total: 24,
             speed_limit: None,
             stall_timeout: DEFAULT_STALL_TIMEOUT,
@@ -245,7 +259,7 @@ impl FetcherBuilder {
     }
 
     /// How many segments of one file are in flight at once, and so how many segments it is split into
-    /// (default 8).
+    /// (default 6, chosen against the other two caps: see [`FetcherBuilder::default`]).
     ///
     /// Named for connections because that is what it costs against an HTTP/1.1 source: one per
     /// segment. An h2 host serves all of them as streams on a single connection instead, so the
@@ -257,7 +271,9 @@ impl FetcherBuilder {
     }
 
     /// The global cap on transfer requests in flight across all jobs (default 24), one socket each
-    /// against an HTTP/1.1 source and streams on one connection against an h2 host.
+    /// against an HTTP/1.1 source and streams on one connection against an h2 host. Keep it at or above
+    /// `max_files * max_connections_per_file`, or segment workers park on it: see
+    /// [`FetcherBuilder::default`].
     #[must_use]
     pub fn max_connections_total(mut self, n: usize) -> Self {
         self.max_connections_total = n;
@@ -366,6 +382,20 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn the_shipped_caps_let_every_admitted_file_run_all_its_segments() {
+        let b = FetcherBuilder::default();
+        assert!(
+            b.max_files * b.max_connections_per_file <= b.max_connections_total,
+            "{} files x {} segments exceeds the global cap of {}, so {} segment workers would park on \
+             the semaphore and their files would go silent while the others transfer",
+            b.max_files,
+            b.max_connections_per_file,
+            b.max_connections_total,
+            b.max_files * b.max_connections_per_file - b.max_connections_total,
+        );
     }
 
     // Both guards fire before any scheduler or network contact, so these need no server.
