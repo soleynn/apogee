@@ -4,9 +4,11 @@
 //! `Locked` property are all plain calls that raise no prompt. A probe that popped the keyring's
 //! password dialog on every launch would be worse than no probe.
 //!
-//! The probe deliberately does not go through `keyring::Entry`. Constructing one performs no I/O at
-//! all, so a probe built on it reports a healthy store from inside a sandbox that cannot reach one,
-//! which is the exact failure this is here to name.
+//! The probe deliberately does not go through the credential path. Building an entry performs no
+//! I/O at all, and opening the store only reaches the bus, so a probe built on either answers
+//! "reachable" for a provider that owns no collection to write into and cannot make one. Resolving
+//! that collection and reading its `Locked` property are what separate the conditions below, and
+//! neither is reachable through a credential.
 
 use std::path::Path;
 
@@ -41,6 +43,30 @@ pub(crate) enum BusFailure {
 /// this the one call whose whole job is to say what the store is doing is the one call that can
 /// never return. A wedged bus proxy and a hung `dbus-daemon` both produce it.
 const BUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the store has no default collection, asked of an absence the read path reported.
+///
+/// The store searches the whole service to read and resolves the default collection to write, so
+/// against a provider that has never been initialized a read finds nothing and reports an absence
+/// while the write that would follow it fails outright. An absence is the answer that sends a caller
+/// off to prompt for a password this store will then refuse to keep, so a miss is checked against
+/// the collection before it is believed.
+///
+/// `false` whenever the question cannot be answered, including on the deadline: a caller that
+/// already has an absence in hand keeps it rather than being handed a condition this could not
+/// establish. Bounded for the reason [`probe`] is, because the same handshake hangs the same way.
+#[must_use]
+pub(crate) fn no_default_collection() -> bool {
+    within(BUS_DEADLINE, false, || {
+        let Ok(service) = SecretService::connect(EncryptionType::Dh) else {
+            return false;
+        };
+        matches!(
+            service.get_default_collection(),
+            Err(secret_service::Error::NoResult)
+        )
+    })
+}
 
 pub(crate) fn probe() -> BackendReport {
     let (state, sandbox) = probe_within(BUS_DEADLINE);
