@@ -49,6 +49,7 @@ is tagged with its change type. Versioning aims to follow
 - Raise the HTTP/2 flow-control window off hyper's defaults (#187) _(performance)_
 - Pin the signed catalogs on BLAKE3 (#188) _(added)_
 - Make retries, stalls, demotions and dropped mirrors observable (#199) _(added)_
+- Make the three concurrency caps agree (#202) _(fixed)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
