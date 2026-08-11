@@ -28,6 +28,7 @@ is tagged with its change type. Versioning aims to follow
 - Report the setup a prefix is missing in its health check (#163) _(fixed)_
 - Refuse every redirect on the client that carries a credential (#174) _(added)_
 - Make the TLS escape hatch reach this machine's trust store (#184) _(fixed)_
+- Remember where each repo's patches are served (#197) _(added)_
 
 ### apogee-fetch
 - Stop asserting the capability probe won a race it is built to lose (#121) _(testing)_
