@@ -102,7 +102,7 @@ pub(crate) async fn dispatch(
 
     // Skip a satisfied destination before spending a probe request.
     if let Some(verified) =
-        download::check_existing_dest(spec.dest(), &verify, Some(len), &progress).await?
+        download::check_existing_dest(spec.dest(), &verify, Some(len), &progress, &cancel).await?
     {
         return Ok(verified);
     }
@@ -609,6 +609,20 @@ async fn transfer(
             end: Mutex::new(None),
         });
 
+        // If the future driving this transfer is dropped (a caller racing it against something
+        // else, a select arm that lost), the tasks spawned below would otherwise keep streaming
+        // into the .part and keep their global connection permits, with nobody left to publish,
+        // fail, or cancel the job. The guard turns an abandoned future into a cancelled transfer:
+        // every worker, the verifier, and the aggregator all watch `done`. On the ordinary paths
+        // the token is already cancelled by the time the guard drops, so it is then a no-op.
+        struct StopOnDrop(CancellationToken);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.cancel();
+            }
+        }
+        let _stop = StopOnDrop(state.done.clone());
+
         let aggregate = tokio::spawn(aggregator(state.clone(), progress.clone(), len));
         let verifier = state
             .verify
@@ -637,7 +651,7 @@ async fn transfer(
         }
     }
 
-    verify_and_publish(dest, &part, &apdl, len, verify.digest, &progress).await
+    verify_and_publish(dest, &part, &apdl, len, verify.digest, &progress, &cancel).await
 }
 
 /// Emit a monotonic download snapshot on every progress tick, so concurrent workers cannot interleave
@@ -847,11 +861,23 @@ fn spawn_hash(
         // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also
         // uses. The permit is scoped to the hash itself: reporting a verdict does no hashing, and a
         // dirty block's verdict waits out a backoff, so holding it any longer would park the whole
-        // verification pipeline behind however long a repair was told to wait.
+        // verification pipeline behind however long a repair was told to wait. The wait for it is
+        // raced against both tokens, and the tokens are re-checked before the hash starts: a
+        // cancelled transfer must stop feeding the blocking pool, not drain its backlog through it.
         let hashed = {
-            let Ok(_permit) = limit.acquire_owned().await else {
-                return; // the semaphore is never closed; this only guards a shutdown race
+            let permit = tokio::select! {
+                biased;
+                () = state.done.cancelled() => return,
+                () = cancel.cancelled() => return,
+                permit = limit.acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return, // the semaphore is never closed; this only guards a shutdown race
+                },
             };
+            let _permit = permit;
+            if state.done.is_cancelled() || cancel.is_cancelled() {
+                return;
+            }
             tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await
         };
         match hashed {
@@ -1081,7 +1107,19 @@ async fn stream_segment(
             }
         };
         let bytes: &[u8] = chunk.as_ref();
-        state.limiter.acquire(bytes.len() as u64).await;
+        // Raced against both tokens: at a low rate this wait is chunk-size over rate long, and it
+        // sits outside the select above, so an unraced wait would hold a cancel off by that long.
+        // Tokens are only debited when the wait completes, so abandoning it mid-wait leaks none.
+        let stopped = tokio::select! {
+            biased;
+            () = cancel.cancelled() => true,
+            () = state.done.cancelled() => true,
+            () = state.limiter.acquire(bytes.len() as u64) => false,
+        };
+        if stopped {
+            let _ = commit_batch(&mut file, &mut batch, &mut committed, state).await;
+            return SegmentResult::Stop;
+        }
         // Clamp to the requested range. All Square Enix input is hostile: a server may answer a closed
         // range with an over-long body, and writing past range.end would overwrite a neighboring block
         // that is already verified and never re-hashed. Keep only up to range.end, commit, and finish
@@ -1176,11 +1214,12 @@ async fn verify_and_publish(
     len: u64,
     pin: Option<DigestPin>,
     progress: &Reporter,
+    cancel: &CancellationToken,
 ) -> Result<VerifiedFile, FetchError> {
     if let Some(pin) = pin {
         progress.emit(len, Some(len), Phase::Verifying);
         let expected = pin.bytes();
-        let got = download::hash_file(part, pin).await?;
+        let got = download::hash_file(part, pin, cancel).await?;
         if got != expected {
             // Drop the journal so a retry restarts clean rather than re-assembling the same bad bytes.
             let _ = tokio::fs::remove_file(apdl).await;

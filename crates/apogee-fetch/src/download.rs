@@ -86,7 +86,7 @@ pub(crate) async fn run(
     let apdl = sidecar(dest, ".apdl");
 
     if let Some(verified) =
-        check_existing_dest(dest, &verify, spec.expected_len(), &progress).await?
+        check_existing_dest(dest, &verify, spec.expected_len(), &progress, &cancel).await?
     {
         return Ok(verified);
     }
@@ -342,7 +342,7 @@ pub(crate) async fn run(
     // fails the file and drops the journal (a retry restarts clean).
     if let Some(plan) = &verify.blocks {
         progress.emit(written, total, Phase::Verifying);
-        if let Some(block) = verify_blocks_seq(&part, plan).await? {
+        if let Some(block) = verify_blocks_seq(&part, plan, &cancel).await? {
             let _ = tokio::fs::remove_file(&apdl).await;
             return Err(FetchError::BlockVerifyFailed {
                 block,
@@ -496,8 +496,19 @@ async fn stream_body(
                 None => break,
                 Some(Ok(chunk)) => {
                     let bytes: &[u8] = chunk.as_ref();
-                    // Throttle on the bytes just read off the socket, before consuming more.
-                    shared.limiter.acquire(bytes.len() as u64).await;
+                    // Throttle on the bytes just read off the socket, before consuming more. Raced
+                    // against the cancel token: at a low rate this wait is chunk-size over rate long,
+                    // and inside this handler the select's own cancel arm is not being polled, so an
+                    // unraced wait would hold a cancel off by that long. The tokens are only debited
+                    // when the wait completes, so abandoning it mid-wait leaks none.
+                    let cancelled = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => true,
+                        () = shared.limiter.acquire(bytes.len() as u64) => false,
+                    };
+                    if cancelled {
+                        Some(FetchError::Cancelled)
+                    } else {
                     if let Some(h) = hasher.as_mut() {
                         h.update(bytes);
                     }
@@ -509,6 +520,7 @@ async fn stream_body(
                         tick(written, high, Phase::Downloading);
                     }
                     None
+                    }
                 }
                 Some(Err(e)) => Some(transport_error(url, e)),
             },
@@ -857,12 +869,18 @@ pub(crate) fn plan(validator: &Validator, expected_len: Option<u64>) -> Result<V
 }
 
 /// Hash each block of `path` from disk in order, returning the index of the first block whose SHA1 does
-/// not match its plan, or `None` when every block verifies. Each block is hashed on a blocking worker.
+/// not match its plan, or `None` when every block verifies. Each block is hashed on a blocking worker,
+/// and the token is checked between blocks: over a multi-gigabyte file this re-hash runs for minutes,
+/// which without the check was that long of a cancel being ignored.
 pub(crate) async fn verify_blocks_seq(
     path: &Path,
     plan: &BlockPlan,
+    cancel: &CancellationToken,
 ) -> Result<Option<u32>, FetchError> {
     for i in 0..plan.count() {
+        if cancel.is_cancelled() {
+            return Err(FetchError::Cancelled);
+        }
         let range = plan.block_range(i);
         let want = plan.expected(i);
         let owned = path.to_path_buf();
@@ -886,10 +904,11 @@ pub(crate) async fn check_existing_dest(
     verify: &Verify,
     expected_len: Option<u64>,
     progress: &Reporter,
+    cancel: &CancellationToken,
 ) -> Result<Option<VerifiedFile>, FetchError> {
     if let Ok(meta) = tokio::fs::metadata(dest).await
         && meta.is_file()
-        && dest_satisfies(dest, meta.len(), verify, expected_len).await?
+        && dest_satisfies(dest, meta.len(), verify, expected_len, cancel).await?
     {
         progress.emit(meta.len(), expected_len, Phase::Complete);
         return Ok(Some(VerifiedFile::mint(dest)));
@@ -905,27 +924,36 @@ async fn dest_satisfies(
     len: u64,
     verify: &Verify,
     expected_len: Option<u64>,
+    cancel: &CancellationToken,
 ) -> Result<bool, FetchError> {
     if expected_len.is_some_and(|n| n != len) {
         return Ok(false);
     }
     if let Some(plan) = &verify.blocks {
-        return Ok(verify_blocks_seq(dest, plan).await?.is_none());
+        return Ok(verify_blocks_seq(dest, plan, cancel).await?.is_none());
     }
     match verify.digest {
         None => Ok(true),
-        Some(pin) => Ok(hash_file(dest, pin).await? == pin.bytes()),
+        Some(pin) => Ok(hash_file(dest, pin, cancel).await? == pin.bytes()),
     }
 }
 
-/// Hash a file on disk in bounded memory, under the function `pin` names.
-pub(crate) async fn hash_file(path: &Path, pin: DigestPin) -> Result<[u8; 32], FetchError> {
+/// Hash a file on disk in bounded memory, under the function `pin` names. The token is checked once
+/// per chunk, so a cancel lands within one read of arriving rather than after the whole file.
+pub(crate) async fn hash_file(
+    path: &Path,
+    pin: DigestPin,
+    cancel: &CancellationToken,
+) -> Result<[u8; 32], FetchError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| FetchError::io(path, e))?;
     let mut hasher = pin.hasher();
     let mut buf = vec![0u8; READ_CHUNK];
     loop {
+        if cancel.is_cancelled() {
+            return Err(FetchError::Cancelled);
+        }
         let read = file
             .read(&mut buf)
             .await
