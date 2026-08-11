@@ -19,6 +19,10 @@ tools/*/target/
 # Corpus cache: boot patches fetched by URL+SHA256 on demand, keyed by digest, never checked in
 /.corpus-cache/
 
+# Block indexes: derived, ~94 MB a set, published as release assets and pinned by the signed
+# manifest beside this path, never committed (site/indexes/README.md)
+/site/indexes/artifacts/
+
 # OS cruft
 .DS_Store
 

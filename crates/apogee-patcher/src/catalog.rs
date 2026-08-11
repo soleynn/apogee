@@ -507,7 +507,7 @@ mod tests {
             .expect("hosted manifest verifies against the compiled-in key");
         assert!(
             catalog
-                .resolve(Repo::Game, "2024.03.28.0000.0000")
+                .resolve(Repo::Game, "2026.08.05.0000.0000")
                 .is_some()
         );
         // A one-byte flip breaks the signature under the same key.
@@ -520,9 +520,10 @@ mod tests {
     }
 
     /// The hosted staging manifest and its detached signature, embedded at build time, must verify
-    /// against the compiled-in key and resolve the sample index; the resolved pin must match the
-    /// committed `.apzi` byte-for-byte. This catches a mistyped key, a manifest reformatted after
-    /// signing, or an artifact regenerated without re-signing.
+    /// against the compiled-in key and carry a row for every repo a repair plans; the resolved pin
+    /// must match the committed `.apzi` byte-for-byte. This catches a mistyped key, a manifest
+    /// reformatted after signing, an artifact regenerated without re-signing, and a patch-day
+    /// re-author that moved some repos to the new version and left others behind.
     #[test]
     fn the_hosted_manifest_verifies_against_the_compiled_in_key() {
         let manifest = include_bytes!("../../../site/indexes/manifest.json");
@@ -531,29 +532,55 @@ mod tests {
         let catalog = IndexCatalog::parse_and_verify(manifest, signature, &key)
             .expect("hosted manifest verifies and parses against the compiled-in key");
 
+        // A repair plans every installed repo at once and refuses on the first it cannot resolve, so
+        // a row missing here is a repair that cannot run at all rather than one that runs narrower.
+        for (repo, version) in [
+            (Repo::Boot, "2026.07.13.0000.0001"),
+            (Repo::Game, "2026.08.05.0000.0000"),
+            (Repo::Expansion(1), "2026.07.03.0000.0000"),
+            (Repo::Expansion(2), "2026.07.06.0000.0000"),
+            (Repo::Expansion(3), "2026.08.05.0000.0000"),
+            (Repo::Expansion(4), "2026.08.05.0000.0000"),
+            (Repo::Expansion(5), "2026.08.05.0000.0000"),
+        ] {
+            assert!(
+                catalog.resolve(repo, version).is_some(),
+                "the hosted catalog must carry {repo:?} {version}",
+            );
+        }
+
+        // Pinned against boot's artifact rather than a larger repo's: the property is that a row's
+        // digest describes the bytes it was taken over, and the smallest artifact proves it without
+        // embedding tens of megabytes in the test binary. The artifacts are published as release
+        // assets rather than committed, so this one is kept as a fixture beside the test; a row
+        // regenerated without re-signing fails here, and a release asset that does not match the row
+        // describing it fails against the pin at download time.
         let entry = catalog
-            .resolve(Repo::Game, "2024.03.28.0000.0000")
-            .expect("the sample game index entry resolves");
-        let artifact =
-            include_bytes!("../../../site/indexes/artifacts/game-2024.03.28.0000.0000.apzi");
+            .resolve(Repo::Boot, "2026.07.13.0000.0001")
+            .expect("the boot index entry resolves");
+        let artifact = include_bytes!("../tests/fixtures/boot-2026.07.13.0000.0001.apzi");
         // The row publishes both spellings so a build that predates BLAKE3 can still read it, and
         // the pin taken here is the preferred one, checked against the artifact it describes.
         assert_eq!(
             entry.pin,
             DigestPin::Blake3(apogee_test_support::chaos::blake3_of(artifact)),
-            "the manifest pin must match the committed artifact",
+            "the manifest pin must match the artifact it was taken over",
         );
+
         // The base survived the signing ceremony in a form that forms source URLs. A row reformatted
-        // by hand is the way this comes back wrong, and the trailing slash is what it loses.
+        // by hand is the way this comes back wrong, and the trailing slash is what it loses. Checked
+        // on an expansion, the only repo whose base nothing else can supply.
         assert_eq!(
-            entry
+            catalog
+                .resolve(Repo::Expansion(1), "2026.07.03.0000.0000")
+                .expect("the ex1 index entry resolves")
                 .source_base
                 .as_ref()
                 .expect("the hosted row names where its source patches are served")
-                .join("D2024.03.28.0000.0000.patch")
+                .join("D2026.07.03.0000.0000.patch")
                 .expect("the hosted base forms a source url")
                 .as_str(),
-            "http://patch-dl.ffxiv.com/game/4e9a232b/D2024.03.28.0000.0000.patch",
+            "http://patch-dl.ffxiv.com/game/ex1/6b936f08/D2026.07.03.0000.0000.patch",
         );
     }
 }
