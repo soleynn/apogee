@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use apogee_runtime::{
-    Catalog, DxvkEnv, DxvkRef, GameSession, HostCaps, LaunchPlan, Prefix, Progress, RunnerKind,
-    Runtime, RuntimeError, RuntimeEvent,
+    Catalog, DxvkEnv, DxvkRef, GameSession, HostCaps, LaunchPlan, Prefix, PrefixWants, Progress,
+    RunnerKind, Runtime, RuntimeError, RuntimeEvent,
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -25,13 +25,50 @@ fn prefix_exists(dir: &Path) -> bool {
     dir.join(apogee_runtime::PREFIX_JSON).is_file()
 }
 
-/// Whether the prefix already has everything an install would place: the version the catalog
-/// publishes, and the `dxvk-nvapi` companion where one was asked for.
+/// The half of a health check the prefix cannot answer about itself: what the profile asked of it.
 ///
-/// A free function so the second half is reachable on its own. It is the half with no other way to
-/// be noticed: a prefix on the published version whose profile has just opted into the companion
-/// passes a version-only gate, and passing it means the companion's DLLs are never placed, because
-/// the install that would place them is the only thing that ever does.
+/// The runtime diagnoses a prefix against its own record, which says what the prefix *has*, so a
+/// profile that wants the companion on a prefix without it reads as nothing wrong unless the wish is
+/// handed down. This is the same composition as [`PrefixReport`](crate::PrefixReport), one layer
+/// lower: the runtime holds the facts about the prefix, this crate holds the profile, and putting
+/// them together is what a composition root is for.
+fn wants(request: &PrefixRequest) -> PrefixWants {
+    PrefixWants {
+        nvapi: request.nvapi,
+    }
+}
+
+/// Whether a check's findings need the DXVK install re-run, and whether it has to be forced past the
+/// version gate. `None` is nothing for the install to do.
+///
+/// Two problems resolve this way rather than by a repair, and only one of them wants the force. A DLL
+/// the record claims and the prefix does not have is the one case where the version gate is the wrong
+/// answer, since the record already says the published version is installed. A companion that was
+/// asked for and never placed is *not* current by that same gate, so it installs on its own; forcing
+/// there would re-download the whole of DXVK to reach a conclusion the gate had already reached.
+fn dxvk_install_for(issues: &[apogee_runtime::HealthIssue]) -> Option<bool> {
+    use apogee_runtime::HealthIssue;
+    let missing_dll = issues
+        .iter()
+        .any(|issue| matches!(issue, HealthIssue::MissingDxvkDll { .. }));
+    let missing_nvapi = issues
+        .iter()
+        .any(|issue| matches!(issue, HealthIssue::MissingNvapi));
+    (missing_dll || missing_nvapi).then_some(missing_dll)
+}
+
+/// Whether the prefix already has everything an install would place: the version the catalog
+/// publishes, and the `dxvk-nvapi` companion where one was asked for *and* the catalog pins one.
+///
+/// A free function so each half is reachable on its own. The companion half is the one with no other
+/// way to be noticed: a prefix on the published version whose profile has just opted into the
+/// companion passes a version-only gate, and passing it means the companion's DLLs are never placed,
+/// because the install that would place them is the only thing that ever does.
+///
+/// `nvapi` is what the *catalog* can deliver rather than what the profile asked for, since an install
+/// only ever records what it placed. Reading the profile's wish here instead makes a row that pins no
+/// companion re-download and re-copy the whole of DXVK on every single launch, chasing a record the
+/// install cannot write.
 fn dxvk_is_current(recorded: Option<&DxvkRef>, version: &str, nvapi: bool) -> bool {
     let Some(recorded) = recorded else {
         return false;
@@ -119,7 +156,9 @@ impl RuntimeLauncher {
         };
 
         let recorded = prefix.metadata().ok().flatten().and_then(|meta| meta.dxvk);
-        let installed = dxvk_is_current(recorded.as_ref(), &entry.version, nvapi);
+        // What the install would actually place: the companion only where the row pins one.
+        let places_nvapi = nvapi && entry.nvapi.is_some();
+        let installed = dxvk_is_current(recorded.as_ref(), &entry.version, places_nvapi);
         // `force` is the repair case: the record says the right version is installed and the files
         // are not there, which is the one situation where the version gate is the wrong answer.
         if force || !installed {
@@ -296,7 +335,7 @@ impl LaunchBackend for RuntimeLauncher {
         let Some(prefix) = prepared.prefix else {
             return Ok(None);
         };
-        let health = self.runtime.check_prefix(&prefix).await?;
+        let health = self.runtime.check_prefix(&prefix, &wants(request)).await?;
         Ok(Some(Examined {
             prefix: Some(prefix),
             health,
@@ -317,23 +356,19 @@ impl LaunchBackend for RuntimeLauncher {
         let Some(prefix) = prepared.prefix else {
             return Ok(None);
         };
-        let health = self.runtime.check_prefix(&prefix).await?;
+        let health = self.runtime.check_prefix(&prefix, &wants(request)).await?;
         if health.is_healthy() {
             return Ok(Some(Examined {
                 prefix: Some(prefix),
                 health,
             }));
         }
-        if health
-            .issues
-            .iter()
-            .any(|issue| matches!(issue, apogee_runtime::HealthIssue::MissingDxvkDll { .. }))
-        {
+        if let Some(force) = dxvk_install_for(&health.issues) {
             self.ensure_dxvk(
                 &prefix,
                 prepared.catalog.as_ref(),
                 request.nvapi,
-                true,
+                force,
                 cancel,
                 &progress,
             )
@@ -341,7 +376,7 @@ impl LaunchBackend for RuntimeLauncher {
         }
         let residual = self
             .runtime
-            .repair_prefix(&prefix, &health.issues, cancel, &progress)
+            .repair_prefix(&prefix, &health.issues, &wants(request), cancel, &progress)
             .await?;
         Ok(Some(Examined {
             prefix: Some(prefix),
@@ -628,6 +663,23 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(activates_nvapi(recorded, nvapi), expected);
+    }
+
+    /// A catalog row that pins no companion is nothing to chase.
+    ///
+    /// The gate reads what an install would place, not what the profile asked for, and this is why: an
+    /// install only records what it placed, so a wish it cannot honor would leave the record short of
+    /// the gate forever. Every launch would then re-download and re-copy the whole of DXVK to write
+    /// the same record again.
+    #[test]
+    fn a_catalog_with_no_companion_settles_instead_of_reinstalling_every_launch() {
+        // What `ensure_dxvk` computes for a row whose `nvapi` pin is absent.
+        let places_nvapi = false;
+        assert!(dxvk_is_current(
+            Some(&recorded("2.7", false)),
+            "2.7",
+            places_nvapi
+        ));
     }
 
     #[test]

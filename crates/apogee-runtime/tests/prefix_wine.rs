@@ -12,7 +12,9 @@ use std::path::Path;
 use std::process::Command;
 
 use apogee_fetch::Fetcher;
-use apogee_runtime::{HealthIssue, Prefix, Progress, RunnerKind, Runtime, RuntimePaths};
+use apogee_runtime::{
+    HealthIssue, Prefix, PrefixWants, Progress, RunnerKind, Runtime, RuntimePaths,
+};
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
@@ -86,7 +88,7 @@ async fn wineboot_initializes_and_records_a_real_prefix() {
     assert!(prefix.path().join("drive_c").is_dir());
     assert!(
         runtime
-            .check_prefix(&prefix)
+            .check_prefix(&prefix, &PrefixWants::default())
             .await
             .expect("check")
             .is_healthy(),
@@ -108,7 +110,10 @@ async fn a_broken_prefix_is_repaired_without_delete() {
     let keep = prefix.path().join("drive_c/keep.txt");
     std::fs::write(&keep, b"user data").expect("write keep");
 
-    let health = runtime.check_prefix(&prefix).await.expect("check");
+    let health = runtime
+        .check_prefix(&prefix, &PrefixWants::default())
+        .await
+        .expect("check");
     assert!(
         health
             .issues
@@ -128,6 +133,7 @@ async fn a_broken_prefix_is_repaired_without_delete() {
         .repair_prefix(
             &prefix,
             &health.issues,
+            &PrefixWants::default(),
             &CancellationToken::new(),
             &Progress::none(),
         )
