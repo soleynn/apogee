@@ -327,6 +327,51 @@ async fn repair_without_a_source_or_a_base_url_is_index_unavailable() -> Result<
     }
 }
 
+/// The same unaddressable request over a repo that is *not* damaged has to succeed: nothing is pulled
+/// from a source, so nothing needs one. This is the ordinary shape of a repair over an install whose
+/// patch cache is gone, where several repos have no URL their sources can be formed under; resolving
+/// sources before verifying made one such repo fail the whole run even when every byte of it was fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_healthy_repo_repairs_with_no_addressable_source() -> Result<(), Box<dyn Error>> {
+    let chain = fixtures::chain();
+    let game_root = tempfile::tempdir()?;
+    let baseline = install_game(&chain, game_root.path())?;
+    let repo = game_root.path().join("game");
+
+    let store = tempfile::tempdir()?;
+    let index_path = store.path().join("game.apzi");
+    write_index_file(&chain, VERSION, &index_path)?;
+
+    // A stray, so the pass has work of a kind that needs no source at all. Quarantine must still run.
+    std::fs::write(repo.join("sqpack/ffxiv/leftover.dat"), b"do not delete me")?;
+
+    let req = RepairRequest {
+        game_root: game_root.path().to_path_buf(),
+        repos: vec![RepairRepo {
+            repo: Repo::Game,
+            target_version: VERSION.to_owned(),
+            index: IndexSource::LocalFile(index_path),
+            patch_sources: Vec::new(),
+            source_base_url: None,
+            headers: SePatch::new("s"),
+        }],
+    };
+    let outcome = patcher(store.path())?.repair(req).await?;
+
+    assert_eq!(outcome.bytes_refetched, 0, "a clean repo fetched something");
+    assert_eq!(
+        outcome.quarantined.len(),
+        1,
+        "the stray was not quarantined"
+    );
+    tree_manifest::assert_tree_matches(
+        &repo,
+        &baseline,
+        Some(&is_ver_or_bck as &dyn Fn(&Path) -> bool),
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repair_trusts_local_patches_first_and_fetches_nothing() -> Result<(), Box<dyn Error>> {
     let chain = fixtures::chain();
@@ -697,6 +742,10 @@ async fn an_index_referencing_an_unprovided_source_is_index_unavailable()
     let store = tempfile::tempdir()?;
     let index_path = store.path().join("game.apzi");
     write_index_file(&chain, VERSION, &index_path)?;
+
+    // Damage is what makes an unaddressable source fatal: bytes have to come from one now. A repo with
+    // nothing broken is the neighbouring test, and it succeeds.
+    corrupt_byte(&game_root.path().join("game").join(fixtures::DAT0_PATH), 0)?;
 
     // Provide only p0, though the index references p0 and p1: repair cannot proceed missing a source.
     let servers = serve(&chain).await?;
