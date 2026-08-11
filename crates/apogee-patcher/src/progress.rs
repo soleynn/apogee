@@ -3,9 +3,10 @@
 use crate::Repo;
 
 /// A progress frame from an install, relayed onto one stream from fetch (download) and zipatch
-/// (apply). Clockless like the underlying frames: a consumer derives rate/ETA from successive
-/// `bytes_done`. `index` is the patch's position in the SE-ordered set. `#[non_exhaustive]` so
-/// repair phases can be added later without a break.
+/// (apply). Clockless like the underlying frames: a consumer derives rate from successive
+/// `bytes_done`, and an ETA only for the phase that carries a total (`Downloading`). `index` is the
+/// patch's position in the SE-ordered set. `#[non_exhaustive]` so repair phases can be added later
+/// without a break.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PatchProgress {
@@ -17,12 +18,13 @@ pub enum PatchProgress {
         total: Option<u64>,
     },
     /// A patch is being applied to disk in strict list order (relayed from
-    /// `apogee_zipatch::ApplyProgress`).
+    /// `apogee_zipatch::ApplyProgress`). Carries no total, unlike `Downloading`: apply progress is
+    /// monotonic bytes with no known end, since nothing in the patch format declares how many bytes
+    /// reach disk.
     Applying {
         repo: Repo,
         index: u32,
         bytes_done: u64,
-        total: Option<u64>,
     },
     /// A patch finished applying cleanly and its `.ver` advanced to `version`.
     Applied {
