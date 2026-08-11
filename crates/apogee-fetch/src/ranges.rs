@@ -32,12 +32,32 @@ const MAX_RANGES_PER_REQUEST: usize = 256;
 /// How ranges are packed into `Range` requests. A request holds at most `max_ranges` ranges, and its
 /// `bytes=…` header value stays at or below `max_range_header_bytes` (a single range always gets its
 /// own request even if it alone exceeds the budget, so progress is guaranteed).
+///
+/// `#[non_exhaustive]`: start from [`default`](Self::default) and adjust through the setters, so a
+/// packing cap added later does not break every literal.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct RangePacking {
     /// The most ranges one request may carry (clamped to `1..=256`).
     pub max_ranges: usize,
     /// The most bytes the `Range` header value may span before a new request is started.
     pub max_range_header_bytes: usize,
+}
+
+impl RangePacking {
+    /// Set the most ranges one request may carry (clamped to `1..=256` when packing).
+    #[must_use]
+    pub fn max_ranges(mut self, n: usize) -> Self {
+        self.max_ranges = n;
+        self
+    }
+
+    /// Set the most bytes the `Range` header value may span before a new request is started.
+    #[must_use]
+    pub fn max_range_header_bytes(mut self, n: usize) -> Self {
+        self.max_range_header_bytes = n;
+        self
+    }
 }
 
 impl Default for RangePacking {

@@ -105,10 +105,7 @@ async fn packing_stays_under_a_strict_request_header_limit() {
         .unwrap();
     let ranges: Vec<Range<u64>> = (0..30).map(|i| (i * 300)..(i * 300 + 10)).collect();
     // A ~20-byte Range value budget forces roughly one range per request.
-    let packing = RangePacking {
-        max_ranges: 256,
-        max_range_header_bytes: 20,
-    };
+    let packing = RangePacking::default().max_range_header_bytes(20);
     let got = collect(&server, len, &ranges, None, packing).await.unwrap();
     assert_exact(seed, &got, &ranges);
     // The transfer succeeded (no 431), and it took more than one request to stay under the limit.

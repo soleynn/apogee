@@ -23,7 +23,12 @@ use crate::ranges::RangePacking;
 
 /// One source patch a [`HttpRangeSource`] can fetch ranges of, keyed by its position in the chain
 /// (`sources[i]` serves `PatchId(i)`, matching `Index::source_refs` order).
+///
+/// `#[non_exhaustive]`: built through [`new`](Self::new) and read through its public fields, so a
+/// per-source input added later (the way the patch token question could land) widens the
+/// constructor set rather than breaking every literal.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HttpSource {
     /// Where the patch file is served.
     pub url: Url,
@@ -31,6 +36,26 @@ pub struct HttpSource {
     pub expected_len: u64,
     /// The request header policy (e.g. the Square Enix patch `User-Agent`); `None` for no extra headers.
     pub policy: Option<HeaderPolicy>,
+}
+
+impl HttpSource {
+    /// A source serving `url`, whose file is `expected_len` bytes long, with no extra request
+    /// headers.
+    #[must_use]
+    pub fn new(url: Url, expected_len: u64) -> Self {
+        Self {
+            url,
+            expected_len,
+            policy: None,
+        }
+    }
+
+    /// Set the request header policy (e.g. the Square Enix patch `User-Agent`).
+    #[must_use]
+    pub fn policy(mut self, policy: HeaderPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
 }
 
 /// An `apogee-zipatch` `RangeSource` that pulls broken byte ranges over HTTP. Built from a `Fetcher`,

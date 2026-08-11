@@ -17,11 +17,7 @@ async fn read_ranges_fetches_a_patch_over_http() -> Result<(), Box<dyn Error>> {
     let server = ChaosServer::builder(seed, len).start().await?;
     let fetcher = Fetcher::builder().build()?;
     let handle = tokio::runtime::Handle::current();
-    let sources = vec![HttpSource {
-        url: server.url("p0.patch"),
-        expected_len: len,
-        policy: None,
-    }];
+    let sources = vec![HttpSource::new(server.url("p0.patch"), len)];
     let mut src = HttpRangeSource::new(fetcher, handle, sources);
 
     let ranges: Vec<Range<u64>> = vec![100..200, 3000..3100];
@@ -55,11 +51,7 @@ async fn an_unknown_patch_id_is_a_corrupt_error() -> Result<(), Box<dyn Error>> 
     let server = ChaosServer::builder(1, 100).start().await?;
     let fetcher = Fetcher::builder().build()?;
     let handle = tokio::runtime::Handle::current();
-    let sources = vec![HttpSource {
-        url: server.url("p0.patch"),
-        expected_len: 100,
-        policy: None,
-    }];
+    let sources = vec![HttpSource::new(server.url("p0.patch"), 100)];
     let mut src = HttpRangeSource::new(fetcher, handle, sources);
 
     let ranges: Vec<Range<u64>> = std::iter::once(0u64..10).collect();
@@ -83,11 +75,7 @@ async fn a_transport_failure_maps_to_a_zipatch_io_error() -> Result<(), Box<dyn 
         .await?;
     let fetcher = Fetcher::builder().build()?;
     let handle = tokio::runtime::Handle::current();
-    let sources = vec![HttpSource {
-        url: server.url("p0.patch"),
-        expected_len: 100,
-        policy: None,
-    }];
+    let sources = vec![HttpSource::new(server.url("p0.patch"), 100)];
     let mut src = HttpRangeSource::new(fetcher, handle, sources);
 
     let ranges: Vec<Range<u64>> = std::iter::once(0u64..10).collect();
@@ -117,11 +105,7 @@ async fn a_callback_error_is_resurfaced_verbatim() -> Result<(), Box<dyn Error>>
     let server = ChaosServer::builder(3, 4096).start().await?;
     let fetcher = Fetcher::builder().build()?;
     let handle = tokio::runtime::Handle::current();
-    let sources = vec![HttpSource {
-        url: server.url("p0.patch"),
-        expected_len: 4096,
-        policy: None,
-    }];
+    let sources = vec![HttpSource::new(server.url("p0.patch"), 4096)];
     let mut src = HttpRangeSource::new(fetcher, handle, sources);
 
     let ranges: Vec<Range<u64>> = std::iter::once(0u64..100).collect();
