@@ -1,5 +1,7 @@
 //! The aggregated patch-progress event stream.
 
+use apogee_fetch::Recoveries;
+
 use crate::Repo;
 
 /// A progress frame from an install, relayed onto one stream from fetch (download) and zipatch
@@ -16,6 +18,10 @@ pub enum PatchProgress {
         index: u32,
         bytes_done: u64,
         total: Option<u64>,
+        /// What the transfer has recovered from to get this far, relayed unchanged. Carried rather
+        /// than flattened away because none of it reaches a caller any other way: every recovery it
+        /// counts ends in a download that succeeded.
+        recoveries: Recoveries,
     },
     /// A patch is being applied to disk in strict list order (relayed from
     /// `apogee_zipatch::ApplyProgress`). Carries no total, unlike `Downloading`: apply progress is
