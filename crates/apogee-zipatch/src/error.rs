@@ -40,6 +40,11 @@ pub enum Limit {
 }
 
 /// ZiPatch parse/apply failures. Byte offsets travel with every variant for triage.
+///
+/// A seam constraint rides two variants: `apogee-fetch`'s `HttpRangeSource` (public API of a crate
+/// with a semver commitment) constructs [`Io`](Error::Io) and [`Corrupt`](Error::Corrupt) by
+/// literal, with [`Op::Read`]. Sealing either variant, changing its fields, or removing that `Op`
+/// row breaks that crate's build, so those shapes hold until both crates take a major together.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {

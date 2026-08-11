@@ -10,7 +10,9 @@
 use std::error::Error;
 use std::time::Duration;
 
-use apogee_fetch::{DownloadSpec, FetchError, Fetcher, RangePacking, RetryPolicy, Validator};
+use apogee_fetch::{
+    DownloadSpec, FetchError, Fetcher, HttpSource, RangePacking, RetryPolicy, Validator,
+};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, sha256_of};
 use tokio_util::sync::CancellationToken;
 
@@ -77,7 +79,9 @@ async fn a_source_that_never_answers_ends_the_transfer_instead_of_hanging() {
     .unwrap_err();
 
     match err {
-        FetchError::Stalled { ref url, at_bytes } => {
+        FetchError::Stalled {
+            ref url, at_bytes, ..
+        } => {
             assert_eq!(url, &server.url("f.bin"));
             assert_eq!(at_bytes, 0, "nothing was ever delivered to stall past");
         }
@@ -294,11 +298,10 @@ async fn a_silent_host_hands_a_range_fetch_back_instead_of_parking_it() {
     let err = bounded(async {
         fetcher(3)?
             .fetch_ranges(
-                &url,
-                64 * 1024,
+                &HttpSource::new(url.clone(), 64 * 1024),
                 &ranges,
-                None,
                 RangePacking::default(),
+                CancellationToken::new(),
                 |_, _| Ok(()),
             )
             .await
@@ -310,7 +313,9 @@ async fn a_silent_host_hands_a_range_fetch_back_instead_of_parking_it() {
     .unwrap();
 
     match err {
-        FetchError::Stalled { ref url, at_bytes } => {
+        FetchError::Stalled {
+            ref url, at_bytes, ..
+        } => {
             assert_eq!(url, &server.url("f.bin"));
             assert_eq!(
                 at_bytes, 4096,

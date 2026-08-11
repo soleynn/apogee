@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 //! Resumable, verified HTTP downloads.
 //!
 //! A download streams to a sidecar `.part` file, is checked against its [`Validator`], and is
@@ -12,6 +13,18 @@
 //! sites also emits a `tracing` event with the source, offset and cause behind it. None of them
 //! reaches the caller as an error, so without the two a transfer that fought for every byte and one
 //! that sailed through are indistinguishable.
+//!
+//! # Stability
+//!
+//! The crate's version commitment covers the default feature set. `testing` and `fuzzing` are
+//! development seams, compiled only into test and fuzz builds; what they expose can change without
+//! a major version.
+//!
+//! One foreign seam is load-bearing: [`HttpRangeSource`] implements `apogee-zipatch`'s
+//! `RangeSource`, so that trait's signature, `PatchId`, and the `Error::Io`/`Error::Corrupt`
+//! variants this adapter constructs are part of this crate's public surface. A breaking change to
+//! that seam is a breaking change here: the two crates version together across it, and the seam's
+//! side of the commitment is recorded beside those items in `apogee-zipatch`.
 
 mod block;
 mod download;
@@ -39,7 +52,7 @@ mod validator;
 
 pub use error::{FetchError, SpecError};
 pub use fetcher::{Fetcher, FetcherBuilder};
-pub use hash::DigestPin;
+pub use hash::{DigestPin, HexPins};
 pub use headers::HeaderPolicy;
 pub use job::Job;
 pub use limiter::LimitHandle;

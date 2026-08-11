@@ -7,12 +7,14 @@ cd "$(dirname "$0")/.."
 status=0
 report() { printf 'FAIL: %s\n' "$1" >&2; printf '%s\n' "$2" | sed 's/^/  /' >&2; status=1; }
 
-# 1. Byte-order conversions live only in each crate's `bytes` module (the one endianness home).
-#    ZiPatch is the mixed-endian format, so this gate matters most there.
-for c in sqex-crypto apogee-sqpack apogee-zipatch; do
+# 1. Byte-order conversions live only in each crate's one endianness home: the `bytes` module for
+#    the wire-format crates (ZiPatch is the mixed-endian format, so this gate matters most there),
+#    and `journal.rs` for apogee-fetch, whose only byte layout is the frozen `.apdl` sidecar.
+for pair in sqex-crypto:bytes apogee-sqpack:bytes apogee-zipatch:bytes apogee-fetch:journal; do
+  c=${pair%%:*} home=${pair##*:}
   hits=$(grep -rnE '(from|to)_(le|be)_bytes' "crates/$c/src" --include='*.rs' \
-    | grep -v '/bytes\.rs:' || true)
-  [ -z "$hits" ] || report "byte-order conversion outside $c/src/bytes.rs" "$hits"
+    | grep -v "/${home}\.rs:" || true)
+  [ -z "$hits" ] || report "byte-order conversion outside $c/src/${home}.rs" "$hits"
 done
 
 # 2. No ambient global state in the library crates.
@@ -290,6 +292,23 @@ if ! tr ',' '\n' <<<"$selection" | grep -qx rustls-tls-native-roots; then
       'reqwest resolves without rustls-tls-native-roots, so APOGEE_TLS_SYSTEM_ROOTS restores a' \
       'root set compiled into the binary and a user behind an intercepting proxy has no way in.' \
       "apogee-cli resolves reqwest with: $selection")"
+fi
+
+# 9c. The download engine's test seams stay out of the shipping selection. `apogee-fetch/testing`
+#    compiles a builder knob that adds trusted roots beside the system store, and `fuzzing` exports
+#    the journal decoder; both exist for other crates' tests and for the fuzz workspace, and both are
+#    declared outside the crate's version commitment on that basis. As with gate 9a, dev edges turn
+#    them on all over the workspace and Cargo unifies features across a `--workspace --all-targets`
+#    build, so the only thing keeping them out of a release is that no normal edge selects either.
+#    Asserted off the resolver, which is the shipping selection.
+selection=$(cargo tree -p apogee-cli -e normal --prefix none -f '{f} {p}' \
+  | awk '$2 == "apogee-fetch" { print $1 }' | sort -u)
+if tr ',' '\n' <<<"$selection" | grep -qxE 'testing|fuzzing'; then
+  report "the shipping launcher compiles apogee-fetch's test seams" \
+    "$(printf '%s\n%s\n%s' \
+      'a normal dependency edge selects apogee-fetch/testing or /fuzzing, so a release build' \
+      'carries the extra-root knob or the fuzz-only journal decoder.' \
+      "apogee-cli resolves apogee-fetch with: $selection")"
 fi
 
 # 10. Unsafe code has exactly one home. The workspace lint is `deny` rather than `forbid` so that the

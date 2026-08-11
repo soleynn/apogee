@@ -1,6 +1,7 @@
 //! Segmented multi-connection download behavior against the chaos server.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use apogee_fetch::{DownloadSpec, FetchError, Fetcher, Validator};
 use apogee_test_support::chaos::{ChaosServer, body_sha256, sha256_of};
@@ -39,7 +40,7 @@ async fn segmented_download_reassembles_correctly() {
 
     // Submit as a job and drain its progress stream, exercising the Job handle.
     let mut job = fetcher.submit(spec);
-    let mut progress = job.progress().into_inner();
+    let mut progress = job.progress();
     let watcher = tokio::spawn(async move {
         let mut last = 0;
         while let Some(p) = progress.recv().await {
@@ -261,5 +262,67 @@ async fn a_server_length_that_disagrees_fails_before_publishing() {
     assert!(
         !dest.exists(),
         "a length-mismatched download never publishes"
+    );
+}
+
+/// Dropping the `download` future must stop the transfer, not detach it. The engine cancels its own
+/// end token when the future driving it is dropped; without that, the spawned workers keep
+/// streaming into the `.part` with nobody left to publish, fail, or cancel the job, and they hold
+/// global connection permits the whole time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_the_download_future_stops_the_workers() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let part = sidecar(&dest, ".part");
+    // Large and slow enough that leaked workers could not finish inside the observation window
+    // below, which would end their streaming for the wrong reason and hide the leak: ~38 MiB/s
+    // across six workers puts completion seconds past the last sample.
+    let len = 96 * MIB;
+    let server = ChaosServer::builder(13, len)
+        .chunk(64 * 1024)
+        .throttle(Duration::from_millis(10))
+        .start()
+        .await
+        .unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("f.bin"),
+        &dest,
+        Validator::Sha256(body_sha256(13, len)),
+    )
+    .expected_len(len)
+    .build()
+    .unwrap();
+    let fetcher = Fetcher::builder().build().unwrap();
+
+    // Drop the future mid-transfer; the timeout's expiry is the drop.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(200),
+        fetcher.download(&spec, None, CancellationToken::new()),
+    )
+    .await;
+    assert!(dropped.is_err(), "the transfer should still be running");
+
+    // Let in-flight batches land, then the durable bytes must stop moving. The `.part` is written
+    // at segment offsets into a preallocated file, so its *size* is fixed; the moving measure is
+    // how much the journal has banked.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let settled = tokio::fs::metadata(sidecar(&dest, ".apdl"))
+        .await
+        .map_or(0, |m| m.len());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let later = tokio::fs::metadata(sidecar(&dest, ".apdl"))
+        .await
+        .map_or(0, |m| m.len());
+    assert_eq!(
+        later, settled,
+        "workers kept streaming and journaling after the future was dropped",
+    );
+    assert!(
+        part.exists(),
+        "the partial file survives for a later resume"
+    );
+    assert!(
+        !dest.exists(),
+        "a dropped transfer must never publish its destination",
     );
 }

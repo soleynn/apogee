@@ -467,6 +467,142 @@ jobs:
         with:
           workspaces: fuzz
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Seed each 30 s run below with the corpus the nightly five-minute soaks have accumulated
+      # (their cache keys, one per target), instead of starting libFuzzer from empty on every push:
+      # fuzz/corpus/<target> is gitignored, so without these the smoke re-derives from scratch what
+      # the nightlies already found. Restore-only, deliberately: growing the corpus lineage is the
+      # nightly's job, and a pull request's 30 s of finds is not worth a cache write per push. A key
+      # that has no cache yet restores nothing and the run proceeds cold, exactly as before.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/patchlist
+          key: fuzz-corpus-patchlist-
+          restore-keys: fuzz-corpus-patchlist-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/oauth_stored
+          key: fuzz-corpus-oauth_stored-
+          restore-keys: fuzz-corpus-oauth_stored-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/oauth_launch_params
+          key: fuzz-corpus-oauth_launch_params-
+          restore-keys: fuzz-corpus-oauth_launch_params-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/http_date
+          key: fuzz-corpus-http_date-
+          restore-keys: fuzz-corpus-http_date-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/sqex_base64
+          key: fuzz-corpus-sqex_base64-
+          restore-keys: fuzz-corpus-sqex_base64-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/steam_ticket
+          key: fuzz-corpus-steam_ticket-
+          restore-keys: fuzz-corpus-steam_ticket-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/secrets_frame
+          key: fuzz-corpus-secrets_frame-
+          restore-keys: fuzz-corpus-secrets_frame-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/secrets_records
+          key: fuzz-corpus-secrets_records-
+          restore-keys: fuzz-corpus-secrets_records-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/otp_import
+          key: fuzz-corpus-otp_import-
+          restore-keys: fuzz-corpus-otp_import-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/otp_listener_request
+          key: fuzz-corpus-otp_listener_request-
+          restore-keys: fuzz-corpus-otp_listener_request-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/otp_listener_framing
+          key: fuzz-corpus-otp_listener_framing-
+          restore-keys: fuzz-corpus-otp_listener_framing-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/launch_args
+          key: fuzz-corpus-launch_args-
+          restore-keys: fuzz-corpus-launch_args-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/runner_manifest
+          key: fuzz-corpus-runner_manifest-
+          restore-keys: fuzz-corpus-runner_manifest-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/sqpack_codec
+          key: fuzz-corpus-sqpack_codec-
+          restore-keys: fuzz-corpus-sqpack_codec-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/sqpack_index
+          key: fuzz-corpus-sqpack_index-
+          restore-keys: fuzz-corpus-sqpack_index-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/sqpack_entry
+          key: fuzz-corpus-sqpack_entry-
+          restore-keys: fuzz-corpus-sqpack_entry-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/sqpack_inspect
+          key: fuzz-corpus-sqpack_inspect-
+          restore-keys: fuzz-corpus-sqpack_inspect-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/sqpack_mods
+          key: fuzz-corpus-sqpack_mods-
+          restore-keys: fuzz-corpus-sqpack_mods-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/zipatch_chunk
+          key: fuzz-corpus-zipatch_chunk-
+          restore-keys: fuzz-corpus-zipatch_chunk-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/zipatch_sqpk
+          key: fuzz-corpus-zipatch_sqpk-
+          restore-keys: fuzz-corpus-zipatch_sqpk-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/zipatch_apply
+          key: fuzz-corpus-zipatch_apply-
+          restore-keys: fuzz-corpus-zipatch_apply-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/apzi_index
+          key: fuzz-corpus-apzi_index-
+          restore-keys: fuzz-corpus-apzi_index-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/fetch_multipart
+          key: fuzz-corpus-fetch_multipart-
+          restore-keys: fuzz-corpus-fetch_multipart-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/fetch_journal
+          key: fuzz-corpus-fetch_journal-
+          restore-keys: fuzz-corpus-fetch_journal-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/index_manifest
+          key: fuzz-corpus-index_manifest-
+          restore-keys: fuzz-corpus-index_manifest-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/component_manifest
+          key: fuzz-corpus-component_manifest-
+          restore-keys: fuzz-corpus-component_manifest-
       - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: cargo-fuzz

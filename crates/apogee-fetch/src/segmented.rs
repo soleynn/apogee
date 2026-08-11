@@ -101,8 +101,10 @@ pub(crate) async fn dispatch(
     }
 
     // Skip a satisfied destination before spending a probe request.
-    if let Some(verified) =
-        download::check_existing_dest(spec.dest(), &verify, Some(len), &progress).await?
+    if !spec.overwrite()
+        && let Some(verified) =
+            download::check_existing_dest(spec.dest(), &verify, Some(len), &progress, &cancel)
+                .await?
     {
         return Ok(verified);
     }
@@ -464,13 +466,10 @@ impl TransferState {
     /// Wait out the backoff for work that has failed `attempts` times, honoring a server-named pause.
     /// `false` means the transfer ended or was cancelled while waiting, so the caller must stop
     /// rather than re-queue.
-    async fn backoff(
-        &self,
-        attempts: u32,
-        asked: Option<Duration>,
-        cancel: &CancellationToken,
-    ) -> bool {
-        let delay = self.retry.delay(attempts, asked, &self.jitter);
+    /// Wait out a computed backoff delay, watching both tokens. The delay is computed at the call
+    /// site (`RetryPolicy::delay` draws jitter, so two calls differ) so the event logged beside it
+    /// names the exact wait being served.
+    async fn wait(&self, delay: Duration, cancel: &CancellationToken) -> bool {
         tokio::select! {
             biased;
             () = self.done.cancelled() => false,
@@ -609,6 +608,20 @@ async fn transfer(
             end: Mutex::new(None),
         });
 
+        // If the future driving this transfer is dropped (a caller racing it against something
+        // else, a select arm that lost), the tasks spawned below would otherwise keep streaming
+        // into the .part and keep their global connection permits, with nobody left to publish,
+        // fail, or cancel the job. The guard turns an abandoned future into a cancelled transfer:
+        // every worker, the verifier, and the aggregator all watch `done`. On the ordinary paths
+        // the token is already cancelled by the time the guard drops, so it is then a no-op.
+        struct StopOnDrop(CancellationToken);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.cancel();
+            }
+        }
+        let _stop = StopOnDrop(state.done.clone());
+
         let aggregate = tokio::spawn(aggregator(state.clone(), progress.clone(), len));
         let verifier = state
             .verify
@@ -637,7 +650,7 @@ async fn transfer(
         }
     }
 
-    verify_and_publish(dest, &part, &apdl, len, verify.digest, &progress).await
+    verify_and_publish(dest, &part, &apdl, len, verify.digest, &progress, &cancel).await
 }
 
 /// Emit a monotonic download snapshot on every progress tick, so concurrent workers cannot interleave
@@ -657,16 +670,54 @@ async fn aggregator(state: Arc<TransferState>, progress: Reporter, len: u64) {
     }
 }
 
+/// Why a segment went back on the queue, named on the retry event beside the backoff, mirroring
+/// the single-connection engine's `reason`. Without it the log said a segment was re-queued and not
+/// what failed, which on a patch day is the difference between "the CDN is throttling" and "the
+/// wire is corrupting".
+#[derive(Clone, Copy)]
+enum RequeueCause {
+    /// The request got no response headers within the deadline.
+    NoResponseHeaders,
+    /// The connection could not be established (a transient connect fault).
+    Connect,
+    /// A throttling or overload status.
+    Throttled(u16),
+    /// The body was cut off before the range completed.
+    BodyDropped,
+    /// The body went quiet past the inactivity timeout.
+    BodyStalled,
+    /// A `206` delivered fewer bytes than the range asked for.
+    ShortRange,
+    /// A worker raced another to a mirror's already-recorded ranges-ignored verdict.
+    RangesIgnored,
+}
+
+impl std::fmt::Display for RequeueCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoResponseHeaders => f.write_str("no response headers within the deadline"),
+            Self::Connect => f.write_str("connect failed"),
+            Self::Throttled(status) => write!(f, "http {status}"),
+            Self::BodyDropped => f.write_str("the body was cut off"),
+            Self::BodyStalled => f.write_str("the body went quiet"),
+            Self::ShortRange => f.write_str("a short 206 left a gap"),
+            Self::RangesIgnored => f.write_str("a mirror already dropped for ignoring ranges"),
+        }
+    }
+}
+
 /// The outcome of one segment attempt.
 enum SegmentResult {
     /// The segment's range is fully durable.
     Done,
     /// The connection dropped or stalled, or the server refused with a retryable status; the
     /// remaining bytes must be re-fetched after a backoff. `asked` carries a `Retry-After` the
-    /// server named, which the policy clamps before honoring.
+    /// server named, which the policy clamps before honoring, and `cause` names what failed for the
+    /// retry event beside the backoff.
     Requeue {
         range: Range<u64>,
         asked: Option<Duration>,
+        cause: RequeueCause,
     },
     /// The primary returned a `200` where a `206` was expected (the source changed under us).
     SourceChanged,
@@ -695,8 +746,9 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
             SegmentResult::Requeue {
                 range: remaining,
                 asked,
+                cause,
             } => {
-                if !requeue(&state, remaining, asked, &cancel).await {
+                if !requeue(&state, remaining, asked, cause, &cancel).await {
                     return; // the transfer ended or was cancelled during the backoff
                 }
             }
@@ -721,20 +773,27 @@ async fn worker(state: Arc<TransferState>, cancel: CancellationToken) {
                         source: moved_to,
                         range,
                     });
-                } else if !requeue(&state, range, None, &cancel).await {
+                } else if !requeue(&state, range, None, RequeueCause::RangesIgnored, &cancel).await
+                {
                     return;
                 }
             }
             SegmentResult::SourceChanged => {
                 // A changed source restarts clean: drop the stale journal and surface the typed
-                // changed-source error so a retry re-downloads from scratch.
+                // changed-source error so a retry re-downloads from scratch. The stale `If-Range`
+                // value rides the event here; the error carries the pair that fits its size budget.
                 tracing::warn!(
                     url = %state.primary(),
+                    stale_validator = state
+                        .if_range
+                        .as_deref()
+                        .map(|v| String::from_utf8_lossy(v).into_owned()),
                     "the primary answered a conditional range with a whole body; the file changed under the transfer",
                 );
                 let _ = tokio::fs::remove_file(&state.apdl).await;
                 state.finish(Err(FetchError::ServerFileChanged {
-                    validator: "range ignored mid-transfer".to_owned(),
+                    url: state.primary().clone(),
+                    detail: "the primary answered a conditional range with a whole body",
                 }));
             }
             SegmentResult::Stop => return,
@@ -764,6 +823,7 @@ async fn requeue(
     state: &TransferState,
     range: Range<u64>,
     asked: Option<Duration>,
+    cause: RequeueCause,
     cancel: &CancellationToken,
 ) -> bool {
     let attempts = state.bump_attempt(range.start);
@@ -773,6 +833,7 @@ async fn requeue(
             offset = range.start,
             remaining = range.end - range.start,
             attempts,
+            reason = %cause,
             "a segment exhausted its attempt budget",
         );
         state.finish(Err(state.exhausted(attempts)));
@@ -780,6 +841,7 @@ async fn requeue(
     }
     let (from, to) = state.rotation(attempts);
     state.counters().retry(from, to);
+    let delay = state.retry.delay(attempts, asked, &state.jitter);
     tracing::debug!(
         url = %state.sources[to],
         offset = range.start,
@@ -787,9 +849,11 @@ async fn requeue(
         attempts,
         from,
         to,
+        delay_ms = delay.as_millis(),
+        reason = %cause,
         "re-queueing a segment after a backoff",
     );
-    if !state.backoff(attempts, asked, cancel).await {
+    if !state.wait(delay, cancel).await {
         return false;
     }
     // The re-queued range goes wherever the rotation names, which is the source that just failed for
@@ -841,11 +905,23 @@ fn spawn_hash(
         // Bound concurrent hashing so a burst cannot saturate the blocking pool the transfer also
         // uses. The permit is scoped to the hash itself: reporting a verdict does no hashing, and a
         // dirty block's verdict waits out a backoff, so holding it any longer would park the whole
-        // verification pipeline behind however long a repair was told to wait.
+        // verification pipeline behind however long a repair was told to wait. The wait for it is
+        // raced against both tokens, and the tokens are re-checked before the hash starts: a
+        // cancelled transfer must stop feeding the blocking pool, not drain its backlog through it.
         let hashed = {
-            let Ok(_permit) = limit.acquire_owned().await else {
-                return; // the semaphore is never closed; this only guards a shutdown race
+            let permit = tokio::select! {
+                biased;
+                () = state.done.cancelled() => return,
+                () = cancel.cancelled() => return,
+                permit = limit.acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return, // the semaphore is never closed; this only guards a shutdown race
+                },
             };
+            let _permit = permit;
+            if state.done.is_cancelled() || cancel.is_cancelled() {
+                return;
+            }
             tokio::task::spawn_blocking(move || block::hash_block(&part, range)).await
         };
         match hashed {
@@ -907,6 +983,7 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
     let (from, source) = state.rotation(attempts);
     state.counters().block_refetched();
     state.counters().retry(from, source);
+    let delay = state.retry.delay(attempts, None, &state.jitter);
     tracing::warn!(
         block = i,
         offset = range.start,
@@ -914,9 +991,10 @@ async fn on_dirty(state: &TransferState, verify: &BlockVerify, i: u32, cancel: &
         attempts,
         from,
         source,
+        delay_ms = delay.as_millis(),
         "a block failed its hash; clearing it for a re-fetch",
     );
-    if !state.backoff(attempts, None, cancel).await {
+    if !state.wait(delay, cancel).await {
         return; // the transfer ended or was cancelled during the backoff
     }
     state.push_task(Task { range, source });
@@ -966,7 +1044,11 @@ async fn stream_segment(
                     timeout_ms = state.stall_timeout.as_millis(),
                     "a segment got no response headers within the deadline",
                 );
-                return SegmentResult::Requeue { range, asked: None };
+                return SegmentResult::Requeue {
+                    range,
+                    asked: None,
+                    cause: RequeueCause::NoResponseHeaders,
+                };
             }
             // A connect error is transient: re-queue the whole range. A redirect this client's policy
             // refused is not - the source keeps pointing where it points - so it fails the transfer
@@ -974,7 +1056,13 @@ async fn stream_segment(
             Ok(Err(e)) if classify_send_error(&e) == Class::Fatal => {
                 return SegmentResult::Fatal(download::connect_error(url, e));
             }
-            Ok(Err(_)) => return SegmentResult::Requeue { range, asked: None },
+            Ok(Err(_)) => {
+                return SegmentResult::Requeue {
+                    range,
+                    asked: None,
+                    cause: RequeueCause::Connect,
+                };
+            }
         },
     };
     match resp.status().as_u16() {
@@ -993,6 +1081,7 @@ async fn stream_segment(
             return SegmentResult::Requeue {
                 range,
                 asked: retry_after(resp.headers()),
+                cause: RequeueCause::Throttled(status),
             };
         }
         status => {
@@ -1007,9 +1096,9 @@ async fn stream_segment(
         // caller's declared length - the same cross-check the single-connection path also enforces.
         Some((first, total)) => {
             if first != range.start {
-                return SegmentResult::Fatal(FetchError::Http {
-                    status: 206,
+                return SegmentResult::Fatal(FetchError::MalformedRangeResponse {
                     url: url.clone(),
+                    detail: "content-range does not start at the requested offset",
                 });
             }
             if let Some(total) = total
@@ -1022,9 +1111,9 @@ async fn stream_segment(
             }
         }
         None => {
-            return SegmentResult::Fatal(FetchError::Http {
-                status: 206,
+            return SegmentResult::Fatal(FetchError::MalformedRangeResponse {
                 url: url.clone(),
+                detail: "206 without a parseable content-range",
             });
         }
     }
@@ -1059,6 +1148,7 @@ async fn stream_segment(
                 return SegmentResult::Requeue {
                     range: committed..range.end,
                     asked: None,
+                    cause: RequeueCause::BodyStalled,
                 };
             }
             item = stream.next() => item,
@@ -1071,11 +1161,24 @@ async fn stream_segment(
                 return SegmentResult::Requeue {
                     range: committed..range.end,
                     asked: None,
+                    cause: RequeueCause::BodyDropped,
                 };
             }
         };
         let bytes: &[u8] = chunk.as_ref();
-        state.limiter.acquire(bytes.len() as u64).await;
+        // Raced against both tokens: at a low rate this wait is chunk-size over rate long, and it
+        // sits outside the select above, so an unraced wait would hold a cancel off by that long.
+        // Tokens are only debited when the wait completes, so abandoning it mid-wait leaks none.
+        let stopped = tokio::select! {
+            biased;
+            () = cancel.cancelled() => true,
+            () = state.done.cancelled() => true,
+            () = state.limiter.acquire(bytes.len() as u64) => false,
+        };
+        if stopped {
+            let _ = commit_batch(&mut file, &mut batch, &mut committed, state).await;
+            return SegmentResult::Stop;
+        }
         // Clamp to the requested range. All Square Enix input is hostile: a server may answer a closed
         // range with an over-long body, and writing past range.end would overwrite a neighboring block
         // that is already verified and never re-hashed. Keep only up to range.end, commit, and finish
@@ -1103,6 +1206,7 @@ async fn stream_segment(
         return SegmentResult::Requeue {
             range: committed..range.end,
             asked: None,
+            cause: RequeueCause::ShortRange,
         };
     }
     SegmentResult::Done
@@ -1170,11 +1274,12 @@ async fn verify_and_publish(
     len: u64,
     pin: Option<DigestPin>,
     progress: &Reporter,
+    cancel: &CancellationToken,
 ) -> Result<VerifiedFile, FetchError> {
     if let Some(pin) = pin {
         progress.emit(len, Some(len), Phase::Verifying);
         let expected = pin.bytes();
-        let got = download::hash_file(part, pin).await?;
+        let got = download::hash_file(part, pin, cancel).await?;
         if got != expected {
             // Drop the journal so a retry restarts clean rather than re-assembling the same bad bytes.
             let _ = tokio::fs::remove_file(apdl).await;

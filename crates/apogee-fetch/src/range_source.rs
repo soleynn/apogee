@@ -14,6 +14,7 @@
 
 use std::ops::Range;
 
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::error::FetchError;
@@ -23,7 +24,12 @@ use crate::ranges::RangePacking;
 
 /// One source patch a [`HttpRangeSource`] can fetch ranges of, keyed by its position in the chain
 /// (`sources[i]` serves `PatchId(i)`, matching `Index::source_refs` order).
+///
+/// `#[non_exhaustive]`: built through [`new`](Self::new) and read through its public fields, so a
+/// per-source input added later (the way the patch token question could land) widens the
+/// constructor set rather than breaking every literal.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HttpSource {
     /// Where the patch file is served.
     pub url: Url,
@@ -33,13 +39,35 @@ pub struct HttpSource {
     pub policy: Option<HeaderPolicy>,
 }
 
+impl HttpSource {
+    /// A source serving `url`, whose file is `expected_len` bytes long, with no extra request
+    /// headers.
+    #[must_use]
+    pub fn new(url: Url, expected_len: u64) -> Self {
+        Self {
+            url,
+            expected_len,
+            policy: None,
+        }
+    }
+
+    /// Set the request header policy (e.g. the Square Enix patch `User-Agent`).
+    #[must_use]
+    pub fn policy(mut self, policy: HeaderPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+}
+
 /// An `apogee-zipatch` `RangeSource` that pulls broken byte ranges over HTTP. Built from a `Fetcher`,
 /// a runtime handle, and the per-patch source table; see the module docs for the off-runtime rule.
+#[derive(Debug)]
 pub struct HttpRangeSource {
     fetcher: Fetcher,
     handle: tokio::runtime::Handle,
     sources: Vec<HttpSource>,
     packing: RangePacking,
+    cancel: CancellationToken,
 }
 
 impl HttpRangeSource {
@@ -53,6 +81,7 @@ impl HttpRangeSource {
             handle,
             sources,
             packing: RangePacking::default(),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -60,6 +89,20 @@ impl HttpRangeSource {
     #[must_use]
     pub fn with_packing(mut self, packing: RangePacking) -> Self {
         self.packing = packing;
+        self
+    }
+
+    /// Watch `cancel` while fetching, so a repair pass driven through this adapter is interruptible
+    /// mid-transfer rather than only between the planner's requests. A cancelled fetch surfaces to
+    /// the planner as an i/o read fault (the seam's taxonomy has no cancel of its own), which ends
+    /// the repair with an error exactly as the caller asked. Default: a token nothing cancels.
+    ///
+    /// No progress counterpart, deliberately: only the repair planner knows what a delivered span
+    /// means to the file it is mending, so per-file progress belongs to its report callback rather
+    /// than to a byte tally here.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
         self
     }
 }
@@ -83,11 +126,10 @@ impl apogee_zipatch::RangeSource for HttpRangeSource {
         // the real error re-surfaced afterward (the sink's own return value never reaches the caller).
         let mut captured: Option<apogee_zipatch::Error> = None;
         let fetch = self.fetcher.fetch_ranges(
-            &source.url,
-            source.expected_len,
+            source,
             ranges,
-            source.policy.as_ref(),
             self.packing,
+            self.cancel.clone(),
             |off, bytes| match out(off, bytes) {
                 Ok(()) => Ok(()),
                 Err(err) => {
@@ -108,10 +150,10 @@ impl apogee_zipatch::RangeSource for HttpRangeSource {
 /// A throwaway error the sink returns to abort a fetch after the planner's callback failed; its
 /// contents never surface (the captured zipatch error wins), so only its role matters.
 fn sink_abort() -> FetchError {
-    FetchError::io(
-        std::path::PathBuf::new(),
-        std::io::Error::other("range sink aborted"),
-    )
+    FetchError::Internal {
+        detail: "range sink aborted",
+        source: std::io::Error::other("range sink aborted"),
+    }
 }
 
 /// Map a transport failure into the zipatch error taxonomy: a malformed range response is corrupt

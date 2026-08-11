@@ -37,7 +37,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use apogee_fetch::DigestPin;
+use apogee_fetch::{DigestPin, HexPins};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use thiserror::Error;
@@ -819,11 +819,13 @@ fn build_op(component: &str, raw: RawOp) -> Result<VerbOp, ManifestError> {
 fn build_artifact(component: &str, files: RawFiles) -> Result<Artifact, ManifestError> {
     Ok(Artifact {
         url: parse_url(component, &files.url)?,
-        pin: DigestPin::from_hex(files.blake3.as_deref(), files.sha256.as_deref()).ok_or_else(
-            || ManifestError::BadPin {
-                component: component.to_owned(),
-            },
-        )?,
+        pin: DigestPin::from_hex(HexPins {
+            blake3: files.blake3.as_deref(),
+            sha256: files.sha256.as_deref(),
+        })
+        .ok_or_else(|| ManifestError::BadPin {
+            component: component.to_owned(),
+        })?,
         archive: ArchiveLayout {
             format: parse_format(component, &files.archive.format)?,
             strip_prefix: files.archive.strip_prefix,

@@ -4,12 +4,14 @@
 //! backend just runs them and relays progress. Repair requests do not: a [`RepairPlan`] names the
 //! repos and versions, and the backend resolves each repo's digest-pinned block index, and where that
 //! index's source patches are served, from the hosted, Ed25519-signed catalog before handing
-//! `apogee-patcher` the full request. The catalog bytes are fetched here (transport is the composition
-//! root's job); the signature check stays in `apogee-patcher`
-//! ([`IndexCatalog::verify_default`]), so no crypto lives in this crate.
+//! `apogee-patcher` the full request. The catalog bytes travel through the download engine like
+//! every other byte this launcher pulls (its redirect floor and stall bounds included); the
+//! signature check stays in `apogee-patcher` ([`IndexCatalog::verify_default`]), so no crypto lives
+//! in this crate.
 
 use std::path::{Path, PathBuf};
 
+use apogee_fetch::{DownloadSpec, Fetcher, Validator};
 use apogee_patcher::{
     IndexCatalog, IndexEntry, InstallRequest, Installed, Job, PatchError, Patcher, RepairOutcome,
     RepairPatchSource, RepairRepo, RepairRequest, Repo, SePatch,
@@ -27,19 +29,20 @@ use crate::error::CoreError;
 /// The real patch backend over `apogee-patcher`.
 pub(crate) struct PatcherBackend {
     patcher: Patcher,
-    /// The HTTP client used to fetch the signed catalog manifest and signature.
-    http: reqwest::Client,
+    /// The download engine the catalog manifest and signature come through, shared with every other
+    /// subsystem that pulls bytes.
+    fetcher: Fetcher,
     /// Where downloaded patches are cached, scanned to seed a repair's local-first sources.
     patch_store: PathBuf,
 }
 
 impl PatcherBackend {
-    /// Construct over an already-built patcher, an HTTP client for the catalog fetch, and the patch
-    /// store (scanned for a repair's local sources).
-    pub(crate) fn new(patcher: Patcher, http: reqwest::Client, patch_store: PathBuf) -> Self {
+    /// Construct over an already-built patcher, the shared download engine (for the catalog fetch),
+    /// and the patch store (scanned for a repair's local sources).
+    pub(crate) fn new(patcher: Patcher, fetcher: Fetcher, patch_store: PathBuf) -> Self {
         Self {
             patcher,
-            http,
+            fetcher,
             patch_store,
         }
     }
@@ -47,27 +50,42 @@ impl PatcherBackend {
     /// Fetch and verify the hosted index catalog against the compiled-in key.
     async fn fetch_catalog(&self) -> Result<IndexCatalog, CoreError> {
         let (manifest_url, signature_url) = index_catalog_urls()?;
-        let manifest = self.get_bytes(&manifest_url).await?;
-        let signature = self.get_bytes(&signature_url).await?;
+        let dir = self.patch_store.join(".index-catalog");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| CoreError::Repair {
+                detail: format!("make {}: {e}", dir.display()),
+            })?;
+        let manifest = self
+            .fetch_bytes(&manifest_url, &dir.join("manifest.json"))
+            .await?;
+        let signature = self
+            .fetch_bytes(&signature_url, &dir.join("manifest.json.sig"))
+            .await?;
         IndexCatalog::verify_default(&manifest, &signature).map_err(|e| CoreError::Repair {
             detail: format!("index catalog: {e}"),
         })
     }
 
-    /// GET `url` and return its body bytes, mapping any transport or status failure to a repair error.
-    async fn get_bytes(&self, url: &Url) -> Result<Vec<u8>, CoreError> {
-        let fetch_err = |e: reqwest::Error| CoreError::Repair {
-            detail: format!("fetch {url}: {e}"),
-        };
-        let response = self
-            .http
-            .get(url.clone())
-            .send()
+    /// Fetch `url` into `dest` through the download engine and hand back the bytes, replacing any
+    /// previous copy (`overwrite`: the catalog is a mutable artifact at a fixed URL, so a satisfied
+    /// destination must not be served back). Unverified at this layer and over HTTPS only;
+    /// authenticity is the Ed25519 check one call up, exactly as the runner and addon catalogs do it.
+    async fn fetch_bytes(&self, url: &Url, dest: &Path) -> Result<Vec<u8>, CoreError> {
+        let repair_err = |detail: String| CoreError::Repair { detail };
+        let spec = DownloadSpec::builder(url.clone(), dest, Validator::None)
+            .allow_unverified()
+            .overwrite()
+            .resume(false)
+            .build()
+            .map_err(|e| repair_err(format!("fetch {url}: {e}")))?;
+        self.fetcher
+            .download(&spec, None, CancellationToken::new())
             .await
-            .map_err(fetch_err)?
-            .error_for_status()
-            .map_err(fetch_err)?;
-        Ok(response.bytes().await.map_err(fetch_err)?.to_vec())
+            .map_err(|e| repair_err(format!("fetch {url}: {e}")))?;
+        tokio::fs::read(dest)
+            .await
+            .map_err(|e| repair_err(format!("read {}: {e}", dest.display())))
     }
 
     /// Turn a [`RepairPlan`] into `apogee-patcher`'s [`RepairRequest`]: resolve each repo's block-index

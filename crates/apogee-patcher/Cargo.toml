@@ -15,6 +15,7 @@ ed25519-dalek = { workspace = true }
 # Async orchestration: the spawned install task, the progress channels, and the cancel token/stream.
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
 tokio-stream.workspace = true
 # Parse a patchlist URL into the fetch request and mirror its path under the patch store.
 url.workspace = true

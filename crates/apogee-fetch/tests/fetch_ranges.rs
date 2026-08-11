@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::ops::Range;
 
-use apogee_fetch::{FetchError, Fetcher, HeaderPolicy, RangePacking};
+use apogee_fetch::{FetchError, Fetcher, HeaderPolicy, HttpSource, RangePacking};
 use apogee_test_support::chaos::{ChaosServer, RetryAfter, generated_vec};
+use tokio_util::sync::CancellationToken;
 
 /// Fetch `ranges` of `server`'s body and return every delivered byte keyed by its absolute offset.
 /// Errors propagate with `?` so no `unwrap` lives in this free helper.
@@ -19,15 +20,24 @@ async fn collect(
     packing: RangePacking,
 ) -> Result<BTreeMap<u64, u8>, Box<dyn Error>> {
     let fetcher = Fetcher::builder().build()?;
-    let url = server.url("f.bin");
+    let mut source = HttpSource::new(server.url("f.bin"), len);
+    if let Some(policy) = policy {
+        source = source.policy(policy.clone());
+    }
     let mut got: BTreeMap<u64, u8> = BTreeMap::new();
     fetcher
-        .fetch_ranges(&url, len, ranges, policy, packing, |off, bytes| {
-            for (i, b) in bytes.iter().enumerate() {
-                got.insert(off + i as u64, *b);
-            }
-            Ok::<(), FetchError>(())
-        })
+        .fetch_ranges(
+            &source,
+            ranges,
+            packing,
+            CancellationToken::new(),
+            |off, bytes| {
+                for (i, b) in bytes.iter().enumerate() {
+                    got.insert(off + i as u64, *b);
+                }
+                Ok::<(), FetchError>(())
+            },
+        )
         .await?;
     Ok(got)
 }
@@ -105,10 +115,7 @@ async fn packing_stays_under_a_strict_request_header_limit() {
         .unwrap();
     let ranges: Vec<Range<u64>> = (0..30).map(|i| (i * 300)..(i * 300 + 10)).collect();
     // A ~20-byte Range value budget forces roughly one range per request.
-    let packing = RangePacking {
-        max_ranges: 256,
-        max_range_header_bytes: 20,
-    };
+    let packing = RangePacking::default().max_range_header_bytes(20);
     let got = collect(&server, len, &ranges, None, packing).await.unwrap();
     assert_exact(seed, &got, &ranges);
     // The transfer succeeded (no 431), and it took more than one request to stay under the limit.
@@ -126,11 +133,10 @@ async fn fetch_err(
     let fetcher = Fetcher::builder().build()?;
     match fetcher
         .fetch_ranges(
-            &server.url("f.bin"),
-            expected_len,
+            &HttpSource::new(server.url("f.bin"), expected_len),
             ranges,
-            None,
             packing,
+            CancellationToken::new(),
             |_off, _bytes| Ok::<(), FetchError>(()),
         )
         .await
@@ -208,6 +214,69 @@ async fn a_content_range_total_disagreeing_with_expected_len_is_a_length_mismatc
             }
         ),
         "{err:?}"
+    );
+    Ok(())
+}
+
+/// A range response whose body goes quiet is bounded by the inactivity timeout, not parked forever.
+/// `send` is bounded only up to the response headers, so without a per-chunk bound a silent body
+/// held the repair planner hostage with no attempt budget to spend and no error to hand back.
+#[tokio::test]
+async fn a_range_body_that_goes_quiet_reports_stalled() -> Result<(), Box<dyn Error>> {
+    let server = ChaosServer::builder(7, 4096)
+        .chunk(64)
+        .stall_range_at(0, 100)
+        .start()
+        .await?;
+    let fetcher = Fetcher::builder()
+        .stall_timeout(std::time::Duration::from_millis(150))
+        .build()?;
+    let ranges: Vec<Range<u64>> = std::iter::once(0u64..2048).collect();
+    let err = match fetcher
+        .fetch_ranges(
+            &HttpSource::new(server.url("f.bin"), 4096),
+            &ranges,
+            RangePacking::default(),
+            CancellationToken::new(),
+            |_off, _bytes| Ok::<(), FetchError>(()),
+        )
+        .await
+    {
+        Ok(()) => return Err("a silent body must not complete".into()),
+        Err(err) => err,
+    };
+    assert!(matches!(err, FetchError::Stalled { .. }), "got {err:?}");
+    Ok(())
+}
+
+/// A token cancelled before the call makes no request at all: the cancel is honored ahead of the
+/// connection slot and the send, which is what makes a repair pass interruptible while it is still
+/// queued behind other transfers.
+#[tokio::test]
+async fn a_cancelled_token_stops_a_range_fetch_before_it_asks() -> Result<(), Box<dyn Error>> {
+    let server = ChaosServer::builder(8, 4096).start().await?;
+    let fetcher = Fetcher::builder().build()?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let ranges: Vec<Range<u64>> = std::iter::once(0u64..64).collect();
+    let err = match fetcher
+        .fetch_ranges(
+            &HttpSource::new(server.url("f.bin"), 4096),
+            &ranges,
+            RangePacking::default(),
+            cancel,
+            |_off, _bytes| Ok::<(), FetchError>(()),
+        )
+        .await
+    {
+        Ok(()) => return Err("a cancelled fetch must not complete".into()),
+        Err(err) => err,
+    };
+    assert!(matches!(err, FetchError::Cancelled), "got {err:?}");
+    assert_eq!(
+        server.stats().requests(),
+        0,
+        "no request should have gone out"
     );
     Ok(())
 }
