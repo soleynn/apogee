@@ -18,28 +18,16 @@ use apogee_patcher::{
 use apogee_test_support::chaos::ChaosServer;
 use apogee_test_support::tree_manifest;
 use apogee_zipatch::fixtures;
-use sha1::{Digest, Sha1};
 use sqex_proto::{BlockHashes, PatchListEntry};
 use url::Url;
 
-/// The per-block hash width the synthetic patchlist advertises.
-const BLOCK_SIZE: usize = 64;
+mod support;
+
+use support::{BLOCK_SIZE, block_sha1_hex};
 
 /// The worker binary this package builds, which is what the launcher would ship beside itself.
 fn worker() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_apogee-elevated"))
-}
-
-fn block_sha1_hex(bytes: &[u8]) -> Vec<String> {
-    bytes
-        .chunks(BLOCK_SIZE)
-        .map(|block| {
-            Sha1::digest(block)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        })
-        .collect()
 }
 
 fn game_entry(url: Url, bytes: &[u8], version_id: &str) -> PatchListEntry {

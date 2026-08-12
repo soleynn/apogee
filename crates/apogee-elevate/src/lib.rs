@@ -31,13 +31,14 @@
 //! # use std::path::Path;
 //! # use apogee_elevate::{Admission, VersionWrite, Worker};
 //! # use tokio_util::sync::CancellationToken;
-//! # async fn demo(worker: &mut Worker, root: &Path, patch: &Path) -> apogee_elevate::Result<()> {
+//! # async fn demo(worker: &mut Worker, root: &Path, patch: &Path, admitted: [u8; 32])
+//! #     -> apogee_elevate::Result<()> {
 //! let session = worker.session();
 //! session.bind(root).await?;
 //! session
 //!     .apply(
 //!         patch,
-//!         Admission::ChunkCrc,
+//!         Admission::ChunkCrc { content: admitted },
 //!         Some(VersionWrite {
 //!             path: "ffxivboot.ver".to_owned(),
 //!             contents: "2024.01.02.0000.0000".to_owned(),
@@ -58,7 +59,6 @@ pub mod spawn;
 mod worker;
 
 pub use client::Session;
-pub use confine::ConfineError;
 pub use error::{Error, Result};
 pub use proto::{
     Admission, FrameError, MAX_FRAME, MAX_VERSION_LEN, PROTOCOL_VERSION, VersionWrite,

@@ -22,6 +22,9 @@ url.workspace = true
 apogee-fetch = { path = "../apogee-fetch" }
 # The privilege boundary: the worker protocol, the client that drives it, and the elevation hop.
 apogee-elevate = { path = "../apogee-elevate" }
+# Digests the bytes a boot patch's chunk-CRC scan admitted, so the far side of that boundary can tell
+# the admitted file from one substituted after the scan. Same digest the signed manifests pin under.
+blake3.workspace = true
 apogee-zipatch = { path = "../apogee-zipatch" }
 # Mod detection compares an install against a map of what the chain wrote. The reader owns the
 # archive and the comparison; this crate holds the block index and the verification a map is built

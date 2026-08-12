@@ -96,22 +96,34 @@ where
     let (requests, mut inbox) = mpsc::unbounded_channel::<WorkerRequest>();
     // And one task owns the read half, so a cancel is seen while an apply is running rather than
     // after it. It is the only request handled out of band.
+    //
+    // The flag is cleared here rather than in the request loop below, because this task is the only
+    // place the two are ordered against each other. Clearing it as a request is dequeued instead
+    // loses a cancel that arrived while the request was still queued: this task can read both frames
+    // before the loop is polled once, and the reset would then erase a stop the parent had already
+    // asked for, applying the patch and advancing the version while the parent is told it stopped.
     let reading = {
         let cancel = Arc::clone(&cancel);
         tokio::spawn(async move {
             let mut reader = reader;
-            loop {
+            let outcome = loop {
                 match read_frame::<_, WorkerRequest>(&mut reader).await {
                     Ok(Some(WorkerRequest::Cancel)) => cancel.store(true, Ordering::Relaxed),
                     Ok(Some(request)) => {
+                        cancel.store(false, Ordering::Relaxed);
                         if requests.send(request).is_err() {
-                            return Ok(());
+                            break Ok(());
                         }
                     }
-                    Ok(None) => return Ok(()),
-                    Err(e) => return Err(Error::from(e)),
+                    Ok(None) => break Ok(()),
+                    Err(e) => break Err(Error::from(e)),
                 }
-            }
+            };
+            // The parent is gone, whether it closed cleanly or died. Anything still applying must
+            // stop: without this, a privileged process keeps writing into the install tree, and then
+            // advances the version file, long after the launcher that asked for it has exited.
+            cancel.store(true, Ordering::Relaxed);
+            outcome
         })
     };
 
@@ -121,8 +133,6 @@ where
 
     let mut root: Option<PathBuf> = None;
     while let Some(request) = inbox.recv().await {
-        // A cancel only ever applies to the request in flight when it arrived.
-        cancel.store(false, Ordering::Relaxed);
         let response = match handle(request, &mut root, &cancel, &responses).await {
             Ok(()) => WorkerResponse::Done,
             Err(fault) => WorkerResponse::from(fault),
@@ -254,9 +264,10 @@ async fn apply_one(
 ///
 /// The handle is opened once and rewound rather than reopened between the two passes. Reopening
 /// would re-resolve the path, so a rename between them would hand the privileged write a file
-/// nothing had checked. A residual window remains, because a same-user process can still modify the
-/// bytes in place after they are hashed; closing that would mean copying every patch into a
-/// directory the user cannot write, which is not affordable at patch sizes.
+/// nothing had checked. On Windows the handle also denies other writers for as long as it is held
+/// (see [`open_patch`]), which is what closes the other half of that window: without it, hashing the
+/// bytes proves nothing about the bytes the applier goes on to read, because a same-user process can
+/// overwrite them in place during the minutes an apply takes.
 #[allow(
     clippy::too_many_arguments,
     reason = "one call site, all of it required"
@@ -270,7 +281,7 @@ fn verify_then_apply(
     responses: &mpsc::UnboundedSender<WorkerResponse>,
     zipatch_progress: &std::sync::mpsc::Sender<ApplyProgress>,
 ) -> std::result::Result<(), Fault> {
-    let file = File::open(patch)
+    let file = open_patch(patch)
         .map_err(|e| Fault::at(WorkerErrorKind::Verify, patch, format!("cannot open: {e}")))?;
 
     reverify(&file, patch, admission, cancel, responses)?;
@@ -305,15 +316,23 @@ fn verify_then_apply(
     write_version(root, &target, &contents)
 }
 
-/// Write the version file, re-checking its resolved location now that the directories exist.
+/// Write the version file, checking its resolved location at every point the filesystem can answer.
+///
+/// The check runs before the directories are made, not only after. Creating them first would mean a
+/// junction standing in for one of the accepted components had already been followed, and the
+/// privileged process would have made directories outside the bound tree on its way to refusing the
+/// request.
 fn write_version(root: &Path, target: &Path, contents: &str) -> std::result::Result<(), Fault> {
     let io = |e: std::io::Error| Fault::at(WorkerErrorKind::Apply, target, e.to_string());
+    let refused = |e: crate::confine::ConfineError| {
+        Fault::at(WorkerErrorKind::Protocol, target, e.to_string())
+    };
     if let Some(parent) = target.parent() {
+        assert_deepest_existing_within(root, parent).map_err(refused)?;
         std::fs::create_dir_all(parent).map_err(io)?;
     }
-    assert_within(root, target)
-        .map_err(|e| Fault::at(WorkerErrorKind::Protocol, target, e.to_string()))?;
-    std::fs::write(target, contents).map_err(io)
+    assert_within(root, target).map_err(refused)?;
+    replace_file(target, contents.as_bytes()).map_err(io)
 }
 
 /// Copy one file to another inside the bound tree.
@@ -327,9 +346,75 @@ fn copy_within(root: PathBuf, from: &str, to: &str) -> std::result::Result<(), F
         assert_within(&root, path)
             .map_err(|e| Fault::at(WorkerErrorKind::Protocol, path, e.to_string()))?;
     }
-    std::fs::copy(&from, &to)
-        .map(|_| ())
-        .map_err(|e| Fault::at(WorkerErrorKind::Apply, &to, e.to_string()))
+    let bytes = std::fs::read(&from)
+        .map_err(|e| Fault::at(WorkerErrorKind::Apply, &from, e.to_string()))?;
+    replace_file(&to, &bytes).map_err(|e| Fault::at(WorkerErrorKind::Apply, &to, e.to_string()))
+}
+
+/// Open a patch for the verify-then-apply pass, refusing to share it with another writer.
+///
+/// Windows lets an opener say who else may hold the file. Denying writers for the life of the handle
+/// is what makes the re-verification mean anything: the bytes hashed on the first pass are then the
+/// bytes applied on the second, and a same-user process cannot rewrite the tail of a multi-gigabyte
+/// patch while the applier is still reading the head. It costs nothing, because nothing else is
+/// meant to be writing a patch that is already being applied.
+#[cfg(windows)]
+fn open_patch(patch: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// `FILE_SHARE_READ`: other readers are fine, other writers and deleters are not.
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(patch)
+}
+
+/// Open a patch for the verify-then-apply pass.
+///
+/// No share mode here: Unix has no equivalent that is not advisory, and this is the platform with no
+/// elevation model, so the worker runs with the same privileges as the process that asked for it.
+#[cfg(not(windows))]
+fn open_patch(patch: &Path) -> std::io::Result<File> {
+    File::open(patch)
+}
+
+/// Write `bytes` to `path`, replacing whatever entry is there rather than writing through it.
+///
+/// The existing entry is unlinked first and the new file is created fresh. Writing to the path as it
+/// stands would follow a symbolic link or a reparse point at the final component, and would write
+/// through a hard link into a file elsewhere entirely; neither is visible to the confinement check,
+/// which can only canonicalize the directory above. Unlinking makes both harmless: the link is what
+/// is removed, and the bytes land in a new file at the checked location.
+///
+/// `create_new` is what makes that airtight rather than merely likely: if anything re-creates the
+/// name between the unlink and this call, the write fails instead of following it.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::File::create_new(path)?.write_all(bytes)
+}
+
+/// Assert that the deepest part of `dir` that exists today is inside `root`.
+///
+/// The confinement check needs a path it can canonicalize, so a directory chain that has not been
+/// made yet is checked at the deepest point that has.
+fn assert_deepest_existing_within(
+    root: &Path,
+    dir: &Path,
+) -> std::result::Result<(), crate::confine::ConfineError> {
+    let existing = dir.ancestors().find(|candidate| candidate.exists());
+    match existing {
+        // `assert_within` checks a path's parent, so it is handed a child of the directory to check.
+        Some(existing) => assert_within(root, &existing.join("x")),
+        None => Ok(()),
+    }
 }
 
 /// Re-derive the patch's proof from the bytes about to be applied.
@@ -344,15 +429,69 @@ fn reverify(
         Admission::BlockSha1 { block_size, hashes } => {
             verify_block_sha1(file, patch, *block_size, hashes, cancel, responses)
         }
-        Admission::ChunkCrc => {
-            // The same scan the unprivileged path runs to admit a boot patch, repeated here because
-            // its result did not cross with it. It reads the whole file, so it doubles as the
-            // "nothing is written until the bytes are proven" step.
+        Admission::ChunkCrc { content } => {
+            // The digest first, because it is the half that an attacker cannot recompute for a file
+            // of their own choosing. The CRC scan behind it is the same one the unprivileged path
+            // runs to admit a boot patch, repeated here because its result did not cross with it.
+            verify_content_digest(file, patch, content, cancel, responses)?;
+            (&*file)
+                .seek(SeekFrom::Start(0))
+                .map_err(|e| Fault::at(WorkerErrorKind::Verify, patch, e.to_string()))?;
             let mut reader = PatchReader::open(BufReader::new(file))
                 .map_err(|e| Fault::at(WorkerErrorKind::Verify, patch, e.to_string()))?
                 .verify_crc(true);
             scan_crc(&mut reader)
                 .map_err(|e| Fault::at(WorkerErrorKind::Verify, patch, e.to_string()))
+        }
+    }
+}
+
+/// Hash the whole file and compare it against the digest the parent took when it admitted the file.
+fn verify_content_digest(
+    file: &File,
+    patch: &Path,
+    expected: &[u8; 32],
+    cancel: &AtomicBool,
+    responses: &mpsc::UnboundedSender<WorkerResponse>,
+) -> std::result::Result<(), Fault> {
+    let mut hasher = blake3::Hasher::new();
+    hash_stream(file, &mut hasher, cancel, responses)
+        .map_err(|e| Fault::at(WorkerErrorKind::Verify, patch, e.to_string()))?;
+    if hasher.finalize().as_bytes() == expected {
+        return Ok(());
+    }
+    Err(Fault::at(
+        WorkerErrorKind::Verify,
+        patch,
+        "the patch is not the file the launcher admitted".to_owned(),
+    ))
+}
+
+/// Read a whole file into `hasher`, reporting progress and honouring a cancel.
+fn hash_stream(
+    file: &File,
+    hasher: &mut blake3::Hasher,
+    cancel: &AtomicBool,
+    responses: &mpsc::UnboundedSender<WorkerResponse>,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(file);
+    let mut buf = vec![0u8; VERIFY_READ_CHUNK];
+    let (mut done, mut announced) = (0u64, 0u64);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("verification was cancelled"));
+        }
+        let read = read_up_to(&mut reader, &mut buf)?;
+        if read == 0 {
+            return Ok(());
+        }
+        hasher.update(&buf[..read]);
+        done += read as u64;
+        if done - announced >= VERIFY_PROGRESS_STRIDE {
+            announced = done;
+            let _ = responses.send(WorkerResponse::Progress(WorkerProgress::Verifying {
+                bytes_done: done,
+            }));
         }
     }
 }

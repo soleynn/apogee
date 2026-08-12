@@ -169,6 +169,12 @@ impl Executor {
         match self {
             Self::InProcess => store::backup_ver(game_root, repo),
             Self::Elevated(worker) => {
+                // The same "nothing to back up" guard the in-process writer keeps. Without it the
+                // two arms disagree: a version file that vanished under the run makes this one fail
+                // an install whose bytes are all on disk, where the other returns cleanly.
+                if !store::ver_path(game_root, repo).exists() {
+                    return Ok(());
+                }
                 let (ver, bck) = (store::ver_rel(repo), store::bck_rel(repo));
                 let outcome = Self::live(worker)?.session().copy_within(&ver, &bck).await;
                 Self::settle(worker, outcome).await
@@ -205,7 +211,7 @@ impl Executor {
         };
         // A worker that stopped answering has said all it is going to say over the stream; its exit
         // status is the only detail left, and reading it means consuming the handle.
-        if matches!(err, ElevateError::Gone)
+        if matches!(err, ElevateError::Gone | ElevateError::Frame(_))
             && let Some(worker) = worker.take()
             && let Some(complaint) = worker.finish().await
         {
@@ -339,7 +345,18 @@ pub fn probe_writable(dir: &Path) -> Result<bool, PatchError> {
         .ancestors()
         .find(|candidate| candidate.exists())
         .unwrap_or(dir);
-    match probe_write(existing) {
+    // Which probe depends on what the install is about to do there. Inside a directory that already
+    // exists it writes files, so a file is what gets tried. Above one that does not, it creates the
+    // directory, and those are separate rights on Windows: the default access list on a drive root
+    // lets a standard user create folders but not files, so a file probe there answers "elevation
+    // required" for an install that would have succeeded unprivileged, and the tree then ends up
+    // owned by administrators with every later unprivileged write to it failing.
+    let outcome = if existing == dir {
+        probe_file(existing)
+    } else {
+        probe_dir(existing)
+    };
+    match outcome {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(false),
         Err(source) => Err(PatchError::Io {
@@ -349,25 +366,35 @@ pub fn probe_writable(dir: &Path) -> Result<bool, PatchError> {
     }
 }
 
+/// A name nothing else will collide with, distinctive enough to recognise if a crash ever strands
+/// one.
+fn probe_name() -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(".apogee-write-probe-{}-{stamp:x}", std::process::id())
+}
+
 /// Create, write and remove one file in `dir`.
 ///
 /// A create alone would answer for a directory that admits new entries but not their contents, and
 /// nothing here is left behind on either outcome.
-fn probe_write(dir: &Path) -> std::io::Result<()> {
+fn probe_file(dir: &Path) -> std::io::Result<()> {
     use std::io::Write;
 
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = dir.join(format!(
-        ".apogee-write-probe-{}-{stamp:x}",
-        std::process::id()
-    ));
+    let path = dir.join(probe_name());
     let mut file = std::fs::File::create_new(&path)?;
     let written = file.write_all(b"apogee").and_then(|()| file.flush());
     drop(file);
     let removed = std::fs::remove_file(&path);
     written.and(removed)
+}
+
+/// Create and remove one subdirectory of `dir`.
+fn probe_dir(dir: &Path) -> std::io::Result<()> {
+    let path = dir.join(probe_name());
+    std::fs::create_dir(&path)?;
+    std::fs::remove_dir(&path)
 }
 
 #[cfg(test)]

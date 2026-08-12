@@ -65,18 +65,38 @@ impl Admitted {
     /// through the parser with CRC verification on; a parse or CRC fault rejects the patch here as
     /// [`PatchError::BootAdmission`], before any byte is applied. Synchronous and CPU/IO-bound: call
     /// it on a blocking worker.
+    ///
+    /// It also takes a digest of the admitted bytes. That digest is not an integrity check here,
+    /// where the file has just been read and proven: it exists so a privileged process on the other
+    /// side of a boundary can tell the file this scan accepted from a file substituted afterwards,
+    /// which the chunk CRC on its own cannot, being a checksum anyone can recompute.
     fn scan_boot(path: PathBuf, index: u32) -> Result<Self, PatchError> {
         let file = std::fs::File::open(&path).map_err(|source| PatchError::Io {
             path: path.clone(),
             source,
         })?;
-        let mut reader = PatchReader::open(BufReader::new(file))
-            .map_err(|source| PatchError::BootAdmission { index, source })?
-            .verify_crc(true);
-        scan_crc(&mut reader).map_err(|source| PatchError::BootAdmission { index, source })?;
+        let mut hashing = HashingReader {
+            inner: BufReader::new(file),
+            hasher: blake3::Hasher::new(),
+        };
+        let content = {
+            let mut reader = PatchReader::open(&mut hashing)
+                .map_err(|source| PatchError::BootAdmission { index, source })?
+                .verify_crc(true);
+            scan_crc(&mut reader).map_err(|source| PatchError::BootAdmission { index, source })?;
+            drop(reader);
+            // The parser stops at the end-of-file chunk, so anything trailing it is unread and
+            // therefore unhashed. Draining first keeps the digest a statement about the whole file,
+            // which is what the far side re-derives.
+            std::io::copy(&mut hashing, &mut std::io::sink()).map_err(|source| PatchError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            *hashing.hasher.finalize().as_bytes()
+        };
         Ok(Self {
             path,
-            admission: Admission::ChunkCrc,
+            admission: Admission::ChunkCrc { content },
         })
     }
 
@@ -91,11 +111,43 @@ impl Admitted {
     }
 }
 
-/// One patch's download request and the admission regime that will prove its bytes.
+/// A reader that digests everything it hands on, so the admission scan and the digest are one pass
+/// over the file rather than two.
+struct HashingReader<R> {
+    inner: R,
+    hasher: blake3::Hasher,
+}
+
+impl<R: std::io::Read> std::io::Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.hasher.update(&buf[..read]);
+        Ok(read)
+    }
+}
+
+/// One patch's download request and how its bytes will be proven.
 #[derive(Debug)]
 struct Plan {
     spec: DownloadSpec,
-    admission: Admission,
+    regime: Regime,
+}
+
+/// How a downloaded patch becomes an [`Admitted`] one.
+///
+/// The two arms are the two ways Square Enix publishes integrity for the two repo families, and the
+/// difference is where the admission comes from: a game patch's digests are known before the
+/// download and travel with the plan, while a boot patch has none and its admission is minted only
+/// once the patcher's own scan has read the file. Carrying the distinction as data, rather than
+/// re-deriving it from the repo at each step, is what keeps the download validator and the admission
+/// from disagreeing about which regime a patch is under.
+#[derive(Debug)]
+enum Regime {
+    /// Fetch proves each block during the download; the same digests are carried on, because a
+    /// privileged apply has to prove them again from the file it is about to read.
+    BlockSha1(Admission),
+    /// Nothing is proven until the chunk-CRC scan runs, which mints the admission itself.
+    ChunkCrc,
 }
 
 /// Run one repo's install to completion.
@@ -268,8 +320,8 @@ fn build_plan(
     // Boot patches carry no per-block hashes: fetch delivers their length-checked bytes under the
     // external-verification marker and the patcher's chunk-CRC scan admits them (`acquire_one`).
     // Game and expansion patches verify per block during download.
-    let (validator, admission) = match repo {
-        Repo::Boot => (Validator::External, Admission::ChunkCrc),
+    let (validator, regime) = match repo {
+        Repo::Boot => (Validator::External, Regime::ChunkCrc),
         Repo::Game | Repo::Expansion(_) => block_sha1_regime(entry, index)?,
     };
     let spec = DownloadSpec::builder(url, dest, validator)
@@ -278,7 +330,7 @@ fn build_plan(
         .header_policy(HeaderPolicy::se_patch(headers.unique_id.clone()))
         .build()
         .map_err(|e| bad(format!("cannot build download: {e}")))?;
-    Ok(Plan { spec, admission })
+    Ok(Plan { spec, regime })
 }
 
 /// Build the per-block SHA1 validator from a game patch's hashes, and the matching admission a
@@ -292,7 +344,7 @@ fn build_plan(
 fn block_sha1_regime(
     entry: &PatchListEntry,
     index: u32,
-) -> Result<(Validator, Admission), PatchError> {
+) -> Result<(Validator, Regime), PatchError> {
     let bad = |detail: String| PatchError::Patchlist { index, detail };
     let block_hashes = entry
         .hashes
@@ -314,10 +366,10 @@ fn block_sha1_regime(
     }
     Ok((
         Validator::BlockSha1 { block_size, hashes },
-        Admission::BlockSha1 {
+        Regime::BlockSha1(Admission::BlockSha1 {
             block_size,
             hashes: block_hashes.hashes.clone(),
-        },
+        }),
     ))
 }
 
@@ -346,8 +398,8 @@ async fn acquire_one(
     cancel: CancellationToken,
 ) -> Result<Admitted, PatchError> {
     let spec = &plan.spec;
-    match repo {
-        Repo::Boot => {
+    match &plan.regime {
+        Regime::ChunkCrc => {
             let path = retry_transient(
                 || {
                     with_progress_relay(
@@ -369,7 +421,7 @@ async fn acquire_one(
                     source: std::io::Error::other(join),
                 })?
         }
-        Repo::Game | Repo::Expansion(_) => {
+        Regime::BlockSha1(admission) => {
             let verified = retry_transient(
                 || {
                     with_progress_relay(
@@ -383,7 +435,7 @@ async fn acquire_one(
             )
             .await
             .map_err(|e| acquire_err(e, repo, index))?;
-            Ok(Admitted::from_verified(verified, plan.admission.clone()))
+            Ok(Admitted::from_verified(verified, admission.clone()))
         }
     }
 }

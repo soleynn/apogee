@@ -14,38 +14,23 @@
 //! transition, and both are the parts a person would actually see. Neither this test nor any other
 //! in this repository has run the prompt a user gets.
 
+mod support;
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use apogee_elevate::{Admission, Session, VersionWrite};
+use apogee_elevate::{Session, VersionWrite};
 use apogee_zipatch::fixtures;
-use sha1::{Digest, Sha1};
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio_util::sync::CancellationToken;
+
+use support::{block_sha1, place};
 
 /// The version file the fixtures advance, relative to the bound tree.
 const VER: &str = "ffxivgame.ver";
 
-/// The block width the synthetic digests are taken over.
-const BLOCK_SIZE: usize = 64;
-
 fn worker() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_apogee-elevated"))
-}
-
-fn block_sha1(bytes: &[u8]) -> Admission {
-    Admission::BlockSha1 {
-        block_size: BLOCK_SIZE as u32,
-        hashes: bytes
-            .chunks(BLOCK_SIZE)
-            .map(|block| {
-                Sha1::digest(block)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            })
-            .collect(),
-    }
 }
 
 fn version() -> Option<VersionWrite> {
@@ -105,8 +90,7 @@ async fn the_worker_serves_a_patch_over_a_named_pipe() -> Result<(), Box<dyn Err
     let patch = fixtures::patch_a();
     let store = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
-    let path = store.path().join("p.patch");
-    std::fs::write(&path, &patch)?;
+    let path = place(store.path(), "p.patch", &patch)?;
 
     let name = format!(r"\\.\pipe\apogee-elevate-test-{}", std::process::id());
     let server = ServerOptions::new()
@@ -138,8 +122,7 @@ async fn the_elevation_request_reaches_a_working_worker() -> Result<(), Box<dyn 
     let patch = fixtures::patch_a();
     let store = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
-    let path = store.path().join("p.patch");
-    std::fs::write(&path, &patch)?;
+    let path = place(store.path(), "p.patch", &patch)?;
 
     let mut worker = apogee_elevate::spawn::elevated(&worker()).await?;
     apply_and_check(worker.session(), root.path(), &path, &patch).await?;

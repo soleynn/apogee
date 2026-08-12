@@ -23,6 +23,9 @@ apogee-zipatch = { path = "../apogee-zipatch" }
 # The worker re-hashes a game patch's blocks itself: a verification proof taken in the parent is a
 # parent-process value and cannot cross to where the privileged write happens.
 sha1.workspace = true
+# And re-hashes a boot patch whole, which publishes no per-block digests. The chunk CRC alone is a
+# checksum the attacker being defended against can recompute, so the pin has to be a real digest.
+blake3.workspace = true
 
 # Naming the pipe the elevated child connects back on. The name is a nonce, so it comes from the
 # same generator every other unpredictable value in this workspace does.

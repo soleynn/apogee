@@ -72,9 +72,19 @@ pub enum Admission {
         /// One 40-character lowercase-hex digest per block.
         hashes: Vec<String>,
     },
-    /// The ZiPatch chunk CRC, which is a boot patch's only integrity check: the whole file is
-    /// scanned before the first write.
-    ChunkCrc,
+    /// The ZiPatch chunk CRC, for a patch that publishes no digests, plus a whole-file digest the
+    /// parent took at the moment it admitted the file.
+    ///
+    /// The CRC alone would not be a re-verification at all. It is a checksum over bytes the attacker
+    /// this check exists to stop can rewrite and recompute in the same breath, so a worker that
+    /// accepted it would accept any well-formed patch put in the store's place. `content` is what
+    /// makes the pass mean something: it pins the exact bytes the parent proved, so the only file
+    /// that passes is the one that was there when the parent looked. It is not an upstream digest
+    /// and does not pretend to be, which is precisely why it closes this window and no other.
+    ChunkCrc {
+        /// The BLAKE3 digest of the whole patch, as the parent measured it.
+        content: [u8; 32],
+    },
 }
 
 /// A version file to write after a clean apply.
@@ -192,8 +202,13 @@ where
     if len > MAX_FRAME {
         return Err(FrameError::TooLarge { len });
     }
-    writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(&body).await?;
+    // Prefix and body in one write, not two. Two leaves a window in which a worker that dies between
+    // them has published a length it will never satisfy, and the peer then reports a truncated frame
+    // where the honest answer is that the process is gone.
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&body);
+    writer.write_all(&frame).await?;
     writer.flush().await?;
     Ok(())
 }

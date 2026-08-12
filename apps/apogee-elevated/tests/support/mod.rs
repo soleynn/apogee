@@ -2,6 +2,13 @@
 //!
 //! Everything here returns a `Result`: the unwrap relaxation these integration targets carry covers
 //! test bodies, not the helpers they call.
+// Each integration target compiles this module separately, so whatever a given one does not reach is
+// dead in that target's eyes. The alternative is a copy of these helpers per target, which is the
+// duplication the module exists to remove.
+#![allow(
+    dead_code,
+    reason = "shared across integration targets, compiled once per target"
+)]
 
 use std::error::Error;
 use std::path::Path;
@@ -46,19 +53,32 @@ pub fn place(dir: &Path, name: &str, bytes: &[u8]) -> Result<std::path::PathBuf,
     Ok(path)
 }
 
-/// The per-block SHA1 admission for `bytes`, in the form a game patchlist publishes.
+/// The chunk-CRC admission for `bytes`, carrying the whole-file digest the launcher takes when its
+/// own scan admits a boot patch.
+pub fn chunk_crc(bytes: &[u8]) -> Admission {
+    Admission::ChunkCrc {
+        content: *blake3::hash(bytes).as_bytes(),
+    }
+}
+
+/// Per-block lowercase-hex SHA1 over `bytes`, the shape a game patchlist publishes.
+pub fn block_sha1_hex(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .chunks(BLOCK_SIZE)
+        .map(|block| {
+            Sha1::digest(block)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// The per-block SHA1 admission for `bytes`.
 pub fn block_sha1(bytes: &[u8]) -> Admission {
     Admission::BlockSha1 {
         block_size: BLOCK_SIZE as u32,
-        hashes: bytes
-            .chunks(BLOCK_SIZE)
-            .map(|block| {
-                Sha1::digest(block)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            })
-            .collect(),
+        hashes: block_sha1_hex(bytes),
     }
 }
 

@@ -125,33 +125,39 @@ where
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        write_frame(&mut self.writer, request).await?;
+        let Self { reader, writer } = self;
+        write_frame(writer, request).await?;
 
-        // Scoped so the completion future's borrow of the reader ends before the cancel arm needs
-        // the writer; `select!` keeps every branch alive while a handler runs.
-        let settled = {
-            let reader = &mut self.reader;
+        // The completion future is created once and never dropped, which is the whole shape of this
+        // loop. `read_frame` is built on `read_exact` and is not cancellation-safe: abandoning it
+        // between the length prefix and the body would swallow four bytes and leave every later
+        // frame reading a JSON fragment as a length. So a cancel does not abandon the read, it
+        // writes a `Cancel` beside it and keeps waiting for the worker's own answer. Dropping the
+        // stream instead would be worse again: it would leave a privileged process writing into the
+        // tree with nobody left to tell it to stop.
+        let mut settling = std::pin::pin!(settle(reader, &mut on_progress));
+        let mut asked_to_stop = false;
+        let outcome = loop {
             tokio::select! {
                 biased;
-                outcome = settle(reader, &mut on_progress) => Some(outcome),
-                () = cancel.cancelled() => None,
-            }
-        };
-        match settled {
-            Some(outcome) => outcome,
-            None => {
-                // The worker is mid-apply. Ask it to stop and then read its answer: dropping the
-                // stream instead would leave a privileged process still writing into the tree.
-                write_frame(&mut self.writer, &WorkerRequest::Cancel).await?;
-                match settle(&mut self.reader, &mut on_progress).await {
-                    Ok(()) => Err(Error::Cancelled),
-                    Err(Error::Worker {
-                        kind: WorkerErrorKind::Cancelled,
-                        ..
-                    }) => Err(Error::Cancelled),
-                    Err(other) => Err(other),
+                outcome = &mut settling => break outcome,
+                () = cancel.cancelled(), if !asked_to_stop => {
+                    asked_to_stop = true;
+                    write_frame(writer, &WorkerRequest::Cancel).await?;
                 }
             }
+        };
+        match outcome {
+            // A worker that answered `Done` after being told to stop finished the request before the
+            // message reached it. The caller still asked to cancel, so the run is reported cancelled;
+            // it is re-runnable either way, since apply is idempotent.
+            Ok(()) if asked_to_stop => Err(Error::Cancelled),
+            Ok(()) => Ok(()),
+            Err(Error::Worker {
+                kind: WorkerErrorKind::Cancelled,
+                ..
+            }) => Err(Error::Cancelled),
+            Err(other) => Err(other),
         }
     }
 }
@@ -162,7 +168,20 @@ async fn settle<R: AsyncRead + Unpin>(
     on_progress: &mut impl FnMut(WorkerProgress),
 ) -> Result<()> {
     loop {
-        match read_frame::<_, WorkerResponse>(reader).await? {
+        // A worker killed part way through writing a frame ends the stream mid-body, which the
+        // framing reports as a truncation rather than a clean close. Both are the same fact to a
+        // caller and both have to reach the arm that reads the dead process's exit status, so the
+        // distinction the framing keeps is folded away here rather than there.
+        let frame = match read_frame::<_, WorkerResponse>(reader).await {
+            Ok(frame) => frame,
+            Err(crate::proto::FrameError::Io(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                return Err(Error::Gone);
+            }
+            Err(e) => return Err(Error::from(e)),
+        };
+        match frame {
             Some(WorkerResponse::Progress(p)) => on_progress(p),
             Some(WorkerResponse::Done) => return Ok(()),
             Some(WorkerResponse::Failed {

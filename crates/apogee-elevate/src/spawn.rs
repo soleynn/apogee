@@ -162,14 +162,20 @@ pub async fn elevated(binary: &Path) -> Result<Worker> {
             connected.map_err(|e| spawn_failed("the worker pipe failed".to_owned(), Some(e)))?;
         }
         status = process.wait() => {
+            let status = status.ok();
+            // A person saying no is not a failure to report as one. The shell turns that one case
+            // into its own exit code so it can be told apart from a worker that could not start.
+            if status.and_then(|s| s.code()) == Some(CONSENT_DECLINED) {
+                return Err(Error::Cancelled);
+            }
             let mut said = String::new();
             if let Some(stderr) = complaint.as_mut() {
                 let _ = stderr.read_to_string(&mut said).await;
             }
-            let status = match status {
-                Ok(status) => status.to_string(),
-                Err(e) => format!("unknown status: {e}"),
-            };
+            let status = status.map_or_else(
+                || "an unknown status".to_owned(),
+                |status| status.to_string(),
+            );
             let said = said.trim();
             return Err(spawn_failed(
                 if said.is_empty() {
@@ -199,6 +205,14 @@ pub async fn elevated(binary: &Path) -> Result<Worker> {
     Ok(Worker { session, process })
 }
 
+/// The exit code the elevation script reports when the user declined the prompt.
+///
+/// Windows raises `ERROR_CANCELLED` for a refused consent dialog, and the script re-reports that
+/// number rather than inventing one, so the value in the log is the one the platform used. Chosen
+/// out of the range a worker can produce: the worker only ever returns success, one, or two.
+#[cfg(windows)]
+const CONSENT_DECLINED: i32 = 1223;
+
 /// The one-line script that raises privileges and re-reports the worker's exit code.
 ///
 /// `Start-Process -Verb RunAs` is the whole reason a shell is involved: raising privileges is a
@@ -206,12 +220,22 @@ pub async fn elevated(binary: &Path) -> Result<Worker> {
 /// Doing it through PowerShell keeps the crate free of foreign-function linkage, which is a
 /// workspace-wide rule rather than a preference here. `-Wait -PassThru` is what turns the shell into
 /// a stand-in for a child this process may not hold a handle to.
+///
+/// The `catch` exists so that declining the prompt is distinguishable from every other way the
+/// request can fail. Without it both arrive as a nonzero exit with a message, and a caller cannot
+/// tell a user who said no from a worker that would not start, which is the difference between
+/// reporting a stopped operation and reporting a crash.
 #[cfg(windows)]
 fn elevate_script(binary: &Path, pipe: &str) -> String {
     format!(
         "$ErrorActionPreference='Stop'; \
-         $p = Start-Process -FilePath {} -ArgumentList {},{} -Verb RunAs -PassThru -Wait; \
-         exit $p.ExitCode",
+         try {{ \
+           $p = Start-Process -FilePath {} -ArgumentList {},{} -Verb RunAs -PassThru -Wait; \
+           exit $p.ExitCode \
+         }} catch [System.ComponentModel.Win32Exception] {{ \
+           if ($_.Exception.NativeErrorCode -eq {CONSENT_DECLINED}) {{ exit {CONSENT_DECLINED} }} \
+           throw \
+         }}",
         single_quote(&binary.display().to_string()),
         single_quote(PIPE_ARG),
         single_quote(pipe),

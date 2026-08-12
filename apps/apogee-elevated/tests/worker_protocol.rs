@@ -15,11 +15,11 @@ mod support;
 use std::error::Error;
 use std::path::Path;
 
-use apogee_elevate::{Admission, Error as ElevateError, VersionWrite, WorkerErrorKind};
+use apogee_elevate::{Error as ElevateError, VersionWrite, WorkerErrorKind};
 use apogee_zipatch::fixtures;
 use tokio_util::sync::CancellationToken;
 
-use support::{BLOCK_SIZE, block_sha1, place, start, wide_expected, wide_patch};
+use support::{BLOCK_SIZE, block_sha1, chunk_crc, place, start, wide_expected, wide_patch};
 
 /// The version file the fixtures advance, relative to the bound tree.
 const VER: &str = "ffxivgame.ver";
@@ -213,7 +213,7 @@ async fn a_boot_patch_is_admitted_by_its_chunk_crc() -> Result<(), Box<dyn Error
         .session
         .apply(
             &bad,
-            Admission::ChunkCrc,
+            chunk_crc(&patch),
             None,
             &CancellationToken::new(),
             |_| {},
@@ -237,13 +237,66 @@ async fn a_boot_patch_is_admitted_by_its_chunk_crc() -> Result<(), Box<dyn Error
         .session
         .apply(
             &good,
-            Admission::ChunkCrc,
+            chunk_crc(&patch),
             None,
             &CancellationToken::new(),
             |_| {},
         )
         .await?;
     assert!(root.path().join(fixtures::DAT0_PATH).exists());
+    Ok(())
+}
+
+/// A boot patch swapped for a different, perfectly well-formed patch is refused.
+///
+/// This is the case the chunk CRC cannot cover and the reason the boot admission carries a digest at
+/// all. The substitute here is a real patch with correct CRCs throughout, which is exactly what an
+/// attacker who can write to the patch store would produce: a checksum they recompute is not a check
+/// on them. Only the digest the launcher took over the bytes it actually admitted separates the two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_boot_patch_swapped_for_another_valid_patch_is_refused() -> Result<(), Box<dyn Error>> {
+    let admitted = fixtures::patch_a();
+    let substitute = fixtures::patch_b();
+    let store = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let mut harness = start().await?;
+    harness.session.bind(root.path()).await?;
+
+    // Prove the substitute is not merely malformed: its own chunk CRCs are correct, so the scan
+    // alone would wave it through.
+    let path = place(store.path(), "swapped.patch", &substitute)?;
+    harness
+        .session
+        .apply(
+            &path,
+            chunk_crc(&substitute),
+            None,
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await?;
+
+    let path = place(store.path(), "swapped2.patch", &substitute)?;
+    let err = harness
+        .session
+        .apply(
+            &path,
+            chunk_crc(&admitted),
+            None,
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect_err("a patch that is not the one the launcher admitted must not be applied");
+    let ElevateError::Worker {
+        kind: WorkerErrorKind::Verify,
+        detail,
+        ..
+    } = &err
+    else {
+        panic!("expected a typed verification refusal, got {err:?}");
+    };
+    assert!(detail.contains("admitted"), "{detail}");
     Ok(())
 }
 
