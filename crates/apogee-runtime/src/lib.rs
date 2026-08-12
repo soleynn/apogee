@@ -44,7 +44,7 @@ mod steam;
 #[cfg(target_os = "linux")]
 mod supervise;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apogee_fetch::Fetcher;
@@ -77,7 +77,7 @@ pub use metadata::{
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 #[cfg(not(target_os = "linux"))]
-pub use non_linux::{GameExit, GameSession, prefix_processes};
+pub use non_linux::{GameExit, GameSession, game_running, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{ProgramStatus, Progress, RuntimeEvent};
 pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
@@ -117,6 +117,29 @@ pub async fn prefix_processes(
             path: PathBuf::from("/proc"),
             source,
         })
+}
+
+/// Whether the game client is live in the install rooted at `game_root`.
+///
+/// A positive answer for whoever is about to rewrite that install: it names the process by the
+/// client's executable and then narrows to the install it is running out of, from that process's own
+/// working directory and argv. A client running from a different directory is a different install and
+/// answers `false`, so a second copy of the game does not stand in the way of patching this one.
+///
+/// It reads the process table as it is at the call, and a game can start the moment after. That makes
+/// it a guard against the ordinary mistake (patching an install someone is playing), not a lock.
+///
+/// Synchronous, and a walk of every process on the machine: run it off the runtime if the caller is
+/// on one and the answer is not wanted at the head of an operation that is about to block anyway.
+///
+/// # Errors
+/// [`RuntimeError::Io`] if `/proc` cannot be read.
+#[cfg(target_os = "linux")]
+pub fn game_running(game_root: &Path) -> Result<bool, RuntimeError> {
+    supervise::running_in_install(game_root).map_err(|source| RuntimeError::Io {
+        path: PathBuf::from("/proc"),
+        source,
+    })
 }
 
 /// Reap the spawned program in the background and report its status on `progress`.
@@ -752,6 +775,15 @@ mod non_linux {
         _prefix: &crate::Prefix,
         _program_name: &str,
     ) -> Result<Vec<i32>, crate::RuntimeError> {
+        Err(crate::RuntimeError::Unsupported {
+            what: "reading the process table",
+        })
+    }
+
+    /// See the Linux implementation. Off Linux there is no process table to read this way, so the
+    /// question is refused rather than answered `false`: a caller guarding an install has to be able
+    /// to tell "no game is running" from "nobody looked".
+    pub fn game_running(_game_root: &std::path::Path) -> Result<bool, crate::RuntimeError> {
         Err(crate::RuntimeError::Unsupported {
             what: "reading the process table",
         })
