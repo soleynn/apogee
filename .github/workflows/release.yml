@@ -46,14 +46,20 @@ jobs:
         with:
           config: cliff.toml
           args: ${{ steps.tag.outputs.cliff_args }}
-      # Stable tags ship a binary; pre-release checkpoints do not. Build, strip, and package the
-      # CLI so the release carries a self-contained tarball plus a sha256 sidecar. Linux only for now.
+      # Stable tags ship binaries; pre-release checkpoints do not. Build, strip, and package the CLI
+      # for each target so the release carries self-contained archives plus sha256 sidecars.
       - name: Set up Rust
         if: steps.tag.outputs.prerelease == 'false'
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
         with:
           toolchain: "1.97.0"
-      - name: Build and package the CLI
+          targets: x86_64-pc-windows-gnu
+      # Windows is cross-built from this runner against the GNU/MinGW ABI, the same way
+      # `build-windows-cross` does in CI: a plain apt package, no MSVC SDK and no second runner.
+      - name: Install the MinGW-w64 cross toolchain
+        if: steps.tag.outputs.prerelease == 'false'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+      - name: Build and package the Linux CLI
         id: package
         if: steps.tag.outputs.prerelease == 'false'
         env:
@@ -73,6 +79,32 @@ jobs:
           sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
           echo "tarball=${pkg}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=${pkg}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+      # The Windows archive carries the pair, flat and in one directory. On Windows the patcher
+      # applies through a separate elevated worker, and it finds that worker by looking for
+      # `apogee-elevated.exe` beside its own executable: an archive holding only the CLI unpacks to a
+      # launcher that cannot elevate, with nothing to point at but a spawn failure. Nothing installs
+      # them, so the layout in the archive is the layout on disk.
+      - name: Build and package the Windows CLI
+        id: package_windows
+        if: steps.tag.outputs.prerelease == 'false'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          triple=x86_64-pc-windows-gnu
+          cargo build --release --locked --target "$triple" -p apogee-cli -p apogee-elevated
+          pkg="apogee-cli-${REF_NAME}-${triple}"
+          # The cross toolchain's `strip`, which targets this object format directly rather than
+          # leaning on the host binutils having been built with PE support.
+          for bin in apogee-cli apogee-elevated; do
+            x86_64-w64-mingw32-strip "target/${triple}/release/${bin}.exe"
+            install -Dm755 "target/${triple}/release/${bin}.exe" "dist/${pkg}/${bin}.exe"
+          done
+          install -Dm644 LICENSE "dist/${pkg}/LICENSE"
+          # zip rather than a tarball: it is the format Windows opens without installing anything.
+          ( cd dist && zip -qr "../${pkg}.zip" "${pkg}" )
+          sha256sum "${pkg}.zip" > "${pkg}.zip.sha256"
+          echo "archive=${pkg}.zip" >> "$GITHUB_OUTPUT"
+          echo "checksum=${pkg}.zip.sha256" >> "$GITHUB_OUTPUT"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,9 +112,12 @@ jobs:
           PRERELEASE: ${{ steps.tag.outputs.prerelease }}
           TARBALL: ${{ steps.package.outputs.tarball }}
           CHECKSUM: ${{ steps.package.outputs.checksum }}
+          WIN_ARCHIVE: ${{ steps.package_windows.outputs.archive }}
+          WIN_CHECKSUM: ${{ steps.package_windows.outputs.checksum }}
         run: |
           if [ "$PRERELEASE" = "true" ]; then
             gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --prerelease
           else
-            gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --latest "$TARBALL" "$CHECKSUM"
+            gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --latest \
+              "$TARBALL" "$CHECKSUM" "$WIN_ARCHIVE" "$WIN_CHECKSUM"
           fi
