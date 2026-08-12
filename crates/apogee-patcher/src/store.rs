@@ -57,22 +57,35 @@ pub(crate) fn repo_subdir(repo: Repo) -> &'static str {
     }
 }
 
-/// The `.ver` path for `repo`, matching `sqex-proto`'s `InstallPaths` layout.
-pub(crate) fn ver_path(game_root: &Path, repo: Repo) -> PathBuf {
+/// The `.ver` path for `repo` relative to its apply root, matching `sqex-proto`'s `InstallPaths`
+/// layout.
+///
+/// Relative rather than absolute because the elevated worker is bound to the apply root and refuses
+/// anything it cannot resolve beneath it; the absolute form is this joined onto that root, which
+/// [`ver_path`] does and a test pins.
+pub(crate) fn ver_rel(repo: Repo) -> String {
     match repo {
-        Repo::Boot => game_root.join("boot").join("ffxivboot.ver"),
-        Repo::Game => game_root.join("game").join("ffxivgame.ver"),
-        Repo::Expansion(n) => game_root
-            .join("game")
-            .join("sqpack")
-            .join(format!("ex{n}"))
-            .join(format!("ex{n}.ver")),
+        Repo::Boot => "ffxivboot.ver".to_owned(),
+        Repo::Game => "ffxivgame.ver".to_owned(),
+        Repo::Expansion(n) => format!("sqpack/ex{n}/ex{n}.ver"),
     }
 }
 
-/// The `.bck` path for `repo` (the `.ver` backup taken after a whole set applies).
+/// The `.bck` path for `repo` relative to its apply root (the `.ver` backup taken after a whole set
+/// applies).
+pub(crate) fn bck_rel(repo: Repo) -> String {
+    let ver = ver_rel(repo);
+    format!("{}.bck", ver.trim_end_matches(".ver"))
+}
+
+/// The `.ver` path for `repo` beneath `game_root`.
+pub(crate) fn ver_path(game_root: &Path, repo: Repo) -> PathBuf {
+    repo_root(game_root, repo).join(ver_rel(repo))
+}
+
+/// The `.bck` path for `repo` beneath `game_root`.
 fn bck_path(game_root: &Path, repo: Repo) -> PathBuf {
-    ver_path(game_root, repo).with_extension("bck")
+    repo_root(game_root, repo).join(bck_rel(repo))
 }
 
 /// Strip a patchlist version's leading list-prefix letter (e.g. `D2024.03.28.0000.0001` →
@@ -181,6 +194,26 @@ mod tests {
             ver_path(root, Repo::Expansion(3)),
             Path::new("/g/game/sqpack/ex3/ex3.ver")
         );
+    }
+
+    /// The relative form the worker is given resolves, under its apply root, to the same absolute
+    /// path the in-process writer uses. The two paths are what keep an elevated and an unelevated
+    /// install byte-identical, so they are pinned against each other rather than separately.
+    #[test]
+    fn the_relative_version_paths_rebuild_the_absolute_ones() {
+        let root = Path::new("/g");
+        for repo in [Repo::Boot, Repo::Game, Repo::Expansion(4)] {
+            assert_eq!(
+                repo_root(root, repo).join(ver_rel(repo)),
+                ver_path(root, repo)
+            );
+            assert_eq!(
+                repo_root(root, repo).join(bck_rel(repo)),
+                bck_path(root, repo)
+            );
+        }
+        assert_eq!(bck_rel(Repo::Game), "ffxivgame.bck");
+        assert_eq!(bck_rel(Repo::Expansion(4)), "sqpack/ex4/ex4.bck");
     }
 
     #[test]

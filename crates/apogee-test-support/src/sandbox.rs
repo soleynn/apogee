@@ -1,6 +1,10 @@
 //! Throwaway on-disk sandboxes: a temp settings store, a temp game root, and a minimal wine prefix,
 //! each auto-removed when the returned handle drops.
 
+// Only the wine-prefix helpers take a path, and both are Unix-only: ungated, a Windows build of this
+// crate warns on an unused import, which every Windows job reaching this dev dependency then has to
+// look past.
+#[cfg(unix)]
 use std::path::Path;
 
 use tempfile::{Builder, TempDir};

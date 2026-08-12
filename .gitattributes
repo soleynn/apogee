@@ -1,0 +1,16 @@
+# No line-ending conversion, anywhere.
+#
+# Git rewrites line endings on checkout for files it decides are text, and on Windows that is the
+# default. For most projects that is a convenience. Here it silently changes bytes that are the
+# contract: the two signed catalogs are embedded with `include_bytes!` and checked against a
+# compiled-in Ed25519 key, so a checkout that turns their newlines into carriage-return pairs
+# produces a binary whose own manifest cannot verify. That was the state of every Windows checkout of
+# this repository until this file existed, and it is not a test-only fault: a launcher built there
+# could not have resolved an index pin or an addon component at all.
+#
+# The rule is global rather than a list of the artifacts that have bitten us, because the list is not
+# knowable in advance. Golden trees, recorded fixtures, patch corpora and signed manifests are all
+# byte-exact by design, and a project whose whole claim is byte-identity to another implementation
+# should not have a checkout step that edits its files. Working with LF everywhere costs nothing:
+# every toolchain this repository uses reads it on every platform.
+* -text

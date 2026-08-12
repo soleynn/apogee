@@ -166,10 +166,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "apogee-elevated"
+name = "apogee-elevate"
 version = "0.0.0"
 dependencies = [
  "apogee-zipatch",
+ "blake3",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "apogee-elevated"
+version = "0.0.0"
+dependencies = [
+ "apogee-elevate",
+ "apogee-fetch",
+ "apogee-patcher",
+ "apogee-test-support",
+ "apogee-zipatch",
+ "blake3",
+ "sha1 0.11.0",
+ "sqex-proto",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]
@@ -219,10 +247,12 @@ dependencies = [
 name = "apogee-patcher"
 version = "0.0.0"
 dependencies = [
+ "apogee-elevate",
  "apogee-fetch",
  "apogee-sqpack",
  "apogee-test-support",
  "apogee-zipatch",
+ "blake3",
  "ed25519-dalek",
  "rustix",
  "serde",

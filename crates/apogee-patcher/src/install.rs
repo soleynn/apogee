@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use apogee_elevate::Admission;
 use apogee_fetch::{
     DownloadSpec, FetchError, Fetcher, HeaderPolicy, Priority, Progress, Validator, VerifiedFile,
 };
@@ -23,6 +24,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::elevated::{ApplySlot, Executor};
 use crate::request::{InstallRequest, Installed, SePatch};
 use crate::{PatchError, PatchProgress, PatcherConfig, Repo, preflight, store};
 
@@ -40,16 +42,22 @@ impl Drop for AbortOnDrop {
 /// Proof a patch may be applied. A game patch arrives already verified by fetch (per-block SHA1); a
 /// boot patch, which carries no patchlist hashes, is admitted by the patcher's own ZiPatch chunk-CRC
 /// scan. Sealed with private construction: the only ways to make one are those two verification
-/// paths, so an unadmitted patch cannot reach [`apply_one`].
-struct Admitted {
+/// paths, so an unadmitted patch cannot reach [`apply_in_process`].
+///
+/// It carries the [`Admission`] that proved it as well as the path, because a proof taken here is a
+/// value in this process: an apply that happens in another one has to be able to re-derive it, and
+/// that needs to know which of the two regimes applies.
+pub(crate) struct Admitted {
     path: PathBuf,
+    admission: Admission,
 }
 
 impl Admitted {
     /// Wrap a game patch fetch already verified per block; its `VerifiedFile` is the proof.
-    fn from_verified(verified: VerifiedFile) -> Self {
+    fn from_verified(verified: VerifiedFile, admission: Admission) -> Self {
         Self {
             path: verified.path().to_path_buf(),
+            admission,
         }
     }
 
@@ -57,22 +65,89 @@ impl Admitted {
     /// through the parser with CRC verification on; a parse or CRC fault rejects the patch here as
     /// [`PatchError::BootAdmission`], before any byte is applied. Synchronous and CPU/IO-bound: call
     /// it on a blocking worker.
+    ///
+    /// It also takes a digest of the admitted bytes. That digest is not an integrity check here,
+    /// where the file has just been read and proven: it exists so a privileged process on the other
+    /// side of a boundary can tell the file this scan accepted from a file substituted afterwards,
+    /// which the chunk CRC on its own cannot, being a checksum anyone can recompute.
     fn scan_boot(path: PathBuf, index: u32) -> Result<Self, PatchError> {
         let file = std::fs::File::open(&path).map_err(|source| PatchError::Io {
             path: path.clone(),
             source,
         })?;
-        let mut reader = PatchReader::open(BufReader::new(file))
-            .map_err(|source| PatchError::BootAdmission { index, source })?
-            .verify_crc(true);
-        scan_crc(&mut reader).map_err(|source| PatchError::BootAdmission { index, source })?;
-        Ok(Self { path })
+        let mut hashing = HashingReader {
+            inner: BufReader::new(file),
+            hasher: blake3::Hasher::new(),
+        };
+        let content = {
+            let mut reader = PatchReader::open(&mut hashing)
+                .map_err(|source| PatchError::BootAdmission { index, source })?
+                .verify_crc(true);
+            scan_crc(&mut reader).map_err(|source| PatchError::BootAdmission { index, source })?;
+            drop(reader);
+            // The parser stops at the end-of-file chunk, so anything trailing it is unread and
+            // therefore unhashed. Draining first keeps the digest a statement about the whole file,
+            // which is what the far side re-derives.
+            std::io::copy(&mut hashing, &mut std::io::sink()).map_err(|source| PatchError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            *hashing.hasher.finalize().as_bytes()
+        };
+        Ok(Self {
+            path,
+            admission: Admission::ChunkCrc { content },
+        })
     }
 
     /// The admitted patch on disk.
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    /// How this patch was proven, for a side of the boundary that has to prove it again.
+    pub(crate) fn admission(&self) -> &Admission {
+        &self.admission
+    }
+}
+
+/// A reader that digests everything it hands on, so the admission scan and the digest are one pass
+/// over the file rather than two.
+struct HashingReader<R> {
+    inner: R,
+    hasher: blake3::Hasher,
+}
+
+impl<R: std::io::Read> std::io::Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.hasher.update(&buf[..read]);
+        Ok(read)
+    }
+}
+
+/// One patch's download request and how its bytes will be proven.
+#[derive(Debug)]
+struct Plan {
+    spec: DownloadSpec,
+    regime: Regime,
+}
+
+/// How a downloaded patch becomes an [`Admitted`] one.
+///
+/// The two arms are the two ways Square Enix publishes integrity for the two repo families, and the
+/// difference is where the admission comes from: a game patch's digests are known before the
+/// download and travel with the plan, while a boot patch has none and its admission is minted only
+/// once the patcher's own scan has read the file. Carrying the distinction as data, rather than
+/// re-deriving it from the repo at each step, is what keeps the download validator and the admission
+/// from disagreeing about which regime a patch is under.
+#[derive(Debug)]
+enum Regime {
+    /// Fetch proves each block during the download; the same digests are carried on, because a
+    /// privileged apply has to prove them again from the file it is about to read.
+    BlockSha1(Admission),
+    /// Nothing is proven until the chunk-CRC scan runs, which mints the admission itself.
+    ChunkCrc,
 }
 
 /// Run one repo's install to completion.
@@ -110,9 +185,9 @@ pub(crate) async fn run(
     // Build every download request first: a malformed entry fails the whole install before any task
     // is spawned, so an early return cannot leave a download running past it (spawning is done under
     // the abort guard below, after the last fallible step).
-    let mut specs = Vec::with_capacity(patches.len());
+    let mut plans = Vec::with_capacity(patches.len());
     for (i, entry) in patches.iter().enumerate() {
-        specs.push(build_spec(
+        plans.push(build_plan(
             &config.patch_store,
             entry,
             i as u32,
@@ -121,12 +196,17 @@ pub(crate) async fn run(
         )?);
     }
 
+    // Where the writes happen. Decided once per run, before the first download: a tree that needs
+    // elevation should ask for consent while the user is still watching the launcher start, not
+    // after a 120 GB transfer.
+    let mut executor = Executor::open(&config, &store::repo_root(&game_root, repo)).await?;
+
     // Acquire: submit every download (fetch caps the real concurrency). Each shares this run's cancel
     // token, forwards its progress, and delivers its verified result over a oneshot the ordered apply
     // loop awaits in turn. Every handle is placed under the guard so an early return aborts the rest.
-    let mut results = Vec::with_capacity(specs.len());
-    let mut handles = Vec::with_capacity(specs.len());
-    for (i, spec) in specs.into_iter().enumerate() {
+    let mut results = Vec::with_capacity(plans.len());
+    let mut handles = Vec::with_capacity(plans.len());
+    for (i, plan) in plans.into_iter().enumerate() {
         let index = i as u32;
         let (tx, rx) = oneshot::channel();
         results.push(rx);
@@ -134,7 +214,7 @@ pub(crate) async fn run(
         let progress = progress.clone();
         let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
-            let result = acquire_one(&fetcher, &spec, repo, index, &progress, cancel).await;
+            let result = acquire_one(&fetcher, &plan, repo, index, &progress, cancel).await;
             let _ = tx.send(result);
         }));
     }
@@ -164,10 +244,25 @@ pub(crate) async fn run(
             return Err(PatchError::Cancelled);
         }
 
-        apply_one(&admitted, &game_root, repo, index, &progress, &cancel).await?;
-
+        // The version advance travels with the apply rather than following it. Where the apply
+        // happens in another process, the version file sits inside the same tree that needed
+        // elevation, so this process cannot write it either; coupling the two is also what makes a
+        // torn run leave the old version behind, whichever side did the writing.
         last_bare = store::bare_version(&entry.version_id);
-        store::write_ver(&game_root, repo, &last_bare)?;
+        executor
+            .apply(
+                &admitted,
+                ApplySlot {
+                    game_root: &game_root,
+                    repo,
+                    index,
+                    advance: Some(&last_bare),
+                },
+                &progress,
+                &cancel,
+            )
+            .await?;
+
         let _ = progress.send(PatchProgress::Applied {
             repo,
             index,
@@ -179,7 +274,8 @@ pub(crate) async fn run(
         }
     }
 
-    store::backup_ver(&game_root, repo)?;
+    executor.backup_ver(&game_root, repo).await?;
+    executor.finish().await;
     Ok(Installed {
         repo,
         new_version: last_bare,
@@ -195,14 +291,14 @@ fn priority_for(repo: Repo) -> Priority {
     }
 }
 
-/// Turn one patchlist entry into an admissible download request.
-fn build_spec(
+/// Turn one patchlist entry into an admissible download request and the regime that proves it.
+fn build_plan(
     patch_store: &Path,
     entry: &PatchListEntry,
     index: u32,
     repo: Repo,
     headers: &SePatch,
-) -> Result<DownloadSpec, PatchError> {
+) -> Result<Plan, PatchError> {
     let bad = |detail: String| PatchError::Patchlist { index, detail };
     // The version drives the `.ver` write; a version that strips to empty (e.g. "" or "D") would
     // persist a zero-byte `.ver` that sqex-proto's sanity gate rejects, so reject the entry here
@@ -224,21 +320,31 @@ fn build_spec(
     // Boot patches carry no per-block hashes: fetch delivers their length-checked bytes under the
     // external-verification marker and the patcher's chunk-CRC scan admits them (`acquire_one`).
     // Game and expansion patches verify per block during download.
-    let validator = match repo {
-        Repo::Boot => Validator::External,
-        Repo::Game | Repo::Expansion(_) => block_sha1_validator(entry, index)?,
+    let (validator, regime) = match repo {
+        Repo::Boot => (Validator::External, Regime::ChunkCrc),
+        Repo::Game | Repo::Expansion(_) => block_sha1_regime(entry, index)?,
     };
-    DownloadSpec::builder(url, dest, validator)
+    let spec = DownloadSpec::builder(url, dest, validator)
         .expected_len(entry.length)
         .priority(priority_for(repo))
         .header_policy(HeaderPolicy::se_patch(headers.unique_id.clone()))
         .build()
-        .map_err(|e| bad(format!("cannot build download: {e}")))
+        .map_err(|e| bad(format!("cannot build download: {e}")))?;
+    Ok(Plan { spec, regime })
 }
 
-/// Build the per-block SHA1 validator from a game patch's hashes. Boot patches (no hashes) are
-/// admitted through the chunk-CRC gate, not here.
-fn block_sha1_validator(entry: &PatchListEntry, index: u32) -> Result<Validator, PatchError> {
+/// Build the per-block SHA1 validator from a game patch's hashes, and the matching admission a
+/// second process would re-derive it from. Boot patches (no hashes) are admitted through the
+/// chunk-CRC gate, not here.
+///
+/// Both come out of the same decode pass, so a digest that reaches the worker has already been
+/// proven to be forty characters of hex here. The pair is built together because they are one
+/// decision expressed twice: the validator is what fetch checks during the download, and the
+/// admission is what the privileged side checks again afterwards.
+fn block_sha1_regime(
+    entry: &PatchListEntry,
+    index: u32,
+) -> Result<(Validator, Regime), PatchError> {
     let bad = |detail: String| PatchError::Patchlist { index, detail };
     let block_hashes = entry
         .hashes
@@ -250,12 +356,21 @@ fn block_sha1_validator(entry: &PatchListEntry, index: u32) -> Result<Validator,
             block_hashes.block_size
         ))
     })?;
+    if block_size == 0 {
+        return Err(bad("block size is zero".to_owned()));
+    }
     let mut hashes = Vec::with_capacity(block_hashes.hashes.len());
     for hex in &block_hashes.hashes {
         hashes
             .push(decode_sha1_hex(hex).ok_or_else(|| bad(format!("invalid sha1 digest {hex:?}")))?);
     }
-    Ok(Validator::BlockSha1 { block_size, hashes })
+    Ok((
+        Validator::BlockSha1 { block_size, hashes },
+        Regime::BlockSha1(Admission::BlockSha1 {
+            block_size,
+            hashes: block_hashes.hashes.clone(),
+        }),
+    ))
 }
 
 /// Decode a 40-char lowercase-hex SHA1 into its 20 raw bytes.
@@ -276,14 +391,15 @@ fn decode_sha1_hex(hex: &str) -> Option<[u8; 20]> {
 /// blocking worker. Either way the result is an [`Admitted`] token the apply loop consumes in order.
 async fn acquire_one(
     fetcher: &Fetcher,
-    spec: &DownloadSpec,
+    plan: &Plan,
     repo: Repo,
     index: u32,
     progress: &mpsc::UnboundedSender<PatchProgress>,
     cancel: CancellationToken,
 ) -> Result<Admitted, PatchError> {
-    match repo {
-        Repo::Boot => {
+    let spec = &plan.spec;
+    match &plan.regime {
+        Regime::ChunkCrc => {
             let path = retry_transient(
                 || {
                     with_progress_relay(
@@ -305,7 +421,7 @@ async fn acquire_one(
                     source: std::io::Error::other(join),
                 })?
         }
-        Repo::Game | Repo::Expansion(_) => {
+        Regime::BlockSha1(admission) => {
             let verified = retry_transient(
                 || {
                     with_progress_relay(
@@ -319,7 +435,7 @@ async fn acquire_one(
             )
             .await
             .map_err(|e| acquire_err(e, repo, index))?;
-            Ok(Admitted::from_verified(verified))
+            Ok(Admitted::from_verified(verified, admission.clone()))
         }
     }
 }
@@ -438,7 +554,7 @@ where
 ///
 /// Takes the [`Admitted`] token by reference, not a bare path, so the verified-before-apply invariant
 /// is carried by the type into the one place that writes bytes, not just by the call site.
-async fn apply_one(
+pub(crate) async fn apply_in_process(
     admitted: &Admitted,
     game_root: &Path,
     repo: Repo,
@@ -522,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn build_spec_rejects_an_entry_whose_version_strips_to_empty() {
+    fn build_plan_rejects_an_entry_whose_version_strips_to_empty() {
         // A hostile entry whose version_id is all-alphabetic ("D") strips to an empty `.ver` value;
         // reject it before download rather than persist a version sqex-proto's gate refuses.
         let entry = PatchListEntry {
@@ -535,7 +651,7 @@ mod tests {
                 hashes: vec!["ab".repeat(20)],
             }),
         };
-        let err = build_spec(
+        let err = build_plan(
             std::path::Path::new("/nonexistent-store"),
             &entry,
             3,
