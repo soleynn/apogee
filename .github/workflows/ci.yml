@@ -41,10 +41,11 @@ jobs:
             echo "fuzz=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # The crates behind the fuzz targets, plus the fuzz workspace itself. Every name has to be a
-          # real directory: `crates/sqex-cryptography` matched nothing, and a crate left off this list
-          # means a change to it skips the target that covers it.
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons|apogee-secrets|apogee-otp)/)'; then
+          # The crates behind the fuzz targets, plus the fuzz workspace itself, plus this workflow
+          # file: an edit to the fuzz jobs would otherwise run for the first time on main. Every
+          # crate name has to be a real directory: `crates/sqex-cryptography` matched nothing, and a
+          # crate left off this list means a change to it skips the target that covers it.
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(\.github/workflows/ci\.yml|fuzz/|crates/(sqex-proto|sqex-crypto|apogee-fetch|apogee-sqpack|apogee-zipatch|apogee-patcher|apogee-runtime|apogee-addons|apogee-secrets|apogee-otp)/)'; then
             echo "fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "fuzz=false" >> "$GITHUB_OUTPUT"
@@ -144,11 +145,12 @@ jobs:
       - run: cargo test -p apogee-cli --features fixtures --test otp
 
   # Process supervision on stock wine: launches a stub PE and proves the /proc scanner resolves it,
-  # kills it targeted, and that wineserver -k is the separate broad stop. A required gate: the
-  # scanner logic is also covered hermetically in test-linux without wine, but only a real wine run
-  # exercises the /proc resolution and the CLI leak detector end to end. Both steps run
-  # single-threaded with WINEDEBUG=-all to keep headless wine deterministic; if real-wine startup
-  # ever proves flaky, wrap the wine steps in a bounded retry rather than making the job advisory.
+  # kills it targeted, and that wineserver -k is the separate broad stop. The scanner logic is also
+  # covered hermetically in test-linux without wine, but only a real wine run exercises the /proc
+  # resolution. Every step runs single-threaded with WINEDEBUG=-all to keep headless wine
+  # deterministic; if real-wine startup ever proves flaky, wrap the wine steps in a bounded retry
+  # rather than making the job advisory. The CLI end-to-end proof lives in its own job beside this
+  # one, so the wine wall clock is the larger half rather than the sum.
   test-linux-wine:
     name: test-linux-wine
     runs-on: ubuntu-latest
@@ -192,9 +194,32 @@ jobs:
         env:
           WINEDEBUG: "-all"
         run: cargo test -p apogee-addons --features wine-integration --test verb_wine -- --test-threads=1
-      # End-to-end: the CLI logs in against scripted fixtures and launches a stub game through system
-      # wine, resolving the real process and killing it. This is the login → register → launch proof
-      # and the output leak detector.
+
+  # End-to-end on stock wine: the CLI logs in against scripted fixtures and launches a stub game
+  # through system wine, resolving the real process and killing it. This is the login → register →
+  # launch proof and the output leak detector. It is the longest single wine step, so it runs as its
+  # own job beside test-linux-wine instead of serializing after those suites.
+  test-linux-wine-e2e:
+    name: test-linux-wine-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: wine-e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Host wine runs the game; the MinGW cross-compiler builds the stub PE the test launches.
+      - name: Install wine and the MinGW cross toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y wine64 wine gcc-mingw-w64-x86-64
       - name: CLI login and launch under stock wine
         env:
           WINEDEBUG: "-all"
@@ -491,13 +516,16 @@ jobs:
           toolchain: "1.97.0"
       - run: bash scripts/audit.sh
 
-  fuzz-smoke:
-    name: fuzz-smoke
+  # The hostile-input fuzz smoke, split into four jobs grouped by the crates their targets build, so
+  # a run's wall clock is one shard rather than the sum of all twenty-six targets. Only the parsers
+  # fed hostile input can regress these; a change that touches none of their crates skips all four,
+  # and a push to main always runs them. Each shard caches its own build tree under its own key and
+  # restores only the corpora its own targets seed from.
+  fuzz-smoke-proto:
+    name: fuzz-smoke-proto
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     needs: changes
-    # The longest job in the run, and only the parsers fed hostile input can regress it. A change
-    # that touches none of their crates skips it; a push to main always runs it.
     if: needs.changes.outputs.fuzz == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -514,6 +542,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
+          key: proto
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Seed each 30 s run below with the corpus the nightly five-minute soaks have accumulated
       # (their cache keys, one per target), instead of starting libFuzzer from empty on every push:
@@ -553,6 +582,64 @@ jobs:
           restore-keys: fuzz-corpus-steam_ticket-
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
+          path: fuzz/corpus/launch_args
+          key: fuzz-corpus-launch_args-
+          restore-keys: fuzz-corpus-launch_args-
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-fuzz
+      # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
+      # allocation-safe on any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose
+      # static libc is incompatible with the address sanitizer.
+      - run: cargo +nightly-2026-07-23 fuzz build patchlist --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run patchlist --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build oauth_stored --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build http_date --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run http_date --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build steam_ticket --target x86_64-unknown-linux-gnu
+      # A malloc bound as well as an RSS one: the ticket buffer is sized from the input length, so an
+      # over-large reservation is exactly the failure this target exists to catch, and the transform
+      # never needs more than a few times its input.
+      - run: cargo +nightly-2026-07-23 fuzz run steam_ticket --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build launch_args --target x86_64-unknown-linux-gnu
+      # No malloc bound here, unlike the listener targets on the stores shard: this target's
+      # allocations are bounded by the input length rather than by a number read out of it, so a
+      # limit could only fire on a bug the builder's own debug assertion catches first (which a fuzz
+      # build has enabled).
+      - run: cargo +nightly-2026-07-23 fuzz run launch_args --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+
+  fuzz-smoke-stores:
+    name: fuzz-smoke-stores
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
+          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). The
+          # `cargo +nightly-2026-07-23` steps below must use the same string. Restore floating
+          # `nightly` (here and in those steps) once the upstream regression clears.
+          toolchain: nightly-2026-07-23
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          key: stores
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Corpus seeds for this shard's targets, restore-only, for the reason given on
+      # fuzz-smoke-proto's restores.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
           path: fuzz/corpus/secrets_frame
           key: fuzz-corpus-secrets_frame-
           restore-keys: fuzz-corpus-secrets_frame-
@@ -578,14 +665,72 @@ jobs:
           restore-keys: fuzz-corpus-otp_listener_framing-
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: fuzz/corpus/launch_args
-          key: fuzz-corpus-launch_args-
-          restore-keys: fuzz-corpus-launch_args-
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
           path: fuzz/corpus/runner_manifest
           key: fuzz-corpus-runner_manifest-
           restore-keys: fuzz-corpus-runner_manifest-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/component_manifest
+          key: fuzz-corpus-component_manifest-
+          restore-keys: fuzz-corpus-component_manifest-
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-fuzz
+      # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
+      # allocation-safe on any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose
+      # static libc is incompatible with the address sanitizer.
+      - run: cargo +nightly-2026-07-23 fuzz build secrets_frame --target x86_64-unknown-linux-gnu
+      # A malloc bound as well as an RSS one: the header names a work factor and the reader has to
+      # refuse an impossible one on the comparison rather than by trying to allocate for it, which is
+      # the failure this target exists to catch.
+      - run: cargo +nightly-2026-07-23 fuzz run secrets_frame --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build secrets_records --target x86_64-unknown-linux-gnu
+      # Same bound, same reason: every record's length comes out of the buffer being decoded.
+      - run: cargo +nightly-2026-07-23 fuzz run secrets_records --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build otp_import --target x86_64-unknown-linux-gnu
+      # A malloc bound too: the pasted text is capped and the key it decodes to is capped, both before
+      # anything is allocated for them, and an over-large reservation is the failure that would mean
+      # one of those caps stopped being checked first.
+      - run: cargo +nightly-2026-07-23 fuzz run otp_import --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build otp_listener_request --target x86_64-unknown-linux-gnu
+      # The tightest malloc bound in the set. This parser reads bytes a stranger on the network chose
+      # and is meant to allocate nothing at all beyond the one fixed buffer the reader owns, so a
+      # megabyte is already far more than a clean run can touch.
+      - run: cargo +nightly-2026-07-23 fuzz run otp_listener_request --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=16
+      - run: cargo +nightly-2026-07-23 fuzz build otp_listener_framing --target x86_64-unknown-linux-gnu
+      # This one asserts an equality rather than an absence, so unlike every other target here it can
+      # fail without crashing: a verdict that depends on how the input was split trips its own assert.
+      - run: cargo +nightly-2026-07-23 fuzz run otp_listener_framing --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=16
+      - run: cargo +nightly-2026-07-23 fuzz build runner_manifest --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build component_manifest --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run component_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+
+  fuzz-smoke-sqpack:
+    name: fuzz-smoke-sqpack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
+          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). The
+          # `cargo +nightly-2026-07-23` steps below must use the same string. Restore floating
+          # `nightly` (here and in those steps) once the upstream regression clears.
+          toolchain: nightly-2026-07-23
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          key: sqpack
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Corpus seeds for this shard's targets, restore-only, for the reason given on
+      # fuzz-smoke-proto's restores.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/sqpack_codec
@@ -611,6 +756,55 @@ jobs:
           path: fuzz/corpus/sqpack_mods
           key: fuzz-corpus-sqpack_mods-
           restore-keys: fuzz-corpus-sqpack_mods-
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-fuzz
+      # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
+      # allocation-safe on any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose
+      # static libc is incompatible with the address sanitizer.
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_codec --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_codec --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_index --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_index --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_entry --target x86_64-unknown-linux-gnu
+      # A malloc bound as well as an RSS one: the readers reserve at most a megabyte at a time, and
+      # `vec![0u8; n]` never touches its pages, so an RSS limit alone would not notice a reservation
+      # made out of a declared size.
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_entry --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_inspect --target x86_64-unknown-linux-gnu
+      # The same malloc bound, for the same reason: the inspector reads a suspect container through
+      # those same readers.
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_inspect --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+      - run: cargo +nightly-2026-07-23 fuzz build sqpack_mods --target x86_64-unknown-linux-gnu
+      # Mod detection reads the same suspect containers, and its other input is a map a caller built,
+      # so both are hostile here.
+      - run: cargo +nightly-2026-07-23 fuzz run sqpack_mods --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
+
+  fuzz-smoke-patch:
+    name: fuzz-smoke-patch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
+          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). The
+          # `cargo +nightly-2026-07-23` steps below must use the same string. Restore floating
+          # `nightly` (here and in those steps) once the upstream regression clears.
+          toolchain: nightly-2026-07-23
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          key: patch
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Corpus seeds for this shard's targets, restore-only, for the reason given on
+      # fuzz-smoke-proto's restores.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/zipatch_chunk
@@ -646,78 +840,12 @@ jobs:
           path: fuzz/corpus/index_manifest
           key: fuzz-corpus-index_manifest-
           restore-keys: fuzz-corpus-index_manifest-
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: fuzz/corpus/component_manifest
-          key: fuzz-corpus-component_manifest-
-          restore-keys: fuzz-corpus-component_manifest-
       - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: cargo-fuzz
       # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
       # allocation-safe on any input. Pin the gnu target: cargo-fuzz's default picks musl here, whose
       # static libc is incompatible with the address sanitizer.
-      - run: cargo +nightly-2026-07-23 fuzz build patchlist --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run patchlist --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build oauth_stored --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run oauth_stored --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build oauth_launch_params --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run oauth_launch_params --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build http_date --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run http_date --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build sqex_base64 --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run sqex_base64 --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build steam_ticket --target x86_64-unknown-linux-gnu
-      # A malloc bound as well as an RSS one: the ticket buffer is sized from the input length, so an
-      # over-large reservation is exactly the failure this target exists to catch, and the transform
-      # never needs more than a few times its input.
-      - run: cargo +nightly-2026-07-23 fuzz run steam_ticket --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
-      - run: cargo +nightly-2026-07-23 fuzz build secrets_frame --target x86_64-unknown-linux-gnu
-      # A malloc bound as well as an RSS one: the header names a work factor and the reader has to
-      # refuse an impossible one on the comparison rather than by trying to allocate for it, which is
-      # the failure this target exists to catch.
-      - run: cargo +nightly-2026-07-23 fuzz run secrets_frame --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
-      - run: cargo +nightly-2026-07-23 fuzz build secrets_records --target x86_64-unknown-linux-gnu
-      # Same bound, same reason: every record's length comes out of the buffer being decoded.
-      - run: cargo +nightly-2026-07-23 fuzz run secrets_records --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
-      - run: cargo +nightly-2026-07-23 fuzz build otp_import --target x86_64-unknown-linux-gnu
-      # A malloc bound too: the pasted text is capped and the key it decodes to is capped, both before
-      # anything is allocated for them, and an over-large reservation is the failure that would mean
-      # one of those caps stopped being checked first.
-      - run: cargo +nightly-2026-07-23 fuzz run otp_import --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
-      - run: cargo +nightly-2026-07-23 fuzz build otp_listener_request --target x86_64-unknown-linux-gnu
-      # The tightest malloc bound in the set. This parser reads bytes a stranger on the network chose
-      # and is meant to allocate nothing at all beyond the one fixed buffer the reader owns, so a
-      # megabyte is already far more than a clean run can touch.
-      - run: cargo +nightly-2026-07-23 fuzz run otp_listener_request --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=16
-      - run: cargo +nightly-2026-07-23 fuzz build otp_listener_framing --target x86_64-unknown-linux-gnu
-      # This one asserts an equality rather than an absence, so unlike every other target here it can
-      # fail without crashing: a verdict that depends on how the input was split trips its own assert.
-      - run: cargo +nightly-2026-07-23 fuzz run otp_listener_framing --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=16
-      - run: cargo +nightly-2026-07-23 fuzz build launch_args --target x86_64-unknown-linux-gnu
-      # No malloc bound here, unlike the two above: this target's allocations are bounded by the input
-      # length rather than by a number read out of it, so a limit could only fire on a bug the builder's
-      # own debug assertion catches first (which a fuzz build has enabled).
-      - run: cargo +nightly-2026-07-23 fuzz run launch_args --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build runner_manifest --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run runner_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build sqpack_codec --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run sqpack_codec --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build sqpack_index --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run sqpack_index --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build sqpack_entry --target x86_64-unknown-linux-gnu
-      # A malloc bound as well as an RSS one: the readers reserve at most a megabyte at a time, and
-      # `vec![0u8; n]` never touches its pages, so an RSS limit alone would not notice a reservation
-      # made out of a declared size.
-      - run: cargo +nightly-2026-07-23 fuzz run sqpack_entry --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
-      - run: cargo +nightly-2026-07-23 fuzz build sqpack_inspect --target x86_64-unknown-linux-gnu
-      # The same malloc bound, for the same reason: the inspector reads a suspect container through
-      # those same readers.
-      - run: cargo +nightly-2026-07-23 fuzz run sqpack_inspect --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
-      - run: cargo +nightly-2026-07-23 fuzz build sqpack_mods --target x86_64-unknown-linux-gnu
-      # Mod detection reads the same suspect containers, and its other input is a map a caller built,
-      # so both are hostile here.
-      - run: cargo +nightly-2026-07-23 fuzz run sqpack_mods --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048 -malloc_limit_mb=64
       - run: cargo +nightly-2026-07-23 fuzz build zipatch_chunk --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run zipatch_chunk --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build zipatch_sqpk --target x86_64-unknown-linux-gnu
@@ -732,8 +860,6 @@ jobs:
       - run: cargo +nightly-2026-07-23 fuzz run fetch_journal --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
       - run: cargo +nightly-2026-07-23 fuzz build index_manifest --target x86_64-unknown-linux-gnu
       - run: cargo +nightly-2026-07-23 fuzz run index_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
-      - run: cargo +nightly-2026-07-23 fuzz build component_manifest --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run component_manifest --target x86_64-unknown-linux-gnu -- -max_total_time=30 -rss_limit_mb=2048
 
   # The one live call: two unauthenticated GETs to SE's boot endpoint, covering both dispositions it
   # has. One sends the base sentinel and parses the boot patch chain it answers with; the other
