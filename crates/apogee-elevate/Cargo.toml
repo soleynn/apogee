@@ -1,0 +1,42 @@
+[package]
+name = "apogee-elevate"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true }
+# The frame body. JSON rather than a binary codec on purpose: the frames are few and small, it adds
+# no dependency the patcher did not already have, and a protocol a maintainer can read off a capture
+# is worth more here than the bytes it costs.
+serde_json = { workspace = true }
+# Framing and both request loops are async over any duplex; the apply itself is synchronous and runs
+# on a blocking thread, exactly as it does in-process.
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+# The privileged writes. This is the only format knowledge on the privileged side of the boundary,
+# and it is the same interpreter the in-process path runs.
+apogee-zipatch = { path = "../apogee-zipatch" }
+# The worker re-hashes a game patch's blocks itself: a verification proof taken in the parent is a
+# parent-process value and cannot cross to where the privileged write happens.
+sha1.workspace = true
+# And re-hashes a boot patch whole, which publishes no per-block digests. The chunk CRC alone is a
+# checksum the attacker being defended against can recompute, so the pin has to be a real digest.
+blake3.workspace = true
+
+# Naming the pipe the elevated child connects back on. The name is a nonce, so it comes from the
+# same generator every other unpredictable value in this workspace does.
+[target.'cfg(windows)'.dependencies]
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The synthetic patches both sides are exercised over, from the one owner of the format.
+apogee-zipatch = { path = "../apogee-zipatch", features = ["test-fixtures"] }
+
+[lints]
+workspace = true
