@@ -129,8 +129,10 @@ pub async fn prefix_processes(
 /// It reads the process table as it is at the call, and a game can start the moment after. That makes
 /// it a guard against the ordinary mistake (patching an install someone is playing), not a lock.
 ///
-/// Synchronous, and a walk of every process on the machine: run it off the runtime if the caller is
-/// on one and the answer is not wanted at the head of an operation that is about to block anyway.
+/// Synchronous, and it walks every process on the machine. That suits a caller asking once at the
+/// head of an operation, where the cost sits beside the other checks it makes before starting; a
+/// caller that wants the answer somewhere hotter, on an async runtime, should put it on a blocking
+/// worker.
 ///
 /// # Errors
 /// [`RuntimeError::Io`] if `/proc` cannot be read.
