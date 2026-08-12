@@ -141,6 +141,7 @@ is tagged with its change type. Versioning aims to follow
 - Report whether a companion actually loaded into the game (#167) _(added)_
 - Give a full disk its own error arm across the download path (#183) _(fixed)_
 - Let a profile opt into the dxvk-nvapi companion (#203) _(added)_
+- Shard the fuzz smoke and split the wine e2e to cut wall time (#210) _(ci)_
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
