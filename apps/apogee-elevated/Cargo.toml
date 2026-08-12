@@ -6,8 +6,28 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-# Reuses zipatch's DiskSink over the elevated stdio protocol (wired later).
-apogee-zipatch = { path = "../../crates/apogee-zipatch" }
+# The whole binary. Everything it does (the protocol, the re-verification, the confined writes, the
+# ZiPatch interpreter it reuses) lives there; this crate is the entry point and the transport choice.
+# Nothing else is declared on purpose: this is the process that runs with raised privileges, so its
+# dependency graph is the shortest honest statement of what it can reach, and an HTTP client is not
+# in it.
+apogee-elevate = { path = "../../crates/apogee-elevate" }
+# `io-std` beyond the workspace set: the standard streams are one of the two transports.
+tokio = { workspace = true, features = ["io-std"] }
+
+[dev-dependencies]
+# The tests drive this binary end to end, so they need the patcher on the other side of the seam to
+# prove the install pipeline routes through it. A dev edge only: nothing here ships with the worker.
+apogee-patcher = { path = "../../crates/apogee-patcher" }
+apogee-fetch = { path = "../../crates/apogee-fetch" }
+apogee-test-support = { path = "../../crates/apogee-test-support" }
+apogee-zipatch = { path = "../../crates/apogee-zipatch", features = ["test-fixtures"] }
+sqex-proto = { path = "../../crates/sqex-proto" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-util.workspace = true
+tempfile.workspace = true
+sha1.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true
