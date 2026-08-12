@@ -104,6 +104,9 @@ is tagged with its change type. Versioning aims to follow
 ### nightly
 - Cache fuzz corpus per target across nightly runs (#150) _(ci)_
 
+### release
+- Ship a Windows archive with the elevated worker (#213) _(ci)_
+
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
 - Close the defects found by the adversarial pass (#97) _(fixed)_
