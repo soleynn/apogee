@@ -671,9 +671,9 @@ mod tests {
 
     /// A fetch i/o failure carrying `ENOSPC` is routed to the typed space arm, keeping the path.
     ///
-    /// The end-to-end proof that fetch really raises this shape is `tests/disk_full_backstop.rs`
-    /// (and `apogee-fetch`'s own `tests/disk_full.rs`); this covers the mapping itself, on every
-    /// target rather than only where a memory-backed filesystem exists.
+    /// The end-to-end proof that fetch really raises this shape is `tests/disk_space.rs` (and
+    /// `apogee-fetch`'s own `tests/disk_full.rs`); this covers the mapping itself, on every target
+    /// rather than only where a memory-backed filesystem exists.
     #[test]
     fn a_disk_full_acquire_failure_is_routed_out_of_the_generic_arm() {
         let err = acquire_err(

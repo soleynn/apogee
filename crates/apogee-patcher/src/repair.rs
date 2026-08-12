@@ -148,21 +148,34 @@ async fn acquire_index(
             let spec = DownloadSpec::builder(url.clone(), dest, Validator::from(*pin))
                 .build()
                 .map_err(|e| index_unavailable(repo, e))?;
-            // A full disk is routed out of `IndexUnavailable` for the same reason it is routed out of
-            // `Acquire` on the install path: it is not the index being unreachable, and reporting it
-            // that way sends a caller looking at the catalog and the network instead of at free space.
             let verified = fetcher
                 .download(&spec, None, cancel.clone())
                 .await
-                .map_err(|e| match e {
-                    FetchError::Cancelled => PatchError::Cancelled,
-                    other => match other.into_out_of_space() {
-                        Ok((path, source)) => PatchError::OutOfSpace { path, source },
-                        Err(other) => index_unavailable(repo, other),
-                    },
-                })?;
+                .map_err(|e| index_acquire_err(e, repo))?;
             Ok(verified.path().to_path_buf())
         }
+    }
+}
+
+/// Map a fetch failure taken while pulling the block index into the patcher taxonomy: a cancellation
+/// stays [`PatchError::Cancelled`], a full disk becomes [`PatchError::OutOfSpace`], everything else
+/// says the index is unavailable.
+///
+/// The disk-full arm is here for the same reason [`install::acquire_err`](crate::install) has one:
+/// the index lands in the patch store like any other download, so the store filling is a failure
+/// this call can produce, and it is not the index being unreachable. Reported that way it sends a
+/// caller looking at the catalog and the network instead of at free space.
+///
+/// Named rather than written inline at the one call site so the routing can be asserted directly:
+/// the arms are hand-written, and dropping either one leaves a `match` that still compiles and an
+/// end-to-end suite that still passes.
+fn index_acquire_err(err: FetchError, repo: Repo) -> PatchError {
+    if matches!(err, FetchError::Cancelled) {
+        return PatchError::Cancelled;
+    }
+    match err.into_out_of_space() {
+        Ok((path, source)) => PatchError::OutOfSpace { path, source },
+        Err(other) => index_unavailable(repo, other),
     }
 }
 
@@ -459,5 +472,83 @@ fn join_to_io(join: tokio::task::JoinError) -> PatchError {
     PatchError::Io {
         path: PathBuf::new(),
         source: std::io::Error::other(join),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `ENOSPC` taken while pulling the index keeps the path the filesystem refused instead of
+    /// being reported as an unreachable index.
+    ///
+    /// The end-to-end proof that fetch really raises this shape is `tests/disk_space.rs`; this
+    /// covers the mapping itself, on every target rather than only where a memory-backed filesystem
+    /// exists.
+    #[test]
+    fn a_disk_full_index_fetch_is_routed_out_of_the_unavailable_arm() {
+        let err = index_acquire_err(
+            FetchError::Io {
+                path: PathBuf::from("/store/indexes/game-2024.01.02.0000.0000.apzi.part"),
+                source: std::io::ErrorKind::StorageFull.into(),
+            },
+            Repo::Game,
+        );
+        let PatchError::OutOfSpace { path, source } = &err else {
+            panic!("a full disk must not arrive as an unavailable index, got {err:?}");
+        };
+        assert_eq!(
+            path,
+            std::path::Path::new("/store/indexes/game-2024.01.02.0000.0000.apzi.part"),
+        );
+        assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    /// Only disk-full leaves the index arm, and a cancelled repair is not dressed up as either.
+    ///
+    /// The pair is what carries the claim: delete the `into_out_of_space` guard and the test above
+    /// still passes, so the routing has to be pinned to the `ErrorKind` and not to "any i/o
+    /// failure". The cancel case is the one that must not move at all: a repair the user stopped is
+    /// re-runnable, and reporting it as a missing index says the opposite.
+    #[test]
+    fn a_cancel_and_every_other_fault_keep_their_existing_arms() {
+        assert!(matches!(
+            index_acquire_err(FetchError::Cancelled, Repo::Game),
+            PatchError::Cancelled
+        ));
+        let denied = index_acquire_err(
+            FetchError::Io {
+                path: PathBuf::from("/store/indexes/boot-2024.01.02.0000.0000.apzi.part"),
+                source: std::io::ErrorKind::PermissionDenied.into(),
+            },
+            Repo::Boot,
+        );
+        assert!(
+            matches!(
+                denied,
+                PatchError::IndexUnavailable {
+                    repo: Repo::Boot,
+                    ..
+                }
+            ),
+            "a permission fault is not a space fault, got {denied:?}",
+        );
+        let bad_pin = index_acquire_err(
+            FetchError::FileVerifyFailed {
+                expected: "00".repeat(32),
+                got: "ff".repeat(32),
+            },
+            Repo::Expansion(1),
+        );
+        assert!(
+            matches!(
+                bad_pin,
+                PatchError::IndexUnavailable {
+                    repo: Repo::Expansion(1),
+                    ..
+                }
+            ),
+            "got {bad_pin:?}",
+        );
     }
 }
