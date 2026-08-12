@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::request::{IndexSource, RepairRepo, RepairRequest};
-use crate::{PartRef, PatchError, PatchProgress, PatcherConfig, Repo, recycler, store};
+use crate::{PartRef, PatchError, PatchProgress, PatcherConfig, Repo, preflight, recycler, store};
 
 /// One repo's repair result: the version it now verifies clean against, the counts healed, the bytes
 /// pulled over HTTP, and the strays moved to the recycler.
@@ -69,6 +69,9 @@ pub(crate) async fn run(
     cancel: CancellationToken,
 ) -> Result<RepairOutcome, PatchError> {
     let RepairRequest { game_root, repos } = request;
+    // Asked once for the request rather than per repo: a repair rewrites files in place, and a client
+    // that is running holds them whichever repo it was launched from.
+    preflight::game_not_running(&config, &game_root)?;
     // One batch directory for the whole request, so strays from several repos land together.
     let batch = recycler::batch_name(SystemTime::now());
     let handle = Handle::current();

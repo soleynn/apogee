@@ -48,6 +48,7 @@ pub use catalog::{
 };
 pub use elevated::{Elevation, probe_writable};
 pub use job::Job;
+pub use preflight::GameProbe;
 pub use progress::PatchProgress;
 // Re-exported because `PatchError::Worker` carries one and a caller that matches on it must be able
 // to name it without depending on the boundary crate itself.
@@ -110,6 +111,11 @@ pub enum PreflightError {
         needed: u64,
         free: u64,
     },
+    /// The game is running in the install this operation targets, so nothing was touched.
+    ///
+    /// Asked of [`PatcherConfig::game_probe`] before an install or a repair does anything at all, and
+    /// not skippable: [`PatcherConfig::ignore_space`] is about free space alone. The install is
+    /// exactly as it was, so the operation re-runs once the client is closed.
     #[error("game is running")]
     GameRunning,
 }
@@ -217,22 +223,33 @@ pub struct PatcherConfig {
     pub repair_reattempts: usize,
     /// Where the apply runs when the install tree is not writable by this process.
     pub elevation: Elevation,
+    /// How to tell whether the game is running in the install being worked on. Consulted before
+    /// every install and repair; see [`GameProbe`].
+    pub game_probe: GameProbe,
 }
 
 /// The reference launcher's reattempt budget, adopted as the default repair pass count.
 pub const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
 
-impl Default for PatcherConfig {
-    /// A config with no patch store set (the caller must fill [`patch_store`](Self::patch_store)):
-    /// patches removed after apply, the disk preflight on, the reference reattempt budget, and
-    /// elevation left to the platform.
-    fn default() -> Self {
+impl PatcherConfig {
+    /// A config over `game_probe` with no patch store set (the caller must fill
+    /// [`patch_store`](Self::patch_store)): patches removed after apply, the disk preflight on, the
+    /// reference reattempt budget, and elevation left to the platform.
+    ///
+    /// Takes the probe rather than defaulting it, and stands in for the [`Default`] impl this type
+    /// would otherwise have, because the useful default for a guard is the one that guards nothing:
+    /// it would leave every caller correct-looking and unguarded, and the one caller that matters is
+    /// the composition root, where forgetting it is silent. Naming it here costs one argument and
+    /// makes the compiler ask.
+    #[must_use]
+    pub fn new(game_probe: GameProbe) -> Self {
         Self {
             patch_store: PathBuf::new(),
             keep_patches: false,
             ignore_space: false,
             repair_reattempts: DEFAULT_REPAIR_REATTEMPTS,
             elevation: Elevation::default(),
+            game_probe,
         }
     }
 }

@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use apogee_fetch::{DigestPin, Fetcher};
 use apogee_patcher::{
-    IndexSource, PatchError, Patcher, PatcherConfig, RepairPatchSource, RepairRepo, RepairRequest,
-    Repo, SePatch,
+    GameProbe, IndexSource, PatchError, Patcher, PatcherConfig, RepairPatchSource, RepairRepo,
+    RepairRequest, Repo, SePatch,
 };
 use apogee_test_support::chaos::{ChaosServer, blake3_of};
 use apogee_test_support::tree_manifest;
@@ -86,7 +86,7 @@ fn patcher(store: &Path) -> Result<Patcher, Box<dyn Error>> {
         fetcher,
         PatcherConfig {
             patch_store: store.to_path_buf(),
-            ..PatcherConfig::default()
+            ..PatcherConfig::new(GameProbe::never_running())
         },
     ))
 }

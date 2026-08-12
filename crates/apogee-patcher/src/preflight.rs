@@ -1,6 +1,14 @@
-//! Disk-space preflight, two pools.
+//! What is checked before an install or a repair touches anything: that the game is not running in
+//! the install, and that the two disk pools have room.
 //!
-//! A heuristic with an escape hatch ([`PatcherConfig::ignore_space`]) and a backstop. The patch store
+//! The game check comes first and has no escape hatch. It is a positive question asked of a
+//! [`GameProbe`] the composition root injects, rather than something inferred from a write that
+//! failed: a running client holds its own files open, so an apply into a live install fails partway
+//! through, at a moment that varies by which file the patch reached first. Asking beforehand is what
+//! makes the refusal say what to do about it.
+//!
+//! The space check is a heuristic with an escape hatch ([`PatcherConfig::ignore_space`], which
+//! covers space and nothing else) and a backstop. The patch store
 //! must hold the concurrent downloads (a rolling window, or all of them when kept); the install dir
 //! must hold the applied result, which patch length overestimates since patches both add and delete.
 //! A pool whose free space cannot be read (a non-existent tree, or a non-Unix target) is not blocked
@@ -22,6 +30,7 @@
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use sqex_proto::PatchListEntry;
 
@@ -30,6 +39,71 @@ use crate::{PatcherConfig, PreflightError, SpacePool};
 /// The rolling window of patches assumed resident at once when not keeping them (XL checks the first
 /// six); the largest six bound any six concurrent.
 const WINDOW: usize = 6;
+
+/// Answers whether the game is running in a given install.
+///
+/// The seam the game-running guard is built on. This crate holds no process knowledge and does not
+/// depend on the one that does: what a live game looks like on a machine is an operating-system
+/// question, and the answer differs by runner, so it is injected through
+/// [`PatcherConfig::game_probe`] the same way the [`Fetcher`](apogee_fetch::Fetcher) is.
+///
+/// The probe is asked once per install or repair, on the caller's task, before anything is spawned
+/// or created. A probe that has to go to the kernel for the answer is expected; one that goes to the
+/// network is not.
+///
+/// A probe that cannot tell answers `false`. The guard exists to stop the ordinary mistake, and it
+/// is not the only thing standing between a running game and a corrupted install: the apply itself
+/// still fails on a file the client holds. Reporting an install as running because nobody could look
+/// would block a machine the launcher cannot see into from ever patching.
+#[derive(Clone)]
+pub struct GameProbe(Arc<dyn Fn(&Path) -> bool + Send + Sync>);
+
+impl GameProbe {
+    /// A probe that answers `check`, which is given the install root to look in.
+    #[must_use]
+    pub fn new(check: impl Fn(&Path) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(check))
+    }
+
+    /// A probe that always answers "not running".
+    ///
+    /// For a caller with no process table to consult: tests, and anything driving the patcher against
+    /// a tree no game could be running in. Named rather than defaulted so that opting out of the
+    /// guard is a decision that appears in the code, and so every place that took it can be found.
+    #[must_use]
+    pub fn never_running() -> Self {
+        Self::new(|_| false)
+    }
+
+    /// Whether the game is running in the install at `game_root`.
+    #[must_use]
+    pub fn is_running(&self, game_root: &Path) -> bool {
+        (self.0)(game_root)
+    }
+}
+
+impl std::fmt::Debug for GameProbe {
+    /// The probe is a function, which has nothing to render.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GameProbe")
+    }
+}
+
+/// Refuse the operation if the game is running in the install at `game_root`.
+///
+/// Unconditional: [`PatcherConfig::ignore_space`] turns off the space estimate and nothing else. That
+/// hatch exists for a caller who knows the free-space arithmetic is wrong about its disk, which is a
+/// claim about a prediction. Whether a process is running is not a prediction, and no caller is in a
+/// position to know better than the machine.
+pub(crate) fn game_not_running(
+    config: &PatcherConfig,
+    game_root: &Path,
+) -> Result<(), PreflightError> {
+    if config.game_probe.is_running(game_root) {
+        return Err(PreflightError::GameRunning);
+    }
+    Ok(())
+}
 
 /// The bytes each pool must have free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

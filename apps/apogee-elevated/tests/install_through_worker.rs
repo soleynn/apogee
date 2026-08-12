@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use apogee_fetch::Fetcher;
 use apogee_patcher::{
-    Elevation, InstallRequest, Installed, PatchError, Patcher, PatcherConfig, Repo, SePatch,
-    WorkerErrorKind,
+    Elevation, GameProbe, InstallRequest, Installed, PatchError, Patcher, PatcherConfig, Repo,
+    SePatch, WorkerErrorKind,
 };
 use apogee_test_support::chaos::ChaosServer;
 use apogee_test_support::tree_manifest;
@@ -62,7 +62,7 @@ fn patcher(store: &Path, elevation: Elevation) -> Result<Patcher, Box<dyn Error>
         PatcherConfig {
             patch_store: store.to_path_buf(),
             elevation,
-            ..PatcherConfig::default()
+            ..PatcherConfig::new(GameProbe::never_running())
         },
     ))
 }
