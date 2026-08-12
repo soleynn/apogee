@@ -61,6 +61,7 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-patcher
 - Stop a healthy repo failing a repair it cannot source (#192) _(fixed)_
 - Publish repair indexes for every repo at its current version (#205) _(added)_
+- Apply through a privileged Windows worker (#209) _(added)_
 
 ### apogee-runtime
 - Report the exit status of a redirected launch's program (#165) _(fixed)_
