@@ -363,10 +363,7 @@ fn repair_repo(
             // type, which has no room for what actually failed; it kept that and hands it back here.
             Err(fault) => {
                 let fault = sink.fault().unwrap_or(PatchError::Apply(fault));
-                // A worker that died or a run the user stopped ends the repair rather than spending
-                // the budget: every later pass would re-fetch the same ranges over the network only
-                // to find there is still nothing that can write them.
-                if matches!(fault, PatchError::Worker { .. } | PatchError::Cancelled) {
+                if ends_the_repair(&fault) {
                     return Err(fault);
                 }
                 last_fault = Some(fault);
@@ -414,6 +411,30 @@ fn repair_repo(
         bytes_refetched: agg.bytes,
         quarantined,
     })
+}
+
+/// Whether a pass's failure ends the repo's repair rather than spending one of its reattempts.
+///
+/// Almost nothing does. The budget exists for exactly the faults a second pass can get past, and a
+/// privileged pass fails the same ways an in-process one does: a write that was refused, bytes that
+/// did not match, a transport that dropped. Those are spent, so the two arms give a broken repo the
+/// same number of chances.
+///
+/// The two that end it are the ones no later pass can improve on. A run the user stopped is not
+/// worth re-fetching for. And a worker that could not start, or that stopped answering, has taken
+/// the only thing that can write the tree with it: every later pass would pull the same ranges over
+/// the network again and then find nothing on the other end. Written out rather than folded into the
+/// `match` above so the routing can be asserted directly; both arms are hand-written, and widening
+/// either one leaves a repair that still compiles and an end-to-end suite that still passes.
+fn ends_the_repair(fault: &PatchError) -> bool {
+    match fault {
+        PatchError::Cancelled => true,
+        PatchError::Worker { kind, .. } => matches!(
+            kind,
+            crate::WorkerErrorKind::Spawn | crate::WorkerErrorKind::Protocol
+        ),
+        _ => false,
+    }
 }
 
 /// Whether a verify report still names something to heal (strays are handled separately).
@@ -590,6 +611,48 @@ mod tests {
             std::path::Path::new("/store/indexes/game-2024.01.02.0000.0000.apzi.part"),
         );
         assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    /// A worker that is gone ends the repair; a worker that refused one pass does not.
+    ///
+    /// The pair is what carries the claim. Ending on any worker failure at all still passes the
+    /// first case and quietly halves the reattempt budget a repair gets whenever it is privileged:
+    /// bytes that failed their digest, or a write the filesystem refused, are exactly the faults the
+    /// budget exists for, and an in-process repair spends a pass on them rather than giving up.
+    #[test]
+    fn only_a_worker_that_cannot_write_again_ends_the_repair() {
+        let worker = |kind| PatchError::Worker {
+            kind,
+            failed_file: None,
+            detail: String::new(),
+        };
+        for kind in [
+            crate::WorkerErrorKind::Spawn,
+            crate::WorkerErrorKind::Protocol,
+        ] {
+            assert!(
+                ends_the_repair(&worker(kind)),
+                "{kind:?} leaves nothing that can write the tree",
+            );
+        }
+        assert!(ends_the_repair(&PatchError::Cancelled));
+
+        for kind in [
+            crate::WorkerErrorKind::Verify,
+            crate::WorkerErrorKind::Apply,
+        ] {
+            assert!(
+                !ends_the_repair(&worker(kind)),
+                "{kind:?} is a pass that failed, not a worker that is gone",
+            );
+        }
+        assert!(!ends_the_repair(&PatchError::Io {
+            path: PathBuf::new(),
+            source: std::io::ErrorKind::PermissionDenied.into(),
+        }));
+        assert!(!ends_the_repair(&PatchError::Apply(
+            apogee_zipatch::Error::BadMagic
+        )));
     }
 
     /// Only disk-full leaves the index arm, and a cancelled repair is not dressed up as either.

@@ -335,7 +335,13 @@ fn open_existing(root: &Path, rel: &Path) -> Result<File> {
 
 /// Open `root/rel` for a rebuild: parents created, a link at the final component stripped, and the
 /// file truncated to start from nothing.
+///
+/// The root is created too, which the descent below cannot do: it walks the components beneath the
+/// root and so can only ever start from one that is there. A repair whose whole subtree is gone
+/// reports every file missing and rebuilds each one, and that is the case where the root is the
+/// directory that has to be made.
 fn open_rebuilt(root: &Path, rel: &Path) -> Result<File> {
+    fs::create_dir_all(root).map_err(|e| io(e, root.to_path_buf(), Op::MakeDir))?;
     ensure_dirs(root, parent_of(rel), true)?;
     let abs = root.join(rel);
     unlink_if_symlink(&abs)?;

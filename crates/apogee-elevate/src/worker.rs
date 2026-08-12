@@ -25,9 +25,9 @@ use tokio::sync::mpsc;
 use crate::confine::{assert_within, join_confined, require_absolute};
 use crate::error::{Error, Result};
 use crate::proto::{
-    Admission, MAX_STAGED_SPAN, MAX_VERSION_LEN, PROTOCOL_VERSION, StagedOp, StagedWrite,
-    VersionWrite, WorkerErrorKind, WorkerProgress, WorkerRequest, WorkerResponse, read_frame,
-    write_frame,
+    Admission, MAX_STAGED_SPAN, MAX_VERSION_LEN, MAX_ZERO_RUN, PROTOCOL_VERSION, StagedOp,
+    StagedWrite, VersionWrite, WorkerErrorKind, WorkerProgress, WorkerRequest, WorkerResponse,
+    read_frame, write_frame,
 };
 
 /// How many bytes pass between progress frames, whether they are being hashed or written.
@@ -623,6 +623,13 @@ fn write_zeros(
 ) -> std::result::Result<(), Fault> {
     use std::io::Write;
 
+    if len > MAX_ZERO_RUN {
+        return Err(Fault::at(
+            WorkerErrorKind::Protocol,
+            target,
+            format!("zero run of {len} bytes exceeds the {MAX_ZERO_RUN}-byte cap"),
+        ));
+    }
     let io = |e: std::io::Error| Fault::at(WorkerErrorKind::Apply, target, e.to_string());
     file.seek(SeekFrom::Start(off)).map_err(io)?;
     let chunk = len.min(ZERO_CHUNK as u64) as usize;

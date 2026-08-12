@@ -616,6 +616,36 @@ fn a_recorded_repair_replays_into_the_same_tree_a_disk_one_produces() {
     );
 }
 
+/// A repair of a subtree that is gone entirely rebuilds it, root directory and all.
+///
+/// The rebuild is the one write that creates anything, and the root is the one directory the
+/// component descent beneath it cannot make: it starts from a directory it assumes is there. A tree
+/// wiped rather than corrupted is exactly the case that lands on it.
+#[test]
+fn a_repair_rebuilds_a_subtree_that_is_gone_entirely() {
+    let chain = chain();
+    let (applied, index, baseline) = setup(&chain).expect("setup");
+    let root = applied.path().join("wiped");
+
+    let report = index
+        .verify(&root, &VerifyOptions::default())
+        .expect("verify");
+    assert!(!report.missing_files.is_empty(), "nothing reported missing");
+
+    let mut source = CountingSource::new(chain.clone());
+    let outcome = index.repair(&root, &report, &mut source).expect("repair");
+    assert!(
+        outcome.is_complete(),
+        "still broken: {:?}",
+        outcome.still_broken
+    );
+    assert_eq!(
+        tree_manifest::author(&root).expect("author").files,
+        baseline.files,
+        "a wiped subtree must rebuild into the tree the index describes",
+    );
+}
+
 /// An in-place repair refuses a target that is a symbolic link rather than writing through it.
 ///
 /// The lexical confinement above cannot see this: every component of the path is ordinary. It

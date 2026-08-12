@@ -136,17 +136,19 @@ impl<'a> StagingSink<'a> {
                 Err(e) => return Err(self.stash_io(e)),
             }
         }
-        let written = match self.file.as_mut() {
-            Some(file) => file.write_all(span),
-            // Unreachable: the branch above fills the slot or returns.
-            None => Ok(()),
-        };
+        // The offsets a batch names are counted from what actually reached the file, so a write that
+        // did not happen has to fail rather than advance them: the far side would otherwise be told
+        // to read a span nothing wrote. That is why the unreachable arm below is an error and not a
+        // quiet success.
+        let written = self.file.as_mut().map(|file| file.write_all(span));
         match written {
-            Ok(()) => {
+            Some(Ok(())) => {
                 self.staged += span.len() as u64;
                 Ok(())
             }
-            Err(e) => Err(self.stash_io(e)),
+            Some(Err(e)) => Err(self.stash_io(e)),
+            // Unreachable: the branch above fills the slot or returns.
+            None => Err(self.stash_io(std::io::Error::other("the staging file was not opened"))),
         }
     }
 

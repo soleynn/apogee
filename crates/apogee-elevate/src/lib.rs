@@ -63,8 +63,9 @@ mod worker;
 pub use client::Session;
 pub use error::{Error, Result};
 pub use proto::{
-    Admission, FrameError, MAX_FRAME, MAX_STAGED_SPAN, MAX_VERSION_LEN, PROTOCOL_VERSION, StagedOp,
-    StagedWrite, VersionWrite, WorkerErrorKind, WorkerProgress, WorkerRequest, WorkerResponse,
+    Admission, FrameError, MAX_FRAME, MAX_STAGED_SPAN, MAX_VERSION_LEN, MAX_ZERO_RUN,
+    PROTOCOL_VERSION, StagedOp, StagedWrite, VersionWrite, WorkerErrorKind, WorkerProgress,
+    WorkerRequest, WorkerResponse,
 };
 pub use spawn::Worker;
 pub use worker::serve;

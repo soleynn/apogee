@@ -146,6 +146,14 @@ pub enum StagedOp {
 /// pieces lands exactly as one written whole.
 pub const MAX_STAGED_SPAN: u32 = 8 << 20;
 
+/// The longest run one [`StagedOp::Zeros`] may cover.
+///
+/// The one field on this side that names a length with no bytes behind it to bound it, so it is
+/// bounded here instead. The figure is the same one the in-process writer holds a zero fill to, and
+/// it clears any real dat-scale run with room to spare; agreeing on it is what keeps a repair that
+/// crosses the boundary from writing what a repair that stayed here would have refused.
+pub const MAX_ZERO_RUN: u64 = 8 << 30;
+
 /// How the worker re-proves a local patch file before writing a byte of it.
 ///
 /// The parent has already verified the same file, but a proof is a parent-process value and the
