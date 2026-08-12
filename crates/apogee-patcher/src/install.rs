@@ -165,6 +165,10 @@ pub(crate) async fn run(
         headers,
     } = request;
 
+    // Before anything exists that would have to be cleaned up: a refusal here has to leave the disk
+    // as it found it, and the patch store below is the first thing that would not.
+    preflight::game_not_running(&config, &game_root)?;
+
     // The store must exist so preflight can stat it and downloads can write beneath it.
     std::fs::create_dir_all(&config.patch_store).map_err(|source| PatchError::Io {
         path: config.patch_store.clone(),

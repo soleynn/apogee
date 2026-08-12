@@ -17,6 +17,8 @@ use crate::error::RuntimeError;
 
 /// Linux caps `/proc/<pid>/comm` at `TASK_COMM_LEN - 1` bytes.
 const COMM_MAX: usize = 15;
+/// The game client's executable: the PE basename a live install is recognized by.
+pub(crate) const GAME_EXE: &str = "ffxiv_dx11.exe";
 /// How long to poll for the game to appear before giving up.
 const RESOLVE_DEADLINE: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
@@ -127,6 +129,19 @@ fn pick_game(pids: &[i32], wrapper_pid: Option<i32>, grace_elapsed: bool) -> Opt
 /// All pids whose `comm` and `WINEPREFIX` match, in `/proc` order. A pid that races away mid-scan is
 /// skipped, not fatal.
 pub(crate) fn scan_matches(comm_target: &str, expected_prefix: &Path) -> std::io::Result<Vec<i32>> {
+    scan_comm(comm_target, |pid| in_prefix(pid, expected_prefix))
+}
+
+/// All pids whose `comm` is `comm_target` and that `belongs` accepts, in `/proc` order.
+///
+/// `comm` narrows first because it is one short read per pid and rejects nearly everything; the
+/// caller's predicate is what says which instance of that program was meant, and it decides that
+/// from whichever part of `/proc/<pid>` answers for its own notion of "instance". A pid that races
+/// away mid-scan is skipped, not fatal.
+pub(crate) fn scan_comm(
+    comm_target: &str,
+    belongs: impl Fn(i32) -> bool,
+) -> std::io::Result<Vec<i32>> {
     let mut matches = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
@@ -141,17 +156,75 @@ pub(crate) fn scan_matches(comm_target: &str, expected_prefix: &Path) -> std::io
         if comm.trim_end_matches('\n') != comm_target {
             continue;
         }
-        let environ = match std::fs::read(format!("/proc/{pid}/environ")) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if let Some(wineprefix) = find_env(&environ, b"WINEPREFIX")
-            && wineprefix_matches(&wineprefix, expected_prefix)
-        {
+        if belongs(pid) {
             matches.push(pid);
         }
     }
     Ok(matches)
+}
+
+/// Whether `pid` declares `expected` as its own `WINEPREFIX`. The kernel restricts `environ` to the
+/// user who owns the process, so a process this one cannot read is not a match.
+fn in_prefix(pid: i32, expected: &Path) -> bool {
+    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    find_env(&environ, b"WINEPREFIX").is_some_and(|found| wineprefix_matches(&found, expected))
+}
+
+/// Whether the game client is live in the install rooted at `game_root`.
+///
+/// The same `comm` narrowing the session scanner uses, over a different notion of "which instance":
+/// not the prefix a process was launched into, but the install its bytes are being read from. That is
+/// what a caller about to rewrite those bytes is asking about, and the two do not coincide, since one
+/// prefix launches whichever install it is pointed at.
+///
+/// The install side is answered from the process's working directory and its argv, either of which
+/// placing it under `game_root` is enough. The client runs with the install's `game/` directory as
+/// its cwd and is launched by path, so a client started elsewhere matches neither and a second
+/// install running from another directory is not mistaken for this one. Reading both is what covers
+/// the launchers that differ: the cwd link is resolved by the kernel and survives a launcher that
+/// passes a wine drive path, while argv survives a launcher that leaves the cwd somewhere else.
+pub(crate) fn running_in_install(game_root: &Path) -> std::io::Result<bool> {
+    let roots = install_roots(game_root);
+    let live = scan_comm(&comm_target(GAME_EXE), |pid| in_install(pid, &roots))?;
+    Ok(!live.is_empty())
+}
+
+/// The forms of `game_root` a process path can be written in: the one the caller passed and, when it
+/// differs, the one it canonicalizes to. Both are kept because the two `/proc` files are written
+/// differently: a `cwd` link is already resolved by the kernel, while argv holds whatever string the
+/// launcher was given, symlinks and all.
+fn install_roots(game_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![game_root.to_path_buf()];
+    if let Ok(canonical) = game_root.canonicalize()
+        && canonical != game_root
+    {
+        roots.push(canonical);
+    }
+    roots
+}
+
+/// Whether `pid` is working in, or was launched from, one of `roots`. Both files are restricted to
+/// the user who owns the process, so one that cannot be read is not a match.
+fn in_install(pid: i32, roots: &[PathBuf]) -> bool {
+    if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd"))
+        && under_any(&cwd, roots)
+    {
+        return true;
+    }
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    cmdline
+        .split(|&b| b == 0)
+        .any(|arg| under_any(Path::new(OsStr::from_bytes(arg)), roots))
+}
+
+/// Whether `path` lies in one of `roots`. Compared by component, so a sibling install whose directory
+/// name merely starts with the same characters is not inside it.
+fn under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 /// The `comm` string to match: the basename truncated to the kernel's limit (on a char boundary).
@@ -278,7 +351,10 @@ pub(crate) async fn terminate(watch: &ExitWatch) -> Result<(), RuntimeError> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
+    use crate::shim::PROBE;
 
     /// Half a minute passes between the spawn and the game showing up in `/proc`, which is long enough
     /// for a user to think better of it. Reported as a process that never appeared, stopping a launch
@@ -363,4 +439,102 @@ mod tests {
         // A plain-wine prefix whose own directory is literally `pfx` must match via the raw path.
         assert!(wineprefix_matches(&prefix, &expected));
     }
+
+    #[test]
+    fn under_any_compares_whole_components() {
+        let roots = vec![PathBuf::from("/games/ffxiv")];
+        assert!(under_any(Path::new("/games/ffxiv/game"), &roots));
+        assert!(under_any(Path::new("/games/ffxiv"), &roots));
+        // The failure a string prefix would produce: a second install whose directory name merely
+        // begins with the first one's would guard the wrong tree.
+        assert!(!under_any(Path::new("/games/ffxiv-ps4/game"), &roots));
+        assert!(!under_any(Path::new("/games"), &roots));
+        // An argv entry that is not a path at all (the client is passed its own options too).
+        assert!(!under_any(Path::new(""), &roots));
+    }
+
+    #[test]
+    fn install_roots_keeps_the_path_as_passed_beside_the_resolved_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("install");
+        std::fs::create_dir(&real).expect("mkdir install");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        // A launcher handed the link writes the link into argv, while the kernel resolves the same
+        // process's cwd to the real path: the guard has to recognize its install in both.
+        let roots = install_roots(&link);
+        assert!(under_any(&link.join("game"), &roots));
+        assert!(under_any(&real.join("game"), &roots));
+
+        // A path already canonical contributes one root, not the same one twice.
+        let canonical = real.canonicalize().expect("canonicalize");
+        assert_eq!(install_roots(&canonical), vec![canonical]);
+    }
+
+    /// The whole scan against a live process, which is the only way to prove the `/proc` reads agree
+    /// with what the kernel actually publishes: that a script exec'd by path is named by its own
+    /// basename in `comm`, and that its cwd link resolves under the install.
+    ///
+    /// The stand-in is a shell script rather than the client because what is being matched is the
+    /// process's name and its directory, neither of which requires the process to be a game.
+    ///
+    /// The client runs in the install whose directory name *extends* the guarded one's, which is the
+    /// arrangement that separates a component compare from a string compare: `FFXIV-second/game`
+    /// begins with the characters of `FFXIV` and is not inside it. Named the other way round the test
+    /// passes either way.
+    #[test]
+    fn a_client_in_the_install_is_live_and_the_same_client_elsewhere_is_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The install about to be patched: nothing is running in it.
+        let install = dir.path().join("FFXIV");
+        // The install the client is actually running in.
+        let other = dir.path().join("FFXIV-second");
+        let game_dir = other.join("game");
+        std::fs::create_dir_all(&game_dir).expect("mkdir game");
+        std::fs::create_dir_all(&install).expect("mkdir the guarded install");
+
+        let exe = game_dir.join(GAME_EXE);
+        // Blocks on a pipe nothing is written to, so the process lives exactly as long as the test
+        // holds its stdin and leaves no descendant behind when it goes.
+        std::fs::write(
+            &exe,
+            format!("#!/bin/sh\n[ \"$1\" = {PROBE} ] && exit 0\nread line\n"),
+        )
+        .expect("write client");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::shim::wait_until_runnable(&exe);
+
+        let mut child = std::process::Command::new(&exe)
+            .current_dir(&game_dir)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the stand-in client");
+
+        // The spawn returns before the child has exec'd, so its name in `/proc` is still the parent's
+        // for a moment.
+        let seen = (0..RUNNING_POLLS).any(|_| {
+            if running_in_install(&other).expect("scan /proc") {
+                return true;
+            }
+            std::thread::sleep(RUNNING_POLL_INTERVAL);
+            false
+        });
+        assert!(seen, "a client running in the install was not seen");
+        assert!(
+            !running_in_install(&install).expect("scan /proc"),
+            "a client running in another install was taken for this one",
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            !running_in_install(&other).expect("scan /proc"),
+            "the install still reads as running after the client exited",
+        );
+    }
+
+    /// How long the stand-in client is given to reach its `execve` before the scan is called wrong.
+    const RUNNING_POLLS: u32 = 200;
+    const RUNNING_POLL_INTERVAL: Duration = Duration::from_millis(10);
 }

@@ -32,6 +32,7 @@ use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
 use crate::model::{Account, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings};
+use crate::patch;
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
 use crate::steam::{NoSteam, SteamBackend};
@@ -413,7 +414,7 @@ impl Core {
                 patch_store: patch_store.clone(),
                 keep_patches,
                 ignore_space: false,
-                ..PatcherConfig::default()
+                ..PatcherConfig::new(patch::game_probe())
             },
         );
         // The signed index catalog for repair rides the same download engine as everything else, so

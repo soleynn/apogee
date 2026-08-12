@@ -18,8 +18,8 @@ use std::path::Path;
 use crate::catalog::RunnerKind;
 use crate::plan::{Prefix, RunnerHandle};
 
-/// The argument the shim answers before running its body. Passed only by [`wait_until_runnable`].
-const PROBE: &str = "--shim-probe";
+/// The argument a shim answers before running its body. Passed only by [`wait_until_runnable`].
+pub(crate) const PROBE: &str = "--shim-probe";
 
 /// How many times a probe may come back `ETXTBSY` before the helper gives up. Each inheriting child
 /// clears the descriptor as it execs, so this drains in microseconds in practice; the ceiling exists
@@ -50,7 +50,7 @@ pub(crate) fn scripted_prefix(body: &str) -> (tempfile::TempDir, Prefix) {
 
 /// Run the shim's probe until it starts, so no descriptor a sibling's fork inherited is still open
 /// against it when the test spawns for real.
-fn wait_until_runnable(shim: &Path) {
+pub(crate) fn wait_until_runnable(shim: &Path) {
     for _ in 0..PROBE_ATTEMPTS {
         match std::process::Command::new(shim).arg(PROBE).status() {
             Ok(_) => return,

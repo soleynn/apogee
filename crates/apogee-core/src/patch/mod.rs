@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use apogee_patcher::{InstallRequest, Installed, RepairOutcome, Repo};
+use apogee_patcher::{GameProbe, InstallRequest, Installed, RepairOutcome, Repo};
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,32 @@ pub(crate) struct RepairPlan {
     pub(crate) game_root: PathBuf,
     /// The repos to verify and heal, each with the version its index must describe.
     pub(crate) repos: Vec<RepairRepoPlan>,
+}
+
+/// The patcher's game-running guard, answered from the real process table.
+///
+/// The two halves live apart on purpose: `apogee-patcher` states that it will not write into an
+/// install someone is playing, and `apogee-runtime` knows what a running client looks like on this
+/// operating system. Joining them is this crate's job, which is why the probe is built here rather
+/// than defaulted inside the patcher, and why every caller that goes through the composition root
+/// gets the guard without asking for it.
+///
+/// A scan that cannot be made is logged and reported as "not running": the whole check is a
+/// courtesy in front of an apply that fails on a held file anyway, and a launcher that cannot read
+/// the process table would otherwise refuse to patch at all. The log line is what keeps that from
+/// being silent.
+pub(crate) fn game_probe() -> GameProbe {
+    GameProbe::new(|game_root| match apogee_runtime::game_running(game_root) {
+        Ok(running) => running,
+        Err(source) => {
+            tracing::warn!(
+                game_root = %game_root.display(),
+                %source,
+                "could not tell whether the game is running; continuing unguarded",
+            );
+            false
+        }
+    })
 }
 
 /// Classify a patch location into its repo by the reference launcher's rule
