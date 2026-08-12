@@ -17,8 +17,11 @@
 //! Repair verifies an install against its block index and re-fetches only the broken byte ranges,
 //! pulling from local patch files on the first (trusted) attempt and over HTTP after, reconstructing
 //! zero/empty regions with no fetch, and quarantining strays to a recycler rather than deleting them.
-//! The Windows elevated-worker protocol (the [`WorkerRequest`]/[`WorkerResponse`]/[`WorkerProgress`]
-//! messages and the [`PatchError::Worker`] arm) is declared here but not yet driven.
+//!
+//! Where the install tree is not writable by the user who launched, the apply runs in a separate
+//! privileged process instead. [`Elevation`] decides when; the boundary itself, and everything that
+//! crosses it, belongs to [`apogee_elevate`]. A worker that dies mid-apply arrives here as
+//! [`PatchError::Worker`], a value the caller renders: nothing in this crate ends the launcher.
 
 use std::path::PathBuf;
 
@@ -28,6 +31,7 @@ use thiserror::Error;
 use apogee_fetch::{FetchError, Fetcher};
 
 mod catalog;
+mod elevated;
 mod install;
 mod job;
 pub mod mods;
@@ -42,8 +46,12 @@ pub use catalog::{
     INDEX_CATALOG_MANIFEST_VERSION, INDEX_CATALOG_PUBLIC_KEY, IndexCatalog, IndexCatalogError,
     IndexEntry,
 };
+pub use elevated::{Elevation, probe_writable};
 pub use job::Job;
 pub use progress::PatchProgress;
+// Re-exported because `PatchError::Worker` carries one and a caller that matches on it must be able
+// to name it without depending on the boundary crate itself.
+pub use apogee_elevate::WorkerErrorKind;
 // Re-exported because `PatchProgress::Downloading` carries one: a consumer that reads the field must
 // be able to name its type without depending on `apogee-fetch` itself.
 pub use apogee_fetch::Recoveries;
@@ -106,16 +114,6 @@ pub enum PreflightError {
     GameRunning,
 }
 
-/// How the elevated worker failed (mirrors its stdio error payload).
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub enum WorkerErrorKind {
-    Spawn,
-    Protocol,
-    Apply,
-    Verify,
-}
-
 /// Patch orchestration failures.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -174,10 +172,16 @@ pub enum PatchError {
         #[source]
         source: std::io::Error,
     },
-    #[error("elevated worker failed: {kind:?}")]
+    /// The privileged apply failed, including by the worker process dying part way through it. The
+    /// launcher is untouched, and because a version file advances only on a clean apply, the run is
+    /// re-runnable.
+    #[error("elevated worker failed: {kind:?}: {detail}")]
     Worker {
+        /// What kind of failure it was.
         kind: WorkerErrorKind,
+        /// The file it named, when it named one.
         failed_file: Option<PathBuf>,
+        /// The rendered underlying error.
         detail: String,
     },
     #[error("index unavailable for {repo:?}")]
@@ -196,32 +200,6 @@ pub enum PatchError {
     Cancelled,
 }
 
-/// The elevated-worker stdio protocol: length-prefixed `serde` frames. The exact message set (and
-/// whether the worker runs the whole apply or a marshaled [`apogee_zipatch::PatchSink`]) is an open
-/// design point, not yet finalized.
-#[derive(Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum WorkerRequest {
-    Apply { repo: Repo, patch: PathBuf },
-    Cancel,
-}
-
-/// A worker's reply to a [`WorkerRequest`].
-#[derive(Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum WorkerResponse {
-    Done,
-    Failed { detail: String },
-}
-
-/// A progress frame streamed from the worker mid-apply.
-#[derive(Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum WorkerProgress {
-    Bytes(u64),
-    File(PathBuf),
-}
-
 /// Runtime configuration for a [`Patcher`]: the profile-independent settings the composition root
 /// knows once. The per-profile game root travels with each [`InstallRequest`] instead.
 #[derive(Debug, Clone)]
@@ -237,6 +215,8 @@ pub struct PatcherConfig {
     /// reattempt budget; clamped to at least one). The first pass may trust local patch files; every
     /// pass after re-fetches over HTTP.
     pub repair_reattempts: usize,
+    /// Where the apply runs when the install tree is not writable by this process.
+    pub elevation: Elevation,
 }
 
 /// The reference launcher's reattempt budget, adopted as the default repair pass count.
@@ -244,13 +224,15 @@ pub const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
 
 impl Default for PatcherConfig {
     /// A config with no patch store set (the caller must fill [`patch_store`](Self::patch_store)):
-    /// patches removed after apply, the disk preflight on, and the reference reattempt budget.
+    /// patches removed after apply, the disk preflight on, the reference reattempt budget, and
+    /// elevation left to the platform.
     fn default() -> Self {
         Self {
             patch_store: PathBuf::new(),
             keep_patches: false,
             ignore_space: false,
             repair_reattempts: DEFAULT_REPAIR_REATTEMPTS,
+            elevation: Elevation::default(),
         }
     }
 }
