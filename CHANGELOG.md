@@ -51,6 +51,7 @@ is tagged with its change type. Versioning aims to follow
 - Make retries, stalls, demotions and dropped mirrors observable (#199) _(added)_
 - Make the three concurrency caps agree (#202) _(fixed)_
 - Close out the pre-freeze API review (#207) _(added)_
+- Reset the rustdoc to the house style (#208) _(documentation)_
 
 ### apogee-otp
 - Generate one-time codes from a stored shared secret (#122) _(added)_
