@@ -1,24 +1,20 @@
 //! The single-connection streaming download state machine.
 //!
-//! A download reserves its `.part` to the full length as soon as one is known - the caller's, or the
-//! first response's `Content-Length` - so a transfer with nowhere to land fails before the payload
-//! streams rather than partway through it. A body whose length nobody states reserves nothing.
+//! A download reserves its `.part` to the full length as soon as one is known (the caller's, or the
+//! first response's `Content-Length`), so a transfer with nowhere to land fails up front rather than
+//! partway through; a body whose length nobody states reserves nothing. The body streams to the
+//! `.part`, hashing as it writes, and the journal watermark advances only after the bytes it names are
+//! `fsync`ed, so a crash never leaves the journal ahead of the disk. On success the file is verified,
+//! renamed onto its destination, and the journal removed. An interrupted transfer resumes from the
+//! journal watermark with `Range` + `If-Range`; a source that answers a ranged request with a `200`
+//! restarts cleanly from zero instead of stitching bodies together. An existing destination is
+//! re-hashed against the validator rather than trusted on its path.
 //!
-//! A download streams the body to a `.part` sidecar, hashing as it writes, and flushes the journal
-//! watermark only after the corresponding bytes are `fsync`ed, so a crash never leaves the journal
-//! naming bytes that are not on disk. On success the file is verified, atomically renamed onto its
-//! destination, and the journal removed. An interrupted transfer resumes from the journal watermark
-//! with `Range` + `If-Range`; a source that changed (a `200` where a `206` was asked for) restarts
-//! cleanly from zero. An existing destination is re-hashed against the validator, not trusted on its
-//! path, so a `VerifiedFile` is never minted over unverified bytes.
-//!
-//! A retry does not have to go back to the source that failed. Each try picks its source from the
-//! spec's list by the same rule the segmented engine's re-queue uses
-//! ([`rotate`](crate::retry::rotate)), so the three cases this engine owns - a transfer of unknown
-//! length, a file too small to be worth segmenting, and a job demoted because the primary answered a
-//! ranged probe with a whole body - fail over to a mirror rather than failing. What belongs to the
-//! primary alone stays with it: the journal's identity, and the validator a conditional range offers
-//! (see [`Conditional`]).
+//! A retry does not have to return to the source that failed: each try picks its source by the same
+//! rule the segmented engine's re-queue uses ([`rotate`](crate::retry::rotate)), so a transfer of
+//! unknown length, a file too small to segment, or a job demoted after the primary answered a ranged
+//! probe with a whole body all fail over to a mirror. The journal's identity and a conditional range's
+//! validator stay the primary's alone (see [`Conditional`]).
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -48,31 +44,28 @@ use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
 /// What a download must prove before it publishes: a whole-file digest, a per-block SHA1 map, or
-/// nothing. Derived from the [`Validator`] once via [`plan`] and threaded through both engines so the
+/// nothing. Built by [`plan`] from the spec's [`Validator`] and threaded through both engines, so the
 /// two never disagree about what "verified" means.
 pub(crate) struct Verify {
-    /// The whole-file digest and the function that produced it. Which function is carried rather
-    /// than assumed: both are 32 bytes wide, so the expected bytes alone cannot say.
+    // Both `Sha256` and `Blake3` digests are 32 bytes wide, so the expected bytes alone can't say
+    // which function produced them; the tag has to travel with the digest.
     pub(crate) digest: Option<DigestPin>,
     pub(crate) blocks: Option<Arc<BlockPlan>>,
 }
 
-/// How many bytes are streamed between `fsync` + journal-commit points, and the size of the in-memory
-/// write buffer: the trade of throughput (one large write and one fsync per batch) against the bytes a
-/// kill can cost (a resume re-fetches at most this much).
+/// Bytes streamed between `fsync` + journal-commit points, and the write-buffer size.
+///
+/// Bounds how much a kill can cost (a resume re-fetches at most this much) against per-batch
+/// write/fsync overhead.
 const BATCH: u64 = 1024 * 1024;
 /// The buffer size for reading a file back to hash it (resume re-seed, existing-dest verification).
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Run one single-connection download to completion.
+/// Run one single-connection download to completion: request, stream, verify, and publish.
 ///
-/// The transfer draws the shared limiter's tokens on the bytes it reads off the socket and holds one
-/// connection slot from the shared scheduler for its lifetime, so it counts against the global
-/// connection cap the same as a segment does.
-///
-/// One attempt is one request plus the body it delivers. A connection cut off mid-body, or one that
-/// goes silent past the inactivity timeout, commits what it received and re-requests the rest after a
-/// backoff, so a drop at 90% costs a wait rather than the whole transfer.
+/// One attempt is one request plus the body it delivers; a connection cut off mid-body, or one that
+/// goes silent past the inactivity timeout, commits what it received and retries the rest after a
+/// backoff rather than losing the whole transfer.
 pub(crate) async fn run(
     client: &reqwest::Client,
     spec: &DownloadSpec,
@@ -356,7 +349,7 @@ pub(crate) async fn run(
     publish(dest, &part, &apdl, written, total, &progress).await
 }
 
-/// A usable response and which source answered it.
+/// A usable response and which source answered it: `0` for the primary, higher for a mirror.
 struct Attempt {
     resp: reqwest::Response,
     /// `0` for the primary, higher for the mirror the rotation stepped onto. The caller needs it to
@@ -365,13 +358,10 @@ struct Attempt {
     source: usize,
 }
 
-/// The `.part` being written and everything that has to stay consistent with it: its open handle, the
-/// running hash over its prefix, its journal, where the next body lands, and the validator a
-/// conditional range for it may offer.
+/// The `.part` being written and everything that must move with it on a resume.
 ///
-/// Grouped because settling a resume disposition moves all of it together or none of it: a response
-/// that restarts the transfer rewinds the file, the hash, the journal, the offset and the validator in
-/// one step ([`reset_to_zero`]), and passing them separately let a caller move one without the rest.
+/// Its handle, running hash, journal, resume offset, and validator. Grouped because
+/// [`reset_to_zero`] moves all of it together, never one piece without the rest.
 struct Partial<'a> {
     path: &'a Path,
     file: &'a mut tokio::fs::File,
@@ -381,37 +371,25 @@ struct Partial<'a> {
     if_range: &'a mut Option<Conditional>,
 }
 
-/// A server validator, and which source issued it.
-///
-/// A validator describes one source's copy of the file, so it is only ever offered back to that
-/// source. The primary's given to a mirror would be answered with a whole body, throwing a durable
-/// prefix away over a difference that means nothing; a mirror's given to the primary would read as
-/// the primary changing when it never did.
-///
-/// The segmented engine needs no such tag: its `If-Range` comes from a probe it only ever records from
-/// the primary, so the one validator it holds belongs to the one source it sends it to. This engine
-/// re-asks whichever source the rotation names, and asks it to continue a prefix rather than to serve a
-/// closed range, so it has to know whose validator it is holding.
+/// A server validator (`ETag` or `Last-Modified`) and the source that issued it. Tagged because a
+/// validator is only valid against the source that issued it: offering the primary's to a mirror, or
+/// the reverse, reads as a change that never happened.
 struct Conditional {
     source: usize,
     value: Vec<u8>,
 }
 
-/// The strongest validator `resp` offers (an `ETag`, else a `Last-Modified`), tagged with the source
-/// that sent it.
+/// The strongest validator `resp` offers (`ETag`, else `Last-Modified`), tagged with `source`.
 fn conditional(resp: &reqwest::Response, source: usize) -> Option<Conditional> {
     header_bytes(resp, &ETAG)
         .or_else(|| header_bytes(resp, &LAST_MODIFIED))
         .map(|value| Conditional { source, value })
 }
 
-/// The failure to report once a transfer's attempt budget is spent.
+/// The failure to report once the attempt budget is spent.
 ///
-/// A transfer carrying mirrors spent that budget across its whole source list, so the fact worth
-/// triaging is that failover itself was exhausted, and the reported source count and attempt count say
-/// how wide and how hard it tried. One with a single source had nowhere to fail over to, so `last`, the
-/// failure that source ended on, is still the whole story and is reported verbatim. The segmented
-/// engine splits the same way, except that it has no single failure to hand back.
+/// [`FetchError::AllSourcesFailed`] when `sources` holds mirrors (failover itself was exhausted),
+/// else `last` verbatim.
 fn exhausted(sources: &[Url], attempts: u32, at_bytes: u64, last: FetchError) -> FetchError {
     match sources {
         [primary, _, ..] => FetchError::AllSourcesFailed {
@@ -424,7 +402,8 @@ fn exhausted(sources: &[Url], attempts: u32, at_bytes: u64, last: FetchError) ->
     }
 }
 
-/// Where one body attempt starts and what the transfer has already reported.
+/// Where one body attempt starts, the transfer's total length once known, and the shared progress
+/// high-water mark.
 struct Cursor<'a> {
     /// The offset this response's body lands at.
     start: u64,
@@ -438,22 +417,21 @@ struct Cursor<'a> {
 enum Outcome {
     /// The body ran to its end; `written` bytes are durable.
     Complete(u64),
-    /// The connection was cut off or went silent mid-body. Everything received is durable and hashed,
-    /// so the next attempt resumes from `written`; `source` is the failure to report if the attempt
-    /// budget runs out first.
+    /// The connection was cut off or went quiet; `written` bytes are durable and hashed, so the next
+    /// attempt resumes from there. `source` is the failure to report if the attempt budget runs out.
     Interrupted { written: u64, source: FetchError },
 }
 
-/// Stream one response body into the `.part`, hashing as it goes.
-///
-/// The body lands in a batch buffer: one write and one `fsync` + journal-commit per batch, so a
-/// multi-GB transfer issues thousands of writes, not millions. Hashing reads the arriving chunk, so
-/// it is unaffected by the buffering. A mid-body error or an inactivity timeout commits the batch
-/// first, so the [`Outcome::Interrupted`] watermark it reports is durable rather than merely received.
+/// Stream one response body into the `.part`, hashing as it goes, in `BATCH`-sized batches: one write
+/// and one `fsync` + journal-commit per batch rather than per chunk. Hashing reads the arriving
+/// chunk, so it is unaffected by the buffering. A mid-body error or inactivity timeout commits the
+/// current batch first, so an [`Outcome::Interrupted`] watermark is always durable.
 ///
 /// # Errors
+///
 /// [`FetchError::Cancelled`] if `cancel` fires, or [`FetchError::Io`] if the `.part` or its journal
-/// cannot be written. A transport failure is not an error here: it is an outcome the caller retries.
+/// cannot be written. A transport failure is not an error here: [`Outcome::Interrupted`] reports it to
+/// the caller as an outcome to retry instead.
 #[allow(clippy::too_many_arguments)]
 async fn stream_body(
     resp: reqwest::Response,
@@ -548,29 +526,26 @@ async fn stream_body(
 /// Send the request and settle the resume disposition, retrying what is worth retrying and rotating
 /// off a source that will not answer.
 ///
-/// A valid `206` continues from `start`; a `200` (source changed, or the server ignored the range)
-/// restarts cleanly from zero; a `416` or an unusable `206` re-requests once from zero. A connect
-/// failure, a throttling status, and a source that sends no headers within the fetcher's stall
-/// timeout (see [`send_bounded`]) each spend an attempt from `attempts` and back off under the
-/// fetcher's policy; every other status is fatal and is not retried.
+/// A valid `206` continues from `start`; a `200` (source changed, or the range was ignored) restarts
+/// cleanly from zero; a `416` or an unusable `206` retries once more from zero. A connect failure, a
+/// throttling status, and a stalled response (see [`send_bounded`]) each spend an attempt and back off
+/// under the fetcher's retry policy; every other status is fatal.
 ///
 /// Which source each try goes to is [`rotate`]'s decision, the same rule the segmented engine's
-/// re-queue follows: the failing source once more, then one step along the list per failure after
-/// that. Because the choice is a pure function of `attempts`, which only the failure paths advance,
-/// rotating cannot add a try the budget has not already paid for.
+/// re-queue follows. The choice is a pure function of `attempts`, which only the failure paths
+/// advance, so rotating never adds a try the attempt budget has not already paid for.
 ///
 /// A `200` where a range was asked for is read the same way whichever source sent it: restart from
 /// zero and stream the whole body. This engine wants a whole body, so a range-ignoring source is
 /// merely a source that starts over here, not the capability failure it is to the segmented engine.
-/// What that costs is the durable prefix, which is why only a conditional range's *own* source is
-/// asked to match it (see [`Conditional`]).
 ///
 /// # Errors
+///
 /// [`FetchError::Http`] for a fatal status, [`FetchError::AllSourcesFailed`] once a transfer with
-/// mirrors has spent its budget across them (the last source's own failure when there are none),
-/// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Stalled`] if
-/// it answered with no headers at all, [`FetchError::Cancelled`] if `cancel` fired, or
-/// [`FetchError::Io`] if truncating the `.part` for a restart failed.
+/// mirrors exhausts its budget across them (the last source's own failure when there are none),
+/// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Stalled`] if it
+/// answered with no headers at all, [`FetchError::Cancelled`] if `cancel` fires, or [`FetchError::Io`]
+/// if truncating the `.part` for a restart failed.
 #[allow(clippy::too_many_arguments)]
 async fn obtain_response(
     client: &reqwest::Client,
@@ -691,8 +666,8 @@ async fn obtain_response(
     }
 }
 
-/// Open the `.part` for writing at `start`: create it fresh at zero, or truncate an existing file to
-/// `start`, re-seed the running hash from its prefix, and position at the end for appending.
+/// Open the `.part` for writing at `start`: create fresh at zero, or truncate an existing file to
+/// `start`, re-seed the running hash from its prefix, and seek to the end for appending.
 async fn open_part(
     part: &Path,
     start: u64,
@@ -737,8 +712,8 @@ async fn open_part(
     Ok(file)
 }
 
-/// Truncate the `.part`, reset the running hash, drop the journal, and clear the resume position and
-/// its validator, so a fresh body streams from zero.
+/// Truncate the `.part`, reset the running hash, and drop the journal, resume offset, and validator,
+/// so the next body streams from zero.
 async fn reset_to_zero(partial: &mut Partial<'_>) -> Result<(), FetchError> {
     partial
         .file
@@ -777,7 +752,7 @@ async fn write_batch(
     Ok(())
 }
 
-/// Flush the data durable, then advance the journal watermark: the record never names bytes the disk
+/// Make the batch durable, then advance the journal watermark: the record never names bytes the disk
 /// has not confirmed.
 async fn flush_and_commit(
     part_file: &mut tokio::fs::File,
@@ -805,8 +780,9 @@ async fn flush_and_commit(
 }
 
 /// The request fingerprint shared by both engines: source, declared length, and validator digest.
-/// `etag`/`last_modified` start empty; the segmented engine fills them from its probe. Keeping this in
-/// one place means a new fingerprint field cannot be set in one engine and forgotten in the other.
+/// `etag`/`last_modified` start empty; the segmented engine fills them in from its own probe. Keeping
+/// this in one place means a new fingerprint field cannot be set in one engine and forgotten in the
+/// other.
 pub(crate) fn base_identity(spec: &DownloadSpec, expected_len: Option<u64>) -> Identity {
     Identity {
         url: spec.url().as_str().to_owned(),
@@ -817,9 +793,9 @@ pub(crate) fn base_identity(spec: &DownloadSpec, expected_len: Option<u64>) -> I
     }
 }
 
-/// The shared publish tail: atomically rename the verified `.part` onto `dest`, `fsync` the parent for
-/// rename durability, drop the journal, and emit `Complete`. The data itself must already be durable
-/// (each engine `fsync`s the part its own way before calling this).
+/// The publish tail shared by both engines: rename the verified `.part` onto `dest`, `fsync` the
+/// parent for rename durability, drop the journal, and emit `Complete`. The part's data must already
+/// be durable; each engine `fsync`s it its own way before calling this.
 pub(crate) async fn publish(
     dest: &Path,
     part: &Path,
@@ -869,10 +845,9 @@ pub(crate) fn plan(validator: &Validator, expected_len: Option<u64>) -> Result<V
     }
 }
 
-/// Hash each block of `path` from disk in order, returning the index of the first block whose SHA1 does
-/// not match its plan, or `None` when every block verifies. Each block is hashed on a blocking worker,
-/// and the token is checked between blocks: over a multi-gigabyte file this re-hash runs for minutes,
-/// which without the check was that long of a cancel being ignored.
+/// Hash each block of `path` from disk in order, returning the index of the first block whose SHA1
+/// does not match its plan, or `None` when every block verifies. Hashed on a blocking worker per
+/// block, with the cancel token checked between blocks so a multi-gigabyte re-hash stays cancellable.
 pub(crate) async fn verify_blocks_seq(
     path: &Path,
     plan: &BlockPlan,
@@ -896,10 +871,9 @@ pub(crate) async fn verify_blocks_seq(
     Ok(None)
 }
 
-/// Idempotent skip: return an existing destination only if it still satisfies the validator, so a
-/// `VerifiedFile` is never minted over unverified or stale bytes. The re-hash reads local disk only,
-/// never the network, so an unchanged file is not re-downloaded. `Ok(None)` means "not satisfied,
-/// proceed with the download".
+/// Idempotent skip: return an existing destination only if it still satisfies the validator (checked
+/// against local disk only, never the network), so a `VerifiedFile` is never minted over stale bytes.
+/// `Ok(None)` means the download should proceed.
 pub(crate) async fn check_existing_dest(
     dest: &Path,
     verify: &Verify,
@@ -917,9 +891,8 @@ pub(crate) async fn check_existing_dest(
     Ok(None)
 }
 
-/// Whether an existing destination already satisfies the request: the declared length (if any) and the
-/// validator's proof (a whole-file digest, or every block's SHA1), recomputed from disk so the skip
-/// never trusts a file's path as proof. A block download is skipped only when *every* block verifies.
+/// Whether `dest` already satisfies the request: the declared length, if any, and the validator's
+/// proof recomputed from disk. A block download is skipped only when every block verifies.
 async fn dest_satisfies(
     dest: &Path,
     len: u64,
@@ -939,8 +912,8 @@ async fn dest_satisfies(
     }
 }
 
-/// Hash a file on disk in bounded memory, under the function `pin` names. The token is checked once
-/// per chunk, so a cancel lands within one read of arriving rather than after the whole file.
+/// Hash a file on disk in bounded memory, under the function `pin` names. The cancel token is checked
+/// once per chunk, so a cancel lands within one read rather than after the whole file.
 pub(crate) async fn hash_file(
     path: &Path,
     pin: DigestPin,
@@ -1001,31 +974,25 @@ pub(crate) async fn sync_parent_dir(path: &Path) {
     }
 }
 
-/// Send `req` and wait for the response *headers*, giving up after `within`. Reaching the host is
-/// inside that: this future spans DNS, the connect, the TLS handshake, any redirect hops, and the
-/// wait for a status line.
-///
-/// The crate's other deadline is an inactivity timeout on a body that is already streaming, which
-/// arms only once there is a stream to poll. Nothing before that point is a body: a host that
-/// completes the connection, takes the request and then never sends a status line leaves every
-/// engine parked inside one `send` with no error to retry on, which is a hang no attempt budget
-/// bounds. reqwest's own whole-request `timeout` cannot stand in for this, since it covers the body
-/// too and would cut a multi-gigabyte transfer off at a fixed duration rather than at a fixed
-/// silence, so the deadline goes here, around exactly the part of a request that has a bounded one.
-///
-/// `Err(Elapsed)` is the deadline passing. Every caller reads it as the source going quiet, so it
-/// costs an attempt and rotates like any other failure to deliver, rather than failing the transfer.
-/// A host that *refuses* the connection still errors immediately and reports
-/// [`Connect`](FetchError::Connect); only one that accepts and then says nothing reaches this.
+/// Send `req` and wait for the response headers, giving up after `within`. Reaching the host is
+/// inside that: DNS, connect, TLS handshake, any redirect hops, and the wait for a status line.
+/// `Err(Elapsed)` reads as the source going quiet: it costs an attempt and rotates like any other
+/// delivery failure, while a host that refuses the connection errors immediately as
+/// [`FetchError::Connect`] instead of reaching here.
 pub(crate) async fn send_bounded(
     req: reqwest::RequestBuilder,
     within: Duration,
 ) -> Result<Result<reqwest::Response, reqwest::Error>, tokio::time::error::Elapsed> {
+    // Bounds only the wait for headers, not the body: the crate's other deadline is an inactivity
+    // timeout that arms once the body is already streaming, and reqwest's own whole-request `timeout`
+    // would cover both and cut a multi-gigabyte transfer off at a fixed duration rather than at a fixed
+    // silence. A host that completes the connection and then never sends a status line would otherwise
+    // hang every engine inside one `send` with no error to retry on and no attempt budget to bound it.
     tokio::time::timeout(within, req.send()).await
 }
 
 /// A failure establishing the connection, or the client's redirect policy declining to follow one.
-/// Both arrive from the same `send`, and only the cause chain tells them apart.
+/// Both arrive from the same `send`; only the cause chain tells them apart.
 pub(crate) fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
     if let Some(detail) = crate::redirect::refusal(&source) {
         return FetchError::RedirectRefused {

@@ -26,13 +26,13 @@ pub enum Validator {
     /// [`Sha256`](Validator::Sha256), and what our own signed manifests pin under; the older
     /// function stays for the artifacts pinned before it and for anything SE hands us.
     Blake3([u8; 32]),
-    /// No verification (refused unless explicitly opted into, never over plain HTTP).
+    /// No verification. Refused unless explicitly opted into, and never over plain HTTP.
     None,
-    /// The bytes are length-checked here and authenticated by a named out-of-band gate downstream:
-    /// the marker a boot patch rides, whose integrity is the patcher's ZiPatch chunk-CRC scan
-    /// (boot patchlists carry no per-block hashes). Unlike [`None`](Validator::None) it is allowed
-    /// over plain `http://`, because it documents a real downstream check rather than skipping one;
-    /// it requires a declared length and is served only through
+    /// The bytes are length-checked here and authenticated by a named out-of-band gate downstream
+    /// (a boot patch's ZiPatch chunk-CRC scan, run by `apogee-patcher`; boot patchlists carry no
+    /// per-block hashes). Unlike [`None`](Validator::None) it is allowed over plain `http://`,
+    /// because it documents a real downstream check rather than skipping one. Requires a declared
+    /// length and is served only through
     /// [`Fetcher::download_external`](crate::Fetcher::download_external), which hands back a plain
     /// path, never a [`VerifiedFile`].
     External,
@@ -44,7 +44,7 @@ impl Validator {
     /// block layout) no longer matches, so the download restarts from zero instead of trusting bytes
     /// against the wrong policy.
     ///
-    /// The encoding lives in `journal.rs`: the fingerprint is journal identity data, and that file
+    /// The encoding lives in `journal.rs`: the fingerprint is journal identity data, and that module
     /// is the one home for every byte-layout decision the `.apdl` format freezes.
     pub(crate) fn config_digest(&self) -> [u8; 32] {
         crate::journal::validator_config_digest(self)
@@ -65,7 +65,7 @@ impl From<DigestPin> for Validator {
 
 /// Proof that a file passed its [`Validator`]. `apogee-patcher` accepts only a `VerifiedFile` into
 /// its apply queue, so "installed an unverified patch" is a type error, not a code-review hope.
-/// Minted only inside this crate after verification.
+/// Minted only inside this crate, after verification.
 #[derive(Debug)]
 pub struct VerifiedFile {
     path: PathBuf,
@@ -90,9 +90,9 @@ mod tests {
     use super::*;
 
     /// Every variant's fingerprint is its own. The pair that matters is the two whole-file digests
-    /// over *identical* bytes: they are the same width, so only the tag tells them apart, and a
-    /// collision would let a `.part` hashed under one function resume under the other and be judged
-    /// against a digest describing different bytes.
+    /// over identical bytes: same width, so only the tag tells them apart, and a collision would let
+    /// a `.part` hashed under one function resume under the other and be judged against a digest
+    /// describing different bytes.
     #[test]
     fn no_two_validators_share_a_journal_fingerprint() {
         let digest = [0x5au8; 32];

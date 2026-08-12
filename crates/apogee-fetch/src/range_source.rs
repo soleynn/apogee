@@ -1,16 +1,5 @@
-//! [`HttpRangeSource`]: the HTTP implementor of `apogee-zipatch`'s `RangeSource` seam.
-//!
-//! `apogee-zipatch`'s repair planner asks a `RangeSource` for byte ranges of one source patch file
-//! at a time; this adapter answers those over HTTP via [`Fetcher::fetch_ranges`]. It maps each
-//! `PatchId` to a URL (the chain order `Index::source_refs` names), then packs and fetches the
-//! requested ranges, handing each fetched span back to the planner's callback.
-//!
-//! **Sync-over-async bridge.** `RangeSource::read_ranges` is synchronous, but the fetcher is async.
-//! The adapter holds a [`tokio::runtime::Handle`] and drives each fetch with `Handle::block_on`,
-//! reusing the one `Fetcher` (its pooled client, limiter, scheduler cap, capability cache). Because
-//! `Handle::block_on` panics inside an async execution context, **repair must run off the runtime** —
-//! a caller drives `Index::repair` from `tokio::task::spawn_blocking` or a dedicated thread, never
-//! directly inside an async task.
+//! [`HttpRangeSource`]: an [`apogee_zipatch::RangeSource`] that answers repair's byte-range requests
+//! over HTTP, one source patch file at a time, via [`Fetcher::fetch_ranges`].
 
 use std::ops::Range;
 
@@ -22,12 +11,12 @@ use crate::fetcher::Fetcher;
 use crate::headers::HeaderPolicy;
 use crate::ranges::RangePacking;
 
-/// One source patch a [`HttpRangeSource`] can fetch ranges of, keyed by its position in the chain
-/// (`sources[i]` serves `PatchId(i)`, matching `Index::source_refs` order).
+/// One source patch a [`HttpRangeSource`] can fetch ranges of, keyed by its position in the chain:
+/// `sources[i]` serves `PatchId(i)`, matching [`apogee_zipatch::Index::source_refs`] order.
 ///
 /// `#[non_exhaustive]`: built through [`new`](Self::new) and read through its public fields, so a
-/// per-source input added later (the way the patch token question could land) widens the
-/// constructor set rather than breaking every literal.
+/// per-source input added later widens the constructor rather than breaking every literal built
+/// elsewhere.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HttpSource {
@@ -35,7 +24,7 @@ pub struct HttpSource {
     pub url: Url,
     /// The patch file's length, cross-checked against each response's `Content-Range` total.
     pub expected_len: u64,
-    /// The request header policy (e.g. the Square Enix patch `User-Agent`); `None` for no extra headers.
+    /// The request header policy; `None` for no extra headers.
     pub policy: Option<HeaderPolicy>,
 }
 
@@ -51,7 +40,7 @@ impl HttpSource {
         }
     }
 
-    /// Set the request header policy (e.g. the Square Enix patch `User-Agent`).
+    /// Set the request header policy.
     #[must_use]
     pub fn policy(mut self, policy: HeaderPolicy) -> Self {
         self.policy = Some(policy);
@@ -59,8 +48,8 @@ impl HttpSource {
     }
 }
 
-/// An `apogee-zipatch` `RangeSource` that pulls broken byte ranges over HTTP. Built from a `Fetcher`,
-/// a runtime handle, and the per-patch source table; see the module docs for the off-runtime rule.
+/// An [`apogee_zipatch::RangeSource`] that fetches repair's requested byte ranges over HTTP, backing
+/// each `PatchId(i)` with `sources[i]`.
 #[derive(Debug)]
 pub struct HttpRangeSource {
     fetcher: Fetcher,
@@ -71,9 +60,27 @@ pub struct HttpRangeSource {
 }
 
 impl HttpRangeSource {
-    /// Back each `PatchId(i)` with `sources[i]`, fetching through `fetcher` and bridging to it with
-    /// `handle`. Capture `handle` on a runtime thread (`Handle::current()`); `read_ranges` must then be
-    /// called off the runtime (see the module docs).
+    /// Build a source over `fetcher`, reusing its pooled client, limiter, scheduler cap, and
+    /// capability cache for every fetch, and bridging its async calls to this synchronous seam with
+    /// `handle` (capture it on a runtime thread via `Handle::current()`). See
+    /// [`read_ranges`](apogee_zipatch::RangeSource::read_ranges) for the resulting constraint on
+    /// where repair may run.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn demo(
+    /// #     fetcher: apogee_fetch::Fetcher,
+    /// #     handle: tokio::runtime::Handle,
+    /// #     sources: Vec<apogee_fetch::HttpSource>,
+    /// # ) -> Result<(), apogee_fetch::FetchError> {
+    /// use apogee_fetch::HttpRangeSource;
+    ///
+    /// let range_source = HttpRangeSource::new(fetcher, handle, sources);
+    /// # let _ = range_source;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn new(fetcher: Fetcher, handle: tokio::runtime::Handle, sources: Vec<HttpSource>) -> Self {
         Self {
@@ -92,14 +99,12 @@ impl HttpRangeSource {
         self
     }
 
-    /// Watch `cancel` while fetching, so a repair pass driven through this adapter is interruptible
+    /// Watch `cancel` while fetching, so repair driven through this adapter is interruptible
     /// mid-transfer rather than only between the planner's requests. A cancelled fetch surfaces to
-    /// the planner as an i/o read fault (the seam's taxonomy has no cancel of its own), which ends
-    /// the repair with an error exactly as the caller asked. Default: a token nothing cancels.
-    ///
-    /// No progress counterpart, deliberately: only the repair planner knows what a delivered span
-    /// means to the file it is mending, so per-file progress belongs to its report callback rather
-    /// than to a byte tally here.
+    /// the planner as an i/o read fault (the seam's taxonomy has no cancel of its own), ending the
+    /// repair with an error; there is no progress counterpart, since only the repair planner's own
+    /// callback knows what a delivered span means to the file it is mending. Default: a token nothing
+    /// cancels.
     #[must_use]
     pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
@@ -108,6 +113,20 @@ impl HttpRangeSource {
 }
 
 impl apogee_zipatch::RangeSource for HttpRangeSource {
+    /// Fetches `ranges` of `sources[patch.0]` over HTTP, driving the fetch to completion on the
+    /// calling thread via `Handle::block_on`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`apogee_zipatch::Error::Corrupt`] for an out-of-range `PatchId`, or for a malformed
+    /// range response reported by the transport. Any other transport failure surfaces as
+    /// [`apogee_zipatch::Error::Io`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from inside any asynchronous execution context, not only the runtime
+    /// `handle` belongs to (`Handle::block_on`'s contract). Drive [`apogee_zipatch::Index::repair`]
+    /// from `tokio::task::spawn_blocking` or a dedicated thread, never directly inside an async task.
     fn read_ranges(
         &mut self,
         patch: apogee_zipatch::PatchId,
@@ -148,7 +167,7 @@ impl apogee_zipatch::RangeSource for HttpRangeSource {
 }
 
 /// A throwaway error the sink returns to abort a fetch after the planner's callback failed; its
-/// contents never surface (the captured zipatch error wins), so only its role matters.
+/// contents never surface, since the captured zipatch error wins.
 fn sink_abort() -> FetchError {
     FetchError::Internal {
         detail: "range sink aborted",
@@ -156,10 +175,11 @@ fn sink_abort() -> FetchError {
     }
 }
 
-/// Map a transport failure into the zipatch error taxonomy: a malformed range response is corrupt
-/// source data, everything else an i/o read fault. A hard error here tells `Index::repair` the source
-/// is broken, and its retry policy owns recovery.
+/// Maps a transport failure to the zipatch error taxonomy: a malformed range response is corrupt
+/// source data, everything else an i/o read fault.
 fn fetch_to_zipatch(err: &FetchError) -> apogee_zipatch::Error {
+    // A hard error here tells `Index::repair` the source is broken; its own retry policy owns
+    // recovery from there.
     match err {
         FetchError::MalformedRangeResponse { detail, .. } => {
             apogee_zipatch::Error::Corrupt { offset: 0, detail }

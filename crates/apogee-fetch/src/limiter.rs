@@ -1,9 +1,8 @@
 //! A shared, live-adjustable token-bucket speed limiter.
 //!
-//! One [`LimitHandle`] is cloned to every connection of every job, so they all draw from a single
-//! budget counted on payload bytes read off the socket. [`set`](LimitHandle::set) retargets the cap
-//! mid-transfer (or lifts it with `None`), matching the reference launcher's live speed control. The
-//! bucket runs on `tokio::time`, so a paused-time test drives it deterministically.
+//! One [`LimitHandle`] is cloned to every connection of every job, so all of them draw from a
+//! single budget counted on payload bytes read off the socket. The bucket runs on `tokio::time`, so
+//! a paused-time test drives it deterministically.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,14 +16,14 @@ pub struct LimitHandle {
 
 #[derive(Debug)]
 struct Bucket {
-    /// The cap in bytes per second, or `None` for uncapped. A rate of `0` is treated as uncapped.
+    /// Cap in bytes per second; `None` or `0` means uncapped.
     rate: Option<u64>,
-    /// Available tokens (bytes), kept fractional to avoid rounding drift.
+    /// Available tokens in bytes, kept fractional to avoid rounding drift.
     tokens: f64,
-    /// The burst ceiling tokens accrue to after an idle gap; bounds post-idle catch-up.
+    /// Burst ceiling tokens accrue to after an idle gap; bounds post-idle catch-up.
     capacity: f64,
-    /// When `tokens` was last refilled; `None` until the first draw so no `Instant` is minted outside
-    /// the runtime.
+    /// When `tokens` was last refilled; `None` until the first draw so no `Instant` is minted
+    /// outside the runtime.
     last: Option<Instant>,
 }
 
@@ -53,8 +52,8 @@ impl LimitHandle {
         }
     }
 
-    /// Retarget the limit live. `None` lifts it; a new rate re-scales the burst ceiling and clamps any
-    /// accumulated tokens to it.
+    /// Retarget the limit live, matching the reference launcher's live speed control. `None` lifts
+    /// it; a new rate re-scales the burst ceiling and clamps any buffered tokens to it.
     pub fn set(&self, bytes_per_second: Option<u64>) {
         let mut b = self.lock();
         b.rate = bytes_per_second;
@@ -64,9 +63,9 @@ impl LimitHandle {
         }
     }
 
-    /// Wait until `n` bytes' worth of tokens are available, then consume them. Returns immediately when
-    /// uncapped. A request larger than the burst ceiling is still served (the ceiling stretches to it
-    /// for that draw), so a large chunk cannot deadlock.
+    /// Wait until `n` bytes' worth of tokens are available, then consume them. Returns immediately
+    /// when uncapped; a request larger than the burst ceiling is still served (the ceiling stretches
+    /// to it for that draw), so a large chunk cannot deadlock.
     pub(crate) async fn acquire(&self, n: u64) {
         if n == 0 {
             return;
@@ -121,6 +120,7 @@ mod tests {
         Instant::now().saturating_duration_since(start)
     }
 
+    /// A steady draw against a fixed cap lands within 5% of the ideal duration.
     #[tokio::test(start_paused = true)]
     async fn holds_the_rate_within_five_percent() {
         let rate = 1_000_000; // 1 MB/s
@@ -134,6 +134,7 @@ mod tests {
         );
     }
 
+    /// An uncapped handle drains any amount with zero elapsed time.
     #[tokio::test(start_paused = true)]
     async fn uncapped_never_waits() {
         let handle = LimitHandle::uncapped();
@@ -141,6 +142,7 @@ mod tests {
         assert_eq!(elapsed, Duration::ZERO);
     }
 
+    /// Calling `set(None)` mid-transfer lifts the cap immediately for the rest of the draw.
     #[tokio::test(start_paused = true)]
     async fn lifting_the_limit_mid_stream_stops_throttling() {
         let handle = LimitHandle::with_limit(1_000_000);
@@ -150,6 +152,7 @@ mod tests {
         assert_eq!(after, Duration::ZERO, "an uncapped handle must not wait");
     }
 
+    /// Raising the rate mid-transfer speeds up the rest of the draw to match.
     #[tokio::test(start_paused = true)]
     async fn retargeting_to_a_faster_rate_takes_effect() {
         let handle = LimitHandle::with_limit(1_000_000);
@@ -162,6 +165,7 @@ mod tests {
         );
     }
 
+    /// A single draw wider than the burst ceiling still completes, over more than one refill.
     #[tokio::test(start_paused = true)]
     async fn a_chunk_larger_than_the_burst_ceiling_is_still_served() {
         // n (2 MB) exceeds the 1 MB/s one-second ceiling; the draw must complete, not deadlock.
