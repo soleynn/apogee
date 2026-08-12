@@ -144,6 +144,7 @@ dependencies = [
  "apogee-runtime",
  "apogee-secrets",
  "apogee-test-support",
+ "apogee-zipatch",
  "async-trait",
  "insta",
  "proptest",

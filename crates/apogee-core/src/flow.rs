@@ -5,7 +5,7 @@
 //! disposition as a [`FlowState`] rather than a failure. The session cache lets a re-login inside its
 //! window skip authentication and registration entirely.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -143,7 +143,10 @@ pub(crate) async fn drive(
             )
             .await
         }
-        Command::Repair { profile } => repair(&ctx, profile, &tx, &cancel).await,
+        Command::Repair {
+            profile,
+            local_indexes,
+        } => repair(&ctx, profile, local_indexes, &tx, &cancel).await,
         Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
         Command::FirstRun(_) => todo!("walk the initial setup"),
         Command::ImportXivLauncher(_) => todo!("import an existing launcher configuration"),
@@ -259,18 +262,35 @@ async fn play(
 }
 
 /// Verify the profile's install against its signed block indexes and re-fetch only the broken ranges.
+/// A repo named in `local_indexes` reads that `.apzi` instead of resolving through the hosted
+/// catalog; the rest resolve as always.
 async fn repair(
     ctx: &FlowContext,
     profile_id: Uuid,
+    local_indexes: Vec<(Repo, PathBuf)>,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, _account) = resolve(ctx, profile_id)?;
-    let repos = installed_repos(&profile.game_path);
+    let mut repos = installed_repos(&profile.game_path);
     if repos.is_empty() {
         return Err(CoreError::Repair {
             detail: "no installed repositories to verify".to_owned(),
         });
+    }
+    // Attach each override to the installed repo it names. An override for a repo that is not
+    // installed is refused loud: silently dropping it would leave that repo resolving through the
+    // catalog the caller was steering around, which is exactly the wrong thing when the catalog
+    // host is the reason the override was passed.
+    for (repo, path) in local_indexes {
+        match repos.iter_mut().find(|plan| plan.repo == repo) {
+            Some(plan) => plan.index_override = Some(path),
+            None => {
+                return Err(CoreError::Repair {
+                    detail: format!("a local index was given for {repo:?}, but it is not installed"),
+                });
+            }
+        }
     }
     emit(tx, FlowState::Repairing);
     let plan = RepairPlan {
@@ -964,13 +984,21 @@ fn installed_repos(game_root: &Path) -> Vec<RepairRepoPlan> {
     let mut repos = Vec::new();
     for repo in [Repo::Boot, Repo::Game] {
         if let Some(version) = read_repo_ver(game_root, repo) {
-            repos.push(RepairRepoPlan { repo, version });
+            repos.push(RepairRepoPlan {
+                repo,
+                version,
+                index_override: None,
+            });
         }
     }
     for n in 1..=5u8 {
         let repo = Repo::Expansion(n);
         if let Some(version) = read_repo_ver(game_root, repo) {
-            repos.push(RepairRepoPlan { repo, version });
+            repos.push(RepairRepoPlan {
+                repo,
+                version,
+                index_override: None,
+            });
         }
     }
     repos

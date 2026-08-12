@@ -33,6 +33,9 @@ rustix = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }
+# Authors real `.apzi` bytes for the local-index repair tests, so they prove the override against
+# the shipped reader rather than a stand-in (and carry no Square Enix bytes).
+apogee-zipatch = { path = "../apogee-zipatch", features = ["test-fixtures"] }
 # The in-memory secret store, so no test reaches the machine's real keyring. `mock`, never
 # `testing`: that feature gates tests that drive whatever provider is on the session bus, and
 # depending on it here would unify it on for every workspace run and start raising unlock prompts.

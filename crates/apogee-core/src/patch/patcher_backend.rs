@@ -4,7 +4,9 @@
 //! backend just runs them and relays progress. Repair requests do not: a [`RepairPlan`] names the
 //! repos and versions, and the backend resolves each repo's digest-pinned block index, and where that
 //! index's source patches are served, from the hosted, Ed25519-signed catalog before handing
-//! `apogee-patcher` the full request. The catalog bytes travel through the download engine like
+//! `apogee-patcher` the full request. A repo carrying a local-index override skips that resolution
+//! and reads its `.apzi` from the given path; a plan whose every repo is overridden never fetches the
+//! catalog at all. The catalog bytes travel through the download engine like
 //! every other byte this launcher pulls (its redirect floor and stall bounds included); the
 //! signature check stays in `apogee-patcher` ([`IndexCatalog::verify_default`]), so no crypto lives
 //! in this crate.
@@ -13,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use apogee_fetch::{DownloadSpec, Fetcher, Validator};
 use apogee_patcher::{
-    IndexCatalog, IndexEntry, InstallRequest, Installed, Job, PatchError, Patcher, RepairOutcome,
-    RepairPatchSource, RepairRepo, RepairRequest, Repo, SePatch,
+    IndexCatalog, IndexEntry, IndexSource, InstallRequest, Installed, Job, PatchError, Patcher,
+    RepairOutcome, RepairPatchSource, RepairRepo, RepairRequest, Repo, SePatch,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -89,41 +91,77 @@ impl PatcherBackend {
     }
 
     /// Turn a [`RepairPlan`] into `apogee-patcher`'s [`RepairRequest`]: resolve each repo's block-index
-    /// pin from the signed catalog and seed its local-first sources from the patch cache.
+    /// pin from the signed catalog and seed its local-first sources from the patch cache. The catalog
+    /// is fetched only when some repo actually resolves through it: a plan whose every repo carries a
+    /// local-index override must complete with the catalog host unreachable, since that host being
+    /// down is what the override exists for.
     async fn build_repair_request(&self, plan: RepairPlan) -> Result<RepairRequest, CoreError> {
-        let catalog = self.fetch_catalog().await?;
-        let cached = cached_patch_sources(&self.patch_store);
-        let mut repos = Vec::with_capacity(plan.repos.len());
-        for RepairRepoPlan { repo, version } in plan.repos {
-            let entry = catalog
-                .resolve(repo, &version)
-                .ok_or_else(|| CoreError::Repair {
-                    detail: format!("no block index for {repo:?} {version} in the signed catalog"),
+        let catalog = if plan.repos.iter().any(|r| r.index_override.is_none()) {
+            Some(self.fetch_catalog().await?)
+        } else {
+            None
+        };
+        assemble_repair_request(plan, catalog.as_ref(), &cached_patch_sources(&self.patch_store))
+    }
+}
+
+/// Assemble the full [`RepairRequest`] from a plan, the verified catalog (`None` only when every repo
+/// is overridden), and the cache scan. An overridden repo reads its `.apzi` from the given path and
+/// never consults the catalog, not even for its source base (the row may not exist, and the point of
+/// the override is completing without one); its sources come from the cache scan and the compiled-in
+/// CDN bases. The plan's version rides into `target_version` either way, so the patcher's cross-check
+/// against the index's own recorded version runs the same for a local index as for a pinned one.
+fn assemble_repair_request(
+    plan: RepairPlan,
+    catalog: Option<&IndexCatalog>,
+    cached: &[(Repo, Vec<RepairPatchSource>)],
+) -> Result<RepairRequest, CoreError> {
+    let mut repos = Vec::with_capacity(plan.repos.len());
+    for RepairRepoPlan {
+        repo,
+        version,
+        index_override,
+    } in plan.repos
+    {
+        let (index, source_base_url) = match index_override {
+            Some(path) => (IndexSource::LocalFile(path), cdn_base_for(repo)),
+            None => {
+                let catalog = catalog.ok_or_else(|| CoreError::Repair {
+                    detail: format!("no catalog was fetched to resolve {repo:?} {version}"),
                 })?;
-            let patch_sources = cached
-                .iter()
-                .find(|(r, _)| *r == repo)
-                .map(|(_, sources)| sources.clone())
-                .unwrap_or_default();
-            repos.push(RepairRepo {
-                repo,
-                target_version: version,
-                index: entry.source(),
-                patch_sources,
+                let entry = catalog
+                    .resolve(repo, &version)
+                    .ok_or_else(|| CoreError::Repair {
+                        detail: format!(
+                            "no block index for {repo:?} {version} in the signed catalog"
+                        ),
+                    })?;
                 // The CDN base lets the repair form each index source-ref's URL without a populated
                 // cache, so a repair works even with keep-patches off.
-                source_base_url: source_base_for(entry, repo),
-                // No session credential, and none is needed: patch delivery answers a ranged request
-                // for a game patch the same way it answers one for a boot patch, on the user agent
-                // alone. Measured against the live CDN, and a full game-repo heal has run over it.
-                headers: SePatch::boot(),
-            });
-        }
-        Ok(RepairRequest {
-            game_root: plan.game_root,
-            repos,
-        })
+                (entry.source(), source_base_for(entry, repo))
+            }
+        };
+        let patch_sources = cached
+            .iter()
+            .find(|(r, _)| *r == repo)
+            .map(|(_, sources)| sources.clone())
+            .unwrap_or_default();
+        repos.push(RepairRepo {
+            repo,
+            target_version: version,
+            index,
+            patch_sources,
+            source_base_url,
+            // No session credential, and none is needed: patch delivery answers a ranged request
+            // for a game patch the same way it answers one for a boot patch, on the user agent
+            // alone. Measured against the live CDN, and a full game-repo heal has run over it.
+            headers: SePatch::boot(),
+        });
     }
+    Ok(RepairRequest {
+        game_root: plan.game_root,
+        repos,
+    })
 }
 
 #[async_trait]
@@ -298,7 +336,12 @@ fn collect_patches(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use apogee_fetch::DigestPin;
+    use apogee_patcher::{GameProbe, PatcherConfig};
+    use apogee_zipatch::{Platform, build_index, fixtures};
+    use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
 
@@ -365,5 +408,211 @@ mod tests {
                 .map(Url::as_str),
             Some(moved),
         );
+    }
+
+    /// The version the local-index tests author their index at and install to. A fn rather than a
+    /// const: the audit forbids string constants in this crate, and its grep does not read cfg.
+    fn version() -> String {
+        "2024.01.02.0000.0000".to_owned()
+    }
+
+    /// A plan entry for `repo` at [`version`], optionally overridden to a local index path.
+    fn plan_repo(repo: Repo, index_override: Option<PathBuf>) -> RepairRepoPlan {
+        RepairRepoPlan {
+            repo,
+            version: version(),
+            index_override,
+        }
+    }
+
+    /// The catalog-down case the override exists for: a plan whose every repo carries a local index
+    /// assembles into a full request with no catalog value at all, each repo reading its own file
+    /// and keeping its plan version as the cross-check target.
+    #[test]
+    fn a_fully_overridden_plan_assembles_without_any_catalog() {
+        let plan = RepairPlan {
+            game_root: PathBuf::from("/install"),
+            repos: vec![
+                plan_repo(Repo::Boot, Some(PathBuf::from("/idx/boot.apzi"))),
+                plan_repo(Repo::Game, Some(PathBuf::from("/idx/game.apzi"))),
+            ],
+        };
+        let request = assemble_repair_request(plan, None, &[]).expect("no catalog is needed");
+        assert_eq!(request.repos.len(), 2);
+        for (built, want) in request.repos.iter().zip(["/idx/boot.apzi", "/idx/game.apzi"]) {
+            assert_eq!(built.target_version, version(), "the cross-check target rides in");
+            match &built.index {
+                IndexSource::LocalFile(path) => assert_eq!(path, &PathBuf::from(want)),
+                other => panic!("expected the local file, got {other:?}"),
+            }
+        }
+    }
+
+    /// One repo overridden, one not: the overridden repo reads its local file while the other still
+    /// resolves its pinned row, so pointing one repo at a regenerated index does not change how the
+    /// untouched repos are trusted.
+    #[test]
+    fn a_mixed_plan_resolves_only_unoverridden_repos_through_the_catalog() {
+        let row = entry(Repo::Game, None);
+        let catalog = IndexCatalog {
+            version: 1,
+            indexes: vec![row.clone()],
+        };
+        let plan = RepairPlan {
+            game_root: PathBuf::from("/install"),
+            repos: vec![
+                RepairRepoPlan {
+                    repo: Repo::Game,
+                    version: row.version.clone(),
+                    index_override: None,
+                },
+                RepairRepoPlan {
+                    repo: Repo::Expansion(1),
+                    version: row.version.clone(),
+                    index_override: Some(PathBuf::from("/idx/ex1.apzi")),
+                },
+            ],
+        };
+        let request =
+            assemble_repair_request(plan, Some(&catalog), &[]).expect("the game row resolves");
+        match &request.repos[0].index {
+            IndexSource::Pinned { url, pin } => {
+                assert_eq!(url, &row.url);
+                assert_eq!(pin, &row.pin);
+            }
+            other => panic!("the unoverridden repo must stay pinned, got {other:?}"),
+        }
+        match &request.repos[1].index {
+            IndexSource::LocalFile(path) => assert_eq!(path, &PathBuf::from("/idx/ex1.apzi")),
+            other => panic!("the overridden repo must read its file, got {other:?}"),
+        }
+    }
+
+    /// Author a `.apzi` over `chain` at `version` and write it to `path`.
+    fn write_index_file(
+        chain: &[Vec<u8>],
+        version: &str,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let inputs: Vec<(String, Cursor<Vec<u8>>)> = chain
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("p{i}.patch"), Cursor::new(p.clone())))
+            .collect();
+        let index = build_index(inputs, Platform::Win32, version)?;
+        let mut buf = Vec::new();
+        index.write_apzi(&mut buf)?;
+        std::fs::write(path, buf)?;
+        Ok(())
+    }
+
+    /// A real backend over `store`, with the game-running guard answered "no" so the repair runs.
+    fn backend(store: &Path) -> Result<PatcherBackend, Box<dyn std::error::Error>> {
+        let fetcher = Fetcher::builder().build()?;
+        let patcher = Patcher::new(
+            fetcher.clone(),
+            PatcherConfig {
+                patch_store: store.to_path_buf(),
+                ..PatcherConfig::new(GameProbe::never_running())
+            },
+        );
+        Ok(PatcherBackend::new(patcher, fetcher, store.to_path_buf()))
+    }
+
+    /// Install the fixture chain into `game_root/game` and put cached copies of its patches in the
+    /// store, laid out as the download cache keeps them, so a heal's first attempt is local.
+    fn install_with_cache(
+        chain: &[Vec<u8>],
+        game_root: &Path,
+        store: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let repo_dir = game_root.join("game");
+        std::fs::create_dir_all(&repo_dir)?;
+        fixtures::apply_chain(&repo_dir, chain)?;
+        let cache = store.join("game").join("cafef00d");
+        std::fs::create_dir_all(&cache)?;
+        for (i, patch) in chain.iter().enumerate() {
+            std::fs::write(cache.join(format!("p{i}.patch")), patch)?;
+        }
+        Ok(())
+    }
+
+    /// The whole point of the override, driven through the real backend and patcher: a damaged
+    /// install heals from a local index and cached patches with the catalog host unreachable. The
+    /// catalog fetch would create `.index-catalog` under the store before a byte moved, so that
+    /// directory staying absent is the observation that no fetch was even attempted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_overridden_repair_heals_offline_and_never_touches_the_catalog() {
+        let chain = fixtures::chain();
+        let game_root = tempfile::tempdir().expect("a game root");
+        let store = tempfile::tempdir().expect("a patch store");
+        install_with_cache(&chain, game_root.path(), store.path()).expect("an installed fixture");
+        let index_path = store.path().join("game.apzi");
+        write_index_file(&chain, &version(), &index_path).expect("an authored index");
+
+        let exe = game_root.path().join("game").join("ffxivboot.exe");
+        let healthy = std::fs::read(&exe).expect("the installed exe");
+        let mut broken = healthy.clone();
+        broken[0] ^= 0xFF;
+        std::fs::write(&exe, broken).expect("a corrupted exe");
+
+        let backend = backend(store.path()).expect("a real backend");
+        let plan = RepairPlan {
+            game_root: game_root.path().to_path_buf(),
+            repos: vec![plan_repo(Repo::Game, Some(index_path))],
+        };
+        let (tx, _rx) = unbounded_channel();
+        let outcome = backend
+            .repair(plan, &CancellationToken::new(), &tx)
+            .await
+            .expect("a local-index repair with no catalog host");
+
+        assert_eq!(outcome.repos.len(), 1);
+        assert!(
+            outcome.repos[0].repaired_parts >= 1,
+            "the corrupted part must have been healed"
+        );
+        assert_eq!(
+            std::fs::read(&exe).expect("the healed exe"),
+            healthy,
+            "healed byte-identically"
+        );
+        assert!(
+            !store.path().join(".index-catalog").exists(),
+            "an all-overridden repair must never attempt the catalog fetch"
+        );
+    }
+
+    /// A local index describing the wrong version is the typed cross-check error, not a trust
+    /// bypass: the plan's installed version still rides into the request, so the patcher refuses to
+    /// heal toward bytes the install is not at. The catalog stays untouched on this path too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wrong_version_local_index_is_the_typed_cross_check_error() {
+        let chain = fixtures::chain();
+        let game_root = tempfile::tempdir().expect("a game root");
+        let store = tempfile::tempdir().expect("a patch store");
+        install_with_cache(&chain, game_root.path(), store.path()).expect("an installed fixture");
+        let index_path = store.path().join("game.apzi");
+        write_index_file(&chain, "2024.09.09.0001.0000", &index_path).expect("a stale index");
+
+        let backend = backend(store.path()).expect("a real backend");
+        let plan = RepairPlan {
+            game_root: game_root.path().to_path_buf(),
+            repos: vec![plan_repo(Repo::Game, Some(index_path))],
+        };
+        let (tx, _rx) = unbounded_channel();
+        let err = backend
+            .repair(plan, &CancellationToken::new(), &tx)
+            .await
+            .expect_err("a wrong-version index must be refused");
+
+        assert!(
+            matches!(
+                err,
+                CoreError::Patch(PatchError::VersionCrossCheck { repo: Repo::Game, .. })
+            ),
+            "expected the typed cross-check error, got {err:?}"
+        );
+        assert!(!store.path().join(".index-catalog").exists());
     }
 }

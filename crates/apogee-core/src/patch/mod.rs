@@ -29,6 +29,10 @@ pub(crate) mod patcher_backend;
 pub(crate) struct RepairRepoPlan {
     pub(crate) repo: Repo,
     pub(crate) version: String,
+    /// A local `.apzi` to read instead of resolving this repo through the hosted catalog. The
+    /// version above still cross-checks the index's own recorded version, so a wrong local index
+    /// fails typed rather than healing to the wrong bytes.
+    pub(crate) index_override: Option<PathBuf>,
 }
 
 /// A repair across a profile's installed repos. The backend resolves each repo's digest-pinned
