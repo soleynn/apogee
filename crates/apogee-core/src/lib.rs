@@ -35,7 +35,9 @@ pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, T
 // core, which is why the pushed-code source carries no payload.
 pub use apogee_fetch::Recoveries;
 pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
-pub use apogee_patcher::PatchProgress;
+// `Repo` rides along because `Command::Repair`'s local-index overrides are keyed by it: a shell
+// naming a repo must be able to name the type without depending on `apogee-patcher` itself.
+pub use apogee_patcher::{PatchProgress, Repo};
 pub use apogee_runtime::{
     BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
     ProgramStatus, SyncChoice,

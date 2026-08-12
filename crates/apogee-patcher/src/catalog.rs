@@ -201,7 +201,7 @@ impl TryFrom<RawCatalog> for IndexCatalog {
 }
 
 fn build_entry(r: RawIndex) -> Result<IndexEntry, IndexCatalogError> {
-    let repo = parse_repo(&r.repo).ok_or_else(|| IndexCatalogError::UnknownRepo {
+    let repo = Repo::from_label(&r.repo).ok_or_else(|| IndexCatalogError::UnknownRepo {
         repo: r.repo.clone(),
     })?;
     let pin = DigestPin::from_hex(HexPins {
@@ -251,18 +251,6 @@ fn parse_source_base(raw: &str) -> Result<Url, ()> {
         && matches!(url.scheme(), "http" | "https")
         && url.path().ends_with('/');
     usable.then_some(url).ok_or(())
-}
-
-/// Map a manifest repo label to a [`Repo`]: `boot`, `game`, or `ex{n}` (an expansion, `n` a `u8`).
-fn parse_repo(label: &str) -> Option<Repo> {
-    match label {
-        "boot" => Some(Repo::Boot),
-        "game" => Some(Repo::Game),
-        other => other
-            .strip_prefix("ex")
-            .and_then(|n| n.parse::<u8>().ok())
-            .map(Repo::Expansion),
-    }
 }
 
 #[cfg(test)]

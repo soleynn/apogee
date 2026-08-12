@@ -70,6 +70,23 @@ pub enum Repo {
     Expansion(u8),
 }
 
+impl Repo {
+    /// Parse a repo label: `boot`, `game`, or `ex{n}` (expansion `n`, a `u8`). The one spelling,
+    /// shared by the signed index catalog's rows and anything a caller lets a user name a repo by,
+    /// so the two can never drift apart.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "boot" => Some(Self::Boot),
+            "game" => Some(Self::Game),
+            other => other
+                .strip_prefix("ex")
+                .and_then(|n| n.parse::<u8>().ok())
+                .map(Self::Expansion),
+        }
+    }
+}
+
 /// Names one broken part for repair reporting: the repo-relative file and the byte offset of the run
 /// that failed verification.
 #[derive(Debug, Clone)]
