@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use apogee_fetch::{FetchError, Fetcher, RetryPolicy};
 use apogee_patcher::{
-    InstallRequest, Installed, PatchError, PatchProgress, Patcher, PatcherConfig, Repo, SePatch,
+    GameProbe, InstallRequest, Installed, PatchError, PatchProgress, Patcher, PatcherConfig, Repo,
+    SePatch,
 };
 use apogee_test_support::chaos::{ChaosServer, RetryAfter};
 use apogee_test_support::tree_manifest;
@@ -113,7 +114,7 @@ fn patcher(store: &Path, keep_patches: bool) -> Result<Patcher, Box<dyn Error>> 
             patch_store: store.to_path_buf(),
             keep_patches,
             ignore_space: false,
-            ..PatcherConfig::default()
+            ..PatcherConfig::new(GameProbe::never_running())
         },
     ))
 }
@@ -568,7 +569,7 @@ async fn a_throttling_storm_outliving_the_engine_budget_is_survived() -> Result<
             patch_store: store.path().to_path_buf(),
             keep_patches: false,
             ignore_space: false,
-            ..PatcherConfig::default()
+            ..PatcherConfig::new(GameProbe::never_running())
         },
     );
 

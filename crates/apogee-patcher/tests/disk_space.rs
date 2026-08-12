@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use apogee_fetch::Fetcher;
 use apogee_patcher::{
-    InstallRequest, PatchError, Patcher, PatcherConfig, PreflightError, Repo, SePatch, SpacePool,
+    GameProbe, InstallRequest, PatchError, Patcher, PatcherConfig, PreflightError, Repo, SePatch,
+    SpacePool,
 };
 use apogee_test_support::capacity::{MemoryBackedDir, memory_backed_dir};
 use apogee_test_support::chaos::ChaosServer;
@@ -70,7 +71,7 @@ fn patcher(store: &Path, ignore_space: bool) -> Result<Patcher, Box<dyn Error>> 
             patch_store: store.to_path_buf(),
             keep_patches: true,
             ignore_space,
-            ..PatcherConfig::default()
+            ..PatcherConfig::new(GameProbe::never_running())
         },
     ))
 }
