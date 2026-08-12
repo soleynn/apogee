@@ -24,7 +24,9 @@ use apogee_sqpack::codec;
 use crate::chunk::expansion_folder;
 use crate::datfile;
 use crate::error::{Error, Limit, Op, Result};
-use crate::seam::{DataSource, KeepFilter, PatchSink, SafePath, TargetPath};
+use crate::seam::{
+    DataSource, KeepFilter, PatchSink, RepairSink, RepairWrite, SafePath, TargetPath,
+};
 
 /// How many target handles to hold open at once. Boot writes a handful of files; game patches touch
 /// more, but a small cache already erases the open/close churn that dominates a naive applier.
@@ -227,6 +229,131 @@ impl PatchSink for DiskSink {
         let file = self.store.get(&self.root, rel)?;
         let _ = rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::KEEP_SIZE, 0, len);
         Ok(())
+    }
+}
+
+/// Applies a repair's writes to a game tree on disk: the [`RepairSink`] behind
+/// [`Index::repair`](crate::Index::repair).
+///
+/// It descends the same way [`DiskSink`] does, so the two agree about what a planted link may do: no
+/// directory component may be a symlink, and a link squatting the final component is stripped before
+/// a rebuild and refused before an in-place write. Refused rather than stripped there because an
+/// in-place repair rewrites part of a file it is not otherwise replacing, and unlinking one to break
+/// the link would throw away the bytes the repair was about to keep.
+///
+/// One handle is held across the writes for a file, which is all the caching the write order needs:
+/// every write for a target is issued before the next target's.
+pub struct DiskRepairSink {
+    root: PathBuf,
+    open: Option<Open>,
+}
+
+/// The target currently being written, and the handle for it.
+struct Open {
+    rel: PathBuf,
+    file: File,
+}
+
+impl DiskRepairSink {
+    /// Write repairs into the tree at `root`. The tree must already exist; a repair heals an
+    /// install, it does not create one.
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            open: None,
+        }
+    }
+
+    /// The handle for `rel`, opening it on a change of target. `create` distinguishes the rebuild of
+    /// a missing file from a write into one that is there.
+    fn handle<'a>(
+        root: &Path,
+        open: &'a mut Option<Open>,
+        rel: &Path,
+        create: bool,
+    ) -> Result<&'a mut File> {
+        // A rebuild always reopens: it truncates, and a cached handle from an earlier write to the
+        // same path would leave the sink writing into the file it just replaced.
+        if create || !open.as_ref().is_some_and(|slot| slot.rel == rel) {
+            let file = if create {
+                open_rebuilt(root, rel)?
+            } else {
+                open_existing(root, rel)?
+            };
+            return Ok(&mut open
+                .insert(Open {
+                    rel: rel.to_path_buf(),
+                    file,
+                })
+                .file);
+        }
+        match open.as_mut() {
+            Some(slot) => Ok(&mut slot.file),
+            // Unreachable: the branch above fills the slot whenever it is empty.
+            None => Err(Error::Corrupt {
+                offset: 0,
+                detail: "the repair sink lost its open target",
+            }),
+        }
+    }
+}
+
+impl RepairSink for DiskRepairSink {
+    fn write(&mut self, target: &Path, write: RepairWrite<'_>) -> Result<()> {
+        let Self { root, open } = self;
+        let create = matches!(write, RepairWrite::Create { .. });
+        let file = Self::handle(root, open, target, create)?;
+        match write {
+            RepairWrite::Create { len } | RepairWrite::Resize { len } => file
+                .set_len(len)
+                .map_err(|e| io(e, root.join(target), Op::Truncate)),
+            RepairWrite::Bytes { off, bytes } => write_at(file, off, bytes, root, target),
+            RepairWrite::Zeros { off, len } => write_zeros(file, off, len, root, target),
+        }
+    }
+
+    /// Drop the open handle. The writes themselves are already on their way to disk (nothing here
+    /// buffers), so this only releases the file before the caller re-reads it.
+    fn flush(&mut self) -> Result<()> {
+        self.open = None;
+        Ok(())
+    }
+}
+
+/// Open `root/rel` for an in-place repair: parents symlink-safely, the file itself refused if it is a
+/// link, and no create (a target that is gone is the caller's to notice).
+fn open_existing(root: &Path, rel: &Path) -> Result<File> {
+    ensure_dirs(root, parent_of(rel), false)?;
+    let abs = root.join(rel);
+    refuse_symlink(&abs)?;
+    OpenOptions::new()
+        .write(true)
+        .open(&abs)
+        .map_err(|e| io(e, abs, Op::Open))
+}
+
+/// Open `root/rel` for a rebuild: parents created, a link at the final component stripped, and the
+/// file truncated to start from nothing.
+fn open_rebuilt(root: &Path, rel: &Path) -> Result<File> {
+    ensure_dirs(root, parent_of(rel), true)?;
+    let abs = root.join(rel);
+    unlink_if_symlink(&abs)?;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&abs)
+        .map_err(|e| io(e, abs, Op::Open))
+}
+
+/// Refuse `path` if it is a symlink, so an in-place write never lands through one.
+fn refuse_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(Error::PathEscape {
+            raw: path.display().to_string(),
+        }),
+        _ => Ok(()),
     }
 }
 

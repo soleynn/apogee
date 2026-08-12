@@ -14,27 +14,30 @@
 //! caller's retry owns recovery), while a part that cannot be sourced (unavailable, or the fetched
 //! bytes fail their CRC) is a soft skip left for the re-verify to report. Retry budget, backoff, and
 //! local-then-HTTP ordering live in the caller.
+//!
+//! Where the bytes land is the caller's too. Every write goes through a [`RepairSink`], so the same
+//! plan either lands in the tree ([`DiskRepairSink`]) or is handed to a process that may write it,
+//! for an install this one has no rights to. The plan, the CRC gate and the re-verify are identical
+//! either way.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use apogee_sqpack::codec;
 
+use crate::disk::DiskRepairSink;
 use crate::error::{Error, Op, Result};
 use crate::index::model::{Index, Part, Source, TargetFile};
 use crate::index::reconstruct::{self, MAX_BLOCK_DECOMPRESSED};
 use crate::index::verify::{PartRef, VerifyOptions, VerifyReport};
-use crate::seam::{PatchId, RangeSource};
+use crate::seam::{PatchId, RangeSource, RepairSink, RepairWrite};
 
 /// Two fetch ranges within this many bytes of each other merge into one request: pulling a little
 /// slack across a small gap is cheaper than a second round trip. The reference used 512 B.
 const GAP_MERGE: u64 = 4 << 10;
-
-/// The chunk size for streaming zeros over a broken zero/empty-block run, matching verify's chunk.
-const ZERO_CHUNK: usize = 1 << 16;
 
 /// One source patch an [`Index`] references: its [`PatchId`] (its chain position), file name, and
 /// expected length, so a caller can build a [`RangeSource`] keyed by id.
@@ -85,6 +88,26 @@ impl Index {
         root: &Path,
         report: &VerifyReport,
         source: &mut dyn RangeSource,
+    ) -> Result<RepairOutcome> {
+        let mut sink = DiskRepairSink::new(root);
+        self.repair_into(root, report, source, &mut sink)
+    }
+
+    /// [`repair`](Self::repair), with the writes going wherever `sink` puts them.
+    ///
+    /// `root` is still read: the plan comes from the tree as it stands and the pass ends by
+    /// re-verifying what it wrote. Only the writing is the sink's, which is what lets a caller that
+    /// cannot write the tree from this process hand them to one that can. The pass flushes the sink
+    /// before it re-reads, so a sink that batches still has its writes counted as repaired.
+    ///
+    /// # Errors
+    /// As [`repair`](Self::repair), plus whatever `sink` raises.
+    pub fn repair_into(
+        &self,
+        root: &Path,
+        report: &VerifyReport,
+        source: &mut dyn RangeSource,
+        sink: &mut dyn RepairSink,
     ) -> Result<RepairOutcome> {
         let limits = codec::Limits {
             max_decompressed: MAX_BLOCK_DECOMPRESSED,
@@ -144,7 +167,7 @@ impl Index {
         // Recreate missing files whole (all their parts are legitimately needed).
         for path in &report.missing_files {
             if let Some(target) = by_path.get(path.as_path()) {
-                rebuild_missing(root, target, &mut bufs, &limits, sources_len)?;
+                rebuild_missing(target, &mut bufs, &limits, sources_len, sink)?;
                 outcome.recreated.push(target.path.clone());
             }
         }
@@ -172,21 +195,17 @@ impl Index {
             let Some(target) = by_path.get(path) else {
                 continue;
             };
-            let mut file = match OpenOptions::new().write(true).open(root.join(path)) {
-                Ok(f) => f,
-                // A file that vanished after verify: leave it; the re-verify re-breaks its parts.
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(Error::io(e, Op::Open)),
-            };
+            if !still_there(root, path)? {
+                continue;
+            }
             if let Some(&final_len) = size_fix.get(path) {
-                file.set_len(final_len)
-                    .map_err(|e| Error::io(e, Op::Truncate))?;
+                sink.write(path, RepairWrite::Resize { len: final_len })?;
                 outcome.resized.push(target.path.clone());
                 resized.insert(*path);
             }
             for pr in prs {
                 if let Some(part) = find_part(target, pr) {
-                    repair_in_place(&mut file, part, &mut bufs, &limits, sources_len)?;
+                    repair_in_place(path, part, &mut bufs, &limits, sources_len, sink)?;
                 }
             }
         }
@@ -200,16 +219,21 @@ impl Index {
             let Some(target) = by_path.get(path) else {
                 continue;
             };
-            match OpenOptions::new().write(true).open(root.join(path)) {
-                Ok(file) => {
-                    file.set_len(target.final_len())
-                        .map_err(|e| Error::io(e, Op::Truncate))?;
-                    outcome.resized.push(target.path.clone());
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Error::io(e, Op::Open)),
+            if !still_there(root, path)? {
+                continue;
             }
+            sink.write(
+                path,
+                RepairWrite::Resize {
+                    len: target.final_len(),
+                },
+            )?;
+            outcome.resized.push(target.path.clone());
         }
+
+        // Land the writes before reading the tree back, or a batching sink's re-verify reports every
+        // part this pass repaired as still broken.
+        sink.flush()?;
 
         // The single source of truth: re-verify only the attempted parts (re-reads what we wrote).
         let refined = self.verify(
@@ -289,32 +313,41 @@ fn merge_ranges(ranges: &mut Vec<Range<u64>>) {
     *ranges = merged;
 }
 
+/// Whether the target is still on disk to be repaired in place.
+///
+/// A file that vanished between the verify and here is left alone: the re-verify re-breaks its parts
+/// and the caller's next pass rebuilds it. Only `NotFound` means that. Anything else (a directory
+/// that turned unreadable, a permission fault) is a real failure, and treating it as absence would
+/// silently skip the file and then report it broken with no reason.
+fn still_there(root: &Path, rel: &Path) -> Result<bool> {
+    match fs::symlink_metadata(root.join(rel)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::io(e, Op::Open)),
+    }
+}
+
 /// Rebuild a missing file whole: size it sparsely, then lay down each part's non-zero bytes. Zeros
 /// stay sparse, an unsourceable part is skipped (the re-verify reports it), and a patch part is only
 /// written when its fetched bytes match the indexed CRC.
 fn rebuild_missing(
-    root: &Path,
     target: &TargetFile,
     bufs: &mut [RangeBuf],
     limits: &codec::Limits,
     sources_len: usize,
+    sink: &mut dyn RepairSink,
 ) -> Result<()> {
-    let abs = root.join(&target.path);
-    if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::io(e, Op::MakeDir))?;
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&abs)
-        .map_err(|e| Error::io(e, Op::Open))?;
-    file.set_len(target.final_len())
-        .map_err(|e| Error::io(e, Op::Truncate))?;
+    let rel = target.path.as_path();
+    sink.write(
+        rel,
+        RepairWrite::Create {
+            len: target.final_len(),
+        },
+    )?;
     for part in &target.parts {
         match part.source {
             Source::Patch { .. } => {
-                write_checked_patch(&mut file, part, bufs, limits, sources_len)?
+                write_checked_patch(rel, part, bufs, limits, sources_len, sink)?;
             }
             Source::EmptyBlock {
                 block_count,
@@ -325,10 +358,17 @@ fn rebuild_missing(
                     decoded_from,
                     part.target_len,
                 ) {
-                    reconstruct::write_at(&mut file, part.target_off, &header)?;
+                    sink.write(
+                        rel,
+                        RepairWrite::Bytes {
+                            off: part.target_off,
+                            bytes: &header,
+                        },
+                    )?;
                 }
             }
-            // Sparse zero run (covered by set_len) or an unsourceable part: nothing to write.
+            // Sparse zero run (covered by the create's length) or an unsourceable part: nothing to
+            // write.
             Source::Zeros | Source::Unavailable => {}
         }
     }
@@ -340,24 +380,35 @@ fn rebuild_missing(
 /// wrong, so the sparse trick does not apply); an empty-block run is zeroed then re-stamped with its
 /// header; an unsourceable part is left for the re-verify.
 fn repair_in_place(
-    file: &mut File,
+    rel: &Path,
     part: &Part,
     bufs: &mut [RangeBuf],
     limits: &codec::Limits,
     sources_len: usize,
+    sink: &mut dyn RepairSink,
 ) -> Result<()> {
+    let zeros = RepairWrite::Zeros {
+        off: part.target_off,
+        len: part.target_len,
+    };
     match part.source {
-        Source::Patch { .. } => write_checked_patch(file, part, bufs, limits, sources_len)?,
-        Source::Zeros => write_zeros(file, part.target_off, part.target_len)?,
+        Source::Patch { .. } => write_checked_patch(rel, part, bufs, limits, sources_len, sink)?,
+        Source::Zeros => sink.write(rel, zeros)?,
         Source::EmptyBlock {
             block_count,
             decoded_from,
         } => {
-            write_zeros(file, part.target_off, part.target_len)?;
+            sink.write(rel, zeros)?;
             if let Some(header) =
                 reconstruct::empty_block_header_slice(block_count, decoded_from, part.target_len)
             {
-                reconstruct::write_at(file, part.target_off, &header)?;
+                sink.write(
+                    rel,
+                    RepairWrite::Bytes {
+                        off: part.target_off,
+                        bytes: &header,
+                    },
+                )?;
             }
         }
         Source::Unavailable => {}
@@ -370,20 +421,31 @@ fn repair_in_place(
 /// both soft skips: nothing is written, so the re-verify reports the part still broken. Shared by the
 /// in-place and missing-file writers.
 ///
+/// The CRC gate is where a part's bytes become the ones the index describes, so it is also the point
+/// a sink that marshals writes elsewhere may treat them as proven: nothing past here is fetched
+/// bytes, it is bytes the index vouches for.
+///
 /// A compressed block split across several broken parts is inflated once per part here (each slices
 /// its own window); the whole-block decode is bounded by [`MAX_BLOCK_DECOMPRESSED`], and the split
 /// case is rare, so a shared-block inflate cache is a deliberate non-goal.
 fn write_checked_patch(
-    file: &mut File,
+    rel: &Path,
     part: &Part,
     bufs: &mut [RangeBuf],
     limits: &codec::Limits,
     sources_len: usize,
+    sink: &mut dyn RepairSink,
 ) -> Result<()> {
     if patch_fetch(part, sources_len).is_some() {
         let bytes = reconstruct::materialize_patch(part, bufs, limits)?;
         if crc32fast::hash(&bytes) == part.crc32 {
-            reconstruct::write_at(file, part.target_off, &bytes)?;
+            sink.write(
+                rel,
+                RepairWrite::Bytes {
+                    off: part.target_off,
+                    bytes: &bytes,
+                },
+            )?;
         }
     }
     Ok(())
@@ -398,21 +460,6 @@ fn find_part<'a>(target: &'a TargetFile, pr: &PartRef) -> Option<&'a Part> {
         .ok()?;
     let part = &target.parts[i];
     (part.target_len == pr.target_len).then_some(part)
-}
-
-/// Overwrite `[off, off+len)` with zeros in bounded chunks, never allocating the run's length.
-fn write_zeros(file: &mut File, off: u64, len: u64) -> Result<()> {
-    let zeros = [0u8; ZERO_CHUNK];
-    file.seek(SeekFrom::Start(off))
-        .map_err(|e| Error::io(e, Op::Write))?;
-    let mut remaining = len;
-    while remaining > 0 {
-        let n = remaining.min(ZERO_CHUNK as u64) as usize;
-        file.write_all(&zeros[..n])
-            .map_err(|e| Error::io(e, Op::Write))?;
-        remaining -= n as u64;
-    }
-    Ok(())
 }
 
 /// A sparse in-memory view of one patch's fetched ranges, presented as `Read + Seek` so the reused

@@ -183,6 +183,71 @@ pub trait PatchSink {
     }
 }
 
+/// One mutation a repair makes to a target file.
+///
+/// The set is what healing a tree against a block index needs and nothing more: a missing file is
+/// recreated at its indexed length, a wrong-length one is resized, a broken part is rewritten from
+/// bytes the caller materialized, and a broken zero run is overwritten. There is no delete and no
+/// rename, so a sink that marshals these to another process is not thereby a general file writer.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RepairWrite<'a> {
+    /// Create the target, replacing whatever entry is there, and size it to `len`. The rebuild of a
+    /// file the verify found missing; the parts that follow fill in only its non-zero bytes.
+    Create {
+        /// The index's final length for the file.
+        len: u64,
+    },
+    /// Set an existing target's length.
+    Resize {
+        /// The index's final length for the file.
+        len: u64,
+    },
+    /// Write `bytes` at `off`, the final bytes of one indexed part.
+    Bytes {
+        /// Where in the target they belong.
+        off: u64,
+        /// The part's materialized, CRC-checked bytes.
+        bytes: &'a [u8],
+    },
+    /// Overwrite `len` bytes at `off` with zeros. Explicit rather than sparse, because the bytes on
+    /// disk are wrong: this is a zero run that failed its verify, not a hole in a fresh file.
+    Zeros {
+        /// Where the run starts.
+        off: u64,
+        /// How long it is.
+        len: u64,
+    },
+}
+
+/// Where a repair's writes land: [`DiskRepairSink`] puts them in the tree, and a sink that cannot
+/// write the tree itself marshals them to a process that can (the elevated worker's caller does).
+///
+/// `target` is the index's own relative path for the file, so a sink resolves it against whichever
+/// root it was built over. [`Index::repair_into`] issues every write for one file before moving to
+/// the next, which is what lets an implementation hold a single open handle.
+///
+/// [`DiskRepairSink`]: crate::DiskRepairSink
+/// [`Index::repair_into`]: crate::Index::repair_into
+pub trait RepairSink {
+    /// Make one write to `target`.
+    ///
+    /// # Errors
+    /// Whatever the sink's own medium raises; a fault here abandons the repair pass, and the caller's
+    /// retry redoes it (every write is positioned, so redoing one is harmless).
+    fn write(&mut self, target: &Path, write: RepairWrite<'_>) -> Result<()>;
+
+    /// Land every write issued so far, before the caller re-reads the tree to see what healed.
+    ///
+    /// A sink that writes as it goes has nothing to do here. One that batches has to finish here or
+    /// the re-verify reads a tree its own writes have not reached, and reports every part it just
+    /// repaired as still broken.
+    ///
+    /// # Errors
+    /// Whatever landing the outstanding writes raises.
+    fn flush(&mut self) -> Result<()>;
+}
+
 /// Random-access byte-range reads over one source patch file. Ranges are pre-merged and sorted by
 /// the caller. The local implementor is `LocalPatchSource`; the HTTP one (`HttpRangeSource`) lives
 /// in `apogee-fetch`.
