@@ -2,6 +2,7 @@
 //! backend, plus the session-cache fast path. No network, no real process.
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -2520,7 +2521,14 @@ async fn repair_plans_every_installed_repo_and_streams_progress() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context_with(&h, transport.clone(), patch.clone(), launch, NOW);
 
-    let events = run(ctx, Command::Repair { profile: h.profile }).await;
+    let events = run(
+        ctx,
+        Command::Repair {
+            profile: h.profile,
+            local_indexes: Vec::new(),
+        },
+    )
+    .await;
 
     assert!(errors(&events).is_empty(), "{:?}", errors(&events));
     assert_eq!(states(&events), [FlowState::Repairing]);
@@ -2566,9 +2574,72 @@ async fn repair_of_an_empty_install_is_a_typed_error() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context(&h, transport, launch, NOW);
 
-    let events = run(ctx, Command::Repair { profile: h.profile }).await;
+    let events = run(
+        ctx,
+        Command::Repair {
+            profile: h.profile,
+            local_indexes: Vec::new(),
+        },
+    )
+    .await;
     assert!(states(&events).is_empty());
     assert_eq!(errors(&events).len(), 1, "nothing installed to verify");
+}
+
+#[tokio::test]
+async fn a_local_index_override_rides_the_plan_for_its_repo_alone() {
+    let h = harness(false); // the install carries boot, game, and ex1..ex4
+    let transport = Arc::new(FixtureTransport::new([]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport, patch.clone(), launch, NOW);
+
+    let apzi = PathBuf::from("/somewhere/game.apzi");
+    let events = run(
+        ctx,
+        Command::Repair {
+            profile: h.profile,
+            local_indexes: vec![(Repo::Game, apzi.clone())],
+        },
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let plans = patch.repairs();
+    assert_eq!(plans.len(), 1);
+    for plan in &plans[0].repos {
+        let want = (plan.repo == Repo::Game).then(|| apzi.clone());
+        assert_eq!(
+            plan.index_override, want,
+            "only the named repo may carry the override ({:?})",
+            plan.repo
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_local_index_for_an_uninstalled_repo_is_refused_before_any_repair() {
+    let h = harness(false); // the install stops at ex4, so ex5 is not present
+    let transport = Arc::new(FixtureTransport::new([]));
+    let patch = Arc::new(FakePatchBackend::new());
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context_with(&h, transport, patch.clone(), launch, NOW);
+
+    let events = run(
+        ctx,
+        Command::Repair {
+            profile: h.profile,
+            local_indexes: vec![(Repo::Expansion(5), PathBuf::from("/somewhere/ex5.apzi"))],
+        },
+    )
+    .await;
+
+    assert_eq!(
+        errors(&events).len(),
+        1,
+        "a mistyped repo must fail loud, not fall back to the catalog"
+    );
+    assert!(patch.repairs().is_empty(), "no repair may have started");
 }
 
 #[test]

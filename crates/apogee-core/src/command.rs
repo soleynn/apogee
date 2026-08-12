@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use apogee_fetch::Recoveries;
 use apogee_otp::OtpSource;
-use apogee_patcher::PatchProgress;
+use apogee_patcher::{PatchProgress, Repo};
 use apogee_secrets::Secret;
 use uuid::Uuid;
 
@@ -65,6 +65,15 @@ pub enum Command {
     /// byte ranges, quarantining strays. Does not launch.
     Repair {
         profile: Uuid,
+        /// Per-repo `.apzi` files to read instead of resolving those repos through the hosted
+        /// catalog; repos not named here still resolve through it. The escape hatch for a catalog
+        /// host that is down, or an index the user rebuilt from kept patch files (the index is
+        /// reproducible, so a rebuilt one is byte-equal to the hosted one). Not a trust bypass: the
+        /// index's own recorded version is still cross-checked against the repo's installed
+        /// version, and a mismatch is a typed error. Naming a repo that is not installed is an
+        /// error rather than a silent skip, so a mistyped repo cannot leave the intended one
+        /// quietly resolving through the catalog being avoided.
+        local_indexes: Vec<(Repo, PathBuf)>,
     },
     /// Work on the profile's prefix without launching anything.
     ///
@@ -112,9 +121,14 @@ impl fmt::Debug for Command {
                 .field("password", &"<redacted>")
                 .field("otp", &otp.label())
                 .finish(),
-            Command::Repair { profile } => {
-                f.debug_struct("Repair").field("profile", profile).finish()
-            }
+            Command::Repair {
+                profile,
+                local_indexes,
+            } => f
+                .debug_struct("Repair")
+                .field("profile", profile)
+                .field("local_indexes", local_indexes)
+                .finish(),
             Command::Prefix { profile, action } => f
                 .debug_struct("Prefix")
                 .field("profile", profile)

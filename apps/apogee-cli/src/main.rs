@@ -17,8 +17,9 @@ use apogee_core::{
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
     KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, Notice,
     OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile,
-    Recoveries, Region, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
-    SecretBackend, SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    Recoveries, Region, Repo, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
+    Secret, SecretBackend, SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger,
+    Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -98,7 +99,7 @@ enum Commands {
     /// Install the game from nothing into the profile's (empty) game directory, then launch.
     Install(PlayArgs),
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
-    Repair(TargetArgs),
+    Repair(RepairArgs),
     /// Frame-consistency analysis over MangoHud frametime logs.
     Bench {
         #[command(subcommand)]
@@ -508,6 +509,21 @@ struct TargetArgs {
     profile: String,
 }
 
+#[derive(Args)]
+struct RepairArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Read one repo's block index from a local `.apzi` instead of the signed catalog, as
+    /// `repo=path` (repos: `boot`, `game`, `ex1`..`ex5`). Repeatable; repos not named still resolve
+    /// through the catalog. For when the catalog host is unreachable, or for an index you rebuilt
+    /// yourself from kept patch files (kept when the `keep-patches` setting is on) with
+    /// `cargo run -p apogee-zipatch --example zipatch_tool -- index <out.apzi> <version> <patch>..`.
+    /// The index must still describe the repo's installed version; a mismatch is refused.
+    #[arg(long)]
+    local_index: Vec<String>,
+}
+
 /// The arguments of a flow that authenticates. Deliberately only the profile: the password and the
 /// one-time code are read from the terminal or stdin, never taken as an argument.
 #[derive(Args)]
@@ -637,7 +653,15 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Commands::Repair(args) => {
             let profile = resolve_profile(&core, &args.profile)?.id;
-            Ok(drive(&core, Command::Repair { profile }).await)
+            let local_indexes = parse_local_indexes(&args.local_index)?;
+            Ok(drive(
+                &core,
+                Command::Repair {
+                    profile,
+                    local_indexes,
+                },
+            )
+            .await)
         }
         Commands::Bench { action } => bench(action),
         Commands::Addon { action } => {
@@ -1716,6 +1740,23 @@ fn resolve_profile(core: &Core, target: &str) -> Result<Profile, CliError> {
         0 => Err(format!("no profile named {target:?}").into()),
         _ => Err(format!("multiple profiles named {target:?}; use the id").into()),
     }
+}
+
+/// Parse the repair verb's `repo=path` local-index overrides into their typed form.
+fn parse_local_indexes(specs: &[String]) -> Result<Vec<(Repo, PathBuf)>, CliError> {
+    specs
+        .iter()
+        .map(|spec| -> Result<(Repo, PathBuf), CliError> {
+            let (label, path) = spec
+                .split_once('=')
+                .filter(|(_, path)| !path.is_empty())
+                .ok_or_else(|| format!("--local-index takes repo=path, got {spec:?}"))?;
+            let repo = Repo::from_label(label).ok_or_else(|| {
+                format!("unknown repo {label:?} in {spec:?}; use boot, game, or ex1..ex5")
+            })?;
+            Ok((repo, PathBuf::from(path)))
+        })
+        .collect()
 }
 
 /// Read the account password from the terminal without echoing it (or a canned value in fixture mode).
