@@ -135,17 +135,31 @@ pub fn assert_within(root: &Path, path: &Path) -> Result<(), ConfineError> {
 mod tests {
     use super::*;
 
+    /// An absolute root that this platform actually agrees is absolute.
+    ///
+    /// A leading separator is enough on Unix and is not on Windows, where an absolute path needs a
+    /// drive or a share as well: `/install/game` there is rooted but relative to the current drive.
+    /// Writing one literal for both would make these tests assert a Unix-shaped fact and call it a
+    /// platform rule.
+    fn root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\install\game")
+        } else {
+            PathBuf::from("/install/game")
+        }
+    }
+
     /// An ordinary descent joins onto the root.
     #[test]
     fn a_plain_relative_path_joins_onto_the_root() {
-        let root = Path::new("/install/game");
+        let root = root();
         assert_eq!(
-            join_confined(root, "sqpack/ex3/ex3.ver").unwrap(),
-            Path::new("/install/game/sqpack/ex3/ex3.ver")
+            join_confined(&root, "sqpack/ex3/ex3.ver").unwrap(),
+            root.join("sqpack").join("ex3").join("ex3.ver")
         );
         assert_eq!(
-            join_confined(root, "./ffxivgame.ver").unwrap(),
-            Path::new("/install/game/ffxivgame.ver")
+            join_confined(&root, "./ffxivgame.ver").unwrap(),
+            root.join("ffxivgame.ver")
         );
     }
 
@@ -155,7 +169,7 @@ mod tests {
     /// build is asking, or a rule proven on the runner would not be the rule that ships.
     #[test]
     fn a_path_that_would_leave_the_tree_is_refused_on_every_platform() {
-        let root = Path::new("/install/game");
+        let root = root();
         for rel in [
             "../boot/ffxivboot.ver",
             "a/../../b",
@@ -168,7 +182,7 @@ mod tests {
             "ffxivgame.ver:stream",
         ] {
             assert!(
-                join_confined(root, rel).is_err(),
+                join_confined(&root, rel).is_err(),
                 "{rel:?} was accepted as confined"
             );
         }
@@ -177,14 +191,22 @@ mod tests {
     /// An absolute path is required where one is required, and a relative one is named as the
     /// offender rather than silently resolved against whatever directory the process happens to be
     /// in.
+    ///
+    /// A drive-relative path is in the refused set because Windows counts it as relative and it is
+    /// the shape most likely to arrive by accident: `\install\game` reads as absolute and resolves
+    /// against whichever drive the process is on.
     #[test]
     fn require_absolute_names_the_relative_path() {
-        assert!(require_absolute("apply root", Path::new("/install/game")).is_ok());
-        let err = require_absolute("apply root", Path::new("game")).unwrap_err();
-        assert!(
-            matches!(err, ConfineError::NotAbsolute { .. }),
-            "got {err:?}"
-        );
+        assert!(require_absolute("apply root", &root()).is_ok());
+        for relative in ["game", "./game", r"..\game"] {
+            let err = require_absolute("apply root", Path::new(relative)).unwrap_err();
+            assert!(
+                matches!(err, ConfineError::NotAbsolute { .. }),
+                "{relative:?}: got {err:?}"
+            );
+        }
+        #[cfg(windows)]
+        assert!(require_absolute("apply root", Path::new(r"\install\game")).is_err());
     }
 
     /// The filesystem-level check accepts a real descent and rejects one whose directory is a link
