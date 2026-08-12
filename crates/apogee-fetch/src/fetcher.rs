@@ -23,10 +23,11 @@ const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// The HTTP/2 flow-control window advertised for a connection and for each stream on it.
 const H2_WINDOW: u32 = 16 * 1024 * 1024;
 
-/// State shared by every clone of a [`Fetcher`]: the job/connection scheduler, the speed limiter,
-/// the per-host capability cache, the retry policy and its jitter source, and the segmentation
-/// config. Cloning the fetcher is cheap and shares all of it, so the caps and the cache hold across
-/// concurrently submitted jobs.
+/// State shared by every clone of a [`Fetcher`].
+///
+/// The job/connection scheduler, the speed limiter, the per-host capability cache, the retry policy
+/// and its jitter source, and the segmentation config. Cloning the fetcher is cheap and shares all of
+/// it, so the caps and the cache hold across concurrently submitted jobs.
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) scheduler: Arc<Scheduler>,
@@ -40,8 +41,20 @@ pub(crate) struct Shared {
     pub(crate) jitter: Arc<Jitter>,
 }
 
-/// A resumable, verified downloader. A cheap handle over a pooled HTTP client and the shared
-/// scheduler/limiter: clone it to hand to several consumers.
+/// A resumable, verified downloader.
+///
+/// A cheap handle over a pooled HTTP client and the shared scheduler/limiter: clone it to hand to
+/// several consumers.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_fetch::Fetcher;
+///
+/// let fetcher = Fetcher::builder().max_files(2).build()?;
+/// # let _ = fetcher;
+/// # Ok::<(), apogee_fetch::FetchError>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct Fetcher {
     client: reqwest::Client,
@@ -63,9 +76,27 @@ impl Fetcher {
     /// `spec`'s priority, so it waits its turn when the fetcher is already at its concurrency cap.
     ///
     /// # Errors
-    /// A [`FetchError`] for any transport, length, verification, i/o, or cancellation failure, or
-    /// [`FetchError::Unsupported`] if `spec` carries [`Validator::External`] (that marker never
-    /// yields a [`VerifiedFile`]; use [`download_external`](Self::download_external)).
+    ///
+    /// A [`FetchError`] for any transport, length, verification, i/o, or cancellation failure (for
+    /// example [`FetchError::Stalled`], [`FetchError::LengthMismatch`], or
+    /// [`FetchError::FileVerifyFailed`]), or [`FetchError::Unsupported`] if `spec` carries
+    /// [`Validator::External`] (that marker never yields a [`VerifiedFile`]; use
+    /// [`download_external`](Self::download_external)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn demo(
+    /// #     fetcher: &apogee_fetch::Fetcher,
+    /// #     spec: &apogee_fetch::DownloadSpec,
+    /// # ) -> Result<(), apogee_fetch::FetchError> {
+    /// use tokio_util::sync::CancellationToken;
+    ///
+    /// let verified = fetcher.download(spec, None, CancellationToken::new()).await?;
+    /// let _path = verified.path();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn download(
         &self,
         spec: &DownloadSpec,
@@ -97,8 +128,10 @@ impl Fetcher {
     /// Progress and cancellation behave exactly as in [`download`](Self::download).
     ///
     /// # Errors
+    ///
     /// [`FetchError::Unsupported`] if `spec`'s validator is not [`Validator::External`]; otherwise
-    /// any transport, length, i/o, or cancellation [`FetchError`].
+    /// any transport, length, i/o, or cancellation [`FetchError`] (for example
+    /// [`FetchError::Stalled`] or [`FetchError::LengthMismatch`]).
     pub async fn download_external(
         &self,
         spec: &DownloadSpec,
@@ -129,6 +162,20 @@ impl Fetcher {
     /// cancel it, and await its verified result. Unlike [`download`](Self::download), the transfer
     /// runs on a spawned task, so several jobs can be submitted and awaited concurrently under the
     /// shared caps.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from outside a Tokio runtime context, since it spawns the transfer task with
+    /// `tokio::spawn`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn demo(fetcher: &apogee_fetch::Fetcher, spec: apogee_fetch::DownloadSpec) {
+    /// let job = fetcher.submit(spec);
+    /// # let _ = job;
+    /// # }
+    /// ```
     #[must_use]
     pub fn submit(&self, spec: DownloadSpec) -> Job {
         let cancel = CancellationToken::new();
@@ -162,7 +209,8 @@ impl Fetcher {
     ///
     /// Ranges are packed into requests under `packing` (a count cap and a `Range` header byte
     /// budget). A single attempt against one URL: mirror rotation and retry live in the caller.
-    /// `cancel` aborts between requests, during any wait, and between body chunks.
+    /// `cancel` aborts between requests, during any wait, and between body chunks; a caller that
+    /// wants an uncancellable fetch passes a fresh token.
     ///
     /// The sink's error type is pinned to [`FetchError`] rather than generic, so the one wrapper
     /// that needs to smuggle a foreign error through it
@@ -170,8 +218,35 @@ impl Fetcher {
     /// afterward.
     ///
     /// # Errors
-    /// A [`FetchError`] for any transport, HTTP-status, length, or malformed-response fault, or the
-    /// sink's own error propagated verbatim.
+    ///
+    /// A [`FetchError`] for any transport, HTTP-status, length, or malformed-response fault
+    /// ([`FetchError::Stalled`] included, the one a caller most needs to distinguish, plus
+    /// [`FetchError::LengthMismatch`]), or the sink's own error propagated verbatim.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn demo(
+    /// #     fetcher: &apogee_fetch::Fetcher,
+    /// #     source: &apogee_fetch::HttpSource,
+    /// # ) -> Result<(), apogee_fetch::FetchError> {
+    /// use apogee_fetch::RangePacking;
+    /// use tokio_util::sync::CancellationToken;
+    ///
+    /// let ranges = [0..1024u64];
+    /// let packing = RangePacking::default();
+    /// let cancel = CancellationToken::new();
+    /// let mut received = 0usize;
+    /// fetcher
+    ///     .fetch_ranges(source, &ranges, packing, cancel, |_off, bytes| {
+    ///         received += bytes.len();
+    ///         Ok(())
+    ///     })
+    ///     .await?;
+    /// # let _ = received;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn fetch_ranges<F>(
         &self,
         source: &crate::HttpSource,
@@ -209,6 +284,8 @@ pub struct FetcherBuilder {
 }
 
 impl Default for FetcherBuilder {
+    /// The shipped defaults: 4 files, 6 segments in flight per file, 24 in flight in total.
+    ///
     /// The three caps must satisfy `max_files * max_connections_per_file <= max_connections_total`,
     /// so every admitted file can run all of its segments and no segment worker ever parks on the
     /// global semaphore; see [`FetcherBuilder::max_connections_total`].
@@ -242,8 +319,8 @@ impl FetcherBuilder {
         self
     }
 
-    /// How many segments of one file are in flight at once, and so how many segments it is split
-    /// into (default 6, chosen against the other two caps: see [`FetcherBuilder::default`]).
+    /// How many segments one file is split into (default 6, chosen against the other two caps: see
+    /// [`FetcherBuilder::default`]).
     ///
     /// Named for connections because that is what it costs against an HTTP/1.1 source: one per
     /// segment. An h2 host serves all of them as streams on a single connection instead, so the
@@ -270,10 +347,10 @@ impl FetcherBuilder {
         self
     }
 
-    /// How long a connection may make no progress before it is killed and re-queued (default 15s).
-    /// Covers a request from the moment it is sent, including reaching the host and waiting for
-    /// response headers, so a host that accepts a connection and then says nothing costs one attempt
-    /// rather than hanging the transfer.
+    /// How long a connection may make no progress before it is killed and re-queued (default 15s),
+    /// on both the segmented and the single-connection path. Covers a request from the moment it is
+    /// sent, including reaching the host and waiting for response headers, so a host that accepts a
+    /// connection and then says nothing costs one attempt rather than hanging the transfer.
     #[must_use]
     pub fn stall_timeout(mut self, timeout: Duration) -> Self {
         self.stall_timeout = timeout;
@@ -320,9 +397,19 @@ impl FetcherBuilder {
     /// Build the configured [`Fetcher`].
     ///
     /// # Errors
+    ///
     /// [`FetchError::Config`] if `max_files * max_connections_per_file` exceeds
     /// `max_connections_total` (see [`FetcherBuilder::default`] for why that combination cannot be
     /// served); [`FetchError::Client`] if the HTTP client cannot be constructed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_fetch::Fetcher;
+    ///
+    /// let built = Fetcher::builder().max_files(4).max_connections_per_file(6).build();
+    /// assert!(built.is_ok());
+    /// ```
     pub fn build(self) -> Result<Fetcher, FetchError> {
         // The scheduler clamps each cap to at least 1, so the invariant is checked over the values
         // that will actually run.
@@ -401,6 +488,8 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
+    /// The shipped defaults satisfy the cap invariant [`FetcherBuilder::default`] documents; its
+    /// sibling below pins the invariant itself by refusing a combination that breaks it.
     #[test]
     fn the_shipped_caps_let_every_admitted_file_run_all_its_segments() {
         let b = FetcherBuilder::default();
@@ -441,6 +530,7 @@ mod tests {
 
     // Both guards fire before any scheduler or network contact, so these need no server.
 
+    /// `download` refuses an externally-verified spec rather than silently skipping verification.
     #[tokio::test]
     async fn download_refuses_external_and_points_at_download_external() {
         let fetcher = Fetcher::builder().build().unwrap();
@@ -459,6 +549,8 @@ mod tests {
         assert!(matches!(err, FetchError::Unsupported { .. }), "got {err:?}");
     }
 
+    /// `download_external` refuses a spec that is not marked `Validator::External`, so a caller
+    /// cannot get plain-HTTP bytes with no fetch-side hash by mistake.
     #[tokio::test]
     async fn download_external_requires_the_external_marker() {
         let fetcher = Fetcher::builder().build().unwrap();

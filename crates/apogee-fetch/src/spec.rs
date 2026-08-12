@@ -10,9 +10,10 @@ use crate::scheduler::Priority;
 use crate::validator::Validator;
 
 /// A single download: where to fetch, where to land it, how to verify it, whether to resume, and its
-/// scheduling priority. Built through [`DownloadSpec::builder`], whose
-/// [`build`](DownloadSpecBuilder::build) is the one place the source-safety rules are enforced, so an
-/// unsafe request cannot be represented.
+/// scheduling priority.
+///
+/// Built through [`DownloadSpec::builder`], whose [`build`](DownloadSpecBuilder::build) is the one
+/// place the source-safety rules are enforced, so an unsafe request cannot be represented.
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
     url: Url,

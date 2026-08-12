@@ -1,7 +1,9 @@
-//! Scatter-gather multi-range fetch: pulls a set of byte ranges of one URL via [`fetch_ranges`],
-//! packing them into `Range` requests bounded by both count and header byte length, and handling
-//! whichever of a single `206`, a multipart `206`, or a range-ignoring `200` the server answers with.
-//! Nothing buffers a whole body: spans are sliced from the stream and delivered as they arrive.
+//! Scatter-gather multi-range fetch: the transport half of game repair.
+//!
+//! [`fetch_ranges`] pulls a set of byte ranges of one URL, packing them into `Range` requests bounded
+//! by both count and header byte length, and handling whichever of a single `206`, a multipart `206`,
+//! or a range-ignoring `200` the server answers with. Nothing buffers a whole body: spans are sliced
+//! from the stream and delivered as they arrive.
 //!
 //! This layer only guarantees that a delivered span came from its claimed offset of the URL; the
 //! caller CRC-checks each part and owns mirror rotation and retry, since [`fetch_ranges`] is a single
@@ -25,9 +27,11 @@ use crate::range_source::HttpSource;
 /// headroom, and matches the multipart parser's own part cap.
 const MAX_RANGES_PER_REQUEST: usize = 256;
 
-/// How ranges are packed into `Range` requests: at most `max_ranges` ranges, and a `bytes=…` header
-/// value at or below `max_range_header_bytes` (a single oversized range still gets its own request,
-/// so progress is guaranteed).
+/// How ranges are packed into `Range` requests.
+///
+/// A request holds at most `max_ranges` ranges, and its `bytes=…` header value stays at or below
+/// `max_range_header_bytes` (a single range still gets its own request even if it alone exceeds the
+/// budget, so progress is guaranteed).
 ///
 /// `#[non_exhaustive]`: start from [`default`](Self::default) and adjust through the setters, so a
 /// packing cap added later does not break every literal.
@@ -494,7 +498,8 @@ mod tests {
         assert_eq!(digits(999), 3);
     }
 
-    /// A large `max_ranges` budget still splits into groups of at most `max_ranges`.
+    /// With a large header-byte budget not binding, the range-count cap alone decides how these
+    /// split into groups.
     #[test]
     fn packing_respects_the_range_count_cap() {
         let ranges: Vec<Range<u64>> = (0..10).map(|i| (i * 100)..(i * 100 + 10)).collect();
@@ -531,7 +536,9 @@ mod tests {
         assert_eq!(range_header(&[0..10, 100..150]), "bytes=0-9,100-149");
     }
 
-    /// The envelope is the min start and max end, not just the first and last range.
+    /// The envelope spans the first range's start to the last range's end here; this input is
+    /// already sorted, so it does not distinguish that from min-start/max-end in general, which is
+    /// untested.
     #[test]
     fn envelope_spans_first_start_to_last_end() {
         assert_eq!(envelope(&[10..20, 100..150]), (10, 150));

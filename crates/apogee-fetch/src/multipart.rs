@@ -12,9 +12,10 @@
 //! into the caller's chunk, tagged with their absolute source-file offset, which is what the range
 //! consumer keys on.
 //!
-//! All input is hostile: every field is a checked parse, header blocks are size-capped, and the
-//! boundary and part count are bounded. There is no panic path, pinned by the `fetch_multipart` fuzz
-//! target.
+//! The framing bytes (delimiters and header blocks) drive a small per-byte state machine; body bytes
+//! are emitted in bulk, so the per-byte cost falls only on the tiny framing fraction. All input is
+//! hostile: every field is a checked parse, header blocks are size-capped, and the boundary and part
+//! count are bounded. There is no panic path, pinned by the `fetch_multipart` fuzz target.
 
 use crate::error::FetchError;
 
@@ -48,15 +49,25 @@ pub(crate) struct RangeExpect {
 /// `matches!` in tests.
 #[derive(Debug)]
 pub(crate) enum MultipartError {
+    /// The `Content-Type` carried no boundary, or it was empty.
     MissingBoundary,
+    /// The boundary token exceeded [`BOUNDARY_CAP`].
     BoundaryTooLong,
+    /// A part's header block ran past [`MAX_HEADER_BYTES`] without terminating.
     HeaderTooLarge,
+    /// A part had no `Content-Range` header.
     MissingContentRange,
+    /// A `Content-Range` header could not be parsed as `bytes first-last/total`.
     MalformedContentRange,
+    /// A part's `total` disagreed with the expected source length.
     TotalMismatch,
+    /// A part's byte span fell outside what the request asked for.
     RangeNotRequested,
+    /// The response carried more parts than [`MAX_PARTS`].
     TooManyParts,
+    /// The byte stream did not follow the boundary/delimiter framing.
     Framing,
+    /// The stream ended before the closing delimiter.
     Truncated,
     /// The sink rejected a delivered part; the wrapped error is surfaced verbatim by the caller.
     Sink(FetchError),
@@ -162,8 +173,11 @@ impl MultipartParser {
     ///
     /// # Errors
     ///
-    /// A [`MultipartError`] on any framing or validation fault, or [`MultipartError::Sink`] wrapping
-    /// a sink rejection.
+    /// [`MultipartError::HeaderTooLarge`], [`MultipartError::MissingContentRange`],
+    /// [`MultipartError::MalformedContentRange`], [`MultipartError::TotalMismatch`],
+    /// [`MultipartError::RangeNotRequested`], [`MultipartError::TooManyParts`],
+    /// [`MultipartError::Framing`], or [`MultipartError::Truncated`] for a framing or validation
+    /// fault, or [`MultipartError::Sink`] wrapping a sink rejection.
     pub(crate) fn feed(
         &mut self,
         chunk: &[u8],
@@ -437,6 +451,7 @@ mod tests {
         out
     }
 
+    /// Two well-formed parts parse identically no matter how the bytes are chunked.
     #[test]
     fn parses_two_parts_across_every_chunk_size() {
         let body = two_part_body("SEP", 300, (0, b"hello"), (100, b"world!"));
@@ -455,6 +470,7 @@ mod tests {
         }
     }
 
+    /// `parse_content_range` accepts a wildcard or concrete total, and rejects every malformed shape.
     #[test]
     fn content_range_parses_and_rejects() {
         assert_eq!(
@@ -467,6 +483,7 @@ mod tests {
         assert!(parse_content_range("bytes x-99/300").is_none());
     }
 
+    /// A boundary-like byte sequence inside a part's body is never mistaken for the real delimiter.
     #[test]
     fn a_body_containing_the_boundary_bytes_is_not_a_delimiter() {
         // The body literally contains "\r\n--SEP\r\n"; length-driven parsing must ignore it.
@@ -481,6 +498,7 @@ mod tests {
         assert_eq!(parts, vec![(0, payload), (500, b"tail".to_vec())]);
     }
 
+    /// Bare `\n` framing, with no `\r`, parses the same as CRLF framing.
     #[test]
     fn lf_only_framing_is_accepted() {
         let boundary = "SEP";
@@ -498,6 +516,7 @@ mod tests {
         assert_eq!(parts, vec![(0, b"abc".to_vec())]);
     }
 
+    /// A part whose `Content-Range` total disagrees with the caller's expected length is rejected.
     #[test]
     fn a_total_that_disagrees_is_rejected() {
         let body = two_part_body("SEP", 999, (0, b"hello"), (100, b"world!"));
@@ -512,6 +531,7 @@ mod tests {
         ));
     }
 
+    /// A part landing outside the requested envelope is rejected even though its own total agrees.
     #[test]
     fn a_part_outside_the_requested_envelope_is_rejected() {
         let body = two_part_body("SEP", 300, (0, b"hello"), (250, b"world!"));
@@ -527,6 +547,7 @@ mod tests {
         ));
     }
 
+    /// A header block with no terminator inside the cap errors rather than growing unbounded.
     #[test]
     fn an_oversized_header_block_is_bounded() {
         let mut body = Vec::new();
@@ -543,6 +564,7 @@ mod tests {
         ));
     }
 
+    /// A stream that ends before the closing delimiter is reported truncated, not silently accepted.
     #[test]
     fn a_missing_close_is_truncated() {
         let mut body = Vec::new();
@@ -559,6 +581,7 @@ mod tests {
         ));
     }
 
+    /// An empty boundary and one past the cap are both rejected at construction, before any bytes.
     #[test]
     fn an_empty_or_oversized_boundary_is_rejected() {
         let expect = RangeExpect {
@@ -577,6 +600,7 @@ mod tests {
         ));
     }
 
+    /// An error the sink returns is wrapped and propagated verbatim, aborting the feed.
     #[test]
     fn a_sink_rejection_propagates() {
         let body = two_part_body("SEP", 300, (0, b"hello"), (100, b"world!"));
@@ -592,6 +616,7 @@ mod tests {
         assert!(matches!(err, MultipartError::Sink(FetchError::Cancelled)));
     }
 
+    /// A byte after a boundary that is neither the close marker nor CRLF is a framing error.
     #[test]
     fn garbage_after_a_boundary_is_a_framing_error() {
         // After the boundary, the next byte must be `-` (close) or CRLF (part); anything else is framing.
@@ -606,6 +631,7 @@ mod tests {
         ));
     }
 
+    /// A well-formed header block missing `Content-Range` is rejected.
     #[test]
     fn a_part_without_a_content_range_is_rejected() {
         // A well-formed header block that carries no Content-Range line.
@@ -621,6 +647,7 @@ mod tests {
         ));
     }
 
+    /// A response carrying one more part than [`MAX_PARTS`] is rejected once the cap is crossed.
     #[test]
     fn more_parts_than_the_cap_is_rejected() {
         // One valid 1-byte part past MAX_PARTS trips the cap.

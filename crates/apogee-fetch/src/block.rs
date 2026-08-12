@@ -3,7 +3,7 @@
 //! A file verified this way carries one SHA1 per fixed-size block, so a block that fails re-fetches
 //! on its own rather than the whole file. [`BlockPlan`] is the block layout, [`hash_block`] hashes one
 //! block from disk, and [`BlockVerify`] tracks each block through its verification lifecycle; the
-//! concurrent claiming and re-fetch dispatch live with the transfer engine.
+//! concurrent verification and re-fetch live with the transfer engine.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -19,8 +19,9 @@ use crate::util::lock;
 /// Buffer size for reading a block back off disk to hash it.
 const READ_CHUNK: usize = 64 * 1024;
 
-/// The block layout of a file: one SHA1 per fixed-size block over `[0, len)`; the last block is short
-/// when `len` isn't a multiple of the block size.
+/// The block layout of a file: one SHA1 per fixed-size block over `[0, len)`.
+///
+/// The last block is short when `len` isn't a multiple of the block size.
 pub(crate) struct BlockPlan {
     block_size: u64,
     len: u64,
@@ -58,8 +59,10 @@ impl BlockPlan {
     }
 }
 
-/// A block's place in its verification lifecycle: `Pending` becomes `Hashing` once its bytes are
-/// durable, then either `Verified` or back to `Pending` on a hash mismatch.
+/// A block's place in its verification lifecycle.
+///
+/// `Pending` becomes `Hashing` once its bytes are durable, then either `Verified` or back to
+/// `Pending` on a hash mismatch.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
     Pending,
@@ -78,13 +81,15 @@ struct BlockState {
 struct States {
     blocks: Vec<BlockState>,
     verified: u32,
-    /// Indices still `Pending`, so a claim scan is O(pending) rather than O(blocks).
+    /// Indices still `Pending`, so a claim scan is O(pending) rather than O(blocks). A block is in
+    /// this list iff its status is `Pending`.
     pending: Vec<u32>,
 }
 
-/// Shared, concurrent verification state for one block-hashed transfer: the transfer engine notifies
-/// [`notify`](Self::notify) as bytes become durable, and a verifier task claims, hashes, and reports
-/// blocks back through this type.
+/// Shared, concurrent verification state for one block-hashed transfer.
+///
+/// The transfer engine notifies [`notify`](Self::notify) as bytes become durable, and a verifier task
+/// claims, hashes, and reports blocks back through this type.
 pub(crate) struct BlockVerify {
     plan: std::sync::Arc<BlockPlan>,
     states: Mutex<States>,
@@ -218,6 +223,7 @@ mod tests {
         h.finalize().into()
     }
 
+    /// Consecutive blocks tile `[0, len)` with no gap or overlap, and the last one is short.
     #[test]
     fn block_ranges_tile_the_file_with_a_short_last_block() {
         let plan = BlockPlan::new(16, vec![[0u8; 20]; 3], 40);
@@ -227,12 +233,14 @@ mod tests {
         assert_eq!(plan.block_range(2), 32..40); // short last block
     }
 
+    /// A length that divides evenly by the block size leaves no short block at the end.
     #[test]
     fn an_exact_multiple_has_full_final_block() {
         let plan = BlockPlan::new(16, vec![[0u8; 20]; 2], 32);
         assert_eq!(plan.block_range(1), 16..32);
     }
 
+    /// A file shorter than the block size still gets exactly one, short, block.
     #[test]
     fn a_file_smaller_than_a_block_is_one_block() {
         let plan = BlockPlan::new(64, vec![[0u8; 20]], 10);
@@ -240,6 +248,7 @@ mod tests {
         assert_eq!(plan.block_range(0), 0..10);
     }
 
+    /// Hashing a middle span and the trailing span off disk matches hashing the same bytes in memory.
     #[test]
     fn hash_block_matches_a_direct_hash_of_the_span() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -257,6 +266,7 @@ mod tests {
         );
     }
 
+    /// A range reaching past EOF fails rather than silently hashing whatever bytes were there.
     #[test]
     fn hash_block_past_the_end_is_an_error_not_a_short_hash() {
         let mut file = tempfile::NamedTempFile::new().unwrap();

@@ -443,6 +443,8 @@ mod tests {
         buf
     }
 
+    /// A run of growing `[0, w)` records, as the single-connection path writes them, folds to one
+    /// prefix at the final watermark.
     #[test]
     fn a_growing_prefix_folds_to_its_watermark() {
         // The single-connection path commits [0, w) as w grows; the runs coalesce to one prefix.
@@ -453,6 +455,8 @@ mod tests {
         assert_eq!(decoded.intervals.len(), 1);
     }
 
+    /// Disjoint segment ranges, as the segmented path writes them, coalesce but a gap keeps the
+    /// watermark at the prefix from 0.
     #[test]
     fn out_of_order_intervals_coalesce() {
         // The segmented path commits disjoint segment ranges; a gap keeps them separate, and the
@@ -463,12 +467,15 @@ mod tests {
         assert_eq!(decoded.intervals.complement(3072), vec![1024..2048]);
     }
 
+    /// A header with no interval records at all resumes from a zero watermark.
     #[test]
     fn a_header_with_no_records_resumes_from_zero() {
         let decoded = decode(&image(&identity(), &[])).unwrap();
         assert_eq!(decoded.watermark(), 0);
     }
 
+    /// Decode bounds the coalesced interval set, not the raw record count, so a large
+    /// single-connection download's thousands of growing-prefix records still resume correctly.
     #[test]
     fn many_growing_prefix_records_survive_coalescing() {
         // The append-only journal never compacts, so a large single-connection download accrues one
@@ -482,6 +489,7 @@ mod tests {
         assert_eq!(decoded.watermark(), 10_000 * 4096);
     }
 
+    /// A partial record left dangling at the end of the file is ignored, not treated as corrupt.
     #[test]
     fn a_torn_trailing_record_is_ignored() {
         let mut buf = image(&identity(), &[(0, 1000), (0, 2000)]);
@@ -489,6 +497,7 @@ mod tests {
         assert_eq!(decode(&buf).unwrap().watermark(), 2000);
     }
 
+    /// A record whose CRC no longer matches its bytes stops the fold at the last good record.
     #[test]
     fn a_corrupted_record_crc_stops_the_fold() {
         let mut buf = image(&identity(), &[(0, 1000), (0, 2000)]);
@@ -497,6 +506,8 @@ mod tests {
         assert_eq!(decode(&buf).unwrap().watermark(), 1000);
     }
 
+    /// A record naming bytes past the declared length is a torn boundary, not a truth, and stops
+    /// the fold before it.
     #[test]
     fn a_record_past_the_declared_length_stops_the_fold() {
         // expected_len is 4096; a record naming bytes beyond it is a torn boundary, not a truth.
@@ -506,6 +517,8 @@ mod tests {
         assert_eq!(decoded.watermark(), 4096);
     }
 
+    /// A corrupt record early in the file discards every later record too, rather than skipping
+    /// ahead to a still-valid one past the torn gap.
     #[test]
     fn a_corrupt_middle_record_discards_every_later_record() {
         // Corrupt the first of three records: the fold must stop there, not skip ahead to a later
@@ -517,6 +530,7 @@ mod tests {
         assert_eq!(decode(&buf).unwrap().watermark(), 0);
     }
 
+    /// A wrong magic byte is read as no journal at all, restarting cleanly.
     #[test]
     fn bad_magic_is_start_over() {
         let mut buf = image(&identity(), &[(0, 1000)]);
@@ -524,6 +538,7 @@ mod tests {
         assert!(decode(&buf).is_none());
     }
 
+    /// An old v1 journal on disk is read as a version mismatch and restarts cleanly.
     #[test]
     fn a_version_one_journal_is_start_over() {
         // A v1 journal on disk (version byte 1) is read as a mismatch and restarts cleanly.
@@ -605,6 +620,7 @@ mod tests {
         );
     }
 
+    /// A flipped byte in the header CRC is read as corrupt, restarting cleanly.
     #[test]
     fn a_flipped_header_crc_is_start_over() {
         let id = identity();
@@ -614,6 +630,7 @@ mod tests {
         assert!(decode(&buf).is_none());
     }
 
+    /// A journal past [`MAX_JOURNAL_LEN`] is refused outright rather than decoded.
     #[test]
     fn an_oversized_journal_is_start_over() {
         let mut buf = image(&identity(), &[(0, 1000)]);
@@ -621,12 +638,14 @@ mod tests {
         assert!(decode(&buf).is_none());
     }
 
+    /// A buffer shorter than the fixed header is refused rather than read out of bounds.
     #[test]
     fn a_truncated_header_is_start_over() {
         let buf = image(&identity(), &[]);
         assert!(decode(&buf[..HEADER_FIXED - 1]).is_none());
     }
 
+    /// `Identity::matches` ignores `etag`/`last_modified` but still distinguishes on declared length.
     #[test]
     fn identity_matches_ignore_server_validators() {
         let a = identity();

@@ -56,18 +56,22 @@ pub enum Phase {
 /// Every one of these is a situation the engine handles and carries on from, so none of them
 /// reaches the caller as a [`FetchError`](crate::FetchError): a transfer that retried forty times
 /// and one that never retried both end in the same `Ok`, and without this tally the two are
-/// indistinguishable from outside the process.
+/// indistinguishable from outside the process. The crate's error taxonomy carries this same triage
+/// data but only ever builds it at the point of failure, which is exactly the case where nobody
+/// needed telling.
 ///
 /// Running totals for one call, never reset and never decremented, so a consumer can difference
 /// successive events the way it already does for `bytes_done`. A resumed transfer starts from zero:
 /// these count this process's work, not the file's history.
 ///
-/// Deliberately exhaustive, unlike [`Progress`]: a consumer that destructures every field (as this
-/// crate's own CLI renderer does, on purpose) is what keeps a future counter from rotting
-/// write-only, and `#[non_exhaustive]` would forbid exactly that destructure. A new counter is
-/// therefore a breaking change consumers must acknowledge rather than one that can land silently -
-/// `phase` on [`Progress`] took the silent route, and every relay in this workspace still drops it
-/// unnoticed.
+/// Deliberately exhaustive, unlike [`Progress`]: a consumer that destructures every field (the CLI's
+/// renderer does, on purpose) is what keeps a future counter from rotting write-only, and
+/// `#[non_exhaustive]` would forbid exactly that destructure. Sealing would still leave the struct
+/// buildable from outside (field assignment onto a [`Default`] survives; a literal and
+/// functional-update syntax do not), so constructibility is not what decides this; the destructure
+/// guard is. A new counter is therefore a breaking change consumers must acknowledge rather than one
+/// that can land silently: `phase` on [`Progress`] took the silent route, and every relay in this
+/// workspace still drops it unnoticed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Recoveries {
     /// Attempts charged to the retry budget after a failed one, over every unit of work the
@@ -219,6 +223,7 @@ impl Reporter {
 mod tests {
     use super::*;
 
+    /// The zero-recovery baseline the other counter tests build on.
     #[test]
     fn a_transfer_that_recovered_from_nothing_is_clean() {
         let counters = Counters::default();

@@ -59,8 +59,9 @@ const BATCH: u64 = 1024 * 1024;
 /// The floor on segment size; a file no larger than this is not worth splitting.
 const MIN_SEGMENT: u64 = 8 * 1024 * 1024;
 
-/// How many block hashes may run on the shared blocking pool at once, capped to the host's
-/// parallelism so a burst of newly-durable blocks cannot starve the transfer's own disk I/O.
+/// How many block hashes may run on the shared blocking pool at once: the host's parallelism,
+/// clamped to between 2 and 16, so a burst of newly-durable blocks cannot starve the transfer's own
+/// disk I/O and a wide host does not oversubscribe it.
 fn hash_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -320,7 +321,8 @@ struct TransferState {
     progress_notify: Notify,
     durable: AtomicU64,
     /// The live durable byte set (not just its length), so the block verifier can tell which whole
-    /// blocks are on disk. Its length always equals `durable`.
+    /// blocks are on disk. Seeded from the resume set; grown in `commit_batch`, shrunk when a dirty
+    /// block is cleared. Its length always equals `durable`.
     covered: Mutex<IntervalSet>,
     attempts: Mutex<HashMap<u64, u32>>,
     /// Sources found unable to serve byte ranges, by index. Index `0` is never in here: a whole body
@@ -658,12 +660,20 @@ async fn aggregator(state: Arc<TransferState>, progress: Reporter, len: u64) {
 /// difference between diagnosing a throttling host and a corrupting link.
 #[derive(Clone, Copy)]
 enum RequeueCause {
+    /// The request got no response headers within the deadline.
     NoResponseHeaders,
+    /// The connection could not be established (a transient connect fault).
     Connect,
+    /// A throttling or overload status.
     Throttled(u16),
+    /// The body was cut off before the range completed.
     BodyDropped,
+    /// The body went quiet past the inactivity timeout.
     BodyStalled,
+    /// A `206` delivered fewer bytes than the range asked for.
     ShortRange,
+    /// This worker lost the race to another worker's already-recorded ranges-ignored verdict for the
+    /// mirror; it is not itself the worker that discovered the mirror ignores ranges.
     RangesIgnored,
 }
 

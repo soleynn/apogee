@@ -16,8 +16,9 @@ use crate::validator::VerifiedFile;
 /// result with `job.await` or [`wait`](Self::wait).
 ///
 /// **Dropping a `Job` detaches it**: the transfer keeps running on its own task and still publishes to
-/// the destination on success. A caller that wants drop-to-abort semantics should hold a
-/// [`cancel_token`](Self::cancel_token) clone and cancel it before letting the job go.
+/// the destination on success; nothing outside the fetcher can stop it once the last externally held
+/// [`cancel_token`](Self::cancel_token) clone is gone. A caller that wants drop-to-abort semantics
+/// should hold a [`cancel_token`](Self::cancel_token) clone and cancel it before letting the job go.
 ///
 /// # Examples
 ///
@@ -80,8 +81,9 @@ impl Job {
     /// Await the verified result.
     ///
     /// # Errors
-    /// A [`FetchError`] for any transfer failure, or [`FetchError::Cancelled`] specifically if the job
-    /// was cancelled.
+    ///
+    /// A [`FetchError`] for any transfer failure, [`FetchError::Cancelled`] specifically if the job
+    /// was cancelled, or [`FetchError::Internal`] if the transfer task itself panicked.
     pub async fn wait(self) -> Result<VerifiedFile, FetchError> {
         match self.handle.await {
             Ok(result) => result,

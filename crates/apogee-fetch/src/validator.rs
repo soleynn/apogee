@@ -44,8 +44,8 @@ impl Validator {
     /// block layout) no longer matches, so the download restarts from zero instead of trusting bytes
     /// against the wrong policy.
     ///
-    /// The encoding lives in [`crate::journal`]: the fingerprint is journal identity data, and that
-    /// module is the one home for every byte-layout decision the `.apdl` format freezes.
+    /// The encoding lives in `journal.rs`: the fingerprint is journal identity data, and that module
+    /// is the one home for every byte-layout decision the `.apdl` format freezes.
     pub(crate) fn config_digest(&self) -> [u8; 32] {
         crate::journal::validator_config_digest(self)
     }

@@ -70,6 +70,7 @@ fn preallocate_blocking(path: &Path, len: u64) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A fresh file is preallocated to exactly the requested length.
     #[tokio::test]
     async fn preallocates_to_the_requested_length() {
         let dir = tempfile::tempdir().unwrap();
@@ -78,6 +79,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 4096);
     }
 
+    /// A second call at the same length leaves an already-preallocated file intact.
     #[tokio::test]
     async fn is_idempotent_and_never_shrinks() {
         let dir = tempfile::tempdir().unwrap();
@@ -88,6 +90,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8192);
     }
 
+    /// A zero length still ensures the file exists, rather than being a no-op.
     #[tokio::test]
     async fn zero_length_just_creates_the_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -96,6 +99,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
     }
 
+    /// A parent directory that does not exist surfaces as `FetchError::Io`, not a panic.
     #[tokio::test]
     async fn a_failure_to_open_is_a_typed_io_error() {
         // A parent that does not exist makes the open fail; the error is surfaced as FetchError::Io,
@@ -108,6 +112,12 @@ mod tests {
 
     /// A length past the filesystem's capacity fails as disk-full specifically, and reserves no
     /// blocks.
+    ///
+    /// Both halves are the claim: `FetchError::Io` alone would also be satisfied by a permission
+    /// fault or by the `EFBIG` a request past the maximum file size returns, so the inner kind and
+    /// errno are what make disk-full distinguishable; the allocated-block count is what makes it
+    /// eager, since a filesystem that reserved its way to the failure would have consumed the host's
+    /// disk to reach the same error.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_length_past_the_filesystem_capacity_is_a_distinct_disk_full_error() {
@@ -140,9 +150,10 @@ mod tests {
 
     /// A filesystem with no reservation support falls back to a length set rather than failing.
     ///
-    /// procfs stands in for such a filesystem (no `fallocate`, verified directly here rather than
-    /// assumed); this only checks that the refusal is swallowed, not that the file actually gets the
-    /// sparse length set, since `/proc/self/oom_score_adj` ignores that write.
+    /// procfs is the one filesystem reachable without mounting one (which needs root) that refuses
+    /// `fallocate` the way the fallback arm expects, verified directly here rather than assumed; this
+    /// only checks that the refusal is swallowed, not that the file actually gets the sparse length
+    /// set, since `/proc/self/oom_score_adj` ignores that write.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_filesystem_without_reservation_support_falls_back_to_a_length_set() {

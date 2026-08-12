@@ -2,7 +2,8 @@
 //!
 //! SHA256 and BLAKE3 are both 32 bytes wide, so a digest's bytes alone don't say which function
 //! produced them: a [`DigestPin`] carries its algorithm, and this module is the only place that turns
-//! one into a [`FileHasher`].
+//! one into a [`FileHasher`]. Both engines verify through it, so neither can decide on its own what a
+//! pin means.
 
 use sha2::{Digest as _, Sha256};
 
@@ -25,7 +26,7 @@ pub enum DigestPin {
 ///
 /// A struct rather than two positional `&str` parameters: the two are the same type, so a swapped
 /// pair would compile and mint a pin under the wrong function, the exact hazard [`DigestPin`] exists
-/// to prevent.
+/// to prevent. The field names are the row's key names, so a call site reads as the row does.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HexPins<'a> {
     /// The row's BLAKE3 spelling, when present; preferred when both are.
@@ -38,7 +39,8 @@ impl DigestPin {
     /// Decode a manifest row's pin from the hex spellings it may carry, preferring BLAKE3 when both
     /// are present so every build that understands both functions verifies one artifact the same way.
     ///
-    /// Returns `None` when neither spelling decodes; callers turn that into their own bad-pin error.
+    /// Returns `None` when the spelling it selected does not decode; a malformed BLAKE3 pin never
+    /// falls through to a well-formed SHA256 one beside it.
     ///
     /// # Examples
     ///

@@ -44,7 +44,10 @@ pub(crate) fn classify_status(status: u16) -> Class {
 /// further along the list per failure after that.
 ///
 /// A pure function of the failure count, so failing over only ever spends an attempt the retry
-/// budget already accounted for.
+/// budget already accounted for. Which failure it was does not matter: a refused connection, a body
+/// that dropped, a silence past the stall timeout, a throttling status, and a block that failed its
+/// hash all rotate the same way, and no path through either engine moves work to another source
+/// without also moving the counter that bounds it.
 pub(crate) fn rotate(failures: u32, sources: usize) -> usize {
     (failures as usize).saturating_sub(1) % sources.max(1)
 }
@@ -66,7 +69,8 @@ pub(crate) fn classify_send_error(error: &reqwest::Error) -> Class {
 ///
 /// The HTTP-date form and anything unparseable both yield `None`, sending the caller to
 /// [`RetryPolicy::delay`]'s computed backoff instead; a server-named pause is clamped to the same
-/// ceiling either way, so parsing dates would gain nothing.
+/// ceiling either way, so parsing dates would gain nothing. Total and allocation-free on hostile
+/// bytes: a non-ASCII value fails `to_str`, and the parse is bounded by the header's own length.
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let raw = headers.get(RETRY_AFTER)?.to_str().ok()?;
     raw.trim().parse::<u64>().ok().map(Duration::from_secs)
@@ -76,10 +80,13 @@ pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// them.
 ///
 /// Exponential backoff from [`base_delay`](Self::base_delay), multiplied per attempt by
-/// [`multiplier`](Self::multiplier), capped at [`max_delay`](Self::max_delay), and jittered. Defaults
-/// to 8 attempts, 500 ms doubling to a 30 s ceiling. One policy covers every retry site in the crate:
-/// a segment whose connection dropped or went silent, a block that failed its hash, the range probe,
-/// and a single-connection transfer cut off mid-body.
+/// [`multiplier`](Self::multiplier), capped at [`max_delay`](Self::max_delay), and jittered. One
+/// policy covers every retry site in the crate: a segment whose connection dropped or went silent, a
+/// block that failed its hash, the range probe, and a single-connection transfer cut off mid-body.
+///
+/// The defaults are 8 attempts, 500 ms doubling to a 30 s ceiling: eight attempts spends about a
+/// minute on one stuck range before reporting a precise failure, so a genuinely dead source fails
+/// inside a patch session rather than hanging it.
 ///
 /// # Examples
 ///
@@ -290,7 +297,9 @@ mod tests {
         }
     }
 
-    /// A degenerate source count still resolves to an index rather than panicking on the modulo.
+    /// A degenerate source count cannot panic on the modulo or index past a real list: the crate
+    /// always has at least one source, so `0` is unreachable by construction, but it must still
+    /// resolve to an index.
     #[test]
     fn rotation_over_an_empty_source_list_still_names_an_index() {
         assert_eq!(rotate(0, 0), 0);

@@ -170,6 +170,7 @@ mod tests {
 
     use super::*;
 
+    /// A freed slot goes to a waiting boot-priority job over an earlier-waiting normal one.
     #[tokio::test]
     async fn boot_preempts_normal_for_a_freed_slot() {
         let sched = Arc::new(Scheduler::new(1, 8));
@@ -212,6 +213,7 @@ mod tests {
         boot.abort();
     }
 
+    /// A slot freed while its woken waiter is cancelled before claiming still lands in the pool.
     #[test]
     fn a_released_slot_survives_a_waiter_that_never_claims() {
         // Reproduces the slot-leak race deterministically: a freed slot must land in the pool, not be
@@ -235,6 +237,7 @@ mod tests {
         );
     }
 
+    /// A slot freed with nobody waiting on it lets the next acquire proceed without waiting.
     #[tokio::test]
     async fn a_freed_slot_with_no_waiters_returns_to_the_pool() {
         let sched = Arc::new(Scheduler::new(1, 8));
@@ -245,6 +248,7 @@ mod tests {
         assert_eq!(sched.waiting(), 0);
     }
 
+    /// A second connection acquire blocks until the first one is dropped.
     #[tokio::test]
     async fn connection_permits_bound_concurrency() {
         let sched = Scheduler::new(4, 1);

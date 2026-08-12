@@ -14,8 +14,9 @@ use crate::ranges::RangePacking;
 /// One source patch a [`HttpRangeSource`] can fetch ranges of, keyed by its position in the chain:
 /// `sources[i]` serves `PatchId(i)`, matching [`apogee_zipatch::Index::source_refs`] order.
 ///
-/// `#[non_exhaustive]` and built only through [`new`](Self::new): a per-source input added later
-/// widens the constructor rather than breaking every literal built elsewhere.
+/// `#[non_exhaustive]`: built through [`new`](Self::new) and read through its public fields, so a
+/// per-source input added later widens the constructor rather than breaking every literal built
+/// elsewhere.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HttpSource {
@@ -100,9 +101,10 @@ impl HttpRangeSource {
 
     /// Watch `cancel` while fetching, so repair driven through this adapter is interruptible
     /// mid-transfer rather than only between the planner's requests. A cancelled fetch surfaces to
-    /// the planner as an i/o read fault, ending the repair with an error; there is no progress
-    /// counterpart, since only the repair planner's own callback knows what a delivered span means to
-    /// the file it is mending. Default: a token nothing cancels.
+    /// the planner as an i/o read fault (the seam's taxonomy has no cancel of its own), ending the
+    /// repair with an error; there is no progress counterpart, since only the repair planner's own
+    /// callback knows what a delivered span means to the file it is mending. Default: a token nothing
+    /// cancels.
     #[must_use]
     pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
@@ -114,11 +116,17 @@ impl apogee_zipatch::RangeSource for HttpRangeSource {
     /// Fetches `ranges` of `sources[patch.0]` over HTTP, driving the fetch to completion on the
     /// calling thread via `Handle::block_on`.
     ///
+    /// # Errors
+    ///
+    /// Returns [`apogee_zipatch::Error::Corrupt`] for an out-of-range `PatchId`, or for a malformed
+    /// range response reported by the transport. Any other transport failure surfaces as
+    /// [`apogee_zipatch::Error::Io`].
+    ///
     /// # Panics
     ///
-    /// Panics if called from inside the async runtime `handle` belongs to. Drive
-    /// [`apogee_zipatch::Index::repair`] from `tokio::task::spawn_blocking` or a dedicated thread,
-    /// never directly inside an async task.
+    /// Panics if called from inside any asynchronous execution context, not only the runtime
+    /// `handle` belongs to (`Handle::block_on`'s contract). Drive [`apogee_zipatch::Index::repair`]
+    /// from `tokio::task::spawn_blocking` or a dedicated thread, never directly inside an async task.
     fn read_ranges(
         &mut self,
         patch: apogee_zipatch::PatchId,
@@ -167,11 +175,11 @@ fn sink_abort() -> FetchError {
     }
 }
 
-// A hard error here tells `Index::repair` the source is broken; its own retry policy owns recovery
-// from there.
 /// Maps a transport failure to the zipatch error taxonomy: a malformed range response is corrupt
 /// source data, everything else an i/o read fault.
 fn fetch_to_zipatch(err: &FetchError) -> apogee_zipatch::Error {
+    // A hard error here tells `Index::repair` the source is broken; its own retry policy owns
+    // recovery from there.
     match err {
         FetchError::MalformedRangeResponse { detail, .. } => {
             apogee_zipatch::Error::Corrupt { offset: 0, detail }

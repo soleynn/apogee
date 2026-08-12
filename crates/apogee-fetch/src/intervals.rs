@@ -1,9 +1,9 @@
-//! A coalesced set of half-open `[start, end)` byte intervals, used to track which byte ranges of a
-//! download are durably on disk.
+//! A coalesced set of half-open `[start, end)` byte intervals.
 //!
-//! A single-connection download grows one prefix `[0, watermark)`; a segmented download completes
-//! ranges out of order, so the set coalesces overlapping and adjacent runs into the minimal cover.
-//! [`IntervalSet::complement`] turns that cover into the gaps a resume must still fetch.
+//! Used to track which byte ranges of a download are durably on disk. A single-connection download
+//! grows one prefix `[0, watermark)`; a segmented download completes ranges out of order, so the set
+//! coalesces overlapping and adjacent runs into the minimal cover. [`IntervalSet::complement`] turns
+//! that cover into the gaps a resume must still fetch.
 
 use std::ops::Range;
 
@@ -15,6 +15,7 @@ pub(crate) struct IntervalSet {
 }
 
 impl IntervalSet {
+    /// An empty set.
     pub(crate) fn new() -> Self {
         Self { runs: Vec::new() }
     }
@@ -44,7 +45,8 @@ impl IntervalSet {
     /// and drops a fully-covered run. An empty or reversed range is ignored.
     ///
     /// Backs a dirty block's clear-and-re-fetch, so `covered_len` drops by exactly the removed
-    /// coverage.
+    /// coverage. The runs stay sorted, disjoint, and non-adjacent (each remainder lies within its
+    /// original run's bounds), so this is the one mutator that does not need to call `coalesce`.
     pub(crate) fn remove(&mut self, start: u64, end: u64) {
         if start >= end {
             return;
@@ -143,6 +145,7 @@ impl IntervalSet {
 mod tests {
     use super::*;
 
+    /// Adjacent and overlapping inserts merge into one run.
     #[test]
     fn insert_coalesces_adjacent_and_overlapping() {
         let mut s = IntervalSet::new();
@@ -154,6 +157,7 @@ mod tests {
         assert_eq!(s.leading_end(), 25);
     }
 
+    /// Inserts with a gap between them stay as separate runs.
     #[test]
     fn insert_keeps_disjoint_runs_separate() {
         let mut s = IntervalSet::new();
@@ -164,6 +168,7 @@ mod tests {
         assert_eq!(s.leading_end(), 10);
     }
 
+    /// Inserting runs out of order still coalesces once the gap between them fills in.
     #[test]
     fn out_of_order_inserts_merge_the_gap() {
         let mut s = IntervalSet::new();
@@ -174,6 +179,7 @@ mod tests {
         assert_eq!(s.leading_end(), 30);
     }
 
+    /// An empty or reversed range is a no-op insert.
     #[test]
     fn empty_or_reversed_inserts_are_ignored() {
         let mut s = IntervalSet::new();
@@ -183,6 +189,7 @@ mod tests {
         assert_eq!(s.leading_end(), 0);
     }
 
+    /// The complement of several runs is exactly the gaps between and around them.
     #[test]
     fn complement_reports_the_gaps() {
         let mut s = IntervalSet::new();
@@ -191,6 +198,7 @@ mod tests {
         assert_eq!(s.complement(40), vec![10..20, 30..40]);
     }
 
+    /// A single leading run's complement is just the trailing gap.
     #[test]
     fn complement_of_a_full_prefix_is_the_tail() {
         let mut s = IntervalSet::new();
@@ -198,6 +206,7 @@ mod tests {
         assert_eq!(s.complement(100), vec![25..100]);
     }
 
+    /// A set covering the whole range has no complement.
     #[test]
     fn complement_of_a_full_cover_is_empty() {
         let mut s = IntervalSet::new();
@@ -205,6 +214,7 @@ mod tests {
         assert!(s.complement(100).is_empty());
     }
 
+    /// A run extending past `total` is clamped, not read as covering more than the file.
     #[test]
     fn complement_clamps_runs_past_total() {
         let mut s = IntervalSet::new();
@@ -212,6 +222,7 @@ mod tests {
         assert!(s.complement(100).is_empty());
     }
 
+    /// `leading_end` is 0 when byte 0 itself is uncovered, even with later runs present.
     #[test]
     fn leading_end_is_zero_when_zero_is_uncovered() {
         let mut s = IntervalSet::new();
@@ -220,6 +231,7 @@ mod tests {
         assert_eq!(s.complement(20), vec![0..10]);
     }
 
+    /// `from_runs` sorts and coalesces unsorted, overlapping input in one pass.
     #[test]
     fn from_runs_coalesces_unsorted_input() {
         let s = IntervalSet::from_runs(vec![20..30, 0..10, 5..25, 40..40]);
@@ -227,6 +239,7 @@ mod tests {
         assert_eq!(s.covered_len(), 30);
     }
 
+    /// Removing a middle span out of one run splits it into two.
     #[test]
     fn remove_splits_a_straddling_run_in_two() {
         let mut s = IntervalSet::new();
@@ -237,6 +250,7 @@ mod tests {
         assert_eq!(s.covered_len(), 80);
     }
 
+    /// Removing a span overlapping just one edge of a run trims that edge.
     #[test]
     fn remove_trims_a_partial_overlap_on_either_side() {
         let mut s = IntervalSet::new();
@@ -248,6 +262,7 @@ mod tests {
         assert_eq!(s.covered_len(), 20);
     }
 
+    /// A remove spanning several runs drops the one fully inside it and trims the outer two.
     #[test]
     fn remove_drops_a_fully_covered_run_and_spans_several() {
         let mut s = IntervalSet::from_runs(vec![0..10, 20..30, 40..50]);
@@ -257,6 +272,7 @@ mod tests {
         assert_eq!(s.complement(50), vec![5..45]);
     }
 
+    /// Removing a range that touches no existing run is a no-op.
     #[test]
     fn remove_of_a_disjoint_range_is_a_no_op() {
         let mut s = IntervalSet::new();
@@ -266,6 +282,7 @@ mod tests {
         assert_eq!(s.covered_len(), 10);
     }
 
+    /// Inserting a bridging span and then removing the same span restores the original set exactly.
     #[test]
     fn insert_then_remove_the_same_range_restores_the_set() {
         let mut s = IntervalSet::new();
@@ -277,6 +294,7 @@ mod tests {
         assert_eq!(s, before);
     }
 
+    /// An empty or reversed range is a no-op remove.
     #[test]
     fn empty_or_reversed_removes_are_ignored() {
         let mut s = IntervalSet::new();
@@ -286,6 +304,7 @@ mod tests {
         assert_eq!(s.covered_len(), 20);
     }
 
+    /// `covers` is true only when the whole queried range lies in one run, never spanning a gap.
     #[test]
     fn covers_is_true_only_within_a_single_run() {
         let mut s = IntervalSet::new();

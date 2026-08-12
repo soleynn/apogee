@@ -44,7 +44,8 @@ use crate::spec::DownloadSpec;
 use crate::validator::{Validator, VerifiedFile};
 
 /// What a download must prove before it publishes: a whole-file digest, a per-block SHA1 map, or
-/// nothing. Built by [`plan`] from the spec's [`Validator`].
+/// nothing. Built by [`plan`] from the spec's [`Validator`] and threaded through both engines, so the
+/// two never disagree about what "verified" means.
 pub(crate) struct Verify {
     // Both `Sha256` and `Blake3` digests are 32 bytes wide, so the expected bytes alone can't say
     // which function produced them; the tag has to travel with the digest.
@@ -52,8 +53,10 @@ pub(crate) struct Verify {
     pub(crate) blocks: Option<Arc<BlockPlan>>,
 }
 
-/// Bytes streamed between `fsync` + journal-commit points, and the write-buffer size: bounds how much
-/// a kill can cost (a resume re-fetches at most this much) against per-batch write/fsync overhead.
+/// Bytes streamed between `fsync` + journal-commit points, and the write-buffer size.
+///
+/// Bounds how much a kill can cost (a resume re-fetches at most this much) against per-batch
+/// write/fsync overhead.
 const BATCH: u64 = 1024 * 1024;
 /// The buffer size for reading a file back to hash it (resume re-seed, existing-dest verification).
 const READ_CHUNK: usize = 64 * 1024;
@@ -349,12 +352,16 @@ pub(crate) async fn run(
 /// A usable response and which source answered it: `0` for the primary, higher for a mirror.
 struct Attempt {
     resp: reqwest::Response,
+    /// `0` for the primary, higher for the mirror the rotation stepped onto. The caller needs it to
+    /// decide what may be recorded from the response: the journal's identity and a conditional
+    /// range's validator are the primary's alone.
     source: usize,
 }
 
-/// The `.part` being written and everything that must move with it on a resume: its handle, running
-/// hash, journal, resume offset, and validator. Grouped because [`reset_to_zero`] moves all of it
-/// together, never one piece without the rest.
+/// The `.part` being written and everything that must move with it on a resume.
+///
+/// Its handle, running hash, journal, resume offset, and validator. Grouped because
+/// [`reset_to_zero`] moves all of it together, never one piece without the rest.
 struct Partial<'a> {
     path: &'a Path,
     file: &'a mut tokio::fs::File,
@@ -379,8 +386,10 @@ fn conditional(resp: &reqwest::Response, source: usize) -> Option<Conditional> {
         .map(|value| Conditional { source, value })
 }
 
-/// The failure to report once the attempt budget is spent: [`FetchError::AllSourcesFailed`] when
-/// `sources` holds mirrors (failover itself was exhausted), else `last` verbatim.
+/// The failure to report once the attempt budget is spent.
+///
+/// [`FetchError::AllSourcesFailed`] when `sources` holds mirrors (failover itself was exhausted),
+/// else `last` verbatim.
 fn exhausted(sources: &[Url], attempts: u32, at_bytes: u64, last: FetchError) -> FetchError {
     match sources {
         [primary, _, ..] => FetchError::AllSourcesFailed {
@@ -396,8 +405,11 @@ fn exhausted(sources: &[Url], attempts: u32, at_bytes: u64, last: FetchError) ->
 /// Where one body attempt starts, the transfer's total length once known, and the shared progress
 /// high-water mark.
 struct Cursor<'a> {
+    /// The offset this response's body lands at.
     start: u64,
+    /// The transfer's total length, once the server or the caller has named one.
     total: Option<u64>,
+    /// The high-water mark progress events are clamped to, shared across attempts.
     high: &'a mut u64,
 }
 
@@ -411,10 +423,12 @@ enum Outcome {
 }
 
 /// Stream one response body into the `.part`, hashing as it goes, in `BATCH`-sized batches: one write
-/// and one `fsync` + journal-commit per batch rather than per chunk. A mid-body error or inactivity
-/// timeout commits the current batch first, so an [`Outcome::Interrupted`] watermark is always durable.
+/// and one `fsync` + journal-commit per batch rather than per chunk. Hashing reads the arriving
+/// chunk, so it is unaffected by the buffering. A mid-body error or inactivity timeout commits the
+/// current batch first, so an [`Outcome::Interrupted`] watermark is always durable.
 ///
 /// # Errors
+///
 /// [`FetchError::Cancelled`] if `cancel` fires, or [`FetchError::Io`] if the `.part` or its journal
 /// cannot be written. A transport failure is not an error here: [`Outcome::Interrupted`] reports it to
 /// the caller as an outcome to retry instead.
@@ -521,7 +535,12 @@ async fn stream_body(
 /// re-queue follows. The choice is a pure function of `attempts`, which only the failure paths
 /// advance, so rotating never adds a try the attempt budget has not already paid for.
 ///
+/// A `200` where a range was asked for is read the same way whichever source sent it: restart from
+/// zero and stream the whole body. This engine wants a whole body, so a range-ignoring source is
+/// merely a source that starts over here, not the capability failure it is to the segmented engine.
+///
 /// # Errors
+///
 /// [`FetchError::Http`] for a fatal status, [`FetchError::AllSourcesFailed`] once a transfer with
 /// mirrors exhausts its budget across them (the last source's own failure when there are none),
 /// [`FetchError::Connect`] if the last attempt could not reach the host, [`FetchError::Stalled`] if it
@@ -761,7 +780,9 @@ async fn flush_and_commit(
 }
 
 /// The request fingerprint shared by both engines: source, declared length, and validator digest.
-/// `etag`/`last_modified` start empty; the segmented engine fills them in from its own probe.
+/// `etag`/`last_modified` start empty; the segmented engine fills them in from its own probe. Keeping
+/// this in one place means a new fingerprint field cannot be set in one engine and forgotten in the
+/// other.
 pub(crate) fn base_identity(spec: &DownloadSpec, expected_len: Option<u64>) -> Identity {
     Identity {
         url: spec.url().as_str().to_owned(),

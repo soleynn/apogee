@@ -1,10 +1,14 @@
-//! Per-request HTTP header policy, applied per request rather than on the shared client so one
-//! download's headers never leak onto another's transfer.
+//! Per-request HTTP header policy.
+//!
+//! Applied per request rather than on the shared client, so one download's headers never leak onto
+//! another's transfer.
 
 use reqwest::RequestBuilder;
 use reqwest::header::USER_AGENT;
 
+/// The `User-Agent` Square Enix's patch delivery expects on every patch request.
 const SE_PATCH_USER_AGENT: &str = "FFXIV PATCH CLIENT";
+/// The session-scoped patch identifier a game-patch request may carry.
 const X_PATCH_UNIQUE_ID: &str = "X-Patch-Unique-Id";
 
 /// How a download's requests are decorated with HTTP headers, selected on
@@ -18,9 +22,9 @@ const X_PATCH_UNIQUE_ID: &str = "X-Patch-Unique-Id";
 pub enum HeaderPolicy {
     /// Square Enix patch delivery: `User-Agent: FFXIV PATCH CLIENT`, plus the session's
     /// `X-Patch-Unique-Id` when one is supplied (game patches carry it; boot patches do not).
-    /// Constructed only through [`se_patch`](Self::se_patch): the field list is `#[non_exhaustive]`,
-    /// so a later header input widens the constructor rather than breaking every literal built
-    /// elsewhere.
+    /// Constructed only through [`se_patch`](Self::se_patch): its field list is separately
+    /// `#[non_exhaustive]`, so a later header input can widen it without a breaking change (the
+    /// enum's own `#[non_exhaustive]` already rules out an external literal).
     #[non_exhaustive]
     SePatch {
         /// The session's `X-Patch-Unique-Id`; `None` for a boot patch, which carries none.

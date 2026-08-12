@@ -14,7 +14,8 @@
 //! download from zero. Neither reaches a caller.
 //!
 //! Both enums are `#[non_exhaustive]`, so matching either needs a `_` arm; [`Validator`](crate::Validator)
-//! is open for the same reason. The transient cases are listed positively in
+//! is open for the same reason: a failure shape a server has not shown us yet earns a variant rather
+//! than widening an existing one into vagueness. The transient cases are listed positively in
 //! [`FetchError::is_transient`], so `_` there reads as "permanent, do not retry": a variant added later
 //! cannot become a retry loop by default.
 //!
@@ -23,7 +24,7 @@
 //! variants consumers build directly or take apart field by field ([`FetchError::Io`],
 //! [`FetchError::LengthMismatch`], [`FetchError::FileVerifyFailed`], [`FetchError::BlockVerifyFailed`],
 //! and the field-less [`FetchError::Cancelled`]) stay open instead: their field lists are the
-//! commitment.
+//! commitment, because a sealed struct variant cannot be built outside this crate at all.
 
 use std::path::PathBuf;
 
@@ -161,6 +162,9 @@ pub enum FetchError {
     },
 
     /// The source changed underneath an in-flight resume in a way the transfer could not absorb.
+    /// The `If-Range` value that went stale rides the tracing event beside this rather than a field
+    /// here, to keep the variant inside clippy's `result_large_err` budget; the seal means it can
+    /// still move in later without a major version.
     #[error("server file changed mid-resume for {url}: {detail}")]
     #[non_exhaustive]
     ServerFileChanged {
@@ -210,9 +214,10 @@ pub enum FetchError {
         source: std::io::Error,
     },
 
-    /// A multi-range response could not be parsed or did not answer what was asked: a malformed
-    /// `multipart/byteranges` body, a part whose `Content-Range` fell outside the requested ranges, or
-    /// a boundary the `Content-Type` never declared.
+    /// A multi-range response could not be parsed or did not answer what was asked.
+    ///
+    /// Three shapes: a malformed `multipart/byteranges` body, a part whose `Content-Range` fell
+    /// outside the requested ranges, or a boundary the `Content-Type` never declared.
     #[error("malformed range response for {url}: {detail}")]
     #[non_exhaustive]
     MalformedRangeResponse {
@@ -222,9 +227,14 @@ pub enum FetchError {
         detail: &'static str,
     },
 
-    /// A source shape the streaming path cannot handle: the multi-range transport, or a block
-    /// validator that reached the engine without a declared length (the spec builder normally rejects
-    /// that first).
+    /// A request shape this call cannot serve.
+    ///
+    /// Two triggers: an externally-verified [`Validator::External`](crate::Validator::External) spec
+    /// routed to the wrong entry point ([`Fetcher::download`](crate::Fetcher::download),
+    /// [`Fetcher::download_external`](crate::Fetcher::download_external), and
+    /// [`Fetcher::submit`](crate::Fetcher::submit) each refuse the other's validator), or a
+    /// [`Validator::BlockSha1`](crate::Validator::BlockSha1) spec that reached the engine without a
+    /// declared length (the spec builder normally rejects that first).
     #[error("unsupported: {what}")]
     #[non_exhaustive]
     Unsupported {
@@ -259,10 +269,16 @@ pub enum FetchError {
 }
 
 impl FetchError {
-    /// Whether asking again could succeed: the network faults, plus an [`Http`](FetchError::Http)
-    /// status in the crate's own retryable set, plus [`ServerFileChanged`](FetchError::ServerFileChanged)
-    /// (raised only after the journal is deleted, so what it asks for is a clean restart). Everything
-    /// else, `_` included, is permanent.
+    /// Whether asking again could succeed.
+    ///
+    /// True for the network faults, plus an [`Http`](FetchError::Http) status in the crate's own
+    /// retryable set (`408`, `429`, `500`, `502`, `503`, `504`), plus
+    /// [`ServerFileChanged`](FetchError::ServerFileChanged) (raised only after the journal is
+    /// deleted, so what it asks for is a clean restart). Everything else, `_` included, is permanent.
+    ///
+    /// A transfer with a single source hands a retryable status back verbatim once its own retry
+    /// budget is spent, so a caller reading the variant alone can stop on a throttling `503` that a
+    /// longer pause would have cleared.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
@@ -276,6 +292,8 @@ impl FetchError {
         }
     }
 
+    /// Build an [`Io`](FetchError::Io) at `path`, the single tidy build site for the crate's
+    /// filesystem failures.
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
             path: path.into(),
@@ -292,6 +310,7 @@ impl FetchError {
     /// covering it if a later variant carried `StorageFull` too.
     ///
     /// # Errors
+    ///
     /// The failure itself, unchanged, when it is not a full disk.
     ///
     /// # Examples
@@ -330,6 +349,7 @@ mod tests {
 
     use super::*;
 
+    /// A bare `io::Error` of `kind`, for the variants that carry one.
     fn io(kind: ErrorKind) -> std::io::Error {
         std::io::Error::from(kind)
     }
@@ -484,10 +504,12 @@ mod tests {
         }
     }
 
+    /// A `FetchError::Io` at a fixed `.part`, for the disk-full routing tests below.
     fn io_failure(kind: ErrorKind) -> FetchError {
         FetchError::io("/dest/out.part", io(kind))
     }
 
+    /// A disk-full `Io` yields the same path and `StorageFull` kind it carried in.
     #[test]
     fn a_disk_full_io_failure_yields_its_path_and_kind() {
         let (path, source) = io_failure(std::io::ErrorKind::StorageFull)
@@ -498,6 +520,8 @@ mod tests {
         assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
     }
 
+    /// Permission and not-found faults at the same path are handed back whole, not mistaken for a
+    /// full disk.
     #[test]
     fn another_io_failure_at_the_same_path_is_not_a_full_disk() {
         // The path alone cannot be the signal: the same `.part` raises permission and not-found
@@ -516,6 +540,8 @@ mod tests {
         }
     }
 
+    /// A `StorageFull` riding inside `Transport` or `Internal` is not read as a full disk: only `Io`
+    /// is.
     #[test]
     fn a_transport_failure_carrying_an_io_error_is_not_a_full_disk() {
         // Connect/Transport/Internal wrap an `io::Error` of their own, so a caller matching on "has
