@@ -47,6 +47,17 @@ done
 bad=$(deps_of sqex-proto | grep -xiE 'regex|regex-.*|scraper|html5ever|select|kuchiki|tl|lol_html' || true)
 [ -z "$bad" ] || report "sqex-proto pulled in a regex/HTML-parser dependency" "$bad"
 
+# 4a. Network never crosses the privilege boundary. The elevated worker applies local files the
+#    unprivileged launcher already fetched; it has no transfer of its own, and the shortest honest
+#    statement of that is a dependency graph with nothing in it that can open a socket to a host.
+#    Asserted off the resolver rather than the manifest, because the manifest of the one crate says
+#    nothing about what its dependencies drag in, and because this crate's own tests dev-depend on
+#    the launcher side: those edges put an HTTP client one `-e normal` away, so the resolved normal
+#    graph is the only thing that distinguishes "cannot reach it" from "does not name it".
+reachable=$(cargo tree -p apogee-elevated -e normal --prefix none -f '{p}' | awk '{print $1}' | sort -u)
+bad=$(grep -xiE 'reqwest|hyper|hyper-util|h2|http|http-body|http-body-util|url|rustls|tokio-rustls|native-tls|openssl|apogee-fetch|apogee-patcher|apogee-core' <<<"$reachable" || true)
+[ -z "$bad" ] || report "the privileged worker can reach the network" "$bad"
+
 # 5. No presentation below the shell: the composition root carries no user-facing string constants
 #    (it emits typed codes, and the shell localizes them), and no library writes to the terminal.
 hits=$(grep -rnE '^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[^=]*\bstr\b' \

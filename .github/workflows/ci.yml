@@ -387,6 +387,54 @@ jobs:
       - run: cargo test -p apogee-secrets --features mock --lib
       - run: cargo test -p apogee-secrets --features testing --test windows_credentials -- --test-threads=1
 
+  # The elevated patch worker, on the only platform it exists for. Nothing else in this file can
+  # reach it: the writability probe needs a real access-control entry, the transport is a named pipe,
+  # and the anti-crash test needs a real process to terminate. `build-windows-cross` does not stand
+  # in for any of that, and its `cargo build` never type-checks a Windows-only test target either.
+  #
+  # Three packages rather than the workspace, on purpose. Other crates carry Windows test targets
+  # that do not compile today, which is the gap that same `cargo build` has been hiding; fixing them
+  # is not this change's to do, and widening the job would only mean pinning that breakage here.
+  #
+  # No ABI matrix. The elevation path reaches no foreign function, links no artifact and loads no
+  # library, so there is nothing in it that a GNU build would exercise differently from an MSVC one;
+  # `build-windows-cross` already compiles it for the GNU ABI. A matrix here would run one axis
+  # twice.
+  #
+  # What this job cannot prove, and what no hosted runner can: the agent already holds an
+  # administrator token, so an elevation request is granted with no consent dialog and no integrity
+  # transition. The plumbing around the hop is covered; the moment a user actually sees is not.
+  #
+  # Advisory, like the credential-store jobs: the branch ruleset's required contexts are fixed, and
+  # promoting one is a separate change.
+  test-windows-elevated-worker:
+    name: test-windows-elevated-worker
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: windows-elevated-worker
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # First: the type check no other job performs. `--all-targets` is the whole point.
+      - run: cargo clippy -p apogee-elevate -p apogee-elevated -p apogee-patcher --all-targets -- -D warnings
+      - run: cargo test -p apogee-elevate
+      # The shipping worker binary driven as a real process against a real NT filesystem: the
+      # protocol, the re-verification, the confinement, the named pipe, the elevation request, a
+      # cancel mid-apply, and a kill mid-apply that must leave this process running and the version
+      # file where it was.
+      - run: cargo test -p apogee-elevated
+      # The probe against a directory `icacls` genuinely denies, plus the unit tests either side of
+      # it. The crate's other integration targets are Linux-proven and add no Windows-specific claim.
+      - run: cargo test -p apogee-patcher --lib --test write_probe_windows
+
   # The Apple targets the crate declares support for, type-checked. There is no hardware for them
   # anywhere in this repository and no cross-compiler either: the Keychain backend links system
   # frameworks, so `build-windows-cross`'s trick does not carry over. Checking does, and it is what
