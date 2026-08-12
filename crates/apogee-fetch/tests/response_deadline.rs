@@ -1,11 +1,12 @@
-//! A source that takes the request and never answers it.
+//! A source that takes the request and never answers it: no status line at all.
 //!
-//! Every other silence these tests' fixtures can produce starts a body first, so the transfer already
-//! holds a status, a length and a stream to poll, and the no-progress timeout runs on that stream.
+//! Every other silence these fixtures can produce starts a body first, so the transfer already holds
+//! a status, a length, and a stream to poll, and the no-progress timeout runs against that stream.
 //! Withholding the response leaves nothing to poll: the connection is up, the request is delivered,
-//! and the engine sits inside one `send`. Each path below used to park there for as long as the
-//! kernel kept the socket, spending no attempt and raising no error, so the outer `timeout` on each
-//! test is the assertion that matters most - a regression here is a hang, not a wrong answer.
+//! and the engine sits inside one `send`. This used to park there for as long as the kernel held the
+//! socket, spending no attempt and raising no error. The outer `timeout` wrapped around each test
+//! below is therefore the assertion that matters most: a regression here is a hang, not a wrong
+//! value.
 
 use std::error::Error;
 use std::time::Duration;

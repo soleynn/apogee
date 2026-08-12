@@ -1,26 +1,27 @@
-//! Eager file preallocation.
+//! Eager `.part` file preallocation.
 //!
-//! Both engines reserve their `.part` to its full length up front, for the two reasons that overlap
-//! here. A segmented download must: it writes at scattered offsets into one file. Either may: with
-//! the blocks reserved, a doomed transfer fails on a full disk here, before any payload streams,
-//! rather than mid-way through gigabytes. The lengths reach this from different places, the caller's
-//! declaration on the segmented path and the first response's `Content-Length` on the streaming one,
-//! and a transfer with no length at all skips the reservation rather than guessing.
+//! Both download engines reserve their `.part` file to its full length before any payload streams.
+//! A segmented download must: it writes at scattered offsets into one file. Either benefits: with the
+//! blocks reserved, a doomed transfer fails on a full disk immediately, rather than mid-way through
+//! gigabytes. The length comes from wherever each engine already has it: the caller's declared length
+//! on the segmented path, the first response's `Content-Length` on the streaming path; a transfer
+//! with no length at all skips the reservation rather than guessing one.
 //!
-//! On a filesystem without `fallocate` support the length is still set (a sparse file), trading eager
-//! disk-full detection for portability while keeping correctness.
+//! On a filesystem without `fallocate` support, the length is still set on a sparse file: eager
+//! disk-full detection is lost, but correctness is not.
 
 use std::path::Path;
 
 use crate::error::FetchError;
 
 /// Preallocate `path` to `len` bytes, reserving the blocks. Idempotent: an existing shorter file is
-/// extended, a full-length one is left as is. `len == 0` just ensures the file exists. The blocking
-/// syscalls run on a blocking-pool thread.
+/// extended, a full-length one is left as is, and `len == 0` just ensures the file exists. Runs the
+/// blocking syscalls on a blocking-pool thread.
 ///
 /// # Errors
-/// [`FetchError::Io`] carrying the underlying [`std::io::Error`], whose `kind()` distinguishes
-/// disk-full from other failures.
+///
+/// Returns [`FetchError::Io`] carrying the underlying [`std::io::Error`], whose `kind()`
+/// distinguishes disk-full from other failures.
 pub(crate) async fn preallocate(path: &Path, len: u64) -> Result<(), FetchError> {
     let owned = path.to_owned();
     let joined = tokio::task::spawn_blocking(move || preallocate_blocking(&owned, len)).await;
@@ -69,6 +70,7 @@ fn preallocate_blocking(path: &Path, len: u64) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A fresh file is preallocated to exactly the requested length.
     #[tokio::test]
     async fn preallocates_to_the_requested_length() {
         let dir = tempfile::tempdir().unwrap();
@@ -77,6 +79,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 4096);
     }
 
+    /// A second call at the same length leaves an already-preallocated file intact.
     #[tokio::test]
     async fn is_idempotent_and_never_shrinks() {
         let dir = tempfile::tempdir().unwrap();
@@ -87,6 +90,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8192);
     }
 
+    /// A zero length still ensures the file exists, rather than being a no-op.
     #[tokio::test]
     async fn zero_length_just_creates_the_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -95,6 +99,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
     }
 
+    /// A parent directory that does not exist surfaces as `FetchError::Io`, not a panic.
     #[tokio::test]
     async fn a_failure_to_open_is_a_typed_io_error() {
         // A parent that does not exist makes the open fail; the error is surfaced as FetchError::Io,
@@ -105,13 +110,14 @@ mod tests {
         assert!(matches!(err, FetchError::Io { .. }));
     }
 
-    /// A length the filesystem cannot hold fails as disk-full specifically, and reserves nothing.
+    /// A length past the filesystem's capacity fails as disk-full specifically, and reserves no
+    /// blocks.
     ///
     /// Both halves are the claim: `FetchError::Io` alone would also be satisfied by a permission
     /// fault or by the `EFBIG` a request past the maximum file size returns, so the inner kind and
-    /// errno are what make disk-full distinguishable to a caller; the allocated-block count is what
-    /// makes it eager, since a filesystem that reserved its way to the failure would have consumed
-    /// the host's disk to reach the same error.
+    /// errno are what make disk-full distinguishable; the allocated-block count is what makes it
+    /// eager, since a filesystem that reserved its way to the failure would have consumed the host's
+    /// disk to reach the same error.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_length_past_the_filesystem_capacity_is_a_distinct_disk_full_error() {
@@ -145,12 +151,9 @@ mod tests {
     /// A filesystem with no reservation support falls back to a length set rather than failing.
     ///
     /// procfs is the one filesystem reachable without mounting one (which needs root) that refuses
-    /// `fallocate` the way the fallback arm expects: its files are regular files with no `fallocate`
-    /// operation, so the kernel answers `EOPNOTSUPP`. The direct call is part of the test rather than
-    /// an assumption, so a kernel that ever grew the operation fails here with a clear reason instead
-    /// of leaving the arm silently unexercised. `oom_score_adj` belongs to this process and ignores a
-    /// length set, which is also why the sparse-file half of the fallback's contract cannot be
-    /// asserted here: what is covered is that the refusal is swallowed, not that a file gets a length.
+    /// `fallocate` the way the fallback arm expects, verified directly here rather than assumed; this
+    /// only checks that the refusal is swallowed, not that the file actually gets the sparse length
+    /// set, since `/proc/self/oom_score_adj` ignores that write.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_filesystem_without_reservation_support_falls_back_to_a_length_set() {

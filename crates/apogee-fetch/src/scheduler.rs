@@ -1,8 +1,8 @@
 //! The job scheduler: bounded concurrency with priority admission.
 //!
-//! Two independent caps. A **job** admission gate bounds how many downloads run at once and, unlike a
+//! Two independent caps. A job admission gate bounds how many downloads run at once and, unlike a
 //! FIFO semaphore, admits a waiting higher-priority job (a boot patch) ahead of a lower one (game
-//! data, then optional assets) when a slot frees. A global **connection** semaphore bounds how many
+//! data, then optional assets) when a slot frees. A global connection semaphore bounds how many
 //! transfer requests are in flight across every job at once: one socket each against an HTTP/1.1
 //! source, and streams on that host's single connection against an h2 one, so what this cap holds
 //! steady is the request count rather than the socket count. One [`Scheduler`] is shared by every
@@ -55,8 +55,8 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    /// A scheduler admitting `max_files` jobs at once and `max_connections_total` concurrent transfer
-    /// requests across them.
+    /// A scheduler admitting `max_files` jobs at once and `max_connections_total` concurrent
+    /// transfer requests across them.
     pub(crate) fn new(max_files: usize, max_connections_total: usize) -> Self {
         Self {
             admission: Mutex::new(Admission {
@@ -100,8 +100,8 @@ impl Scheduler {
         Arc::clone(&self.connections).acquire_owned().await.ok()
     }
 
-    /// Return a freed slot to the pool and wake the highest-priority live waiter to claim it. The slot
-    /// is counted in `available` first, so a woken waiter that is then cancelled cannot lose it.
+    /// Return a freed slot to the pool and wake the highest-priority live waiter to claim it. The
+    /// slot is counted in `available` first, so a woken waiter that is then cancelled cannot lose it.
     fn release_job(&self) {
         let mut a = self.lock();
         a.available += 1;
@@ -170,6 +170,7 @@ mod tests {
 
     use super::*;
 
+    /// A freed slot goes to a waiting boot-priority job over an earlier-waiting normal one.
     #[tokio::test]
     async fn boot_preempts_normal_for_a_freed_slot() {
         let sched = Arc::new(Scheduler::new(1, 8));
@@ -212,6 +213,7 @@ mod tests {
         boot.abort();
     }
 
+    /// A slot freed while its woken waiter is cancelled before claiming still lands in the pool.
     #[test]
     fn a_released_slot_survives_a_waiter_that_never_claims() {
         // Reproduces the slot-leak race deterministically: a freed slot must land in the pool, not be
@@ -235,6 +237,7 @@ mod tests {
         );
     }
 
+    /// A slot freed with nobody waiting on it lets the next acquire proceed without waiting.
     #[tokio::test]
     async fn a_freed_slot_with_no_waiters_returns_to_the_pool() {
         let sched = Arc::new(Scheduler::new(1, 8));
@@ -245,6 +248,7 @@ mod tests {
         assert_eq!(sched.waiting(), 0);
     }
 
+    /// A second connection acquire blocks until the first one is dropped.
     #[tokio::test]
     async fn connection_permits_bound_concurrency() {
         let sched = Scheduler::new(4, 1);

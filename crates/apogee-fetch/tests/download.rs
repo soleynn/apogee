@@ -288,10 +288,10 @@ async fn an_existing_destination_is_returned_without_a_request() {
     );
 }
 
-/// The opt-out for the skip above, made for the unpinned download: with nothing to check an
-/// existing file against, a mutable artifact fetched to a fixed path would be served back forever.
-/// The sharpest proof available over a pinned spec is a destination that fully satisfies it, which
-/// the sibling test above shows is served back with zero requests; `overwrite` must ask the network
+/// The opt-out for the skip above, made for the unpinned download: with nothing to check an existing
+/// file against, a mutable artifact fetched to a fixed path would be served back forever. The
+/// sharpest proof available over a pinned spec is a destination that fully satisfies it, which the
+/// sibling test above shows is served back with zero requests; `overwrite` must ask the network
 /// anyway and land the answer through the same verify-then-publish path.
 #[tokio::test]
 async fn overwrite_refetches_an_existing_destination() {

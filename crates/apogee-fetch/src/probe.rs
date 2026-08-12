@@ -1,18 +1,19 @@
 //! Per-host range-capability probing and its session cache.
 //!
-//! Segmentation needs the server to honor `Range`. The first ranged request to a host reveals this:
-//! a `206 Partial Content` means ranges work and the transfer can fan out; a `200` (the range
-//! ignored, whole body returned) demotes the job to a single streaming connection, correct but
-//! slower. The verdict is cached per `host:port` for the session, so later jobs to the same host skip
-//! the probe.
+//! The first ranged request to a host reveals whether it honors `Range`: a `206` means the transfer
+//! can segment across connections, a `200` (the range ignored) demotes it to a single connection,
+//! correct but slower. The verdict is cached per `host:port` for the session, so later jobs to the
+//! same host skip the probe.
 //!
-//! Probing rather than assuming is also what absorbs a forward proxy, which these transfers run
-//! through whenever `HTTP_PROXY` is set. A proxy that drops the `Range` on the way out, or strips
-//! `Content-Range` and rewrites the `206` to a `200` on the way back, is indistinguishable here from
-//! a server that ignores ranges, and it demotes down the same path: measured against both on
-//! 2026-08-10, a 64 MiB transfer arrived byte-identical on one connection instead of four. Nothing
-//! needs to detect the proxy, because the only thing worth knowing about it is what the probe
-//! already asks.
+//! Probing rather than assuming also absorbs a forward proxy transparently, which these transfers
+//! run through whenever `HTTP_PROXY` is set: one that drops the `Range` on the way out, or rewrites a
+//! `206` back to a `200` on the way back, looks identical here to a server that ignores ranges and
+//! demotes down the same path. Nothing needs to detect the proxy, because the only thing worth
+//! knowing about it is what the probe already asks.
+
+// Measured against both on 2026-08-10: a 64 MiB transfer through a range-stripping proxy arrived
+// byte-identical on one connection instead of four, the same demotion path an honest
+// range-ignoring server takes.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -29,8 +30,8 @@ pub(crate) enum Capability {
 }
 
 /// Classify a ranged probe response. Only `200`/`206` are expected here; any other status is a
-/// transport error handled before classification. A `206` proves the server served the requested
-/// range, so ranges are usable; anything else is treated as an ignored range.
+/// transport error handled before this is called. A `206` proves the range was served, so anything
+/// else is treated as ignored.
 pub(crate) fn classify(resp: &reqwest::Response) -> Capability {
     if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         Capability::Segmentable
@@ -93,16 +94,21 @@ mod tests {
         classify(&resp)
     }
 
+    /// A server that honors the probe's range is classified segmentable.
     #[tokio::test]
     async fn a_ranging_server_is_segmentable() {
         assert_eq!(probe_status(true).await, Capability::Segmentable);
     }
 
+    /// A server that ignores the probe's range and returns the whole body demotes to single
+    /// connection.
     #[tokio::test]
     async fn a_range_ignoring_server_is_single_connection() {
         assert_eq!(probe_status(false).await, Capability::SingleConnection);
     }
 
+    /// A verdict recorded for one URL is returned for any other URL on the same host and port, and
+    /// a different port misses.
     #[test]
     fn the_cache_round_trips_per_host() {
         let cache = CapabilityCache::default();

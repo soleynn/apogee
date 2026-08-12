@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
 //! Resumable, verified HTTP downloads.
 //!
 //! A download streams to a sidecar `.part` file, is checked against its [`Validator`], and is
@@ -8,11 +9,23 @@
 //! journal; progress is a stream of [`Progress`] events over a caller-owned channel, and cancellation
 //! is a single token.
 //!
-//! What a transfer had to recover from on the way (a retry, a stall, a dropped mirror, a demotion, a
-//! block re-fetched after a bad hash) rides the same events as [`Recoveries`], and each of those
-//! sites also emits a `tracing` event with the source, offset and cause behind it. None of them
-//! reaches the caller as an error, so without the two a transfer that fought for every byte and one
-//! that sailed through are indistinguishable.
+//! # Layout
+//!
+//! - [`Fetcher`] is the entry point: build one with [`Fetcher::builder`], then
+//!   [`Fetcher::download`] or [`Fetcher::submit`] a [`DownloadSpec`].
+//! - [`DownloadSpec`] describes one request; build it with [`DownloadSpec::builder`], which enforces
+//!   the safety rules a [`SpecError`] reports when broken.
+//! - [`Validator`] states how the bytes are checked; a passing check mints a [`VerifiedFile`], the
+//!   only way to name a downloaded file as trustworthy.
+//! - [`Progress`] and [`Recoveries`] are the two things every transfer reports: how far along, and
+//!   what it recovered from (a retry, a stall, a dropped mirror, a block re-fetched after a bad
+//!   hash) on the way there. Neither reaches the caller as an error, so without them a transfer that
+//!   fought for every byte and one that sailed through are indistinguishable.
+//! - [`Job`] is the handle [`Fetcher::submit`] returns for a transfer running on its own task.
+//! - [`HttpRangeSource`] and [`Fetcher::fetch_ranges`] are the scatter-gather primitive behind
+//!   repair.
+//! - [`RetryPolicy`], [`HeaderPolicy`], [`LimitHandle`], and [`Priority`] configure backoff, request
+//!   headers, a shared speed cap, and job ordering.
 //!
 //! # Stability
 //!
@@ -25,6 +38,39 @@
 //! variants this adapter constructs are part of this crate's public surface. A breaking change to
 //! that seam is a breaking change here: the two crates version together across it, and the seam's
 //! side of the commitment is recorded beside those items in `apogee-zipatch`.
+//!
+//! # Examples
+//!
+//! Building a request:
+//!
+//! ```
+//! use apogee_fetch::{DownloadSpec, Validator};
+//!
+//! let spec = DownloadSpec::builder(
+//!     "https://example.invalid/patch.zip".parse().unwrap(),
+//!     "/tmp/patch.zip",
+//!     Validator::Sha256([0; 32]),
+//! )
+//! .expected_len(1024)
+//! .build()
+//! .unwrap();
+//! assert_eq!(spec.expected_len(), Some(1024));
+//! ```
+//!
+//! Running it:
+//!
+//! ```
+//! # async fn demo(
+//! #     fetcher: &apogee_fetch::Fetcher,
+//! #     spec: &apogee_fetch::DownloadSpec,
+//! # ) -> Result<(), apogee_fetch::FetchError> {
+//! use tokio_util::sync::CancellationToken;
+//!
+//! let verified = fetcher.download(spec, None, CancellationToken::new()).await?;
+//! let _path = verified.path();
+//! # Ok(())
+//! # }
+//! ```
 
 mod block;
 mod download;

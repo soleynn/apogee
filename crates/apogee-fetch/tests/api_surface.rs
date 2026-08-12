@@ -1,14 +1,13 @@
-//! Pins the public API surface ahead of the version commitment: every public item, the exact
-//! signature of every public method, and the auto-traits consumers rely on.
+//! Pins the crate's public API surface: every public item, the exact signature of every public
+//! method, and the auto-traits consumers rely on.
 //!
-//! Signatures are pinned by coercing each method to a function pointer of its written-out type, so
-//! a changed parameter, return type, or receiver fails this compile rather than surfacing as a
-//! consumer break after the fact. Additive change (a new method, a new variant on a
-//! `#[non_exhaustive]` enum, a new field on a sealed variant) passes untouched, which is the point:
-//! only the commitments break.
+//! Signatures are pinned by coercing each method to a function pointer of its written-out type, so a
+//! changed parameter, return type, or receiver fails this compile rather than surfacing as a consumer
+//! break after the fact. Additive change (a new method, a new variant on a `#[non_exhaustive]` enum, a
+//! new field on a sealed variant) passes untouched, which is the point: only the commitments break.
 //!
-//! Async methods do not coerce to `fn` pointers, so each is pinned by a monomorphic wrapper whose
-//! own signature restates the method's; a drifted method fails to typecheck inside the wrapper.
+//! Async methods do not coerce to `fn` pointers, so each is pinned by a monomorphic wrapper whose own
+//! signature restates the method's; a drifted method fails to typecheck inside the wrapper.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};

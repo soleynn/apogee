@@ -1,5 +1,5 @@
-//! Property test: repeated interruptions converge to a byte-identical file, and every resume picks
-//! up where the last one left off instead of re-fetching what it had already banked.
+//! Property test: repeated interruptions converge to a byte-identical file, and every resume picks up
+//! where the last one left off instead of re-fetching what it had already banked.
 //!
 //! Each case interrupts a download at a random set of progress points, resumes from the journal after
 //! every interruption, and finally lets it complete. Two things must hold: the final file hashes to
