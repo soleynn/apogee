@@ -101,7 +101,11 @@ impl PatcherBackend {
         } else {
             None
         };
-        assemble_repair_request(plan, catalog.as_ref(), &cached_patch_sources(&self.patch_store))
+        assemble_repair_request(
+            plan,
+            catalog.as_ref(),
+            &cached_patch_sources(&self.patch_store),
+        )
     }
 }
 
@@ -439,8 +443,16 @@ mod tests {
         };
         let request = assemble_repair_request(plan, None, &[]).expect("no catalog is needed");
         assert_eq!(request.repos.len(), 2);
-        for (built, want) in request.repos.iter().zip(["/idx/boot.apzi", "/idx/game.apzi"]) {
-            assert_eq!(built.target_version, version(), "the cross-check target rides in");
+        for (built, want) in request
+            .repos
+            .iter()
+            .zip(["/idx/boot.apzi", "/idx/game.apzi"])
+        {
+            assert_eq!(
+                built.target_version,
+                version(),
+                "the cross-check target rides in"
+            );
             match &built.index {
                 IndexSource::LocalFile(path) => assert_eq!(path, &PathBuf::from(want)),
                 other => panic!("expected the local file, got {other:?}"),
@@ -609,7 +621,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CoreError::Patch(PatchError::VersionCrossCheck { repo: Repo::Game, .. })
+                CoreError::Patch(PatchError::VersionCrossCheck {
+                    repo: Repo::Game,
+                    ..
+                })
             ),
             "expected the typed cross-check error, got {err:?}"
         );

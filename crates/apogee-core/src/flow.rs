@@ -287,7 +287,9 @@ async fn repair(
             Some(plan) => plan.index_override = Some(path),
             None => {
                 return Err(CoreError::Repair {
-                    detail: format!("a local index was given for {repo:?}, but it is not installed"),
+                    detail: format!(
+                        "a local index was given for {repo:?}, but it is not installed"
+                    ),
                 });
             }
         }

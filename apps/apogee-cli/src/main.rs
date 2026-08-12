@@ -17,8 +17,9 @@ use apogee_core::{
     ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
     KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, Notice,
     OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile,
-    Recoveries, Region, Repo, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
-    SecretBackend, SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    Recoveries, Region, Repo, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
+    Secret, SecretBackend, SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger,
+    Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
