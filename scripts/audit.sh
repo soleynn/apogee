@@ -47,6 +47,23 @@ done
 bad=$(deps_of sqex-proto | grep -xiE 'regex|regex-.*|scraper|html5ever|select|kuchiki|tl|lol_html' || true)
 [ -z "$bad" ] || report "sqex-proto pulled in a regex/HTML-parser dependency" "$bad"
 
+# 4b. The signed catalogs are still the bytes they were signed as, and the checkout cannot rewrite
+#    them. Both are embedded with `include_bytes!` and verified against a compiled-in key, so a
+#    carriage return anywhere in one means the signature cannot verify in the binary that carries it.
+#    Two ways that happens: a checkout that converts line endings (which is the default on Windows,
+#    and is what `.gitattributes` now turns off), or a re-sign written out by an editor that added
+#    them. The first is a build nobody can verify on that platform; the second reaches every
+#    platform. Checked on the bytes rather than on the setting, because the setting is only half of
+#    it.
+grep -q '^\* -text$' .gitattributes 2>/dev/null \
+  || report "the checkout may rewrite line endings in byte-exact artifacts" \
+     ".gitattributes does not disable text conversion, so a Windows checkout corrupts the signed catalogs"
+for m in site/indexes/manifest.json site/components/manifest.json; do
+  [ -f "$m" ] || continue
+  ! grep -qU $'\r' "$m" || report "a signed manifest carries carriage returns" \
+    "$m cannot verify against the compiled-in key with these bytes"
+done
+
 # 4a. Network never crosses the privilege boundary. The elevated worker applies local files the
 #    unprivileged launcher already fetched; it has no transfer of its own, and the shortest honest
 #    statement of that is a dependency graph with nothing in it that can open a socket to a host.
