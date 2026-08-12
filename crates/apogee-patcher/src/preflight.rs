@@ -7,12 +7,11 @@
 //! through, at a moment that varies by which file the patch reached first. Asking beforehand is what
 //! makes the refusal say what to do about it.
 //!
-//! The space check is a heuristic with an escape hatch ([`PatcherConfig::ignore_space`], which
-//! covers space and nothing else) and a backstop. The patch store
-//! must hold the concurrent downloads (a rolling window, or all of them when kept); the install dir
-//! must hold the applied result, which patch length overestimates since patches both add and delete.
-//! A pool whose free space cannot be read (a non-existent tree, or a non-Unix target) is not blocked
-//! on.
+//! The space check is a heuristic with an escape hatch ([`PatcherConfig::ignore_space`], which covers
+//! space and nothing else) and a backstop. The patch store must hold the concurrent downloads (a
+//! rolling window, or all of them when kept); the install dir must hold the applied result, which
+//! patch length overestimates since patches both add and delete. A pool whose free space cannot be
+//! read (a non-existent tree, or a non-Unix target) is not blocked on.
 //!
 //! Two pools, but not always two filesystems: a patch store under the game root, or both under one
 //! home directory, is the ordinary arrangement. Pools that resolve onto the same mount are guarded
