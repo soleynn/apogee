@@ -2,16 +2,25 @@
 //!
 //! The halves are distinct and neither covers for the other, which is what these tests are for. The
 //! preflight is an estimate taken before any byte moves, it can be wrong in either direction, and
-//! [`PatcherConfig::ignore_space`] turns it off outright; the backstop is `apogee-fetch`'s eager
-//! preallocation, which observes the refusal itself. The case the estimate exists to catch and
-//! structurally cannot see is the disk filling mid-install, so a backstop that folds into
-//! "acquire failed" leaves a caller matching on the space arms seeing only the guess. The third test
-//! covers the estimate's own blind spot: two pools that turn out to be one filesystem.
+//! [`PatcherConfig::ignore_space`] turns it off outright; the observation is `apogee-fetch`'s eager
+//! preallocation, which sees the refusal itself. The case the estimate exists to catch and
+//! structurally cannot see is the disk filling mid-install, so an observation that folds into
+//! "acquire failed" leaves a caller matching on the space arms seeing only the guess.
+//!
+//! Both halves are covered per pool, because the two pools are not symmetric. The patch store is
+//! where fetch writes, so a bad estimate there is caught by the observation; the game root is where
+//! nothing but the apply writes, so its estimate is the only guard standing in front of it and is
+//! pinned on its own. On the observation side, the install's patch downloads and the repair's index
+//! download are separate fetches with separately written routing, and each has a plausible generic
+//! arm (`Acquire`, `IndexUnavailable`) to be swallowed by.
 //!
 //! The mechanism is the one `apogee-fetch`'s own `tests/disk_full.rs` uses, for the same safety
-//! reason: the pools sit on a memory-backed filesystem whose size is known and small, so a request
+//! reason: the pool under test sits on a memory-backed filesystem whose size is known, so a request
 //! past it is answered with `ENOSPC` without reserving a block. A disk-backed volume would instead
-//! allocate its way toward the request and take the host's free space with it.
+//! allocate its way toward the request and take the host's free space with it. That is also why the
+//! apply side has no test here: `apogee-zipatch`'s sink declares no length to be refused up front,
+//! it writes its way to the end of the volume, so injecting one would mean genuinely filling a
+//! filesystem this process does not own.
 
 #![cfg(target_os = "linux")]
 
@@ -19,10 +28,10 @@ use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
 
-use apogee_fetch::Fetcher;
+use apogee_fetch::{DigestPin, Fetcher};
 use apogee_patcher::{
-    GameProbe, InstallRequest, PatchError, Patcher, PatcherConfig, PreflightError, Repo, SePatch,
-    SpacePool,
+    GameProbe, IndexSource, InstallRequest, PatchError, Patcher, PatcherConfig, PreflightError,
+    RepairRepo, RepairRequest, Repo, SePatch, SpacePool,
 };
 use apogee_test_support::capacity::{MemoryBackedDir, memory_backed_dir};
 use apogee_test_support::chaos::ChaosServer;
@@ -74,6 +83,24 @@ fn patcher(store: &Path, ignore_space: bool) -> Result<Patcher, Box<dyn Error>> 
             ..PatcherConfig::new(GameProbe::never_running())
         },
     ))
+}
+
+/// A single-repo game repair whose block index is pulled from `url` under `pin`.
+///
+/// The index fetch is the first thing a repair does after the game-running guard, before the tree is
+/// read at all, so the game root needs nothing in it for this to reach the download.
+fn index_repair(game_root: &Path, url: Url, pin: DigestPin) -> RepairRequest {
+    RepairRequest {
+        game_root: game_root.to_path_buf(),
+        repos: vec![RepairRepo {
+            repo: Repo::Game,
+            target_version: "2024.01.02.0000.0000".to_owned(),
+            index: IndexSource::Pinned { url, pin },
+            patch_sources: Vec::new(),
+            source_base_url: None,
+            headers: SePatch::new("test-session"),
+        }],
+    }
 }
 
 /// A memory-backed patch store, a normal game root, and an origin serving one real boot patch under
@@ -247,6 +274,147 @@ async fn pools_sharing_a_filesystem_are_guarded_against_their_combined_need()
         "one volume must not be reported as one of the two pools that share it",
     );
     assert_eq!(*needed, per_pool * 2, "the two needs were not summed");
+    assert!(
+        *needed > *got,
+        "the reported pair does not describe a shortfall (need {needed}, have {got})",
+    );
+    Ok(())
+}
+
+/// How long the index origin sits on its first chunk. Far longer than the stall timeout paired with
+/// it, so a regression that streams the body fails fast instead of hanging.
+const WILLING_BUT_SLOW: Duration = Duration::from_secs(30);
+
+/// A repair whose block index cannot be reserved reports a full disk, not an unreachable index.
+///
+/// The index is a download like any other and lands in the same patch store the patches do, so the
+/// store filling is a failure this fetch can produce. `IndexUnavailable` is the arm beside it, and it
+/// is the wrong answer in the most expensive way: it says the catalog or the network is at fault and
+/// sends the user checking both, while the actual repair is one deleted file away from working.
+///
+/// The whole difference is one hand-written arm at the fetch's error boundary. Nothing else in the
+/// repair suite distinguishes the two, so without this the arm can be deleted and every test still
+/// passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repair_index_that_cannot_be_reserved_is_typed_as_a_space_failure()
+-> Result<(), Box<dyn Error>> {
+    let store = memory_backed_dir("apogee-patcher-index-disk-full-")?;
+    let game_root = tempfile::tempdir()?;
+    // No declared length travels with an index download, so the reservation is taken from the
+    // response's own `Content-Length`: announcing one past the store's filesystem is what refuses it.
+    let server = ChaosServer::builder(7, store.beyond_capacity())
+        .throttle(WILLING_BUT_SLOW)
+        .start()
+        .await?;
+
+    // The pin is one the served bytes could never hash to, and the run must not get far enough to
+    // care: the reservation is refused before a payload byte arrives, so nothing is ever hashed.
+    // Were that to regress, the failure would land on `IndexUnavailable`, which is the arm this
+    // asserts against, so the wrong pin cannot make the test pass for the wrong reason.
+    let request = index_repair(
+        game_root.path(),
+        server.url("game.apzi"),
+        DigestPin::Sha256([0u8; 32]),
+    );
+    let err = patcher(store.path(), false)?
+        .repair(request)
+        .await
+        .expect_err("an index past the filesystem capacity must not be acquired");
+
+    let PatchError::OutOfSpace { path, source } = &err else {
+        panic!("a full disk must not arrive as an unavailable index, got {err:?}");
+    };
+    // The path is the actionable half, and here it is more actionable than on the install path: the
+    // index cache is a directory the user can clear on its own.
+    let indexes = store.path().join("indexes");
+    assert!(
+        path.starts_with(&indexes),
+        "want the refused path under {indexes:?}, got {path:?}",
+    );
+    assert_eq!(
+        source.kind(),
+        std::io::ErrorKind::StorageFull,
+        "want disk-full and not some other i/o fault, got {source:?}",
+    );
+
+    // Eager, not after the fact. The origin has answered, announced its length and generated its
+    // first chunk, so only the throttle keeps that chunk off the wire: a byte count of zero is the
+    // client refusing before the payload rather than a server with nothing to give.
+    assert_eq!(
+        server.stats().bytes_served(),
+        0,
+        "the origin served a payload byte before the reservation failed",
+    );
+    Ok(())
+}
+
+/// The per-patch length below, small enough that the store's rolling window of six of them is 48 MiB
+/// on any host, so the store's own estimate cannot be what refuses the install.
+const WINDOWED_PATCH: u64 = 8 * 1024 * 1024;
+
+/// The game root is predicted against its own filesystem, and it is the pool with nothing behind it.
+///
+/// The two pools look alike in the error type and are not alike underneath. A patch store the
+/// estimate misjudges is caught by fetch's reservation, which is where every downloaded byte lands;
+/// the game root is written only by the apply, which declares no length any filesystem can refuse up
+/// front, so nothing observes it filling until a write partway through a patch fails. That makes this
+/// estimate the only thing standing in front of the pool, and it has to be taken against the game
+/// root's filesystem rather than the store's, which is the transposition this pins.
+///
+/// The sizes make the store unable to be the answer: many small patches, so the applied total is
+/// twice what the game root holds while the store's rolling window stays at six times one patch.
+/// Both inequalities are asserted before the install, so a host where the arithmetic degenerates
+/// fails loudly here instead of passing for the wrong reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_game_root_pool_is_predicted_against_its_own_filesystem() -> Result<(), Box<dyn Error>>
+{
+    let game_root = memory_backed_dir("apogee-patcher-game-root-full-")?;
+    let store = tempfile::tempdir()?;
+
+    let free = game_root.available()?;
+    let count = free / WINDOWED_PATCH * 2 + 2;
+    let total = WINDOWED_PATCH * count;
+    let window = WINDOWED_PATCH * 6;
+    assert!(
+        total > free,
+        "the applied result must not fit in the game root (need {total}, free {free})",
+    );
+    // The same reading the preflight will take of the store, so a host too full to make the store
+    // the passing pool says so here rather than reporting the wrong pool below.
+    let vfs = rustix::fs::statvfs(store.path())?;
+    let store_free = vfs.f_bavail.saturating_mul(vfs.f_frsize);
+    assert!(
+        window < store_free,
+        "the store must have room for its window or this proves nothing \
+         (need {window}, free {store_free})",
+    );
+
+    // Unreachable on purpose: a prediction is made without contacting anybody, and the request never
+    // reaches the point of building a download.
+    let url = Url::parse("http://127.0.0.1:9/p0.patch")?;
+    let patches = (0..count)
+        .map(|_| boot_entry(url.clone(), WINDOWED_PATCH))
+        .collect();
+
+    let err = patcher(store.path(), false)?
+        .install(boot_request(game_root.path(), patches))
+        .await
+        .expect_err("an install past what the game root holds must be refused");
+
+    let PatchError::Preflight(PreflightError::NotEnoughSpace {
+        pool,
+        needed,
+        free: got,
+    }) = &err
+    else {
+        panic!("want the preflight estimate, got {err:?}");
+    };
+    assert_eq!(
+        *pool,
+        SpacePool::GameRoot,
+        "the short pool is the game root, not the store the downloads fit in",
+    );
+    assert_eq!(*needed, total, "the applied result was not summed whole");
     assert!(
         *needed > *got,
         "the reported pair does not describe a shortfall (need {needed}, have {got})",
