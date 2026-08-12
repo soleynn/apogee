@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use apogee_fetch::{
@@ -26,6 +26,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::elevated::Executor;
 use crate::request::{IndexSource, RepairRepo, RepairRequest};
 use crate::{PartRef, PatchError, PatchProgress, PatcherConfig, Repo, preflight, recycler, store};
 
@@ -77,6 +78,17 @@ pub(crate) async fn run(
     let handle = Handle::current();
     let mut outcome = RepairOutcome::default();
 
+    // Where the writes happen, decided once before the first verify. Every repo subtree the request
+    // names, plus the install root itself, because a stray is quarantined into a recycler beside
+    // those subtrees rather than inside one.
+    let mut roots: Vec<PathBuf> = repos
+        .iter()
+        .map(|repo_req| store::repo_root(&game_root, repo_req.repo))
+        .collect();
+    roots.push(game_root.clone());
+    let mut executor = Executor::open_unbound(&config, &roots).await?;
+    let staging = StagingFile::under(&config.patch_store)?;
+
     for repo_req in repos {
         if cancel.is_cancelled() {
             return Err(PatchError::Cancelled);
@@ -85,21 +97,30 @@ pub(crate) async fn run(
         // repair to a blocking worker: `HttpRangeSource` uses `Handle::block_on`, which must not run
         // inside an async task.
         let index_path = acquire_index(&fetcher, &config, &repo_req, &cancel).await?;
-        let repaired = {
-            let ctx = RepoCtx {
-                fetcher: fetcher.clone(),
-                handle: handle.clone(),
-                game_root: game_root.clone(),
-                index_path,
-                batch: batch.clone(),
-                reattempts: config.repair_reattempts.max(1),
-                progress: progress.clone(),
-                cancel: cancel.clone(),
-            };
-            tokio::task::spawn_blocking(move || repair_repo(&repo_req, &ctx))
-                .await
-                .map_err(join_to_io)??
+        let ctx = RepoCtx {
+            fetcher: fetcher.clone(),
+            handle: handle.clone(),
+            game_root: game_root.clone(),
+            index_path,
+            batch: batch.clone(),
+            staging: staging.path.clone(),
+            reattempts: config.repair_reattempts.max(1),
+            progress: progress.clone(),
+            cancel: cancel.clone(),
         };
+        // The executor rides onto the blocking worker and back: the repair sink drives it from
+        // there, exactly as the range source drives the fetcher from there.
+        let carried = executor;
+        let (result, returned) = tokio::task::spawn_blocking(move || {
+            let mut executor = carried;
+            let result = repair_repo(&repo_req, &ctx, &mut executor);
+            (result, executor)
+        })
+        .await
+        .map_err(join_to_io)?;
+        executor = returned;
+        let repaired = result?;
+
         outcome.bytes_refetched = outcome
             .bytes_refetched
             .saturating_add(repaired.bytes_refetched);
@@ -108,7 +129,45 @@ pub(crate) async fn run(
             .extend(repaired.quarantined.iter().cloned());
         outcome.repos.push(repaired);
     }
+    executor.finish().await;
     Ok(outcome)
+}
+
+/// The file a privileged repair stages its bytes in, removed when the run ends.
+///
+/// Named per process and per run rather than fixed, so two repairs at once do not read each other's
+/// batches, and removed on the way out however the run ended: a staging file left behind is bytes
+/// nothing will ever read again.
+struct StagingFile {
+    path: PathBuf,
+}
+
+impl StagingFile {
+    /// The staging path beneath `patch_store`. Nothing is created here; a repair that stays in
+    /// process never touches it.
+    fn under(patch_store: &Path) -> Result<Self, PatchError> {
+        let stamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = patch_store
+            .join("repair")
+            .join(format!("staged-{}-{stamp:x}.bin", std::process::id()));
+        // Absolute because the worker refuses a relative path, and this process's working directory
+        // is not the one an elevated child inherits.
+        std::path::absolute(&path)
+            .map(|path| Self { path })
+            .map_err(|source| PatchError::Io { path, source })
+    }
+}
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        // Only if this run left it empty; a concurrent repair's file keeps it.
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
 }
 
 /// The per-repo inputs threaded onto the blocking worker.
@@ -118,6 +177,7 @@ struct RepoCtx {
     game_root: PathBuf,
     index_path: PathBuf,
     batch: String,
+    staging: PathBuf,
     reattempts: usize,
     progress: mpsc::UnboundedSender<PatchProgress>,
     cancel: CancellationToken,
@@ -191,7 +251,11 @@ fn index_filename(repo: Repo, target_version: &str) -> String {
 }
 
 /// Verify one repo against its index and heal it. Synchronous and off the runtime.
-fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, PatchError> {
+fn repair_repo(
+    repo_req: &RepairRepo,
+    ctx: &RepoCtx,
+    executor: &mut Executor,
+) -> Result<RepairedRepo, PatchError> {
     let repo = repo_req.repo;
     let index = read_index(&ctx.index_path, repo)?;
 
@@ -227,8 +291,17 @@ fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, Pat
             repo,
             count: report.stray_files.len(),
         });
-        recycler::quarantine(&ctx.game_root, repo, &ctx.batch, &report.stray_files)?
+        ctx.handle.block_on(executor.quarantine(
+            &ctx.game_root,
+            repo,
+            &ctx.batch,
+            &report.stray_files,
+        ))?
     };
+
+    // From here on every write is inside the repo subtree, so that is what the executor is pointed
+    // at: the quarantine above is the only phase whose two ends are not both in it.
+    ctx.handle.block_on(executor.bind(&root))?;
 
     // Addressing the chain's source patches is deferred until the verify says something has to be
     // pulled from one. A repo can reference sources this request cannot form a URL for (no cached copy
@@ -264,7 +337,8 @@ fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, Pat
         // toward the `Refetching` progress; a local pass delivers bytes but fetches nothing.
         let over_network = !(attempt == 0 && local_files.is_some());
         let mut source = compose_source(ctx, attempt, &local_files, &http_sources);
-        match index.repair(&root, &pending, source.as_mut()) {
+        let mut sink = executor.repair_sink(&root, &ctx.staging, ctx.handle.clone(), &ctx.cancel);
+        match index.repair_into(&root, &pending, source.as_mut(), &mut *sink) {
             Ok(outcome) => {
                 last_fault = None;
                 agg.absorb(&outcome, over_network);
@@ -285,7 +359,18 @@ fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, Pat
                     ..VerifyReport::default()
                 };
             }
-            Err(fault) => last_fault = Some(PatchError::Apply(fault)),
+            // A sink that writes somewhere this process cannot reach unwinds through zipatch's error
+            // type, which has no room for what actually failed; it kept that and hands it back here.
+            Err(fault) => {
+                let fault = sink.fault().unwrap_or(PatchError::Apply(fault));
+                // A worker that died or a run the user stopped ends the repair rather than spending
+                // the budget: every later pass would re-fetch the same ranges over the network only
+                // to find there is still nothing that can write them.
+                if matches!(fault, PatchError::Worker { .. } | PatchError::Cancelled) {
+                    return Err(fault);
+                }
+                last_fault = Some(fault);
+            }
         }
         attempt += 1;
     }
@@ -309,9 +394,12 @@ fn repair_repo(repo_req: &RepairRepo, ctx: &RepoCtx) -> Result<RepairedRepo, Pat
         }
     }
 
-    // Clean: record the healed version exactly as an install would (bare, then `.bck`).
-    store::write_ver(&ctx.game_root, repo, &wanted)?;
-    store::backup_ver(&ctx.game_root, repo)?;
+    // Clean: record the healed version exactly as an install would (bare, then `.bck`), through
+    // whichever side did the writing, since the version file lives in the tree that needed it.
+    ctx.handle
+        .block_on(executor.advance_ver(&ctx.game_root, repo, &wanted))?;
+    ctx.handle
+        .block_on(executor.backup_ver(&ctx.game_root, repo))?;
     let _ = ctx.progress.send(PatchProgress::Repaired {
         repo,
         version: wanted.clone(),

@@ -71,6 +71,25 @@ pub(crate) fn ver_rel(repo: Repo) -> String {
     }
 }
 
+/// A relative path spelled with `/` separators, or `None` if it is not a plain descent.
+///
+/// The one spelling both sides of the privilege boundary read the same way, and the same one
+/// [`ver_rel`] is written in: a Linux build reads `sqpack\ex1\x` as a single filename, and the
+/// worker refuses a backslash outright, so a path built with this platform's separator would mean
+/// different things on the two platforms. Anything that is not a plain descent is refused here
+/// rather than reinterpreted, since the far side would only refuse it again.
+pub(crate) fn slashed(rel: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// The `.bck` path for `repo` relative to its apply root (the `.ver` backup taken after a whole set
 /// applies).
 pub(crate) fn bck_rel(repo: Repo) -> String {

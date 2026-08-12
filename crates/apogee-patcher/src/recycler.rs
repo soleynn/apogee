@@ -17,6 +17,48 @@ use crate::{PatchError, Repo, store};
 /// The recycler directory name beneath the install root.
 const RECYCLER_DIR: &str = "apogee_repair_recycler";
 
+/// Where one stray goes: the two ends of the move and the path to report it under, all relative to
+/// the install root.
+///
+/// Both ends are named relative to the install root rather than absolutely because a repair that
+/// cannot write the tree from this process hands them to one that can, and that side resolves them
+/// against the tree its session bound. The install root is what both ends need in common: the
+/// recycler is a sibling of the repo subtrees, so a stray leaves its subtree by design.
+pub(crate) struct Relocation {
+    /// The stray today, with `/` separators.
+    pub(crate) from: String,
+    /// Where it lands, with `/` separators.
+    pub(crate) to: String,
+    /// The same destination in this platform's spelling, for the outcome.
+    pub(crate) reported: PathBuf,
+}
+
+/// Where each stray of `repo` goes in the `batch` recycler, preserving its repo-relative path.
+///
+/// # Errors
+/// [`PatchError::Io`] if a stray's path is not the plain relative descent verify produces.
+pub(crate) fn plan(
+    repo: Repo,
+    batch: &str,
+    strays: &[StrayFile],
+) -> Result<Vec<Relocation>, PatchError> {
+    let subdir = store::repo_subdir(repo);
+    strays
+        .iter()
+        .map(|stray| {
+            let rel = store::slashed(&stray.path).ok_or_else(|| not_relative(&stray.path))?;
+            Ok(Relocation {
+                from: format!("{subdir}/{rel}"),
+                to: format!("{RECYCLER_DIR}/{batch}/{subdir}/{rel}"),
+                reported: Path::new(RECYCLER_DIR)
+                    .join(batch)
+                    .join(subdir)
+                    .join(&stray.path),
+            })
+        })
+        .collect()
+}
+
 /// Move each stray of `repo` into the `batch` recycler directory beneath `game_root`, preserving its
 /// repo-relative path. Returns the quarantined destinations (install-root-relative) for reporting.
 /// Never deletes: a file that cannot be moved is a hard [`PatchError::Io`].
@@ -26,30 +68,27 @@ pub(crate) fn quarantine(
     batch: &str,
     strays: &[StrayFile],
 ) -> Result<Vec<PathBuf>, PatchError> {
-    if strays.is_empty() {
-        return Ok(Vec::new());
-    }
-    let repo_root = store::repo_root(game_root, repo);
-    let dest_root = game_root
-        .join(RECYCLER_DIR)
-        .join(batch)
-        .join(store::repo_subdir(repo));
     let mut moved = Vec::with_capacity(strays.len());
-    for stray in strays {
-        let src = repo_root.join(&stray.path);
-        let dest = dest_root.join(&stray.path);
+    for relocation in plan(repo, batch, strays)? {
+        let (src, dest) = (
+            game_root.join(&relocation.from),
+            game_root.join(&relocation.to),
+        );
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|source| io_err(parent, source))?;
         }
         move_file(&src, &dest)?;
-        moved.push(
-            Path::new(RECYCLER_DIR)
-                .join(batch)
-                .join(store::repo_subdir(repo))
-                .join(&stray.path),
-        );
+        moved.push(relocation.reported);
     }
     Ok(moved)
+}
+
+/// A path that is not the plain relative descent the index and verify produce.
+fn not_relative(rel: &Path) -> PatchError {
+    PatchError::Io {
+        path: rel.to_path_buf(),
+        source: std::io::Error::other("not a relative path inside the install"),
+    }
 }
 
 /// Move `src` to `dest`, never deleting. A rename covers the same-filesystem case (always true here:
@@ -143,6 +182,50 @@ mod tests {
             dest.starts_with(game_root.join(RECYCLER_DIR)),
             "quarantined under the recycler: {dest:?}"
         );
+    }
+
+    /// The plan names both ends relative to the install root, in the one spelling both sides read
+    /// the same way, and puts the recycler outside the repo subtree it took the stray from.
+    #[test]
+    fn a_relocation_names_both_ends_under_the_install_root() {
+        let strays = [StrayFile {
+            path: PathBuf::from("sqpack").join("ex1").join("extra.dat"),
+        }];
+        let plan = plan(Repo::Expansion(1), "20240101_000000", &strays).unwrap();
+        assert_eq!(plan[0].from, "game/sqpack/ex1/extra.dat");
+        assert_eq!(
+            plan[0].to,
+            "apogee_repair_recycler/20240101_000000/game/sqpack/ex1/extra.dat"
+        );
+        assert!(
+            !plan[0].to.starts_with("game/"),
+            "the recycler must sit outside the subtree the stray came from",
+        );
+        // The reported path is the destination in this platform's own spelling.
+        assert_eq!(
+            plan[0].reported,
+            Path::new("apogee_repair_recycler")
+                .join("20240101_000000")
+                .join("game")
+                .join("sqpack")
+                .join("ex1")
+                .join("extra.dat")
+        );
+    }
+
+    /// A stray path that is not a plain descent is refused rather than reinterpreted, so nothing
+    /// hands the far side a `..` to resolve.
+    #[test]
+    fn a_stray_path_that_is_not_a_plain_descent_is_refused() {
+        for raw in ["../escape.dat", "/etc/passwd", ""] {
+            let strays = [StrayFile {
+                path: PathBuf::from(raw),
+            }];
+            assert!(
+                plan(Repo::Game, "b", &strays).is_err(),
+                "{raw:?} was accepted"
+            );
+        }
     }
 
     #[test]

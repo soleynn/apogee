@@ -1,19 +1,27 @@
-//! Deciding whether the apply needs another process, and driving it when it does.
+//! Deciding whether the writes need another process, and driving it when they do.
 //!
 //! On Linux the answer is always no: game directories live under the user's home. On Windows an
 //! install under a system-owned directory is not writable by the user who launched, and the write
-//! has to happen somewhere else. What that costs is the verified-before-apply proof, which is a
+//! has to happen somewhere else. What that costs is the verified-before-write proof, which is a
 //! value in this process and cannot travel, so the worker re-derives it (the patch store is
 //! writable by the same unprivileged user, and the gap between this process checking a file and a
 //! privileged process writing it is exactly where a swap would land).
+//!
+//! An install and a repair take the same route and differ only in what crosses. An install sends
+//! whole patches and the worker applies them. A repair sends the writes: this process verifies the
+//! tree, plans the heal and fetches the broken ranges, then [`StagingSink`] hands over the bytes it
+//! proved (see [`crate::staging`]).
 
 use std::path::{Path, PathBuf};
 
-use apogee_elevate::{Error as ElevateError, VersionWrite, Worker, WorkerErrorKind};
+use apogee_elevate::{Error as ElevateError, StagedWrite, VersionWrite, Worker, WorkerErrorKind};
+use apogee_zipatch::{DiskRepairSink, StrayFile};
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{PatchError, PatchProgress, PatcherConfig, Repo, store};
+use crate::staging::{RepairTarget, StagingSink};
+use crate::{PatchError, PatchProgress, PatcherConfig, Repo, recycler, store};
 
 /// When the apply runs somewhere other than this process.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -73,48 +81,160 @@ impl Executor {
         config: &PatcherConfig,
         apply_root: &Path,
     ) -> Result<Self, PatchError> {
+        let roots = [apply_root.to_path_buf()];
+        let mut executor = Self::open_unbound(config, &roots).await?;
+        executor.bind(apply_root).await?;
+        Ok(executor)
+    }
+
+    /// Choose one executor for every tree a run will write, and start it without binding.
+    ///
+    /// One for the whole run rather than one per tree, because starting a worker is what raises
+    /// privileges: a repair across seven repos would otherwise ask for consent seven times. A single
+    /// tree that needs it decides for all of them, since the alternative is a second prompt part way
+    /// through. Which tree the session may write at any moment is [`bind`](Self::bind)'s job, and it
+    /// is still exactly one.
+    ///
+    /// # Errors
+    /// As [`open`](Self::open).
+    pub(crate) async fn open_unbound(
+        config: &PatcherConfig,
+        roots: &[PathBuf],
+    ) -> Result<Self, PatchError> {
         match &config.elevation {
             Elevation::Never => Ok(Self::InProcess),
             Elevation::Worker { binary } => {
-                Self::start(apogee_elevate::spawn::direct(binary).await, apply_root).await
+                Self::start(apogee_elevate::spawn::direct(binary).await)
             }
-            Elevation::Auto => Self::automatic(apply_root).await,
+            Elevation::Auto => Self::automatic(roots).await,
         }
     }
 
     /// The probe-then-maybe-elevate path.
     #[cfg(windows)]
-    async fn automatic(apply_root: &Path) -> Result<Self, PatchError> {
-        if probe_writable(apply_root)? {
-            return Ok(Self::InProcess);
+    async fn automatic(roots: &[PathBuf]) -> Result<Self, PatchError> {
+        let mut unwritable = None;
+        for root in roots {
+            if !probe_writable(root)? {
+                unwritable = Some(root);
+                break;
+            }
         }
+        let Some(root) = unwritable else {
+            return Ok(Self::InProcess);
+        };
         let binary = beside_the_launcher()?;
         tracing::info!(
-            root = %apply_root.display(),
+            root = %root.display(),
             worker = %binary.display(),
             "the install tree is not writable; asking for elevation",
         );
-        Self::start(apogee_elevate::spawn::elevated(&binary).await, apply_root).await
+        Self::start(apogee_elevate::spawn::elevated(&binary).await)
     }
 
     /// Off Windows there is nothing to elevate to: the platform has no consent flow this launcher
     /// participates in, and the game directories it installs into are the user's own.
     #[cfg(not(windows))]
-    async fn automatic(_apply_root: &Path) -> Result<Self, PatchError> {
+    async fn automatic(_roots: &[PathBuf]) -> Result<Self, PatchError> {
         Ok(Self::InProcess)
     }
 
-    /// Bind a freshly started worker to the tree it may write.
-    async fn start(
-        started: Result<Worker, ElevateError>,
-        apply_root: &Path,
-    ) -> Result<Self, PatchError> {
-        let mut worker = started.map_err(worker_error)?;
-        // Absolute because the worker refuses a relative root: an elevated process does not inherit
-        // this one's working directory, so a relative path there means something else entirely.
-        let root = absolute(apply_root)?;
-        worker.session().bind(&root).await.map_err(worker_error)?;
-        Ok(Self::Elevated(Some(Box::new(worker))))
+    /// Take a freshly started worker.
+    fn start(started: Result<Worker, ElevateError>) -> Result<Self, PatchError> {
+        Ok(Self::Elevated(Some(Box::new(
+            started.map_err(worker_error)?,
+        ))))
+    }
+
+    /// Point the executor at the tree it may write next; a no-op in process.
+    ///
+    /// Called again between phases that write different trees. A repair's heal stays inside one repo
+    /// subtree, while the stray quarantine moves files from that subtree into the recycler beside it,
+    /// so the two bind different roots and each is confined to its own.
+    pub(crate) async fn bind(&mut self, root: &Path) -> Result<(), PatchError> {
+        match self {
+            Self::InProcess => Ok(()),
+            Self::Elevated(worker) => WorkerLink(worker).bind(root).await,
+        }
+    }
+
+    /// The sink a repair pass writes through: straight to disk, or staged for the worker.
+    ///
+    /// `staging` is where a worker-bound sink puts the bytes it wants written; it is never touched
+    /// in process. The returned sink borrows the executor, so it lasts one pass.
+    pub(crate) fn repair_sink<'a>(
+        &'a mut self,
+        root: &Path,
+        staging: &Path,
+        handle: Handle,
+        cancel: &'a CancellationToken,
+    ) -> Box<dyn RepairTarget + 'a> {
+        match self {
+            Self::InProcess => Box::new(DiskRepairSink::new(root)),
+            Self::Elevated(worker) => Box::new(StagingSink::new(
+                WorkerLink(worker),
+                staging.to_path_buf(),
+                handle,
+                cancel,
+            )),
+        }
+    }
+
+    /// Move each stray of `repo` into the run's recycler batch, never deleting one.
+    ///
+    /// Binds the install root first where a worker is doing it: a stray leaves its repo subtree by
+    /// design, so this is the one phase whose two ends are not in the same subtree.
+    pub(crate) async fn quarantine(
+        &mut self,
+        game_root: &Path,
+        repo: Repo,
+        batch: &str,
+        strays: &[StrayFile],
+    ) -> Result<Vec<PathBuf>, PatchError> {
+        match self {
+            Self::InProcess => recycler::quarantine(game_root, repo, batch, strays),
+            Self::Elevated(worker) => {
+                let plan = recycler::plan(repo, batch, strays)?;
+                let mut link = WorkerLink(worker);
+                link.bind(game_root).await?;
+                let mut moved = Vec::with_capacity(plan.len());
+                for relocation in plan {
+                    link.move_within(&relocation.from, &relocation.to).await?;
+                    moved.push(relocation.reported);
+                }
+                Ok(moved)
+            }
+        }
+    }
+
+    /// Record the version a clean repair healed the repo to.
+    ///
+    /// The worker writes it as its own request rather than as part of a batch, because it must land
+    /// after every write of every pass: a version file that advanced over a partial heal would tell
+    /// the next run there is nothing to do. The session must already be bound to the repo subtree,
+    /// which the heal did.
+    pub(crate) async fn advance_ver(
+        &mut self,
+        game_root: &Path,
+        repo: Repo,
+        bare: &str,
+    ) -> Result<(), PatchError> {
+        match self {
+            Self::InProcess => store::write_ver(game_root, repo, bare),
+            Self::Elevated(worker) => {
+                WorkerLink(worker)
+                    .repair(
+                        None,
+                        Vec::new(),
+                        Some(VersionWrite {
+                            path: store::ver_rel(repo),
+                            contents: bare.to_owned(),
+                        }),
+                        &CancellationToken::new(),
+                    )
+                    .await
+            }
+        }
     }
 
     /// Apply one admitted patch, advancing the repo's version file if it lands cleanly.
@@ -222,6 +342,51 @@ impl Executor {
             });
         }
         Err(worker_error(err))
+    }
+}
+
+/// The worker half of an [`Executor`], for the callers that only make sense against one.
+///
+/// It exists so the repair sink can drive a worker without carrying the in-process arm it can never
+/// be: the executor decides once which arm a pass is on, and hands this out only on the elevated
+/// side. Every call routes through the same [`Executor::live`]/[`Executor::settle`] pair as an
+/// install's, so a worker that dies here becomes the same typed value it does there.
+pub(crate) struct WorkerLink<'a>(&'a mut Option<Box<Worker>>);
+
+impl WorkerLink<'_> {
+    /// Bind the session to the tree it may write next.
+    pub(crate) async fn bind(&mut self, root: &Path) -> Result<(), PatchError> {
+        // Absolute because the worker refuses a relative root: an elevated process does not inherit
+        // this one's working directory, so a relative path there means something else entirely.
+        let root = absolute(root)?;
+        let outcome = Executor::live(self.0)?.session().bind(&root).await;
+        Executor::settle(self.0, outcome).await
+    }
+
+    /// Make one batch of staged repair writes, optionally advancing the version file after them.
+    pub(crate) async fn repair(
+        &mut self,
+        staging: Option<&Path>,
+        writes: Vec<StagedWrite>,
+        advance: Option<VersionWrite>,
+        cancel: &CancellationToken,
+    ) -> Result<(), PatchError> {
+        let outcome = Executor::live(self.0)?
+            .session()
+            .repair(staging, writes, advance, cancel, |frame| {
+                tracing::debug!(?frame, "the worker made repair progress");
+            })
+            .await;
+        Executor::settle(self.0, outcome).await
+    }
+
+    /// Move one file to another place inside the bound tree.
+    pub(crate) async fn move_within(&mut self, from: &str, to: &str) -> Result<(), PatchError> {
+        let outcome = Executor::live(self.0)?
+            .session()
+            .move_within(from, to)
+            .await;
+        Executor::settle(self.0, outcome).await
     }
 }
 
