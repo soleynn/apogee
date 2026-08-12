@@ -488,7 +488,11 @@ impl RepairSink for RecordingSink {
             RepairWrite::Resize { len } => Recorded::Resize(len),
             RepairWrite::Bytes { off, bytes } => Recorded::Bytes(off, bytes.to_vec()),
             RepairWrite::Zeros { off, len } => Recorded::Zeros(off, len),
-            _ => return Err(Error::Unsupported { what: "repair write" }),
+            _ => {
+                return Err(Error::Unsupported {
+                    what: "repair write",
+                });
+            }
         };
         self.writes.push((target.to_path_buf(), recorded));
         Ok(())

@@ -3,8 +3,13 @@
 //! Everything here is deliberately dumb. There is no network client, no patchlist, no ordering and
 //! no retry policy: the parent has already fetched and sequenced, and this side only re-proves local
 //! bytes and writes them. What it does own is the two rules the parent cannot be trusted to keep for
-//! it, since the parent runs unprivileged and the store is writable by the same user: every patch is
-//! re-verified from the handle it is applied from, and every path stays inside the bound tree.
+//! it, since the parent runs unprivileged and the store is writable by the same user: every byte is
+//! re-proved from the file it is read out of, and every path stays inside the bound tree.
+//!
+//! The two write paths differ only in what "re-proved" costs. A patch is verified from the handle it
+//! is applied from, because it is read twice and can be gigabytes. A repair's staged span is read
+//! into memory, hashed there, and written from that same buffer, which is stronger and only possible
+//! because a span is bounded.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -20,15 +25,19 @@ use tokio::sync::mpsc;
 use crate::confine::{assert_within, join_confined, require_absolute};
 use crate::error::{Error, Result};
 use crate::proto::{
-    Admission, MAX_VERSION_LEN, PROTOCOL_VERSION, VersionWrite, WorkerErrorKind, WorkerProgress,
-    WorkerRequest, WorkerResponse, read_frame, write_frame,
+    Admission, MAX_STAGED_SPAN, MAX_VERSION_LEN, PROTOCOL_VERSION, StagedOp, StagedWrite,
+    VersionWrite, WorkerErrorKind, WorkerProgress, WorkerRequest, WorkerResponse, read_frame,
+    write_frame,
 };
 
-/// How much of a patch is hashed between re-verification progress frames.
-const VERIFY_PROGRESS_STRIDE: u64 = 8 << 20;
+/// How many bytes pass between progress frames, whether they are being hashed or written.
+const PROGRESS_STRIDE: u64 = 8 << 20;
 
 /// The read size for the re-verification pass, when a block is larger than this.
 const VERIFY_READ_CHUNK: usize = 1 << 20;
+
+/// The buffer one zero run is written in, so a multi-gigabyte run never allocates its own length.
+const ZERO_CHUNK: usize = 1 << 16;
 
 /// A request failure, on its way to a [`WorkerResponse::Failed`].
 struct Fault {
@@ -179,6 +188,18 @@ async fn handle(
             let root = bound(root)?;
             copy_within(root, &from, &to)
         }
+        WorkerRequest::Repair {
+            staging,
+            writes,
+            advance,
+        } => {
+            let root = bound(root)?;
+            repair(root, staging, writes, advance, cancel, responses).await
+        }
+        WorkerRequest::MoveWithin { from, to } => {
+            let root = bound(root)?;
+            move_within(&root, &from, &to)
+        }
         // Handled out of band by the reader; reachable only if that changes, and a no-op either way.
         WorkerRequest::Cancel => Ok(()),
     }
@@ -208,21 +229,7 @@ async fn apply_one(
 
     // Resolved before a byte is written, so a version path that leaves the tree fails the request
     // rather than leaving a patch applied and the version refused.
-    let advance = match advance {
-        None => None,
-        Some(VersionWrite { path, contents }) => {
-            if contents.len() > MAX_VERSION_LEN {
-                return Err(Fault::new(
-                    WorkerErrorKind::Protocol,
-                    format!("version body of {} bytes is too long", contents.len()),
-                ));
-            }
-            let target = join_confined(&root, &path).map_err(|e| {
-                Fault::at(WorkerErrorKind::Protocol, Path::new(&path), e.to_string())
-            })?;
-            Some((target, contents))
-        }
-    };
+    let advance = resolve_advance(&root, advance)?;
 
     // zipatch reports progress on a synchronous channel; drain it onto the response stream from its
     // own blocking task, exactly as the in-process path does.
@@ -259,13 +266,35 @@ async fn apply_one(
     }
 }
 
+/// Resolve a version write against the bound tree, before anything else in the request runs.
+///
+/// Resolving up front is what keeps a torn request honest: a version path that leaves the tree fails
+/// the whole request rather than leaving the writes made and the version refused afterwards.
+fn resolve_advance(
+    root: &Path,
+    advance: Option<VersionWrite>,
+) -> std::result::Result<Option<(PathBuf, String)>, Fault> {
+    let Some(VersionWrite { path, contents }) = advance else {
+        return Ok(None);
+    };
+    if contents.len() > MAX_VERSION_LEN {
+        return Err(Fault::new(
+            WorkerErrorKind::Protocol,
+            format!("version body of {} bytes is too long", contents.len()),
+        ));
+    }
+    let target = join_confined(root, &path)
+        .map_err(|e| Fault::at(WorkerErrorKind::Protocol, Path::new(&path), e.to_string()))?;
+    Ok(Some((target, contents)))
+}
+
 /// The synchronous half: verify from one handle, apply from that same handle, then write the
 /// version file.
 ///
 /// The handle is opened once and rewound rather than reopened between the two passes. Reopening
 /// would re-resolve the path, so a rename between them would hand the privileged write a file
 /// nothing had checked. On Windows the handle also denies other writers for as long as it is held
-/// (see [`open_patch`]), which is what closes the other half of that window: without it, hashing the
+/// (see [`open_denying_writers`]), which is what closes the other half of that window: without it, hashing the
 /// bytes proves nothing about the bytes the applier goes on to read, because a same-user process can
 /// overwrite them in place during the minutes an apply takes.
 #[allow(
@@ -281,7 +310,7 @@ fn verify_then_apply(
     responses: &mpsc::UnboundedSender<WorkerResponse>,
     zipatch_progress: &std::sync::mpsc::Sender<ApplyProgress>,
 ) -> std::result::Result<(), Fault> {
-    let file = open_patch(patch)
+    let file = open_denying_writers(patch)
         .map_err(|e| Fault::at(WorkerErrorKind::Verify, patch, format!("cannot open: {e}")))?;
 
     reverify(&file, patch, admission, cancel, responses)?;
@@ -335,6 +364,312 @@ fn write_version(root: &Path, target: &Path, contents: &str) -> std::result::Res
     replace_file(target, contents.as_bytes()).map_err(io)
 }
 
+/// Make one batch of repair writes, then advance the version file if the batch landed.
+///
+/// The staged bytes are re-proved here for the same reason a patch is: the parent's proof is a value
+/// in the parent, and it took it over a staging file the unprivileged user can rewrite. What is
+/// different is that a repair write is small and positioned, so this side does not need the
+/// hold-one-handle trick the apply path uses. It reads each span into memory, hashes what it read,
+/// and writes that same buffer, which leaves nothing between the check and the write to substitute.
+async fn repair(
+    root: PathBuf,
+    staging: Option<PathBuf>,
+    writes: Vec<StagedWrite>,
+    advance: Option<VersionWrite>,
+    cancel: &Arc<AtomicBool>,
+    responses: &mpsc::UnboundedSender<WorkerResponse>,
+) -> std::result::Result<(), Fault> {
+    if let Some(staging) = &staging {
+        require_absolute("the staging file", staging)
+            .map_err(|e| Fault::at(WorkerErrorKind::Protocol, staging, e.to_string()))?;
+    }
+    let advance = resolve_advance(&root, advance)?;
+
+    let cancel = Arc::clone(cancel);
+    let responses = responses.clone();
+    tokio::task::spawn_blocking(move || {
+        write_staged(&root, staging, &writes, advance, &cancel, &responses)
+    })
+    .await
+    .unwrap_or_else(|join| {
+        Err(Fault::new(
+            WorkerErrorKind::Apply,
+            format!("the repair task ended abnormally: {join}"),
+        ))
+    })
+}
+
+/// The synchronous half of a repair batch.
+///
+/// Handles are held one at a time because the caller issues every write for a file before the next
+/// file's; a target with fifty broken parts is opened once.
+fn write_staged(
+    root: &Path,
+    staging: Option<PathBuf>,
+    writes: &[StagedWrite],
+    advance: Option<(PathBuf, String)>,
+    cancel: &AtomicBool,
+    responses: &mpsc::UnboundedSender<WorkerResponse>,
+) -> std::result::Result<(), Fault> {
+    let mut staged = match staging {
+        None => None,
+        Some(path) => {
+            let file = open_denying_writers(&path).map_err(|e| {
+                Fault::at(
+                    WorkerErrorKind::Verify,
+                    &path,
+                    format!("cannot open the staging file: {e}"),
+                )
+            })?;
+            Some((path, file))
+        }
+    };
+
+    let mut open: Option<(PathBuf, File)> = None;
+    let (mut done, mut announced) = (0u64, 0u64);
+    for write in writes {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fault::new(
+                WorkerErrorKind::Cancelled,
+                "the repair was cancelled",
+            ));
+        }
+        let target = join_confined(root, &write.path).map_err(|e| {
+            Fault::at(
+                WorkerErrorKind::Protocol,
+                Path::new(&write.path),
+                e.to_string(),
+            )
+        })?;
+        match write.op {
+            StagedOp::Create { len } => {
+                // Dropped before the name is unlinked, so the handle the last write held is not the
+                // one this replaces.
+                drop(open.take());
+                let file = create_target(root, &target)?;
+                set_len(&file, len, &target)?;
+                open = Some((target, file));
+            }
+            StagedOp::Resize { len } => {
+                let file = existing_target(root, &target, &mut open)?;
+                set_len(file, len, &target)?;
+            }
+            StagedOp::Bytes {
+                off,
+                staged_off,
+                len,
+                digest,
+            } => {
+                let bytes = read_staged(staged.as_mut(), staged_off, len, &digest)?;
+                let file = existing_target(root, &target, &mut open)?;
+                write_at(file, off, &bytes, &target)?;
+                done += u64::from(len);
+            }
+            StagedOp::Zeros { off, len } => {
+                let file = existing_target(root, &target, &mut open)?;
+                write_zeros(file, off, len, &target)?;
+                done += len;
+            }
+        }
+        if done - announced >= PROGRESS_STRIDE {
+            announced = done;
+            let _ = responses.send(WorkerResponse::Progress(WorkerProgress::Applying {
+                bytes_done: done,
+            }));
+        }
+    }
+
+    let Some((target, contents)) = advance else {
+        return Ok(());
+    };
+    write_version(root, &target, &contents)
+}
+
+/// Read one staged span and prove it is the span the parent measured.
+///
+/// The bytes are returned rather than the handle, because the buffer this hashed is the buffer the
+/// caller writes: re-reading the file after the check would put the whole window back.
+fn read_staged(
+    staged: Option<&mut (PathBuf, File)>,
+    off: u64,
+    len: u32,
+    digest: &[u8; 32],
+) -> std::result::Result<Vec<u8>, Fault> {
+    let Some((path, file)) = staged else {
+        return Err(Fault::new(
+            WorkerErrorKind::Protocol,
+            "a write carries staged bytes but no staging file was named",
+        ));
+    };
+    if len == 0 || len > MAX_STAGED_SPAN {
+        return Err(Fault::at(
+            WorkerErrorKind::Protocol,
+            path,
+            format!("staged span of {len} bytes is outside 1..={MAX_STAGED_SPAN}"),
+        ));
+    }
+    let bad = |detail: String| Fault::at(WorkerErrorKind::Verify, path, detail);
+    file.seek(SeekFrom::Start(off))
+        .map_err(|e| bad(format!("cannot seek to {off}: {e}")))?;
+    let mut bytes = vec![0u8; len as usize];
+    let read = read_up_to(&mut *file, &mut bytes).map_err(|e| bad(e.to_string()))?;
+    if read != bytes.len() {
+        return Err(bad(format!(
+            "the staging file holds {read} of the {len} bytes claimed at {off}"
+        )));
+    }
+    if blake3::hash(&bytes).as_bytes() != digest {
+        return Err(bad(format!(
+            "the {len} staged bytes at {off} are not the ones the launcher proved"
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Create a target the repair is rebuilding, replacing whatever entry is at the name.
+///
+/// The unlink is what makes this safe to do as a privileged process: writing to the path as it
+/// stands would follow a link or a reparse point at the final component, and would write through a
+/// hard link into a file elsewhere. `create_new` closes the gap the unlink opens, so anything that
+/// re-creates the name in between fails the request rather than being followed.
+fn create_target(root: &Path, target: &Path) -> std::result::Result<File, Fault> {
+    let io = |e: std::io::Error| Fault::at(WorkerErrorKind::Apply, target, e.to_string());
+    let refused = |e: crate::confine::ConfineError| {
+        Fault::at(WorkerErrorKind::Protocol, target, e.to_string())
+    };
+    if let Some(parent) = target.parent() {
+        assert_deepest_existing_within(root, parent).map_err(refused)?;
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    assert_within(root, target).map_err(refused)?;
+    create_replacing(target).map_err(io)
+}
+
+/// The handle for a target already on disk, opening it on a change of file.
+fn existing_target<'a>(
+    root: &Path,
+    target: &Path,
+    open: &'a mut Option<(PathBuf, File)>,
+) -> std::result::Result<&'a mut File, Fault> {
+    if !open.as_ref().is_some_and(|(path, _)| path == target) {
+        let file = open_existing(root, target)?;
+        return Ok(&mut open.insert((target.to_path_buf(), file)).1);
+    }
+    match open.as_mut() {
+        Some((_, file)) => Ok(file),
+        // Unreachable: the branch above fills the slot whenever it is empty.
+        None => Err(Fault::new(
+            WorkerErrorKind::Protocol,
+            "the repair lost its open target",
+        )),
+    }
+}
+
+/// Open a target for an in-place repair, refusing a link at the final component.
+///
+/// Refused rather than unlinked, as the rebuild path does: an in-place repair rewrites part of a
+/// file it otherwise keeps, so breaking the link by removing it would throw away the bytes it was
+/// about to leave alone.
+fn open_existing(root: &Path, target: &Path) -> std::result::Result<File, Fault> {
+    assert_within(root, target)
+        .map_err(|e| Fault::at(WorkerErrorKind::Protocol, target, e.to_string()))?;
+    refuse_link(target)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(target)
+        .map_err(|e| Fault::at(WorkerErrorKind::Apply, target, e.to_string()))
+}
+
+/// Refuse `path` if it is a symbolic link or a reparse point, which the confinement check cannot see:
+/// it canonicalizes the parent, and every component of the path is ordinary.
+fn refuse_link(path: &Path) -> std::result::Result<(), Fault> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(Fault::at(
+            WorkerErrorKind::Protocol,
+            path,
+            "the target is a link out of the bound tree".to_owned(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Set a target's length.
+fn set_len(file: &File, len: u64, target: &Path) -> std::result::Result<(), Fault> {
+    file.set_len(len)
+        .map_err(|e| Fault::at(WorkerErrorKind::Apply, target, e.to_string()))
+}
+
+/// Write `bytes` at `off`.
+fn write_at(
+    file: &mut File,
+    off: u64,
+    bytes: &[u8],
+    target: &Path,
+) -> std::result::Result<(), Fault> {
+    use std::io::Write;
+
+    let io = |e: std::io::Error| Fault::at(WorkerErrorKind::Apply, target, e.to_string());
+    file.seek(SeekFrom::Start(off)).map_err(io)?;
+    file.write_all(bytes).map_err(io)
+}
+
+/// Overwrite `len` bytes at `off` with zeros, in bounded chunks so a large run never allocates its
+/// own length.
+fn write_zeros(
+    file: &mut File,
+    off: u64,
+    len: u64,
+    target: &Path,
+) -> std::result::Result<(), Fault> {
+    use std::io::Write;
+
+    let io = |e: std::io::Error| Fault::at(WorkerErrorKind::Apply, target, e.to_string());
+    file.seek(SeekFrom::Start(off)).map_err(io)?;
+    let chunk = len.min(ZERO_CHUNK as u64) as usize;
+    let zeros = vec![0u8; chunk];
+    let mut remaining = len;
+    while remaining > 0 {
+        let n = remaining.min(chunk as u64) as usize;
+        file.write_all(&zeros[..n]).map_err(io)?;
+        remaining -= n as u64;
+    }
+    Ok(())
+}
+
+/// Move one file to another place inside the bound tree, never deleting: the bytes land at `to` or
+/// the request fails.
+fn move_within(root: &Path, from: &str, to: &str) -> std::result::Result<(), Fault> {
+    let resolve = |rel: &str| {
+        join_confined(root, rel)
+            .map_err(|e| Fault::at(WorkerErrorKind::Protocol, Path::new(rel), e.to_string()))
+    };
+    let (from, to) = (resolve(from)?, resolve(to)?);
+    let refused = |path: &Path| {
+        let path = path.to_path_buf();
+        move |e: crate::confine::ConfineError| {
+            Fault::at(WorkerErrorKind::Protocol, &path, e.to_string())
+        }
+    };
+    assert_within(root, &from).map_err(refused(&from))?;
+    // A link would make the copy fallback below read whatever it points at; the move itself would
+    // not follow it, but the two arms must not disagree about what is being relocated.
+    refuse_link(&from)?;
+    if let Some(parent) = to.parent() {
+        assert_deepest_existing_within(root, parent).map_err(refused(&to))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Fault::at(WorkerErrorKind::Apply, parent, e.to_string()))?;
+    }
+    assert_within(root, &to).map_err(refused(&to))?;
+
+    if std::fs::rename(&from, &to).is_ok() {
+        return Ok(());
+    }
+    // A rename cannot cross a mount point. Copy first and unlink only once the bytes are there, so a
+    // failure at either step leaves the file somewhere.
+    std::fs::copy(&from, &to).map_err(|e| Fault::at(WorkerErrorKind::Apply, &to, e.to_string()))?;
+    std::fs::remove_file(&from).map_err(|e| Fault::at(WorkerErrorKind::Apply, &from, e.to_string()))
+}
+
 /// Copy one file to another inside the bound tree.
 fn copy_within(root: PathBuf, from: &str, to: &str) -> std::result::Result<(), Fault> {
     let resolve = |rel: &str| {
@@ -359,7 +694,7 @@ fn copy_within(root: PathBuf, from: &str, to: &str) -> std::result::Result<(), F
 /// patch while the applier is still reading the head. It costs nothing, because nothing else is
 /// meant to be writing a patch that is already being applied.
 #[cfg(windows)]
-fn open_patch(patch: &Path) -> std::io::Result<File> {
+fn open_denying_writers(patch: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     /// `FILE_SHARE_READ`: other readers are fine, other writers and deleters are not.
@@ -376,11 +711,11 @@ fn open_patch(patch: &Path) -> std::io::Result<File> {
 /// No share mode here: Unix has no equivalent that is not advisory, and this is the platform with no
 /// elevation model, so the worker runs with the same privileges as the process that asked for it.
 #[cfg(not(windows))]
-fn open_patch(patch: &Path) -> std::io::Result<File> {
+fn open_denying_writers(patch: &Path) -> std::io::Result<File> {
     File::open(patch)
 }
 
-/// Write `bytes` to `path`, replacing whatever entry is there rather than writing through it.
+/// Create `path` fresh, replacing whatever entry is there rather than writing through it.
 ///
 /// The existing entry is unlinked first and the new file is created fresh. Writing to the path as it
 /// stands would follow a symbolic link or a reparse point at the final component, and would write
@@ -390,15 +725,20 @@ fn open_patch(patch: &Path) -> std::io::Result<File> {
 ///
 /// `create_new` is what makes that airtight rather than merely likely: if anything re-creates the
 /// name between the unlink and this call, the write fails instead of following it.
-fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
+fn create_replacing(path: &Path) -> std::io::Result<File> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    std::fs::File::create_new(path)?.write_all(bytes)
+    std::fs::File::create_new(path)
+}
+
+/// Write `bytes` to `path`, replacing whatever entry is there.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    create_replacing(path)?.write_all(bytes)
 }
 
 /// Assert that the deepest part of `dir` that exists today is inside `root`.
@@ -487,7 +827,7 @@ fn hash_stream(
         }
         hasher.update(&buf[..read]);
         done += read as u64;
-        if done - announced >= VERIFY_PROGRESS_STRIDE {
+        if done - announced >= PROGRESS_STRIDE {
             announced = done;
             let _ = responses.send(WorkerResponse::Progress(WorkerProgress::Verifying {
                 bytes_done: done,
@@ -534,7 +874,7 @@ fn verify_block_sha1(
             hasher.update(&buf[..read]);
             in_block += read;
             done += read as u64;
-            if done - announced >= VERIFY_PROGRESS_STRIDE {
+            if done - announced >= PROGRESS_STRIDE {
                 announced = done;
                 let _ = responses.send(WorkerResponse::Progress(WorkerProgress::Verifying {
                     bytes_done: done,
