@@ -27,10 +27,11 @@ use tokio_util::sync::CancellationToken;
 use crate::elevated::WorkerLink;
 use crate::{PatchError, store};
 
-/// How many staged bytes a batch accumulates before it is handed over.
+/// How many staged bytes a batch accumulates before a flush is checked for.
 ///
-/// This is the staging file's peak size, and the only disk a privileged repair costs beyond the
-/// heal itself.
+/// The check runs after a whole write lands, not during one, so a single large part can carry the
+/// file past this before `send` is called; the staging file is otherwise the only disk a privileged
+/// repair costs beyond the heal itself.
 const FLUSH_BYTES: u64 = 32 << 20;
 
 /// How many writes a batch carries before it is handed over.

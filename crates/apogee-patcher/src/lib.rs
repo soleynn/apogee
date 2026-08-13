@@ -1,29 +1,66 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
 //! Patch orchestration across download, apply, and repair.
 //!
-//! [`Patcher`] composes [`apogee_fetch`] (acquire) and [`apogee_zipatch`] (apply) into an install
-//! pipeline: it turns the ordered pending patches `sqex-proto` reports into a verified, up-to-date
-//! install. It holds no format or transport knowledge, only the sequencing between them: acquire
-//! runs ahead through fetch's scheduler while apply consumes strictly in SE list order, nothing
-//! unverified reaches the apply queue, and `.ver`/`.bck` advance only after a clean apply.
+//! [`Patcher`] composes [`apogee_fetch`] (acquire) and [`apogee_zipatch`] (apply) into two flows over
+//! a repo's patch set. It holds no format or transport knowledge, only the sequencing and policy
+//! between the two lower crates.
 //!
-//! Admission has two shapes because Square Enix hashes the two repo families differently. A game
-//! patch carries per-block SHA1 in the patchlist, so fetch verifies it and returns a `VerifiedFile`.
-//! A boot patch carries no hashes; fetch delivers its length-checked bytes under
-//! [`apogee_fetch::Validator::External`], and the patcher's own ZiPatch chunk-CRC scan mints the
-//! admission token before the file may join the apply queue. Either way, an unadmitted patch cannot
-//! be applied.
+//! **Install** ([`Patcher::install`]) turns one repo's ordered pending patches into an up-to-date
+//! tree: acquire runs ahead through fetch's scheduler while apply consumes strictly in the list order
+//! Square Enix requires, so patch `k` applies only once `0..k` already has, even when `k` downloaded
+//! first. Only an admitted patch (below) reaches the apply queue. The repo's version file advances
+//! only after a patch applies cleanly, so a torn apply leaves the previous version in place and an
+//! interrupted install re-runs from there; once the whole set has applied, the version file is copied
+//! to its backup.
 //!
-//! Repair verifies an install against its block index and re-fetches only the broken byte ranges,
-//! pulling from local patch files on the first (trusted) attempt and over HTTP after, reconstructing
-//! zero/empty regions with no fetch, and quarantining strays to a recycler rather than deleting them.
+//! **Repair** ([`Patcher::repair`]) verifies one or more repos against a block index and heals only
+//! the byte ranges that no longer match: acquire the index (with a version cross-check against what
+//! the caller asked to heal to), verify in parallel, then re-fetch broken ranges through a
+//! [`RangeSource`](apogee_zipatch::RangeSource) that reads local patch files on the first, trusted
+//! attempt and falls back to HTTP afterward. A bounded number of reattempts re-verifies only what a
+//! pass left broken, so a retry never re-hashes a healthy tree. Files the index cannot explain are
+//! quarantined into a recycler beside the repo tree; a repair never deletes a user's files.
 //!
-//! Where the install tree is not writable by the user who launched, the writes run in a separate
-//! privileged process instead: an install sends whole patches for that process to apply, a repair
-//! sends the writes its own verify and fetch produced. [`Elevation`] decides when; the boundary
-//! itself, and everything that crosses it, belongs to [`apogee_elevate`]. A worker that dies part
-//! way through arrives here as [`PatchError::Worker`], a value the caller renders: nothing in this
-//! crate ends the launcher.
+//! # Admission: proving a patch before it applies
+//!
+//! An apply only ever consumes an admitted patch, and Square Enix hashes its two repo families
+//! differently, so admission has two routes. A game (or expansion) patch carries per-block SHA1 in the
+//! patchlist: fetch verifies each block during download and the result is admitted directly. A boot
+//! patch carries no hashes at all; fetch delivers its length-checked bytes unverified, and this
+//! crate's own ZiPatch chunk-CRC scan is what mints the admission, rejecting a corrupt or malformed
+//! patch before a byte of it is applied. That scan also takes a whole-file digest of the bytes it just
+//! read, alongside the CRC check: the chunk CRC alone is a checksum anyone can recompute, so on its own
+//! it cannot tell an admitted file apart from one substituted afterward, which is exactly the gap that
+//! matters once the apply crosses into another process (below).
+//!
+//! # Elevation: when the writes need another process
+//!
+//! On Linux the writes always happen in this process: game directories live under the user's home, so
+//! there is nothing to elevate to. On Windows, an install under a system-owned directory may not be
+//! writable by the user who launched, and [`probe_writable`] answers that with a real write into the
+//! tree rather than a permission calculation, since only the filesystem knows the access-control
+//! entries, the ownership, and this process's token at once; [`Elevation::Auto`] elevates only once
+//! that probe fails. Where the apply does run in a separate, privileged worker, that worker is offline
+//! by design: this process fetches and verifies every byte first, and the worker only ever writes
+//! bytes it re-derives the proof for from what it reads, since the admission taken here is a value in
+//! this process that cannot travel across the boundary unchanged. For a game patch that re-derivation
+//! is the same per-block SHA1; for a boot patch it is the whole-file digest taken at admission, since
+//! that is the half of the boot proof an attacker cannot recompute.
+//!
+//! # Error semantics
+//!
+//! [`PatchError`] keeps two kinds of disk exhaustion apart because they are different claims.
+//! [`PreflightError::NotEnoughSpace`], reached through [`PatchError::Preflight`], is a *predicted*
+//! shortfall: an estimate taken from patchlist lengths before a byte moves, naming a pool and a
+//! needed/free pair that describe a disk reading, not a failure. [`PatchError::OutOfSpace`] is the
+//! *observed* half: the disk actually filled during a transfer, so it names the path the filesystem
+//! refused instead, a number that is not knowable once a write has already failed. [`PatchError::Acquire`]
+//! is deliberately not `#[from]` for the same reason those two stay distinct: an unwritten `?` over a
+//! fetch failure would flatten `OutOfSpace` and [`PatchError::Cancelled`] back into a generic acquire
+//! failure that names neither the repo nor the patch index responsible, so every fetch failure in this
+//! crate is routed to its variant by hand instead.
 
 use std::path::PathBuf;
 
@@ -97,9 +134,9 @@ impl Repo {
 /// Names one broken part for repair reporting: the repo-relative file and the byte offset of the run
 /// that failed verification.
 ///
-/// Carries no repo of its own. It is only ever reached through
-/// [`PatchError::Verify`](PatchError::Verify), which names the repo already, and two copies of one
-/// value are two chances for a caller to read the one that was not set.
+/// Carries no repo of its own. It is only ever reached through [`PatchError::Verify`], which names
+/// the repo already, and two copies of one value are two chances for a caller to read the one that
+/// was not set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartRef {
     /// The repo-relative path of the file holding the run.
@@ -112,7 +149,9 @@ pub struct PartRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpacePool {
+    /// Where downloaded patch files land ([`PatcherConfig::patch_store`]).
     PatchStore,
+    /// The install tree the patches apply into.
     GameRoot,
     /// The pools resolved onto one filesystem, so they were guarded once against their combined
     /// need.
@@ -136,8 +175,11 @@ pub enum PreflightError {
     /// [`PatchError::OutOfSpace`] instead.
     #[error("not enough space in {pool:?}: need {needed}, have {free}")]
     NotEnoughSpace {
+        /// The pool that came up short (or, on a shared filesystem, both pools together).
         pool: SpacePool,
+        /// The heuristic bytes required.
         needed: u64,
+        /// The bytes free on the pool's filesystem.
         free: u64,
     },
     /// The game is running in the install this operation targets, so nothing was touched.
@@ -153,10 +195,18 @@ pub enum PreflightError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PatchError {
+    /// Refused before anything was touched: see [`PreflightError`].
     #[error("preflight failed")]
     Preflight(#[from] PreflightError),
+    /// A patchlist entry could not be turned into a download request (a bad URL, a version that
+    /// strips to nothing, malformed or absent block hashes).
     #[error("patchlist entry {index}: {detail}")]
-    Patchlist { index: u32, detail: String },
+    Patchlist {
+        /// The entry's zero-based position in the patch set.
+        index: u32,
+        /// What was wrong with it.
+        detail: String,
+    },
     /// The disk filled during the transfer: the other half of the space story, and the half that
     /// fires when the [`PreflightError::NotEnoughSpace`] estimate cleared the install or
     /// [`PatcherConfig::ignore_space`] skipped it. Separate from that variant rather than folded
@@ -168,7 +218,9 @@ pub enum PatchError {
     /// holds this same path and nothing else besides.
     #[error("out of disk space at {path:?}")]
     OutOfSpace {
+        /// The path the filesystem refused to write.
         path: PathBuf,
+        /// The underlying `ENOSPC` (or platform equivalent).
         #[source]
         source: std::io::Error,
     },
@@ -206,17 +258,26 @@ pub enum PatchError {
         /// The first of those runs, in verification order.
         first: PartRef,
     },
+    /// The apply itself failed (a corrupt patch, a write the filesystem refused).
     #[error("apply failed")]
     Apply(#[from] apogee_zipatch::Error),
+    /// A boot patch failed its chunk-CRC admission scan, so it was rejected before any byte of it
+    /// was applied.
     #[error("boot patch {index} failed chunk-crc admission")]
     BootAdmission {
+        /// The failed patch's zero-based position in the boot chain.
         index: u32,
+        /// The parse or CRC fault the scan hit.
         #[source]
         source: apogee_zipatch::Error,
     },
+    /// A filesystem operation this crate owns directly failed (version files, directory creation),
+    /// distinct from a fault inside the acquire or apply pipelines.
     #[error("i/o error on {path}")]
     Io {
+        /// The path the operation was on.
         path: PathBuf,
+        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
@@ -232,18 +293,29 @@ pub enum PatchError {
         /// The rendered underlying error.
         detail: String,
     },
+    /// A repo's block index could not be obtained or parsed (fetch failure, signature or pin
+    /// mismatch, malformed `.apzi`).
     #[error("index unavailable for {repo:?}")]
     IndexUnavailable {
+        /// The repo whose index was needed.
         repo: Repo,
+        /// The underlying failure.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// A repair's index describes a different version than the one the caller asked to heal to, so
+    /// it was refused before any byte was rewritten to guard against contents from the wrong
+    /// version.
     #[error("version cross-check failed for {repo:?}: index {index_version}, wanted {wanted}")]
     VersionCrossCheck {
+        /// The repo whose index failed the cross-check.
         repo: Repo,
+        /// The version the index actually describes.
         index_version: String,
+        /// The version the repair was asked to heal to.
         wanted: String,
     },
+    /// The operation was cancelled through [`Job::cancel`].
     #[error("cancelled")]
     Cancelled,
 }

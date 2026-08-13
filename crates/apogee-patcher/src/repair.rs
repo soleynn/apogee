@@ -34,6 +34,7 @@ use crate::{PartRef, PatchError, PatchProgress, PatcherConfig, Repo, preflight, 
 /// pulled over HTTP, and the strays moved to the recycler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairedRepo {
+    /// The repo that was healed.
     pub repo: Repo,
     /// The version the repo verifies against after the heal (its `.ver` was advanced to this).
     pub version: String,
@@ -54,6 +55,7 @@ pub struct RepairedRepo {
 /// deleted nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepairOutcome {
+    /// One entry per repo the request named.
     pub repos: Vec<RepairedRepo>,
     /// Total bytes pulled over HTTP across every repo.
     pub bytes_refetched: u64,

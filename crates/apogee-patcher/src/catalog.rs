@@ -7,7 +7,7 @@
 //! signing ceremony is its own), matching the "each domain crate verifies its own manifest" model.
 //!
 //! [`IndexCatalog::from_json_bytes`] is a pure, total parser over untrusted input (the fuzz entry
-//! point); [`IndexCatalog::parse_and_verify`] gates it behind the signature check. A resolved
+//! point); [`IndexCatalog::verify_default`] gates it behind the signature check. A resolved
 //! [`IndexEntry`] hands back the [`IndexSource`] a repair fetches under, and the base its source
 //! patches are served under ([`IndexEntry::source_base`]) when the row names one.
 
@@ -32,10 +32,6 @@ const INDEX_CATALOG_MANIFEST_VERSION: u32 = 1;
 /// Separate from the runner catalog's key: this is the patcher's own signed manifest. The matching
 /// private seed is held offline by the maintainer; it signs the hosted `manifest.json` and only these
 /// public bytes are committed. Rotating the key is a change to this constant plus a re-sign.
-///
-/// Not public, and neither is the verification that takes a key. [`IndexCatalog::verify_default`] is
-/// the whole API: it is the arm that uses `verify_strict`, and handing out the raw bytes invites a
-/// caller to build its own check that does not.
 const INDEX_CATALOG_PUBLIC_KEY: [u8; 32] = [
     0xb0, 0x60, 0x39, 0xaa, 0x1a, 0x8b, 0x96, 0x54, 0x1d, 0x8c, 0xd7, 0x5a, 0x23, 0x68, 0xec, 0x94,
     0x38, 0x2c, 0x1e, 0x97, 0xfd, 0x32, 0xed, 0x43, 0xd4, 0x33, 0x11, 0x25, 0x88, 0xb5, 0xe1, 0x37,
@@ -46,8 +42,11 @@ const INDEX_CATALOG_PUBLIC_KEY: [u8; 32] = [
 /// references are served.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
+    /// Which repo this index describes.
     pub repo: Repo,
+    /// The repo version this index was built for.
     pub version: String,
+    /// Where the `.apzi` is served.
     pub url: Url,
     /// The whole-file digest, carrying which function a row pinned it under.
     pub pin: DigestPin,
@@ -76,7 +75,9 @@ impl IndexEntry {
 /// A verified index catalog.
 #[derive(Debug, Clone)]
 pub struct IndexCatalog {
+    /// The manifest schema version this catalog was parsed as.
     pub version: u32,
+    /// The rows: one block-index pin per repo and version the catalog describes.
     pub indexes: Vec<IndexEntry>,
 }
 
@@ -84,7 +85,7 @@ impl IndexCatalog {
     /// Parse a catalog from untrusted JSON. Pure and total: any byte sequence yields an
     /// [`IndexCatalog`] or a typed [`IndexCatalogError`], never a panic or an unbounded allocation.
     /// This is the fuzz target and carries **no** authenticity guarantee on its own; callers must have
-    /// verified the signature (see [`parse_and_verify`](Self::parse_and_verify)).
+    /// verified the signature (see [`verify_default`](Self::verify_default)).
     ///
     /// # Errors
     /// [`IndexCatalogError`] for malformed JSON, an unsupported version, or a bad
@@ -118,7 +119,7 @@ impl IndexCatalog {
         Self::from_json_bytes(manifest_json)
     }
 
-    /// Verify and parse a hosted catalog against the compiled-in [`INDEX_CATALOG_PUBLIC_KEY`]. The
+    /// Verify and parse a hosted catalog against the compiled-in `INDEX_CATALOG_PUBLIC_KEY`. The
     /// convenience the composition root calls so it never handles the key or the `ed25519` type: it
     /// fetches the manifest and signature bytes (transport is its job) and hands them here for the
     /// crypto (the patcher's job).
@@ -149,20 +150,51 @@ impl IndexCatalog {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum IndexCatalogError {
+    /// The bytes are not valid JSON, or do not match the manifest schema.
     #[error("manifest is not valid JSON or violates the schema")]
     Malformed(#[source] serde_json::Error),
+    /// The signature over the manifest bytes did not verify against the trusted key, or was absent
+    /// or malformed. Checked before any row inside is trusted.
     #[error("manifest signature did not verify against the trusted key")]
     BadSignature,
+    /// The manifest declares a schema version this build does not understand.
     #[error("unsupported manifest version {found} (expected {expected})")]
-    UnsupportedVersion { found: u32, expected: u32 },
+    UnsupportedVersion {
+        /// The version the manifest declared.
+        found: u32,
+        /// The version this build understands.
+        expected: u32,
+    },
+    /// A row names a repo label [`Repo::from_label`] does not recognize.
     #[error("unknown repo {repo:?}")]
-    UnknownRepo { repo: String },
+    UnknownRepo {
+        /// The unrecognized label, as written in the manifest.
+        repo: String,
+    },
+    /// A row carries neither a valid BLAKE3 nor SHA-256 hex pin.
     #[error("{repo} {version}: no blake3 or sha256 pin of 32 hex bytes")]
-    BadPin { repo: String, version: String },
+    BadPin {
+        /// The row's repo label.
+        repo: String,
+        /// The row's version.
+        version: String,
+    },
+    /// A row's `url` field does not parse as an absolute URL.
     #[error("{repo} {version}: not a valid absolute url")]
-    BadUrl { repo: String, version: String },
+    BadUrl {
+        /// The row's repo label.
+        repo: String,
+        /// The row's version.
+        version: String,
+    },
+    /// A row's `source_base` is not an absolute `http`/`https` URL with a path ending in `/`.
     #[error("{repo} {version}: source base is not an absolute http(s) url ending in `/`")]
-    BadSourceBase { repo: String, version: String },
+    BadSourceBase {
+        /// The row's repo label.
+        repo: String,
+        /// The row's version.
+        version: String,
+    },
 }
 
 // ---- raw deserialization + validation -------------------------------------------------------
