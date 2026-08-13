@@ -23,6 +23,7 @@ mod error;
 mod exec;
 #[cfg(target_os = "linux")]
 mod extract;
+mod flatpak;
 mod hive;
 #[cfg(target_os = "linux")]
 mod install;
@@ -70,6 +71,7 @@ pub use error::{
 pub use exec::{PrefixRun, ProgramInPrefix};
 #[cfg(target_os = "linux")]
 pub use extract::extract_archive;
+pub use flatpak::{Confinement, Invocation};
 pub use hive::RegistryEffect;
 pub use metadata::{
     DxvkRef, InstalledComponent, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord,
@@ -187,6 +189,7 @@ pub struct RuntimePaths {
 struct Inner {
     fetcher: Fetcher,
     paths: RuntimePaths,
+    confinement: Confinement,
 }
 
 /// Wine/Proton runner manager. A cheap handle: clone it to share.
@@ -196,11 +199,33 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Construct the runtime over `fetcher` and `paths` (called by the composition root).
+    /// Construct the runtime over `fetcher` and `paths` (called by the composition root), detecting
+    /// this process's confinement once.
     pub fn new(fetcher: Fetcher, paths: RuntimePaths) -> Self {
+        Self::with_confinement(fetcher, paths, Confinement::detect())
+    }
+
+    /// The same, for a composition root that already knows its confinement or a test that is
+    /// composing for one it is not running under.
+    pub fn with_confinement(
+        fetcher: Fetcher,
+        paths: RuntimePaths,
+        confinement: Confinement,
+    ) -> Self {
         Self {
-            inner: Arc::new(Inner { fetcher, paths }),
+            inner: Arc::new(Inner {
+                fetcher,
+                paths,
+                confinement,
+            }),
         }
+    }
+
+    /// The sandbox this runtime is running in, if any. What follows from it is
+    /// [`Confinement`]'s to say; this is here so a shell can report the fact.
+    #[must_use]
+    pub fn confinement(&self) -> &Confinement {
+        &self.inner.confinement
     }
 }
 
@@ -420,7 +445,7 @@ impl Runtime {
         } else {
             None
         };
-        let mut command = spawn::build_command(&plan, umu.as_deref())?;
+        let mut command = spawn::build_command(&plan, umu.as_deref(), &self.inner.confinement)?;
 
         progress.emit(RuntimeEvent::Spawning {
             runner: runner_name.clone(),
@@ -564,11 +589,16 @@ impl Runtime {
     /// through its runner. Unlike [`Self::launch`] the child is held rather than resolved through
     /// `/proc`, so a short-lived companion is supported and its exit status is readable.
     ///
+    /// A host companion is the one thing this crate starts outside its own sandbox: from inside one
+    /// it is relayed through `flatpak-spawn`, which changes what a stop can reach
+    /// ([`Companion::stop`], [`Confinement`]).
+    ///
     /// # Errors
     /// [`RuntimeError::MissingHostTool`] if a prefix companion has no resolvable runner launcher,
-    /// or [`RuntimeError::Spawn`] if the process could not be started.
+    /// or if a host companion is being started from a sandbox that carries no `flatpak-spawn`, and
+    /// [`RuntimeError::Spawn`] if the process could not be started.
     pub fn spawn_companion(&self, spec: &CompanionSpec) -> Result<Companion, RuntimeError> {
-        companion::spawn(spec, &self.tools_dir())
+        companion::spawn(spec, &self.tools_dir(), &self.inner.confinement)
     }
 
     /// Kill everything in a prefix. Separate and explicit: never the default stop.

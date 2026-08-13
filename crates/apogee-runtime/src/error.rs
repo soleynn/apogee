@@ -276,4 +276,14 @@ pub enum HostTool {
     Steam,
     Tar,
     Umu,
+    /// `flatpak-spawn`, the only way a confined process starts a program outside its sandbox. It
+    /// belongs to the runtime rather than to the application, so a build can be missing one
+    /// ([`crate::Confinement`]).
+    FlatpakSpawn,
+    /// `gamescope`. Named only under confinement, where its absence is a build that does not ship
+    /// one rather than a package the user chose not to install.
+    Gamescope,
+    /// `gamemoderun`, the shim that preloads the gamemode client into what it wraps. As
+    /// [`Self::Gamescope`].
+    Gamemode,
 }

@@ -5,6 +5,14 @@
 //! ([`crate::GameSession`]); a companion is not, because it is an ordinary child with an ordinary
 //! exit status. What it does need is a stop that reaches the tool a launcher script backgrounded,
 //! so every companion leads its own process group and the stop signals the group.
+//!
+//! Inside a Flatpak sandbox a host companion is relayed out through `flatpak-spawn`
+//! ([`crate::flatpak`]), and the group stops being the whole story: the group then holds the relay
+//! rather than the tool. What survives is measured in that module, and it is the graceful half.
+//! `SIGTERM` is forwarded across the boundary, so an ordinary stop still reaches the tool and its
+//! exit status still comes back; the `SIGKILL` that follows a grace reaches only the relay, so a
+//! host tool that ignores `SIGTERM` outlives it, and a stopped launcher cannot see whatever the tool
+//! backgrounded.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +23,7 @@ use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use tokio::process::{Child, Command};
 
 use crate::error::RuntimeError;
+use crate::flatpak::{Confinement, Invocation, host_arguments};
 use crate::plan::Prefix;
 use crate::spawn::{prefix_env, prefix_launcher, resolve_umu};
 use crate::supervise::{ExitWatch, wait_exit, watch_exit};
@@ -200,31 +209,23 @@ impl Companion {
 }
 
 /// Spawn `spec`, resolving the runner launcher for a prefix companion from `tools_dir`.
-pub(crate) fn spawn(spec: &CompanionSpec, tools_dir: &Path) -> Result<Companion, RuntimeError> {
+///
+/// # Errors
+/// [`RuntimeError::MissingHostTool`] if a prefix companion has no resolvable runner launcher, or if
+/// a host companion is being started from a sandbox that carries no `flatpak-spawn`, and
+/// [`RuntimeError::Spawn`] if the process could not be started.
+pub(crate) fn spawn(
+    spec: &CompanionSpec,
+    tools_dir: &Path,
+    confinement: &Confinement,
+) -> Result<Companion, RuntimeError> {
     let name = spec
         .program
         .file_name()
         .map_or_else(|| spec.program.to_string_lossy(), |n| n.to_string_lossy())
         .into_owned();
 
-    let mut command = match spec.prefix.as_ref() {
-        Some(prefix) => {
-            let umu = resolve_umu(tools_dir);
-            let launcher = prefix_launcher(prefix, umu.as_deref())?;
-            let mut command = Command::new(launcher);
-            command.arg(&spec.program);
-            prefix_env(&mut command, prefix);
-            command
-        }
-        None => Command::new(&spec.program),
-    };
-    command.args(&spec.args);
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
-    if let Some(dir) = &spec.working_dir {
-        command.current_dir(dir);
-    }
+    let mut command = compose(spec, tools_dir, confinement)?;
     // A companion is not the user's terminal session: its output would otherwise interleave with the
     // launcher's own, and a prompt on inherited stdin would block the launch.
     command.stdin(Stdio::null());
@@ -251,9 +252,179 @@ pub(crate) fn spawn(spec: &CompanionSpec, tools_dir: &Path) -> Result<Companion,
     Ok(Companion { child, pid, name })
 }
 
+/// The command that starts `spec`, on whichever side of a sandbox boundary it belongs to.
+///
+/// A companion that runs inside a prefix goes through the runner and stays where the prefix is. A
+/// host companion is the one invocation in this crate that is a host one by definition: the user
+/// points at a program on their own machine, which a sandbox neither installed nor can see, so
+/// under confinement it is relayed out through `flatpak-spawn` ([`crate::flatpak`]).
+fn compose(
+    spec: &CompanionSpec,
+    tools_dir: &Path,
+    confinement: &Confinement,
+) -> Result<Command, RuntimeError> {
+    if let Some(prefix) = spec.prefix.as_ref() {
+        let umu = resolve_umu(tools_dir);
+        let launcher = prefix_launcher(prefix, umu.as_deref())?;
+        let mut command = Command::new(launcher);
+        command.arg(&spec.program);
+        prefix_env(&mut command, prefix);
+        inline_tail(&mut command, spec);
+        return Ok(command);
+    }
+    if !confinement.runs_on_host(Invocation::HostTool) {
+        let mut command = Command::new(&spec.program);
+        inline_tail(&mut command, spec);
+        return Ok(command);
+    }
+    // Nothing is set on this command beyond the argv: across the boundary the environment is not
+    // inherited and the working directory is a flag, so both travel inside `host_arguments`.
+    let mut command = Command::new(confinement.require_host_spawn()?);
+    command.args(host_arguments(
+        &spec.program,
+        &spec.args,
+        &spec.env,
+        spec.working_dir.as_deref(),
+    ));
+    Ok(command)
+}
+
+/// The part of a command that is the same wherever it runs: its arguments, the caller's environment
+/// and its working directory, all inherited by an ordinary child.
+fn inline_tail(command: &mut Command, spec: &CompanionSpec) {
+    command.args(&spec.args);
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    if let Some(dir) = &spec.working_dir {
+        command.current_dir(dir);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
+    use crate::error::HostTool;
+    use crate::shim::{PROBE, scripted_prefix, wait_until_runnable};
+
+    /// A process that is not sandboxed, which is what every test here but the Flatpak ones composes
+    /// for.
+    fn unconfined() -> Confinement {
+        Confinement::default()
+    }
+
+    /// A stand-in for `flatpak-spawn` that writes the argv it was handed, one token per line, and
+    /// then stops. It does not relay anything: what a test needs to read is exactly what crossed the
+    /// boundary, and a real relay is the thing being stood in for.
+    ///
+    /// Written and then probed until it runs, because a sibling thread's fork can inherit the
+    /// descriptor this file is still open on and make the first exec fail with `ETXTBSY`
+    /// ([`crate::shim`]).
+    fn fake_host_spawn(dir: &Path, record: &Path) -> PathBuf {
+        let path = dir.join("flatpak-spawn");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = {PROBE} ] && exit 0\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                record.display()
+            ),
+        )
+        .expect("write the relay");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        wait_until_runnable(&path);
+        path
+    }
+
+    /// A sandbox whose way out is `spawn`.
+    fn confined(spawn: PathBuf) -> Confinement {
+        Confinement {
+            flatpak: true,
+            host_spawn: Some(spawn),
+        }
+    }
+
+    /// The tokens the relay recorded, or nothing if it was never run.
+    fn recorded(record: &Path) -> Option<Vec<String>> {
+        let text = std::fs::read_to_string(record).ok()?;
+        Some(text.lines().map(str::to_owned).collect())
+    }
+
+    /// A host companion started from inside a sandbox goes out through the relay, and everything the
+    /// caller set travels as an argument rather than as inherited state: measured on flatpak 1.16.6,
+    /// a host command gets the host session's environment and none of the sandbox's, so a variable
+    /// merely set on the child is a variable the tool never sees.
+    #[tokio::test]
+    async fn a_host_companion_under_confinement_is_relayed_with_its_environment_named() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let record = dir.path().join("argv");
+        let relay = fake_host_spawn(dir.path(), &record);
+
+        let mut env = BTreeMap::new();
+        env.insert("APOGEE_GAME_PID".to_owned(), "4242".to_owned());
+        let spec = CompanionSpec::host("/opt/overlay/tool", vec!["--attach".to_owned()])
+            .env(env)
+            .working_dir("/opt/overlay");
+
+        let mut companion = spawn(&spec, dir.path(), &confined(relay)).expect("spawn");
+        companion.wait().await.expect("wait");
+
+        assert_eq!(
+            recorded(&record).expect("the relay ran"),
+            [
+                "--host",
+                "--directory=/opt/overlay",
+                "--env=APOGEE_GAME_PID=4242",
+                "--",
+                "/opt/overlay/tool",
+                "--attach",
+            ]
+        );
+    }
+
+    /// The other half of the matrix. A companion that runs inside a prefix goes through the runner
+    /// wherever the launcher is, because the prefix and the wine processes it holds are the
+    /// sandbox's; relaying it out would start a second wine against a prefix nothing else can see.
+    #[tokio::test]
+    async fn an_in_prefix_companion_is_not_relayed_out_of_the_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let record = dir.path().join("argv");
+        let relay = fake_host_spawn(dir.path(), &record);
+        let (_runner_dir, prefix) = scripted_prefix("exit 0");
+
+        let spec = CompanionSpec::in_prefix("overlay.exe", Vec::new(), &prefix);
+        let mut companion = spawn(&spec, dir.path(), &confined(relay)).expect("spawn");
+        companion.wait().await.expect("wait");
+
+        assert!(
+            recorded(&record).is_none(),
+            "a program that belongs in the prefix was sent to the host"
+        );
+    }
+
+    /// A sandbox with no relay cannot start a host tool. Reported rather than fallen back on: run
+    /// inside the sandbox instead, the tool is missing from a runtime that never had it, and the
+    /// failure would read as the user's own program being broken.
+    #[test]
+    fn a_confined_host_companion_with_no_relay_is_a_typed_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stranded = Confinement {
+            flatpak: true,
+            host_spawn: None,
+        };
+        let spec = CompanionSpec::host("/opt/overlay/tool", Vec::new());
+        let err = spawn(&spec, dir.path(), &stranded).expect_err("there is no way out");
+        assert!(
+            matches!(
+                err,
+                RuntimeError::MissingHostTool {
+                    tool: HostTool::FlatpakSpawn
+                }
+            ),
+            "{err:?}"
+        );
+    }
 
     /// The group stop must reach a process the companion backgrounded and left behind. A shell that
     /// starts a sleeper and exits immediately is the shim shape that orphans a descendant when the
@@ -273,7 +444,7 @@ mod tests {
                 ),
             ],
         );
-        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+        let mut companion = spawn(&spec, dir.path(), &unconfined()).expect("spawn");
 
         // The leader exits at once; the backgrounded loop keeps refreshing the marker.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -302,7 +473,7 @@ mod tests {
                 "trap '' TERM; while :; do sleep 0.05; done".into(),
             ],
         );
-        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+        let mut companion = spawn(&spec, dir.path(), &unconfined()).expect("spawn");
         let pid = companion.pid();
 
         companion
@@ -320,7 +491,7 @@ mod tests {
     async fn a_companion_reports_its_exit_status() {
         let dir = tempfile::tempdir().expect("tempdir");
         let spec = CompanionSpec::host("/bin/sh", vec!["-c".into(), "exit 3".into()]);
-        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+        let mut companion = spawn(&spec, dir.path(), &unconfined()).expect("spawn");
         assert_eq!(companion.wait().await.expect("wait").code, Some(3));
     }
 
@@ -337,7 +508,7 @@ mod tests {
                 format!("(sleep 0.4; : > {}) & exit 0", marker.display()),
             ],
         );
-        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+        let mut companion = spawn(&spec, dir.path(), &unconfined()).expect("spawn");
 
         companion.wait_group().await.expect("wait_group");
         assert!(
@@ -351,7 +522,7 @@ mod tests {
     async fn a_companion_still_running_reports_no_exit_yet() {
         let dir = tempfile::tempdir().expect("tempdir");
         let spec = CompanionSpec::host("/bin/sh", vec!["-c".into(), "sleep 0.2".into()]);
-        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+        let mut companion = spawn(&spec, dir.path(), &unconfined()).expect("spawn");
 
         assert_eq!(companion.try_wait().expect("try_wait"), None);
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -376,7 +547,7 @@ mod tests {
                 "one two \"three\"".into(),
             ],
         );
-        let mut companion = spawn(&spec, dir.path()).expect("spawn");
+        let mut companion = spawn(&spec, dir.path(), &unconfined()).expect("spawn");
         companion.wait().await.expect("wait");
         assert_eq!(
             std::fs::read_to_string(&out).expect("argv"),
