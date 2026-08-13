@@ -34,7 +34,14 @@ const OPEN_HANDLE_CAP: usize = 16;
 
 /// The decode cap for one `F:A` block. Comfortably clears real file-add blocks while still bounding a
 /// hostile `decompressed_size` claim.
-const MAX_BLOCK_DECOMPRESSED: u32 = 16 << 20;
+///
+/// Deliberately looser than [`codec::DEFAULT_MAX_DECOMPRESSED`], which is the reader's bound on a
+/// SqPack *data* block; this is the patch side's bound on the same format, set where no real chain
+/// reaches it. It lives here, once, because every path in this crate that decodes a block has to
+/// agree on it: the apply engine, the index build, the reconstruct and the repair all read this
+/// constant, and a second copy would let the apply path and the repair path disagree about the same
+/// bytes without anything saying so.
+pub(crate) const MAX_BLOCK_DECOMPRESSED: u32 = 16 << 20;
 
 /// The cap on a single zero-fill (an `A` delete-tail or a `D`/`E` empty-block span). It clears any
 /// real dat-scale wipe or expand with room to spare while rejecting the pathological ~512 GiB span a

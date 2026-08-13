@@ -16,11 +16,9 @@ use std::path::Path;
 use apogee_sqpack::codec;
 
 use crate::datfile;
+use crate::disk::MAX_BLOCK_DECOMPRESSED;
 use crate::error::{Error, Op, Result};
 use crate::index::model::{Index, Part, Source, TargetFile};
-
-/// The decode cap for one compressed block, matching the apply engine's bound.
-pub(crate) const MAX_BLOCK_DECOMPRESSED: u32 = 16 << 20;
 
 impl Index {
     /// Reconstruct the whole tree under `root` from the index, pulling source bytes from `sources`
