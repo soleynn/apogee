@@ -81,14 +81,34 @@ pub enum RuntimeError {
     RegistryKey { key: String, reason: &'static str },
     #[error("invalid launch plan: {reason}")]
     InvalidLaunchPlan { reason: &'static str },
-    #[error("game process not found after {waited:?}")]
-    GameProcessNotFound { waited: Duration },
+    /// The game never appeared in the process table inside the time budget.
+    ///
+    /// Names what was scanned for, because the scan is by `comm` and the answer to "why did nothing
+    /// match" is usually the name rather than the waiting. The kernel caps `comm` at 15 bytes and the
+    /// runner renames its loader to the PE basename, so a launch that resolves nothing is read by
+    /// comparing the basename against what the prefix actually started, and neither is recoverable
+    /// from a duration.
+    #[error("game process {program:?} not found in {prefix:?} after {waited:?}")]
+    GameProcessNotFound {
+        /// The PE basename the `/proc` scan matched on.
+        program: String,
+        /// The prefix the scan narrowed to, by each process's own `WINEPREFIX`.
+        prefix: PathBuf,
+        waited: Duration,
+    },
     /// The wait for the game process to appear ended because the run was stopped. Its own variant
     /// rather than a flag on [`Self::GameProcessNotFound`]: nothing was found either way, but one is a
     /// launch that failed and the other is a user who changed their mind, and only the first is worth
     /// telling them about.
-    #[error("the wait for the game process was stopped after {waited:?}")]
-    GameWaitCancelled { waited: Duration },
+    ///
+    /// Carries the same program as [`Self::GameProcessNotFound`], so a consumer that logs a stopped
+    /// launch still records which one was stopped.
+    #[error("the wait for game process {program:?} was stopped after {waited:?}")]
+    GameWaitCancelled {
+        /// The PE basename the `/proc` scan was matching on.
+        program: String,
+        waited: Duration,
+    },
     /// The supervision of a running game ended before the process was reaped, so whether it is still
     /// running is no longer known. Raised where a launch is supervised by the child handle rather than
     /// by the process table (Windows), and reachable only when the async runtime that owns the
