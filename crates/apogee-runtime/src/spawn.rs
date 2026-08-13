@@ -6,6 +6,7 @@ use tokio::process::Command;
 
 use crate::catalog::RunnerKind;
 use crate::error::{HostTool, RuntimeError};
+use crate::flatpak::{Confinement, check_sandbox_tool, on_path};
 use crate::plan::{LaunchPlan, Prefix};
 
 /// A generic umu `GAMEID`: the Steam Linux Runtime environment with no per-title protonfix.
@@ -60,9 +61,15 @@ pub(crate) fn prefix_env(cmd: &mut Command, prefix: &Prefix) {
 
 /// Build the process command for `plan` (which must carry a prefix). `umu_run` is the resolved
 /// umu-run path (managed or on `PATH`) for Proton runners.
+///
+/// The whole invocation runs on one side of a sandbox boundary and that side is the sandbox
+/// ([`crate::flatpak`]), so `confinement` decides nothing about composition here. What it does
+/// decide is whether the outermost wrapper is pre-flighted: inside a sandbox, a wrapper the build
+/// does not ship fails as itself rather than as an `ENOENT` naming a path the user has never seen.
 pub(crate) fn build_command(
     plan: &LaunchPlan,
     umu_run: Option<&Path>,
+    confinement: &Confinement,
 ) -> Result<Command, RuntimeError> {
     let prefix = plan.prefix_ref().ok_or(RuntimeError::InvalidLaunchPlan {
         reason: "launch plan has no prefix",
@@ -91,6 +98,7 @@ pub(crate) fn build_command(
     let (exe, rest) = argv.split_first().ok_or(RuntimeError::InvalidLaunchPlan {
         reason: "empty launch command",
     })?;
+    check_sandbox_tool(confinement, exe)?;
     let mut cmd = Command::new(exe);
     cmd.args(rest);
     apply_env(&mut cmd, plan, prefix);
@@ -185,15 +193,9 @@ pub(crate) fn resolve_umu(tools_dir: &Path) -> Option<PathBuf> {
             }
         }
     }
-    which("umu-run")
-}
-
-/// The first `name` found on `PATH`.
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+    // Inside a sandbox this is the sandbox's `PATH`, which is the right answer: a host umu-run
+    // would start the game on the far side of the boundary supervision cannot read across.
+    on_path("umu-run")
 }
 
 #[cfg(test)]
@@ -224,7 +226,7 @@ mod tests {
             .prefix(&prefix)
             .in_directory(&working);
 
-        let cmd = build_command(&plan, None).unwrap();
+        let cmd = build_command(&plan, None, &Confinement::default()).unwrap();
         assert_eq!(cmd.as_std().get_current_dir(), Some(working.as_path()));
     }
 
@@ -268,7 +270,7 @@ mod tests {
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
         let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
 
-        let cmd = build_command(&plan, None).unwrap();
+        let cmd = build_command(&plan, None, &Confinement::default()).unwrap();
         assert_eq!(cmd.as_std().get_current_dir(), None);
     }
 
@@ -290,7 +292,7 @@ mod tests {
             .prefix(&prefix);
         plan.set_inserted_args(vec!["launch".to_owned(), "--mode=inject".to_owned()]);
 
-        let cmd = build_command(&plan, None).unwrap();
+        let cmd = build_command(&plan, None, &Confinement::default()).unwrap();
         let args: Vec<_> = cmd.as_std().get_args().collect();
         assert_eq!(
             args,
@@ -302,6 +304,48 @@ mod tests {
             ],
             "the loader's flags belong ahead of the game's own argument"
         );
+    }
+
+    /// Inside a sandbox a wrapper the build does not ship is named, and the launch it would have
+    /// wrapped is refused before anything starts. The runner underneath it is an absolute path the
+    /// caller already resolved, so the same pre-flight leaves an unwrapped launch alone.
+    #[test]
+    fn a_confined_launch_names_the_wrapper_its_sandbox_does_not_carry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner_dir = tmp.path().join("runner");
+        std::fs::create_dir_all(runner_dir.join("bin")).unwrap();
+        let wine = runner_dir.join("bin/wine");
+        std::fs::write(&wine, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = RunnerHandle::new(runner_dir, RunnerKind::Custom, "test", "custom");
+        let prefix = Prefix::new(tmp.path().join("prefix"), runner);
+        let confined = Confinement {
+            flatpak: true,
+            host_spawn: Some(PathBuf::from("/usr/bin/flatpak-spawn")),
+        };
+
+        // `gamescope` is not in any Flatpak runtime, so a sandbox that did not bundle it resolves
+        // nothing. The name is pinned in the matrix precisely so this failure can be told apart from
+        // the program itself refusing to start.
+        let wrapped = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new())
+            .prefix(&prefix)
+            .with_wrappers(vec!["gamescope".to_owned(), "--".to_owned()]);
+        let err = build_command(&wrapped, None, &confined)
+            .expect_err("a wrapper the sandbox does not carry is not a launch");
+        assert!(
+            matches!(
+                err,
+                RuntimeError::MissingHostTool {
+                    tool: HostTool::Gamescope
+                }
+            ),
+            "{err:?}"
+        );
+
+        let plain = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
+        build_command(&plain, None, &confined)
+            .expect("the runner is a resolved path, not a name to vet");
     }
 
     /// Nothing is inserted unless an injectable asked for it, and the supervised process defaults to
