@@ -590,7 +590,7 @@ pub enum Defect {
     // The dat container and the archive.
     /// A dat's declared data region does not end at the end of the file.
     DeclaredLength {
-        /// `0x800` plus the declared units.
+        /// `0x800` plus the declared units, each 128 bytes.
         declared: u64,
         /// The file's length.
         actual: u64,
@@ -1343,7 +1343,7 @@ mod tests {
     /// in a wildcard, so a variant added to the enum is graded `Damaged`/`Container` by default and
     /// nothing says so. That default is not harmless in one direction: [`Report::damaged_containers`]
     /// is the set a targeted repair re-fetches, and a coherent rewrite graded into it re-fetches the
-    /// container a mod tool left behind — which is the mistake this module's `Altered` arm exists to
+    /// container a mod tool left behind. That is the mistake this module's `Altered` arm exists to
     /// avoid. The table is what makes a new variant's grade a decision somebody made.
     const DEFECT_GRADES: [(&str, Severity, Scope); DEFECT_SLUGS.len()] = [
         ("container-unreadable", Severity::Unusable, Scope::Container),

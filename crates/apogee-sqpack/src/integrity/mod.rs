@@ -84,8 +84,8 @@ pub struct SweepOptions {
     /// Read every entry header the indexes name, account for the slots and classify what the slots do
     /// not cover. On by default: it is the pass that proves an index and its dat files agree.
     pub walk_entries: bool,
-    /// How far unclaimed space is accounted for. Ignored when `walk_entries` is false, since a run of
-    /// unclaimed space is measured between slots.
+    /// How far unclaimed space is accounted for. Ignored unless the entries pass runs (`walk_entries`
+    /// or `decode_entries`), since a run of unclaimed space is measured between slots.
     pub gaps: GapPolicy,
     /// Hash every dat's declared data region and compare it with the header's claim. Disk-bound:
     /// roughly four minutes for a 118 GiB install on a SATA SSD.
