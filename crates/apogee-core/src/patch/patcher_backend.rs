@@ -20,7 +20,6 @@ use apogee_patcher::{
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -204,7 +203,7 @@ async fn drive_job<T: Send + 'static>(
     let mut progress = job.progress();
     let sink = events.clone();
     let relay = tokio::spawn(async move {
-        while let Some(frame) = progress.next().await {
+        while let Some(frame) = progress.recv().await {
             let _ = sink.send(Event::Patch(frame));
         }
     });
@@ -267,7 +266,7 @@ fn cdn_base_for(repo: Repo) -> Option<Url> {
     let path = match repo {
         Repo::Boot => "boot/2b5cbc63/",
         Repo::Game => "game/4e9a232b/",
-        _ => return None,
+        Repo::Expansion(_) => return None,
     };
     Url::parse(&format!("http://patch-dl.ffxiv.com/{path}")).ok()
 }

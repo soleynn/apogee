@@ -976,7 +976,6 @@ fn repo_order(repo: Repo) -> u16 {
         Repo::Boot => 0,
         Repo::Game => 1,
         Repo::Expansion(n) => 2 + u16::from(n),
-        _ => u16::MAX,
     }
 }
 
@@ -1012,7 +1011,7 @@ fn installed_repos(game_root: &Path) -> Vec<RepairRepoPlan> {
 /// byte-for-byte; a plain `read_to_string` would keep a BOM (`trim` does not remove U+FEFF) or fail on
 /// a non-UTF-8 byte, and either would then miss the catalog's exact-match lookup.
 fn read_repo_ver(game_root: &Path, repo: Repo) -> Option<String> {
-    let bytes = std::fs::read(repo_ver_path(game_root, repo)?).ok()?;
+    let bytes = std::fs::read(repo_ver_path(game_root, repo)).ok()?;
     let text = sqex_proto::decode_ver(&bytes);
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())

@@ -21,7 +21,6 @@ use apogee_test_support::tree_manifest;
 use apogee_zipatch::fixtures;
 use sha1::{Digest, Sha1};
 use sqex_proto::{BlockHashes, PatchListEntry};
-use tokio_stream::StreamExt;
 use url::Url;
 
 /// The per-block hash width the synthetic patchlist advertises (small, so a patch spans many blocks).
@@ -202,7 +201,7 @@ async fn apply_stays_in_list_order_under_out_of_order_downloads() -> Result<(), 
     let mut stream = job.progress();
     let collector = tokio::spawn(async move {
         let mut events = Vec::new();
-        while let Some(ev) = stream.next().await {
+        while let Some(ev) = stream.recv().await {
             events.push(ev);
         }
         events
@@ -296,13 +295,13 @@ async fn cancel_then_rerun_converges() -> Result<(), Box<dyn Error>> {
     // Run 1: cancel as soon as a download is in flight.
     let mut job = patcher.install(request(game_root.path(), patches.clone()));
     let mut stream = job.progress();
-    let first = stream.next().await;
+    let first = stream.recv().await;
     assert!(
         matches!(first, Some(PatchProgress::Downloading { .. })),
         "expected a download to start, got {first:?}",
     );
     job.cancel();
-    let drain = tokio::spawn(async move { while stream.next().await.is_some() {} });
+    let drain = tokio::spawn(async move { while stream.recv().await.is_some() {} });
     let result = job.await;
     drain.await?;
     assert!(
@@ -512,7 +511,7 @@ async fn a_malformed_entry_fails_before_any_download_and_leaks_no_task()
 
     // The progress stream closes promptly: no spawned download outlived the early error holding it
     // open (the regression this guards). A leaked task would hang this drain.
-    while stream.next().await.is_some() {}
+    while stream.recv().await.is_some() {}
 
     assert!(
         matches!(result, Err(PatchError::Patchlist { index: 1, .. })),

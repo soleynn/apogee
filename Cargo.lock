@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "apogee-patcher"
-version = "0.0.0"
+version = "0.5.0"
 dependencies = [
  "apogee-elevate",
  "apogee-fetch",
@@ -263,7 +263,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "tracing",
  "url",

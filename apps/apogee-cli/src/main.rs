@@ -2413,6 +2413,10 @@ fn render_recoveries(recoveries: &Recoveries) -> String {
 
 /// Render one patch/repair progress frame as a plain line. Byte counts and versions only: no secret
 /// (the session credential never appears in a `PatchProgress`).
+///
+/// No catch-all arm, and `PatchProgress` is exhaustive so there cannot be one: a new phase fails
+/// this build rather than printing as a bare "progress" line nobody would notice. Same enforcement
+/// [`render_recoveries`] gets from destructuring, one level up.
 fn render_patch(patch: &PatchProgress) -> String {
     match patch {
         PatchProgress::Downloading {
@@ -2451,7 +2455,6 @@ fn render_patch(patch: &PatchProgress) -> String {
         PatchProgress::Repaired { repo, version } => {
             format!("repair: {repo:?} repaired -> {version}")
         }
-        _ => "patch: progress".to_owned(),
     }
 }
 
