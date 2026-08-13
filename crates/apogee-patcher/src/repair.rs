@@ -383,7 +383,6 @@ fn repair_repo(
                 repo,
                 broken: residue.len(),
                 first: PartRef {
-                    repo,
                     path: first.path.clone(),
                     offset: first.target_off,
                 },
@@ -587,6 +586,34 @@ fn join_to_io(join: tokio::task::JoinError) -> PatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A repair that did not converge says which file and offset it gave up on.
+    ///
+    /// Asserted on the rendered message rather than on the fields, because rendering is the only way
+    /// the part reaches anyone: this variant has no `#[source]`, and a launcher builds the line it
+    /// shows out of `Display`. Drop either interpolation from the format string and this goes red,
+    /// which is the state the message shipped in before.
+    #[test]
+    fn an_unconverged_repair_names_the_part_it_gave_up_on() {
+        let rendered = PatchError::Verify {
+            repo: Repo::Expansion(1),
+            broken: 3,
+            first: PartRef {
+                path: PathBuf::from("sqpack/ex1/0a0000.win32.dat0"),
+                offset: 786_432,
+            },
+        }
+        .to_string();
+
+        assert!(
+            rendered.contains("sqpack/ex1/0a0000.win32.dat0"),
+            "the file has to be in the message: {rendered}",
+        );
+        assert!(
+            rendered.contains("786432"),
+            "and the offset within it: {rendered}",
+        );
+    }
 
     /// An `ENOSPC` taken while pulling the index keeps the path the filesystem refused instead of
     /// being reported as an unreachable index.

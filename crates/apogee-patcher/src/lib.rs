@@ -92,10 +92,15 @@ impl Repo {
 
 /// Names one broken part for repair reporting: the repo-relative file and the byte offset of the run
 /// that failed verification.
-#[derive(Debug, Clone)]
+///
+/// Carries no repo of its own. It is only ever reached through
+/// [`PatchError::Verify`](PatchError::Verify), which names the repo already, and two copies of one
+/// value are two chances for a caller to read the one that was not set.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartRef {
-    pub repo: Repo,
+    /// The repo-relative path of the file holding the run.
     pub path: PathBuf,
+    /// The byte offset of the failing run within that file.
     pub offset: u64,
 }
 
@@ -178,10 +183,23 @@ pub enum PatchError {
         #[source]
         source: FetchError,
     },
-    #[error("{broken} broken part(s) in {repo:?}")]
+    /// A repo still failed verification after the last repair pass.
+    ///
+    /// The message names `first` as well as the count. The count alone says a repair did not
+    /// converge and gives nobody a file to look at, and this variant carries no `#[source]`, so a
+    /// part left out of the message is a part that reaches no caller at all: the error chain a
+    /// launcher renders is built from `Display`.
+    #[error(
+        "{broken} broken part(s) in {repo:?}, first {} at offset {}",
+        first.path.display(),
+        first.offset,
+    )]
     Verify {
+        /// The repo that did not come clean.
         repo: Repo,
+        /// How many runs still failed verification.
         broken: usize,
+        /// The first of those runs, in verification order.
         first: PartRef,
     },
     #[error("apply failed")]
