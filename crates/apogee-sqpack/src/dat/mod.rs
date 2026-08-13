@@ -314,6 +314,12 @@ impl<S: DatSource> Dat<S> {
     /// padding. [`Entry::stored_len`] says so before the read, and nothing is invented to close the
     /// gap.
     ///
+    /// Reads are confined to the slot the entry reserves, so a table pointing past it reports a
+    /// broken entry rather than decoding its neighbour's bytes. An entry reserving nothing at all
+    /// while declaring a file is the exception: no entry of a retail install spells that pair, and a
+    /// writer that leaves the occupancy words empty and stores the data anyway would otherwise be
+    /// unreadable, so its container bounds the read in the slot's place.
+    ///
     /// On failure `out` may already hold a prefix of the file: blocks are written as they decode, so
     /// a fault partway through leaves what came before it. (The model arm is the exception, since a
     /// model's header cannot be written until its sections are known, so it emits nothing at all.) A
@@ -334,10 +340,22 @@ impl<S: DatSource> Dat<S> {
             // Nothing an entry holds sits outside the slot it declares, so that is where its reads
             // stop: a block table that points past it is naming another entry's bytes, and answering
             // with those would be handing back the wrong file rather than reporting a broken one.
-            end: entry
-                .data_offset()
-                .saturating_add(entry.header().allocated_bytes())
-                .min(self.source.len()),
+            //
+            // Unless the slot declares nothing at all while the entry declares a file, which is a
+            // combination no entry of a full retail install spells (0 of 1,911,006; the 364 that
+            // reserve no space all declare no file either, and their tables name no blocks). A
+            // third-party writer that leaves both occupancy words at zero and stores megabytes
+            // anyway lands here, and the slot is not a bound so much as absent, so the container is
+            // what bounds the read instead. What comes out is still held to the declared length by
+            // the budget below, so this widens which bytes may be read and not how many.
+            end: if entry.header().allocated_units == 0 && entry.declared_len() > 0 {
+                self.source.len()
+            } else {
+                entry
+                    .data_offset()
+                    .saturating_add(entry.header().allocated_bytes())
+                    .min(self.source.len())
+            },
             spent: 0,
             limit: entry.declared_len(),
             offset: entry.offset(),
@@ -378,8 +396,14 @@ impl<S: DatSource> Dat<S> {
         codec::read_block(&mut window, out, &self.limits.block).map_err(|err| rebase(err, at))
     }
 
-    /// Decode one block, holding it to the on-disk size its entry declares (which is what the next
-    /// block's position is measured from) and to what is left of the entry's budget.
+    /// Decode one block, holding it inside the on-disk size its entry declares (which is what the
+    /// next block's position is measured from) and to what is left of the entry's budget.
+    ///
+    /// Fitting rather than filling is what the size is held to. A block ending short of its row
+    /// leaves padding nothing reads, and a writer that rounds a block already on a unit boundary up
+    /// by another whole unit leaves one unit of it; a block ending past its row is the one that
+    /// matters, since the next block is read from where this row says this one ends and the two
+    /// would overlap.
     fn decode_sized(
         &self,
         at: u64,
@@ -388,10 +412,10 @@ impl<S: DatSource> Dat<S> {
         run: &mut Extraction,
     ) -> Result<u64> {
         let meta = self.decode_block(at, run.end, out)?;
-        if meta.block_len != on_disk {
+        if meta.block_len > on_disk {
             return Err(Error::EntryCorrupt {
                 offset: at,
-                detail: "block does not occupy the space its entry declares",
+                detail: "block does not fit the space its entry declares",
             });
         }
         run.spend(u64::from(meta.decompressed_size))
@@ -828,16 +852,31 @@ mod tests {
     }
 
     #[test]
-    fn a_block_that_does_not_occupy_the_space_its_table_reserves_is_corrupt() {
+    fn a_block_running_past_the_space_its_table_reserves_is_corrupt() {
+        // The next block is read from where this row says this one ends, so a block overrunning its
+        // row overlaps the block after it.
         let (mut bytes, offset, _) =
             one(EntrySpec::standard(vec![b"the quick brown fox".to_vec()]));
         let at = usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN + 4 + 4;
-        bytes[at..at + 2].copy_from_slice(&bytes::write_u16_le(256));
+        bytes[at..at + 2].copy_from_slice(&bytes::write_u16_le(64));
         assert!(matches!(
             extract(&bytes, offset),
             Err(Error::EntryCorrupt { detail, .. })
-                if detail == "block does not occupy the space its entry declares"
+                if detail == "block does not fit the space its entry declares"
         ));
+    }
+
+    #[test]
+    fn a_block_padded_past_its_content_is_read_from_where_its_row_puts_it() {
+        // A row is space reserved, not space filled: a writer rounding a block that already ends on a
+        // unit boundary up by another whole unit leaves one unit no block occupies. Nothing reads the
+        // padding, and the row is still what the next block's position is measured from.
+        let content = b"the quick brown fox".to_vec();
+        let (mut bytes, offset, _) = one(EntrySpec::standard(vec![content.clone()]));
+        let at = usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN + 4 + 4;
+        let declared = bytes::u16_le([bytes[at], bytes[at + 1]]);
+        bytes[at..at + 2].copy_from_slice(&bytes::write_u16_le(declared + DATA_UNIT as u16));
+        assert_eq!(extract(&bytes, offset).unwrap(), content);
     }
 
     #[test]
@@ -970,6 +1009,44 @@ mod tests {
         let block_at = u32::try_from(placed[1].offset - placed[0].offset).unwrap();
         bytes[first + ENTRY_HEADER_LEN + 4..first + ENTRY_HEADER_LEN + 8]
             .copy_from_slice(&bytes::write_u32_le(block_at));
+        assert!(matches!(
+            extract(&bytes, placed[0].offset),
+            Err(Error::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn an_entry_reserving_nothing_at_all_is_read_against_its_container() {
+        // A writer that never fills the occupancy words stores the data anyway, and its table is the
+        // only thing describing it. Bounding such an entry at the space it reserves would read zero
+        // bytes of a file it declares megabytes of, so the container bounds it instead.
+        for spec in [
+            EntrySpec::standard(vec![b"payload".repeat(300), b"tail".to_vec()]),
+            EntrySpec::texture(vec![9u8; 80], vec![vec![3u8; 4000], vec![4u8; 900]]),
+        ] {
+            let mut b = DatBuilder::new();
+            b.empty_slot_words().entry(spec);
+            let (bytes, placed) = b.build();
+            let dat = Dat::parse(&bytes).unwrap();
+            let entry = dat.entry_at(placed[0].offset).unwrap();
+            assert_eq!(entry.header().allocated_units, 0);
+            assert_eq!(entry.header().occupied_units, 0);
+            assert_eq!(dat.read(&entry).unwrap(), placed[0].content);
+        }
+    }
+
+    #[test]
+    fn an_entry_reserving_nothing_and_declaring_nothing_is_still_held_to_its_slot() {
+        // The pair that widens the bound is an empty slot under a declared file. An empty slot over a
+        // file of no length is what a real archive spells for an empty one (364 of a full install's
+        // entries), and there the slot is exact rather than absent, so nothing is read past it.
+        let mut b = DatBuilder::new();
+        b.empty_slot_words()
+            .entry(EntrySpec::standard(vec![b"payload".repeat(300)]));
+        let (mut bytes, placed) = b.build();
+        let at = usize::try_from(placed[0].offset).unwrap();
+        // Declare no file, leaving the block table naming bytes the empty slot does not cover.
+        bytes[at + 8..at + 12].copy_from_slice(&bytes::write_u32_le(0));
         assert!(matches!(
             extract(&bytes, placed[0].offset),
             Err(Error::Truncated { .. })
