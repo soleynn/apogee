@@ -233,7 +233,7 @@ enum Item {
 /// Builds a byte-faithful dat container: the common header, the data header, then entries and the
 /// space between them laid out back to back from `0x800`.
 ///
-/// Byte-faithful includes the four digests a real container carries, so what it builds is clean by
+/// Byte-faithful includes the three digests a real container carries, so what it builds is clean by
 /// default and every hash check has to be provoked deliberately. The two self hashes are written last
 /// and the data-region digest before them, so a poke inside a hashed run leaves a container whose
 /// hashes are still right about its own bytes.

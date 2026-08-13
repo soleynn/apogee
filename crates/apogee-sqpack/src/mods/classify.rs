@@ -288,8 +288,8 @@ fn whole(located: &Located, container: ContainerRef, standing: Standing) -> File
 /// Count a verdict, and carry it unless it is pristine or the budget has filled.
 ///
 /// Pristine files are counted and dropped: a full install holds 1.9 M of them and a caller asking
-/// "what did a mod tool touch" wants the other list. The budget is the integrity module's, for the
-/// same reason: a wrecked container otherwise names one verdict per entry.
+/// "what did a mod tool touch" wants the other list. The budget mirrors the integrity module's own,
+/// for the same reason: a wrecked container otherwise names one verdict per entry.
 fn push(out: &mut ContainerComparison, file: FileStanding, opts: &ModOptions) {
     match file.standing {
         Standing::Pristine => {

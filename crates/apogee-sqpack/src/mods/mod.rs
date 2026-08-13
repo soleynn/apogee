@@ -97,7 +97,7 @@ impl ModReport {
     /// Whether the install holds only what the patch chain put there.
     ///
     /// Both halves matter, and the second is not implied by the first: no file's bytes differ, *and*
-    /// no container the map speaks for was rewritten, grown, added or lost. An index container holds
+    /// no container the map speaks for was rewritten, grown, truncated, added or lost. An index container holds
     /// no files at all, so a tool that rewrites one leaves every file verdict pristine, and a report
     /// that answered from file verdicts alone would call that install untouched.
     #[must_use]
@@ -115,7 +115,7 @@ impl ModReport {
         self.totals.modified + self.totals.foreign
     }
 
-    /// The containers something rewrote, added or removed, in report order.
+    /// The containers something rewrote, grew, truncated, added or removed, in report order.
     pub fn altered_containers(&self) -> impl Iterator<Item = &ContainerVerdict> {
         self.containers.iter().filter(|v| v.standing.is_altered())
     }
