@@ -28,10 +28,10 @@ use std::path::{Path, PathBuf};
 
 use apogee_sqpack::codec;
 
-use crate::disk::DiskRepairSink;
+use crate::disk::{DiskRepairSink, MAX_BLOCK_DECOMPRESSED};
 use crate::error::{Error, Op, Result};
 use crate::index::model::{Index, Part, Source, TargetFile};
-use crate::index::reconstruct::{self, MAX_BLOCK_DECOMPRESSED};
+use crate::index::reconstruct;
 use crate::index::verify::{PartRef, VerifyOptions, VerifyReport};
 use crate::seam::{PatchId, RangeSource, RepairSink, RepairWrite};
 

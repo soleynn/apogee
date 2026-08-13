@@ -21,11 +21,11 @@ use apogee_sqpack::codec;
 
 use crate::apply::{ApplyOptions, apply};
 use crate::chunk::Platform;
+use crate::disk::MAX_BLOCK_DECOMPRESSED;
 use crate::error::{Error, Op, Result};
 use crate::parse::PatchReader;
 
 use model::{Source, SourcePatch, TargetFile};
-use reconstruct::MAX_BLOCK_DECOMPRESSED;
 use sink::IndexSink;
 
 pub use model::Index;
