@@ -83,9 +83,7 @@ mod apple;
 
 pub use encrypted_file::{Consent, EncryptedFile, FileState, KdfCost, Passphrase, Unprompted};
 pub use error::SecretsError;
-pub use import::{
-    FOREIGN_SCHEMA, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, Import, ImportSource,
-};
+pub use import::{ForeignCredentialStore, ForeignKey, ForeignSecretsFile, Import, ImportSource};
 pub use keyring_store::OsKeyring;
 pub use null::Null;
 pub use report::{Backend, BackendReport, BackendState, Sandbox};
