@@ -273,6 +273,34 @@ mod tests {
         );
     }
 
+    /// The working directory is set on the host side, where the runner is started, so a setup program
+    /// that resolves its own files relatively finds them.
+    ///
+    /// The one builder on this type with no caller in the workspace, which left the branch reading it
+    /// never taken. It is public and about to be frozen, so it is exercised rather than trusted.
+    #[tokio::test]
+    async fn the_working_directory_reaches_the_runner() {
+        let (dir, prefix) = scripted_prefix("pwd");
+        let elsewhere = dir.path().join("run-from-here");
+        std::fs::create_dir(&elsewhere).expect("make the directory");
+
+        let run = run(
+            &prefix,
+            &ProgramInPrefix::new("reg", Vec::new()).working_dir(&elsewhere),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+        assert!(run.ok(), "{run:?}");
+        // Canonicalized on both sides: a temporary directory can sit under a symlinked root, and
+        // `pwd` reports where the shell actually ended up.
+        let reported = std::fs::canonicalize(run.stdout.trim()).expect("the reported directory");
+        let expected = std::fs::canonicalize(&elsewhere).expect("the requested directory");
+        assert_eq!(reported, expected);
+    }
+
     /// A non-zero exit is a fact, not an error: what it means belongs to the caller, and the captured
     /// output is what makes its message useful.
     #[tokio::test]
