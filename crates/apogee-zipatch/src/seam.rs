@@ -189,8 +189,12 @@ pub trait PatchSink {
 /// recreated at its indexed length, a wrong-length one is resized, a broken part is rewritten from
 /// bytes the caller materialized, and a broken zero run is overwritten. There is no delete and no
 /// rename, so a sink that marshals these to another process is not thereby a general file writer.
+///
+/// Not `#[non_exhaustive]`: that closedness is the point, and a sink is entitled to be told about a
+/// fifth shape by the compiler. Under the attribute every marshalling sink carried a wildcard arm
+/// returning [`Error::Unsupported`], which moves the discovery to a repair running on a user's
+/// machine. Widening it is therefore a major, deliberately.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum RepairWrite<'a> {
     /// Create the target, replacing whatever entry is there, and size it to `len`. The rebuild of a
     /// file the verify found missing; the parts that follow fill in only its non-zero bytes.
