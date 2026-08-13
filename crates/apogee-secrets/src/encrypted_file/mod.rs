@@ -285,8 +285,10 @@ enum Missing {
 /// most one call's worth of plaintext is alive at a time, and the passphrase is dropped inside the
 /// call that used it.
 ///
-/// The kept key is erased once it has gone unused for [`EncryptedFile::DEFAULT_IDLE`], and the next
-/// call asks again. What that bounds is how long the one value that opens the store without a
+/// The kept key is erased once it has gone unused for the handle's idle window
+/// ([`EncryptedFile::DEFAULT_IDLE`] unless [`EncryptedFile::with_idle_timeout`] set another one),
+/// and the next call asks again. What that bounds is how long the one value that opens the store
+/// without a
 /// passphrase sits in this process's ordinary memory, because that memory reaches disk by routes the
 /// launcher does not choose: a core dump attached to a bug report, a page written to swap, a
 /// hibernation image. Anyone holding one of those and a copy of the file reads the whole store with
@@ -366,8 +368,8 @@ impl EncryptedFile {
     /// # Errors
     /// [`SecretsError::Io`] carrying [`std::io::ErrorKind::AlreadyExists`] if something is at the
     /// path, [`SecretsError::Locked`] for an empty passphrase, [`SecretsError::Backend`] if the
-    /// system random source or the derivation failed, and [`SecretsError::Io`] or
-    /// [`SecretsError::Denied`] for the filesystem.
+    /// store lock could not be taken, the system random source failed, or the derivation failed, and
+    /// [`SecretsError::Io`] or [`SecretsError::Denied`] for the filesystem.
     pub fn create(
         &self,
         consent: Consent,
@@ -408,7 +410,9 @@ impl EncryptedFile {
     /// # Errors
     /// [`SecretsError::WrongPassphrase`] if `current` does not open the store,
     /// [`SecretsError::Locked`] if either passphrase is empty, [`SecretsError::NoCollection`] if
-    /// there is no store, [`SecretsError::Corrupt`] if it is damaged, and the filesystem's own.
+    /// there is no store, [`SecretsError::Corrupt`] if it is damaged, [`SecretsError::Backend`] if
+    /// the store lock could not be taken, the system random source failed, or a derivation failed,
+    /// and the filesystem's own.
     pub fn change_passphrase(&self, current: &Secret, new: &Secret) -> Result<(), SecretsError> {
         if current.is_empty() || new.is_empty() {
             return Err(SecretsError::Locked);
@@ -449,12 +453,14 @@ impl EncryptedFile {
         }
     }
 
-    /// Whether this handle holds a derived key that is still inside its window, so the next call
-    /// will not ask for anything.
+    /// Whether this handle holds a derived key that is still inside its window.
     ///
     /// A key whose window has run out reads as closed here from the moment it expires, whether or not
     /// anything has got round to erasing it yet, because what the answer is for is what the next call
-    /// will do.
+    /// will do. It does not promise the next call will not ask for anything: a live key is still
+    /// matched against the file's salt and work factor before it is used, so if another process (or
+    /// another handle) re-sealed the store since this key was derived, the next call finds a live but
+    /// stale key and asks for the passphrase anyway.
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.key.present()

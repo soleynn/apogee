@@ -26,7 +26,9 @@ pub enum Backend {
     Memory,
 }
 
-/// What condition the store is in. Each variant is a distinct thing for a caller to do about it.
+/// What condition the store is in.
+///
+/// Each variant is a distinct thing for a caller to do about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BackendState {
@@ -87,8 +89,8 @@ impl BackendReport {
     /// The struct is `#[non_exhaustive]`, so this is the only way to build one from another crate,
     /// and without it [`SecretStore`](crate::SecretStore) could not be implemented outside this one
     /// at all: every method but the probe can be written by anybody, and the probe has to return a
-    /// value only this module could make. The two implementations in this workspace that live
-    /// elsewhere both had to hold a backend of this crate's and forward to its probe, which is a
+    /// value only this module could make. The one implementation in this workspace that lives
+    /// elsewhere had to hold a backend of this crate's and forward to its probe, which is a
     /// workaround for the gap rather than a use of the seam.
     ///
     /// Sandbox detection is left out rather than defaulted to a guess: this crate reads

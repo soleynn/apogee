@@ -69,12 +69,15 @@ pub(crate) fn refuse_empty(value: &Secret) -> Result<(), SecretsError> {
 /// # Ok::<(), SecretsError>(())
 /// ```
 pub trait SecretStore {
-    /// Read a secret. A secret that was never stored is `Ok(None)`, not an error.
+    /// Read a secret.
+    ///
+    /// A secret that was never stored is `Ok(None)`, not an error.
     ///
     /// # Errors
     /// [`SecretsError::Locked`] if the store is locked and was not unlocked,
     /// [`SecretsError::NoBackend`] if no store answered, [`SecretsError::Denied`] if it refused,
-    /// [`SecretsError::Ambiguous`] if more than one stored item matches.
+    /// [`SecretsError::NoCollection`] if the store has no collection to read from and cannot make
+    /// one, [`SecretsError::Ambiguous`] if more than one stored item matches.
     fn get(&self, account: Uuid, kind: SecretKind) -> Result<Option<Secret>, SecretsError>;
 
     /// Write a secret, replacing whatever was stored for this account and kind.
@@ -83,7 +86,9 @@ pub trait SecretStore {
     /// As [`SecretStore::get`].
     fn set(&self, account: Uuid, kind: SecretKind, value: Secret) -> Result<(), SecretsError>;
 
-    /// Delete a secret. Deleting one that is not there is `Ok(())`.
+    /// Delete a secret.
+    ///
+    /// Deleting one that is not there is `Ok(())`.
     ///
     /// # Errors
     /// As [`SecretStore::get`].
