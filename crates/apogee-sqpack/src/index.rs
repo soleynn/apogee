@@ -201,7 +201,8 @@ pub struct IndexHeader {
     pub version: u32,
     /// Which index form this is.
     pub kind: IndexKind,
-    /// How many `.dat{n}` files the archive spans.
+    /// The declared count of `.dat{n}` files the archive spans, recorded as read; [`crate::ArchiveInfo::dats`]
+    /// is what a directory walk actually found beside it.
     pub data_file_count: u32,
     /// The four segment descriptors, in header order.
     pub segments: [SegmentDescriptor; SEGMENT_COUNT],
@@ -561,7 +562,7 @@ impl Index {
     /// Resolve a game path to the location the container holds for it, or `None` if it holds none.
     ///
     /// A key that collides carries no location of its own, so the collision table is searched for the
-    /// record spelling this exact path.
+    /// record spelling this path, matched the same case-insensitive way the hash itself folds it.
     ///
     /// # Errors
     /// [`Error::SynonymUnresolved`] if the path's key is a collision placeholder and no collision

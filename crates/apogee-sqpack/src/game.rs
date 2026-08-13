@@ -232,7 +232,8 @@ impl GameData {
         &self.repos
     }
 
-    /// The archives discovered, in archive-id order.
+    /// The archives discovered, grouped by repository (base first, then expansions in index order,
+    /// the same order as [`GameData::repos`]), and in archive-id order within each.
     #[must_use]
     pub fn archives(&self) -> &[ArchiveInfo] {
         &self.archives
