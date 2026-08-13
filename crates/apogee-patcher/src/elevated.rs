@@ -75,8 +75,10 @@ impl Executor {
     ///
     /// # Errors
     /// [`PatchError::Worker`] with [`WorkerErrorKind::Spawn`] if a worker is needed and cannot be
-    /// started, or [`PatchError::Io`] if the writability probe itself fails for a reason other than
-    /// permission.
+    /// started, [`PatchError::Io`] if the writability probe fails for a reason other than permission
+    /// or the bind's own path cannot be made absolute, or [`PatchError::Worker`] with
+    /// [`WorkerErrorKind::Protocol`] if a worker starts but then dies, breaks its transport, or
+    /// refuses the root during the bind that follows.
     pub(crate) async fn open(
         config: &PatcherConfig,
         apply_root: &Path,
@@ -96,7 +98,10 @@ impl Executor {
     /// is still exactly one.
     ///
     /// # Errors
-    /// As [`open`](Self::open).
+    /// [`PatchError::Worker`] with [`WorkerErrorKind::Spawn`] if a worker is needed and cannot be
+    /// started, or [`PatchError::Io`] if the writability probe itself fails for a reason other than
+    /// permission. Unlike [`open`](Self::open), this does not bind, so it cannot fail the way a bind
+    /// can.
     pub(crate) async fn open_unbound(
         config: &PatcherConfig,
         roots: &[PathBuf],
