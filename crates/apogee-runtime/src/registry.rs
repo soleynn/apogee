@@ -1,30 +1,25 @@
 //! Writing and removing registry values inside a prefix.
 //!
+//! An edit composes an argv for `reg`, so there is no shell and no quoting rules, and it writes with
+//! `/f`, which overwrites an existing value instead of prompting. That is what makes applying the
+//! same edit twice the same as applying it once, with no read-back needed to decide.
+//!
+//! `/f` is not a nicety. Observed on wine 10.0: without it, `reg add` over a value that already
+//! exists asks whether to overwrite, and with stdin closed it re-asks in a tight loop rather than
+//! giving up, 36 MB of prompts in twenty seconds. So the flag is part of the composed command rather
+//! than a caller's option, and the time budget and output cap every prefix run is held to are what
+//! bound that shape if anything else ever produces it.
+//!
 //! A removal is read rather than reported. `reg delete` exits non-zero both for a value that was not
-//! there and for a prefix that cannot answer at all, so a failed removal is followed by two status-only
-//! probes: one for the target, one for a key every prefix has. Only "the target is gone while the
-//! registry still answers" is success, because a removal reported as done is one a caller never retries.
-//!
-//! The component layer's prefix tweaks are registry writes, so they get a typed primitive rather than
-//! a hand-assembled command line at each call site. Two properties make it usable as the unit of an
-//! idempotent setup step. It composes an argv, so there is no shell and no quoting rules. And it
-//! writes with `/f`, which overwrites an existing value without prompting, so applying the same edit
-//! twice is the same as applying it once and no read-back is needed to decide.
-//!
-//! `/f` is not a nicety. Observed on wine 10.0: without it, `reg add` over a value that already exists
-//! asks whether to overwrite, and with stdin closed it re-asks in a tight loop rather than giving up:
-//! 36 MB of prompts in twenty seconds. So the flag is part of the composed command rather than a
-//! caller's option, and the time budget and output cap in [`crate::exec`] are what bound that shape if
-//! anything else ever produces it.
-//!
-//! The value types are the ones with an unambiguous single-argument encoding. `REG_MULTI_SZ` needs a
-//! separator convention and `REG_BINARY` a hex one, and a manifest that gets either subtly wrong would
-//! write a plausible-looking wrong value rather than failing; neither is added until a verb needs it.
+//! there and for a prefix that cannot answer at all, so a failed removal is followed by two
+//! status-only probes: one for the target, one for a key every prefix has. Only "the target is gone
+//! while the registry still answers" counts as success, because a removal reported as done is one a
+//! caller never retries.
 
 use crate::error::RuntimeError;
 use crate::exec::{PrefixRun, ProgramInPrefix};
 
-/// Registry roots this launcher will write under, in both spellings `reg` accepts.
+/// The registry roots this launcher will write under, in both spellings `reg` accepts.
 const ROOTS: &[&str] = &[
     "HKCU",
     "HKEY_CURRENT_USER",
@@ -39,6 +34,22 @@ const ROOTS: &[&str] = &[
 ];
 
 /// A registry value to write.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_runtime::{RegistryEdit, RegistryValue};
+///
+/// let edit = RegistryEdit {
+///     key: r"HKCU\Software\Wine\DllOverrides".to_owned(),
+///     name: "d3d11".to_owned(),
+///     value: RegistryValue::String("native,builtin".to_owned()),
+/// };
+/// assert!(edit.validate().is_ok());
+///
+/// let unrooted = RegistryEdit { key: r"Software\Wine".to_owned(), ..edit };
+/// assert_eq!(unrooted.validate(), Err("it does not start at a registry root"));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryEdit {
     /// The key, backslash-separated from a root: `HKCU\Software\Wine\DllOverrides`.
@@ -49,6 +60,10 @@ pub struct RegistryEdit {
     pub value: RegistryValue,
 }
 
+// The types here are the ones with an unambiguous single-argument encoding. `REG_MULTI_SZ` needs a
+// separator convention and `REG_BINARY` a hex one, and a manifest that got either subtly wrong would
+// write a plausible-looking wrong value rather than failing, so neither is added until a verb needs
+// it.
 /// A registry value, in the types a prefix tweak needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -62,9 +77,9 @@ pub enum RegistryValue {
     /// An empty `REG_SZ`, which under `Wine\DllOverrides` means "load neither the native library nor
     /// the builtin one".
     ///
-    /// Its own variant rather than an empty [`Self::String`] so that a row meaning it says so, while a
-    /// row whose value went missing is still refused. Those are opposite intentions with the same
-    /// spelling otherwise.
+    /// Its own variant rather than an empty [`Self::String`], so a value that means it says so while
+    /// one that went missing is still refused. Those are opposite intentions with the same spelling
+    /// otherwise.
     Disabled,
 }
 
@@ -90,21 +105,24 @@ impl RegistryValue {
 
 /// The fewest path components below a root a whole-key removal may name.
 ///
-/// `HKLM\Software` and `HKLM\Software\Microsoft` are not keys anything here has business removing, and a
-/// row that meant to name something deeper and lost a component would otherwise take the whole subtree
-/// with it. Removing a single *value* is not held to this, since it names exactly what it removes.
+/// `HKLM\Software` and `HKLM\Software\Microsoft` are not keys anything here has business removing,
+/// and a row that meant to name something deeper and lost a component would otherwise take the whole
+/// subtree with it. Removing a single value is not held to this, since it names exactly what it
+/// removes.
 const MIN_KEY_DEPTH: usize = 3;
 
-/// A key every initialized prefix has, queried as the control when a removal fails. `reg query` on it
-/// answers if and only if the prefix's registry can be read at all, which is what makes a "not found"
-/// on the target readable as an absence rather than as a prefix that cannot answer anything.
+/// A key every initialized prefix has, queried as the control when a removal fails.
+///
+/// `reg query` on it answers if and only if the prefix's registry can be read at all, which is what
+/// makes a "not found" on the target readable as an absence rather than as a prefix that cannot
+/// answer anything.
 const ALWAYS_PRESENT_KEY: &str = r"HKCU\Software";
 
 /// A registry value or key to remove.
 ///
-/// Its own type rather than an option on [`RegistryEdit`], because removal is the one registry operation
-/// that can destroy something the launcher did not create, and it is worth being unable to write one by
-/// accident while reaching for a write.
+/// Its own type rather than a mode of [`RegistryEdit`]: removal is the one registry operation that
+/// can destroy something the launcher did not create, and writing one by accident while reaching for
+/// a write should not be possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryDelete {
     /// The key, backslash-separated from a root.
@@ -117,18 +135,21 @@ impl RegistryDelete {
     /// Why this removal is not one this primitive will perform, or `Ok` when it is.
     ///
     /// # Errors
-    /// The reason, as [`RegistryEdit::validate`], plus a whole-key removal that names a key too shallow
-    /// to be one the launcher put there.
+    /// The reason, on the same grounds as [`RegistryEdit::validate`], plus a whole-key removal that
+    /// names a key too shallow to be one the launcher put there.
     pub fn validate(&self) -> Result<(), &'static str> {
         self.check()
     }
 
     /// The invocation that asks whether the thing is still there.
     ///
-    /// Asked after a failed removal, not before one: `reg delete` on something absent exits non-zero,
-    /// and this crate reads exit status rather than output, so "it was not there" and "it could not be
-    /// removed" are otherwise the same answer. Status-only invocations tell them apart without parsing
-    /// anything (see [`read_failed_delete`]).
+    /// Asked after a failed removal, not before one: `reg delete` on something absent exits
+    /// non-zero, and this crate reads exit status rather than output, so "it was not there" and "it
+    /// could not be removed" are otherwise the same answer. Status-only invocations tell them apart
+    /// without parsing anything; [`read_failed_delete`] does that reading.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RegistryKey`] if [`Self::validate`] refuses it.
     pub(crate) fn probe(&self) -> Result<ProgramInPrefix, RuntimeError> {
         self.check().map_err(|reason| self.rejected(reason))?;
         let mut args = vec!["query".to_owned(), self.key.clone()];
@@ -200,16 +221,14 @@ pub(crate) enum DeleteVerdict {
 /// Read a failed removal against two status-only probes: `target` asked whether the thing is still
 /// there, `control` whether `reg` answers at all.
 ///
-/// The control is what makes an absent answer trustworthy. A non-zero `reg query` is "not found", but
-/// it is equally a half-created prefix, a runner whose builtin `reg` will not start, and a wine that
-/// aborts on startup. Reading any of those as a completed removal reports success for something that
-/// never happened, and a caller that records applied steps then never retries it. So an absence counts
-/// only when a key every prefix has still answers.
+/// The control is what makes an absent answer trustworthy. A non-zero `reg query` is "not found",
+/// but it is equally a half-created prefix, a runner whose builtin `reg` will not start, and a wine
+/// that aborts on startup. Reading any of those as a completed removal reports success for something
+/// that never happened, to a caller that records applied steps and then never retries them.
 ///
 /// The target is read as a raw status rather than as pass/fail, because a probe killed by a signal
-/// never got to an answer at all: it is not "not found", it is nothing. The control cannot rescue that
-/// one, since it establishes that the registry is readable and not that this probe finished, so a
-/// target with no exit status is its own failure however well the control went.
+/// never reached an answer at all. The control cannot rescue that one: it establishes that the
+/// registry is readable, not that this probe finished.
 pub(crate) fn read_failed_delete(target: &PrefixRun, control: &PrefixRun) -> DeleteVerdict {
     match (target.code, control.ok()) {
         (Some(0), _) => DeleteVerdict::Failed("it is still in the registry afterwards"),
@@ -223,6 +242,9 @@ pub(crate) fn read_failed_delete(target: &PrefixRun, control: &PrefixRun) -> Del
     }
 }
 
+// Not injection defence: the composed argv has no shell to escape into. The checks are here so a
+// typo is a named error at the point of the mistake, rather than an opaque non-zero exit from `reg`
+// or, worse, a write that lands somewhere plausible.
 /// The key rules both a write and a removal are held to.
 fn check_key(key: &str) -> Result<(), &'static str> {
     let root = key
@@ -264,18 +286,14 @@ fn check_value_name(name: &str) -> Result<(), &'static str> {
 impl RegistryEdit {
     /// Why this edit is not a shape this primitive will write, or `Ok` when it is.
     ///
-    /// Public because a manifest that describes registry edits wants to reject a bad row when it is
-    /// parsed, naming the row, rather than at the moment of the write. Returns the reason rather than a
+    /// Public so a manifest that describes registry edits can reject a bad row as it parses it,
+    /// naming the row, rather than at the moment of the write. The reason is a string rather than a
     /// [`RuntimeError`] so a caller can report it in its own taxonomy.
     ///
-    /// Not injection defence: the composed argv has no shell to escape into. It is there so a typo is a
-    /// named error at the point of the mistake, rather than a non-zero exit from `reg` or, worse, a
-    /// write that lands somewhere plausible.
-    ///
     /// # Errors
-    /// The reason, when the key is not rooted at a registry root, a path component or the value name is
-    /// empty, a leading slash would be read as an option, the value is empty without saying so, or
-    /// anything carries a control character.
+    /// The reason, when the key is not rooted at a registry root, a path component or the value name
+    /// is empty, a leading slash would be read as an option, the value is empty without saying so
+    /// with [`RegistryValue::Disabled`], or anything carries a control character.
     pub fn validate(&self) -> Result<(), &'static str> {
         self.check()
     }
@@ -339,6 +357,7 @@ mod tests {
         }
     }
 
+    /// The dll override every prefix tweak is shaped like.
     fn dll_override() -> RegistryEdit {
         edit(
             r"HKCU\Software\Wine\DllOverrides",
@@ -348,7 +367,7 @@ mod tests {
     }
 
     /// `/f` is what makes a re-apply a no-op instead of a program blocking on a prompt, so it is not
-    /// optional and the order of the flags is the one `reg` documents.
+    /// optional, and the flag order is the one `reg` documents.
     #[test]
     fn the_command_overwrites_without_prompting() {
         let command = dll_override().command().expect("valid edit");
@@ -370,6 +389,7 @@ mod tests {
         );
     }
 
+    /// Each value type reaches `reg` as its own `/t` name and its own `/d` spelling.
     #[test]
     fn each_value_type_carries_its_own_encoding() {
         let dword = edit(r"HKCU\Software\Apogee", "Flag", RegistryValue::Dword(1))
@@ -388,8 +408,8 @@ mod tests {
         assert!(command_args(&expand).contains(&"REG_EXPAND_SZ".to_owned()));
     }
 
-    /// The one value that is legitimately empty. It has to be spelled, because the check that catches a
-    /// row whose value went missing would otherwise catch this too.
+    /// The one value that is legitimately empty. It has to be spelled, because the check that
+    /// catches a row whose value went missing would otherwise catch this too.
     #[test]
     fn disabling_a_dll_writes_an_empty_string_value() {
         let command = edit(
@@ -428,6 +448,8 @@ mod tests {
         }
     }
 
+    /// A row that lost a path component, its value name or its value is refused rather than written
+    /// somewhere plausible, and a name that begins as an option is refused with it.
     #[test]
     fn an_empty_component_name_or_value_is_refused() {
         let cases = [
@@ -448,8 +470,8 @@ mod tests {
         }
     }
 
-    /// A newline in a value would split the argument as far as anything reading the child's output is
-    /// concerned, and a NUL truncates it on the way to the syscall.
+    /// A newline in a value would split the argument as far as anything reading the child's output
+    /// is concerned, and a NUL truncates it on the way to the syscall.
     #[test]
     fn a_control_character_anywhere_is_refused() {
         let cases = [
@@ -469,7 +491,7 @@ mod tests {
         }
     }
 
-    /// Reads back the argv a `ProgramInPrefix` was built with, which is the whole contract here.
+    /// Reads back the argv a [`ProgramInPrefix`] was built with, which is the whole contract here.
     fn command_args(program: &ProgramInPrefix) -> Vec<String> {
         program.args().to_vec()
     }
@@ -493,8 +515,8 @@ mod tests {
     }
 
     /// The reason each failed reading carries, written out here rather than shared with the source.
-    /// The text is the whole point of returning a string instead of a bool, and a test that named the
-    /// same constant the code names would pass however the readings were wired up.
+    /// The text is the whole point of returning a string instead of a bool, and a test that named
+    /// the same constant the code names would pass however the readings were wired up.
     const STILL_THERE: &str = "it is still in the registry afterwards";
     const PROBE_KILLED: &str =
         "the probe for it was killed before it answered, so whether it is still there is unknown";
@@ -516,9 +538,8 @@ mod tests {
     }
 
     /// The reading a pass/fail on the target cannot express. A killed probe never reached an answer,
-    /// and a healthy control does not supply one: it says the registry is readable, not that this probe
-    /// finished. Collapsed into "non-zero means not found", it reports a value that is still there as
-    /// removed.
+    /// and a healthy control does not supply one: it says the registry is readable, not that this
+    /// probe finished.
     #[test]
     fn a_probe_that_was_killed_answered_nothing_however_well_the_control_went() {
         assert_eq!(
@@ -549,7 +570,7 @@ mod tests {
     }
 
     /// A prefix whose "runner" is a shell script standing in for `wine`, so the removal path can be
-    /// driven end to end without one. The script sees `reg <verb> <key> …` as its argv and answers
+    /// driven end to end without one. The script sees `reg <verb> <key> ...` as its argv and answers
     /// with a status, which is all this path reads.
     #[cfg(target_os = "linux")]
     fn scripted(body: &str) -> (tempfile::TempDir, crate::Runtime, crate::Prefix) {
@@ -573,9 +594,9 @@ mod tests {
         }
     }
 
-    /// The regression: a prefix where nothing answers used to report a successful removal, so a caller
-    /// recorded a step that never ran and never came back to it. The message has to say which of the
-    /// two failures it was, since the fixes are different: this one is the prefix, not the value.
+    /// The regression: a prefix where nothing answers used to report a successful removal, so a
+    /// caller recorded a step that never ran and never came back to it. The message has to say which
+    /// of the two failures it was, since the fixes differ: this one is the prefix, not the value.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_prefix_that_answers_nothing_is_a_failure_not_a_removal() {
@@ -593,8 +614,8 @@ mod tests {
         assert!(message.contains(UNREADABLE), "{message}");
     }
 
-    /// The same reading end to end: a probe that dies on its way to an answer is not an absence, even
-    /// though the prefix around it is healthy enough to answer the control.
+    /// The same reading end to end: a probe that dies on its way to an answer is not an absence,
+    /// even though the prefix around it is healthy enough to answer the control.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_probe_the_runner_killed_is_a_failure_not_a_removal() {
@@ -616,8 +637,8 @@ mod tests {
         assert!(message.contains(PROBE_KILLED), "{message}");
     }
 
-    /// And the case it must stay compatible with: the value really is gone, the registry says so, and
-    /// removing it again is success.
+    /// And the case it must stay compatible with: the value really is gone, the registry says so,
+    /// and removing it again is success.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn removing_what_is_absent_from_a_working_registry_succeeds() {

@@ -4,7 +4,8 @@
 //! program that has to run on the other side of that boundary is started through
 //! `flatpak-spawn --host`, which hands the invocation to the Flatpak portal and proxies the exit
 //! status back. Which programs those are is the whole of the decision, and it is pinned here rather
-//! than restated at each spawn site.
+//! than restated at each spawn site: **the launch chain runs whole inside the sandbox**, and the one
+//! invocation relayed out is a host companion, a program the user pointed at on their own machine.
 //!
 //! # What the boundary costs
 //!
@@ -17,12 +18,12 @@
 //!   itself into, narrowing on each process's own `WINEPREFIX`, the targeted kill, the guard that
 //!   answers whether the game is running), so a host-spawned game is one this crate can neither
 //!   find, stop, nor report on.
-//! - **The environment does not travel.** A variable exported in the sandbox arrives unset; the
+//! - **The environment does not travel.** A variable exported in the sandbox arrives unset, and the
 //!   host command gets the host session's environment instead, host `PATH` included. Every variable
 //!   the matrix computes ([`crate::compute_environment`]) and every structural one the spawner sets
 //!   (`WINEPREFIX`, `GAMEID`, `PROTONPATH`) would be dropped in silence, and a wine with no
-//!   `WINEPREFIX` does not fail: it uses `~/.wine`. Whatever must survive is named as an explicit
-//!   `--env=` argument, which is what [`host_arguments`] is for.
+//!   `WINEPREFIX` does not fail: it uses `~/.wine`. Whatever must survive is named individually as
+//!   an explicit `--env=` argument.
 //! - **Only a graceful stop crosses.** `SIGTERM` is forwarded to the host command. `SIGKILL` cannot
 //!   be: killing the proxy leaves the host command running, and `--watch-bus` does not change that
 //!   (measured on both a killed proxy and a torn-down sandbox), which is why it is not passed.
@@ -32,21 +33,22 @@
 //!   and the failure arrives as the proxy's own exit status 1 with the portal's message on stderr.
 //!   Nothing downstream can tell that from the program itself exiting 1.
 //!
-//! # The matrix
+//! # Which side each invocation runs on
 //!
-//! | invocation | side | why |
-//! | --- | --- | --- |
-//! | the runner (`wine`, `umu-run`) and the game | sandbox | this crate downloaded and extracted the runner into the application's own data directory, for the runtime the application was built against; and see the process table above, which is what supervision reads |
-//! | `gamescope` | sandbox | it is the first token of the *same* argv as the runner, so host-spawning it host-spawns the game inside it. The application's Flatpak has to carry it |
-//! | `gamemoderun` | sandbox | it is an `LD_PRELOAD` shim for the process it wraps, so it belongs on the game's side of the boundary; the daemon it drives is reached over D-Bus. `org.freedesktop.Platform` 25.08 already carries the script and `libgamemodeauto.so.0` |
-//! | a free-form wrapper | sandbox | same argv again, and it is usually a tracer or a preload of the game. Rewriting a command the user typed is not this crate's call |
-//! | a program run inside a prefix | sandbox | same runner, same prefix |
-//! | the prefix-wide stop | sandbox | `wineserver -k` and `umu-run wineboot -k` have to reach the wine processes they are stopping, which are the sandbox's |
-//! | a host companion ([`CompanionSpec::host`](crate::CompanionSpec::host)) | **host** | the one invocation whose definition is a native tool from outside this application: the user points at a program on their own machine, which the sandbox neither installed nor can see |
+//! The runner (`wine`, `umu-run`) and the game stay inside, because this crate downloaded and
+//! extracted that runner into the application's own data directory for the runtime the application
+//! was built against, and because supervision reads the process table above. `gamescope`,
+//! `gamemoderun` and a free-form wrapper are tokens of that same argv, so host-spawning one
+//! host-spawns the game inside it; the application's Flatpak has to carry the first two, and
+//! `org.freedesktop.Platform` 25.08 already carries `gamemoderun` and `libgamemodeauto.so.0` (the
+//! daemon it drives is reached over D-Bus). A program run inside a prefix is the same runner and the
+//! same prefix, and the prefix-wide stop (`wineserver -k`, `umu-run wineboot -k`) has to reach the
+//! wine processes it is stopping, which are the sandbox's. Only a host companion
+//! ([`crate::CompanionSpec::host`]) is defined as a native tool from outside this application, which
+//! the sandbox neither installed nor can see.
 //!
-//! So the launch chain runs whole on one side, and that side is the sandbox. Nothing about that is a
-//! smaller build of the feature: the alternative is a game the launcher loses track of the moment it
-//! starts, running with none of the environment it was configured with.
+//! Nothing about that is a smaller build of the feature: the alternative is a game the launcher
+//! loses track of the moment it starts, running with none of the environment it was configured with.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -72,9 +74,10 @@ const SANDBOX_TOOLS: &[(&str, HostTool)] = &[
     ("gamemoderun", HostTool::Gamemode),
 ];
 
-/// What is being started, for [`Confinement::runs_on_host`]. One arm per row of the matrix in the
-/// module documentation, so the classification is a value a test can pin rather than a rule each
-/// call site repeats.
+/// What is being started, for [`Confinement::runs_on_host`].
+///
+/// One arm per kind of invocation, so which side of a sandbox boundary each runs on is a value a
+/// test can pin rather than a rule every call site repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Invocation {
@@ -85,38 +88,56 @@ pub enum Invocation {
     /// Stopping every process in a prefix.
     PrefixStop,
     /// A native tool that is not part of the launch and did not arrive with this application.
+    ///
+    /// The only invocation that leaves a sandbox, and nothing is inherited across that boundary, so
+    /// every variable and the working directory it needs have to be named on the request itself.
     HostTool,
 }
 
 /// Whether this process runs inside a Flatpak sandbox, and what it can leave one with.
 ///
-/// A sandbox does not share the host's process table, environment, or filesystem, so what crosses
-/// the boundary is decided once and for the whole crate: **the launch chain runs inside the
-/// sandbox**, every part of it, and the only invocation relayed out through `flatpak-spawn --host`
-/// is a host companion, which is a program the user pointed at on their own machine. The runner and
-/// the game go nowhere near the host because a host-spawned game is one this crate cannot find in
-/// `/proc`, cannot hand its computed environment to, and cannot stop; `gamescope`, `gamemoderun` and
-/// a free-form wrapper are tokens of that same argv and follow it. [`Self::runs_on_host`] is that
-/// table as a value, and the module documentation records the measurements behind it.
+/// A sandbox shares neither the host's process table, environment, nor filesystem, so what crosses
+/// the boundary is decided once for the whole crate: the launch chain runs inside the sandbox, every
+/// part of it, and the only invocation relayed out is [`Invocation::HostTool`].
+/// [`Self::runs_on_host`] is that decision as a value.
 ///
-/// Deliberately exhaustive, unlike most of the types around it: the whole point is that a caller can
-/// build one, so a test can compose a launch for a confinement it is not running under and a
-/// composition root that already knows can say so instead of probing again.
+/// # Examples
+///
+/// ```
+/// use apogee_runtime::{Confinement, Invocation};
+///
+/// // Unconfined there is nothing to be outside of, so nothing runs on "the host".
+/// let unconfined = Confinement::default();
+/// assert!(!unconfined.is_confined());
+/// assert!(!unconfined.runs_on_host(Invocation::HostTool));
+///
+/// let confined = Confinement {
+///     flatpak: true,
+///     host_spawn: Some("/usr/bin/flatpak-spawn".into()),
+/// };
+/// assert!(confined.runs_on_host(Invocation::HostTool));
+/// assert!(!confined.runs_on_host(Invocation::Launch));
+/// ```
+// Deliberately exhaustive, unlike most of the types around it: the whole point is that a caller can
+// build one, so a test can compose a launch for a confinement it is not running under and a
+// composition root that already knows can say so instead of probing again. No caller outside this
+// crate does so today; inside it, `Runtime::new` probes and `Runtime::with_confinement` takes one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Confinement {
     /// This process runs inside a Flatpak sandbox.
     pub flatpak: bool,
-    /// The `flatpak-spawn` this process can reach the host with. Meaningful only alongside
-    /// `flatpak`: a sandbox without one has no way out, which is a typed failure rather than a
-    /// silent run on the wrong side.
+    /// The `flatpak-spawn` this process can reach the host with.
+    ///
+    /// Meaningful only alongside `flatpak`: a sandbox without one has no way out, which is a typed
+    /// failure rather than a silent run on the wrong side.
     pub host_spawn: Option<PathBuf>,
 }
 
 impl Confinement {
-    /// Detect this process's confinement. `/.flatpak-info` says whether there is a sandbox, and
-    /// `PATH` says whether it carries the tool to leave it with.
+    /// Detect this process's confinement.
     ///
-    /// Off Linux both probes answer no, which is the correct answer there.
+    /// `/.flatpak-info` says whether there is a sandbox, and `PATH` says whether it carries the tool
+    /// to leave it with. Off Linux both probes answer no, which is the correct answer there.
     #[must_use]
     pub fn detect() -> Self {
         Self::from_reads(Path::new(FLATPAK_INFO).exists(), on_path(HOST_SPAWN))
@@ -140,8 +161,10 @@ impl Confinement {
         self.flatpak
     }
 
-    /// Whether `invocation` runs outside the sandbox. The matrix in the module documentation, as a
-    /// value; unconfined, the answer is always no, because there is nothing to be outside of.
+    /// Whether `invocation` runs outside the sandbox.
+    ///
+    /// Only [`Invocation::HostTool`] ever does, and unconfined the answer is always `false`, because
+    /// there is nothing to be outside of.
     #[must_use]
     pub fn runs_on_host(&self, invocation: Invocation) -> bool {
         match invocation {
@@ -153,9 +176,11 @@ impl Confinement {
     /// The `flatpak-spawn` a host invocation goes through.
     ///
     /// # Errors
-    /// [`RuntimeError::MissingHostTool`] if the sandbox carries none. Reported rather than fallen
-    /// back on: running the tool inside the sandbox instead would look like it worked, and the
-    /// program a user pointed at is on their machine and not in this one's runtime.
+    /// [`RuntimeError::MissingHostTool`] carrying [`HostTool::FlatpakSpawn`] if the sandbox carries
+    /// none.
+    // Reported rather than fallen back on: running the tool inside the sandbox instead would look
+    // like it worked, and the program a user pointed at is on their machine and not in this one's
+    // runtime.
     pub(crate) fn require_host_spawn(&self) -> Result<&Path, RuntimeError> {
         self.host_spawn
             .as_deref()
@@ -213,13 +238,15 @@ fn missing_sandbox_tool(
 
 /// Refuse a launch whose outermost wrapper is a tool this sandbox does not carry.
 ///
-/// Only under confinement, and the difference is what the failure means rather than how it reads.
-/// On a host, a missing `gamescope` is a package the user has not installed on a machine they know;
-/// inside a sandbox it is a build that does not ship one, and the bare `ENOENT` names a path the
-/// user has never seen and cannot act on.
+/// Unconfined this always succeeds.
 ///
 /// # Errors
-/// [`RuntimeError::MissingHostTool`] naming the tool.
+/// [`RuntimeError::MissingHostTool`] naming the tool, [`HostTool::Gamescope`] or
+/// [`HostTool::Gamemode`].
+// Only under confinement, and the difference is what the failure means rather than how it reads. On
+// a host, a missing `gamescope` is a package the user has not installed on a machine they know;
+// inside a sandbox it is a build that does not ship one, and the bare `ENOENT` names a path the user
+// has never seen and cannot act on.
 pub(crate) fn check_sandbox_tool(
     confinement: &Confinement,
     argv0: &str,
@@ -236,7 +263,7 @@ pub(crate) fn check_sandbox_tool(
 /// The first `name` on `PATH`.
 ///
 /// Lives here because deciding where a program comes from is what this module is for; the runner
-/// side ([`crate::spawn`]) resolves `umu-run` through the same lookup.
+/// side resolves `umu-run` through the same lookup.
 pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -278,8 +305,8 @@ mod tests {
         assert_eq!(host, Confinement::default());
     }
 
-    /// The matrix, pinned. A change here is a change to which side the game runs on, which is the one
-    /// decision this module exists to make.
+    /// Which side each invocation runs on, pinned. A change here is a change to which side the game
+    /// runs on, which is the one decision this module exists to make.
     #[test]
     fn only_a_host_tool_runs_outside_the_sandbox() {
         let every = [

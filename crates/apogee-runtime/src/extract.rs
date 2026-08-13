@@ -1,15 +1,15 @@
 //! Streaming, in-process extraction of runner, tool, and component archives.
 //!
-//! Pure-Rust decoders (`flate2`/`ruzstd`/`lzma-rs`) feed `tar` entry by entry, so peak memory stays
-//! bounded by the decoder window, never the tarball size. Every entry is confined to the
+//! Pure-Rust decoders (`flate2`, `ruzstd`, `lzma-rs`) feed `tar` entry by entry, so peak memory is
+//! bounded by the decoder window and never by the archive size. Every entry is confined to the
 //! destination before it is written: an archive comes from the signed catalog, but its bytes are
-//! still treated as hostile. Directory components are never traversed through a symlink, so a
+//! still treated as hostile, and no directory component is ever traversed through a symlink, so a
 //! crafted archive cannot plant a link that redirects a later write outside the tree.
 //!
 //! Zip is here for the Windows-side companions, which is all anyone publishes them as. It shares the
-//! confinement, and differs in two ways the container forces: entries are addressed through a central
-//! directory rather than streamed, and a symlink entry is refused outright rather than recreated,
-//! because a zip encodes its target as file content and no companion archive contains one.
+//! confinement and differs in the two ways the container forces: entries are addressed through a
+//! central directory rather than streamed, and a symlink entry is refused outright rather than
+//! recreated, because a zip encodes its target as file content and no companion archive contains one.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -21,17 +21,41 @@ use tar::EntryType;
 use crate::catalog::{ArchiveFormat, ArchiveLayout};
 use crate::error::RuntimeError;
 
-/// Read/write buffer for the per-entry copy: bigger than the 8 KiB default to cut syscalls on a
-/// multi-gigabyte runner without materializing anything.
+/// Read/write buffer for the per-entry copy.
+///
+/// Larger than the 8 KiB default, so a multi-gigabyte runner costs fewer syscalls without
+/// materializing anything.
 const COPY_BUF: usize = 256 * 1024;
 
-/// Extract `archive` (a `layout.format` tarball) into `dest`, stripping `layout.strip_prefix` from
-/// each entry. Streams to disk without holding the whole tarball in memory. Returns the number of
-/// entries written (zero means nothing matched the strip prefix).
+/// Extract `archive` into `dest`, stripping `layout.strip_prefix` from every entry.
 ///
-/// Entries are confined to `dest`: an absolute path, a `..` component, a symlink/hardlink whose
-/// target would escape `dest`, or a directory component that is a symlink are all hard errors, never
-/// a write outside the tree.
+/// Streams to disk and returns the number of entries written; zero means nothing matched the strip
+/// prefix. Entries are confined to `dest`: an absolute path, a `..` component, a symlink or hardlink
+/// target that does not resolve inside `dest`, a parent component that is an existing symlink or
+/// non-directory, and, for zip, a symlink entry at all are refusals rather than a write outside the
+/// tree. Entry kinds a runner never contains, such as devices and fifos, are skipped and not counted.
+///
+/// # Errors
+///
+/// [`RuntimeError::Extract`] naming `archive`, for every failure. Its source is the raw `io::Error`
+/// for a filesystem failure, and an `io::ErrorKind::InvalidData` carrying the reason for a container
+/// that will not decode or an entry the confinement refused.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # use apogee_runtime::{ArchiveFormat, ArchiveLayout, RuntimeError, extract_archive};
+/// # fn demo(archive: &Path, dest: &Path) -> Result<(), RuntimeError> {
+/// let layout = ArchiveLayout {
+///     format: ArchiveFormat::TarXz,
+///     strip_prefix: Some("UMU-Proton-9-20".to_owned()),
+/// };
+/// let entries = extract_archive(archive, &layout, dest)?;
+/// assert!(entries > 0);
+/// # Ok(())
+/// # }
+/// ```
 pub fn extract_archive(
     archive: &Path,
     layout: &ArchiveLayout,
@@ -55,14 +79,9 @@ pub fn extract_archive(
     }
 }
 
-/// Extract a zip, entry by entry, with the same confinement the tar path applies.
+/// Extract a zip, entry by entry, with the confinement the tar path applies.
 ///
-/// Permissions are the one deliberate divergence. A runner tarball is built on Unix and its modes are
-/// meaningful, so the tar path takes them as they are. A zip's are not dependable: an entry may carry no
-/// external attributes at all, and one written by Windows tooling gets a mode synthesised from the MS-DOS
-/// attribute bits, which is a plausible-looking number rather than an intended one. So the low nine bits
-/// are taken where there are any, the owner's read and write are forced on so an install is never
-/// unreadable, and an entry with no attributes at all gets the ordinary file default.
+/// Permissions are the one deliberate divergence; see [`zip_mode`].
 fn unpack_zip(
     reader: BufReader<File>,
     strip_prefix: Option<&str>,
@@ -115,6 +134,13 @@ fn unpack_zip(
 }
 
 /// The mode to write for a zip entry, given whatever the container claimed.
+///
+/// A tarball is built on Unix and its modes are meaningful, so the tar path takes them as they are.
+/// A zip's are not dependable: an entry may carry no external attributes at all, and one written by
+/// Windows tooling gets a mode synthesised from the MS-DOS attribute bits, which is a
+/// plausible-looking number rather than an intended one. So the low nine bits are kept where there
+/// are any, the owner's read and write are forced on so an install is never left unreadable, and an
+/// entry with nothing usable gets the ordinary file default.
 fn zip_mode(claimed: Option<u32>) -> u32 {
     match claimed.map(|mode| mode & 0o777).filter(|mode| *mode != 0) {
         Some(mode) => mode | 0o600,
@@ -122,8 +148,11 @@ fn zip_mode(claimed: Option<u32>) -> u32 {
     }
 }
 
-/// `lzma-rs` is push-model (it writes to a sink), so decode on a helper thread whose output pipes
-/// into `tar` on this thread — streaming, with memory bounded by the LZMA dictionary window.
+/// Extract an xz tarball, decoding on a helper thread.
+///
+/// `lzma-rs` is push-model (it writes to a sink), so the decode runs on its own thread and pipes into
+/// the `tar` reader on this one. That keeps the extraction streaming, with memory bounded by the LZMA
+/// dictionary window.
 fn extract_xz(
     mut reader: BufReader<File>,
     strip_prefix: Option<&str>,
@@ -152,6 +181,10 @@ fn extract_xz(
     Ok(count)
 }
 
+/// Unpack the tar stream in `reader` into `dest`, confining every entry, and count what was written.
+///
+/// Drains `reader` to EOF on the way out so an upstream streaming decoder finishes rather than dying
+/// on a broken pipe.
 fn unpack<R: Read>(
     reader: R,
     strip_prefix: Option<&str>,
@@ -227,16 +260,20 @@ fn unpack<R: Read>(
     Ok(count)
 }
 
-/// The result of stripping the prefix from and confining one entry path.
+/// The result of stripping the prefix from one entry path and confining what is left.
 enum Resolved {
+    /// The confined path, relative to the destination.
     Path(PathBuf),
+    /// The entry is outside the strip prefix, or is the prefix directory itself.
     Skip,
+    /// The entry would have escaped the destination.
     Reject,
 }
 
-/// Strip `strip_prefix` from `path` and confine the remainder: reject absolute paths, `..`, and
-/// filesystem-root/prefix components; skip the prefix directory itself and entries outside it. A
-/// leading `./` (the GNU-tar convention) is transparent.
+/// Strip `strip_prefix` from `path` and confine the remainder.
+///
+/// Rejects a root, `..`, or filesystem-prefix component; skips the prefix directory itself and any
+/// entry outside it. A leading `./`, the GNU-tar convention, is transparent.
 fn resolve(path: &Path, strip_prefix: Option<&str>) -> Resolved {
     let mut comps = path.components().peekable();
     while matches!(comps.peek(), Some(Component::CurDir)) {
@@ -265,9 +302,15 @@ fn resolve(path: &Path, strip_prefix: Option<&str>) -> Resolved {
     }
 }
 
-/// Create the ancestor directories of `rel` under `dest`, refusing to traverse an existing symlink
-/// (or a non-directory). A crafted archive could otherwise plant an in-tree symlink to relocate a
-/// later write outside `dest`; refusing traversal keeps every parent a real directory.
+/// Create the ancestor directories of `rel` under `dest`, refusing to traverse an existing symlink.
+///
+/// A crafted archive could otherwise plant an in-tree symlink and relocate a later write outside
+/// `dest`. Refusing traversal keeps every parent a real directory, which is also what makes
+/// [`symlink_within_dest`]'s lexical depth accounting exact.
+///
+/// # Errors
+///
+/// [`RuntimeError::Extract`] if a component exists and is not a directory, or if creating one fails.
 fn safe_make_dirs(dest: &Path, rel: &Path, archive: &Path) -> Result<(), RuntimeError> {
     let Some(parent) = rel.parent() else {
         return Ok(());
@@ -293,8 +336,13 @@ fn safe_make_dirs(dest: &Path, rel: &Path, archive: &Path) -> Result<(), Runtime
     Ok(())
 }
 
-/// Remove `out` if it is an existing symlink, so a write never follows a symlink planted at the
-/// final path component.
+/// Remove `out` if it is an existing symlink.
+///
+/// So a write never follows a link planted at the final path component.
+///
+/// # Errors
+///
+/// [`RuntimeError::Extract`] if the link is there and cannot be removed.
 fn unlink_if_symlink(out: &Path, archive: &Path) -> Result<(), RuntimeError> {
     match fs::symlink_metadata(out) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -304,9 +352,12 @@ fn unlink_if_symlink(out: &Path, archive: &Path) -> Result<(), RuntimeError> {
     }
 }
 
-/// Lexically decide whether a symlink at `link_path` (relative to `dest`) with `target` stays inside
-/// `dest`. No filesystem access is needed: [`safe_make_dirs`] guarantees every parent is a real
-/// directory, so the component count is the true on-disk depth.
+/// Decide lexically whether a symlink at `link_path` with `target` stays inside the destination.
+///
+/// No filesystem access is needed: [`safe_make_dirs`] guarantees every parent is a real directory, so
+/// the component count is the true on-disk depth. That also means this alone does not settle
+/// confinement, since it accepts an in-tree link such as `a/b` pointing at `..`; what stops a later
+/// entry from traversing that link is [`safe_make_dirs`].
 fn symlink_within_dest(link_path: &Path, target: &Path) -> bool {
     if target.is_absolute() {
         return false;
@@ -329,6 +380,11 @@ fn symlink_within_dest(link_path: &Path, target: &Path) -> bool {
     true
 }
 
+/// The target a symlink or hardlink entry names.
+///
+/// # Errors
+///
+/// [`RuntimeError::Extract`] if the header is unreadable or the entry carries no target at all.
 fn link_target(
     entry: &mut tar::Entry<'_, impl Read>,
     archive: &Path,
@@ -340,6 +396,7 @@ fn link_target(
         .ok_or_else(|| confined(archive, "link entry without a target"))
 }
 
+/// The single build site for this module's failures: every one names `archive`.
 fn io_err(archive: &Path, source: io::Error) -> RuntimeError {
     RuntimeError::Extract {
         archive: archive.to_path_buf(),
@@ -347,6 +404,7 @@ fn io_err(archive: &Path, source: io::Error) -> RuntimeError {
     }
 }
 
+/// A container that would not decode, as an `InvalidData` error carrying the decoder's own message.
 fn decode_err(archive: &Path, e: &dyn std::fmt::Display) -> RuntimeError {
     io_err(
         archive,
@@ -354,6 +412,7 @@ fn decode_err(archive: &Path, e: &dyn std::fmt::Display) -> RuntimeError {
     )
 }
 
+/// A refused entry, as an `InvalidData` error carrying which confinement rule it broke.
 fn confined(archive: &Path, msg: &'static str) -> RuntimeError {
     io_err(archive, io::Error::new(io::ErrorKind::InvalidData, msg))
 }
@@ -362,6 +421,9 @@ fn confined(archive: &Path, msg: &'static str) -> RuntimeError {
 mod tests {
     use super::*;
 
+    /// [`resolve`] as a two-state answer, for the cases about stripping rather than confinement.
+    ///
+    /// A reject here is the test itself being wrong, so it panics.
     fn resolved(path: &str, strip: Option<&str>) -> Option<PathBuf> {
         match resolve(Path::new(path), strip) {
             Resolved::Path(p) => Some(p),
@@ -370,6 +432,7 @@ mod tests {
         }
     }
 
+    /// The versioned top directory an upstream tarball wraps its content in is removed.
     #[test]
     fn resolve_strips_the_prefix() {
         assert_eq!(
@@ -378,6 +441,9 @@ mod tests {
         );
     }
 
+    /// A leading `./` does not shift the strip prefix onto the second component.
+    ///
+    /// So a tarball built the GNU way strips the same as one built without it.
     #[test]
     fn resolve_is_transparent_to_a_leading_dot_slash() {
         // GNU `tar czf x ./runner-1.0` stores entries as `./runner-1.0/...`.
@@ -387,6 +453,10 @@ mod tests {
         );
     }
 
+    /// The prefix directory itself yields nothing to write, and neither does an outsider.
+    ///
+    /// A second top-level directory is a tarball's business, not an escape, so it is skipped rather
+    /// than refused.
     #[test]
     fn resolve_skips_the_prefix_dir_and_outsiders() {
         assert_eq!(resolved("runner-1.0", Some("runner-1.0")), None);
@@ -394,6 +464,9 @@ mod tests {
         assert_eq!(resolved("other/thing", Some("runner-1.0")), None);
     }
 
+    /// The three escapes an entry path can spell are refusals, never skips.
+    ///
+    /// A leading `..`, one buried after the strip prefix, and an absolute path.
     #[test]
     fn resolve_rejects_traversal_and_absolute() {
         assert!(matches!(
@@ -410,6 +483,10 @@ mod tests {
         ));
     }
 
+    /// A symlink target is judged against the link's own depth below the destination.
+    ///
+    /// So `../c.so` from two levels down stays inside while the same walk from one level down does
+    /// not. An absolute target is refused whatever its depth.
     #[test]
     fn symlink_confinement() {
         assert!(symlink_within_dest(
@@ -430,6 +507,8 @@ mod tests {
         ));
     }
 
+    /// A zip entry with no usable mode still lands readable.
+    ///
     /// A zip built by Windows tooling routinely carries no mode, or a mode of zero, and taking either
     /// verbatim lands an install the launcher cannot read back.
     #[test]
@@ -444,6 +523,10 @@ mod tests {
         assert_eq!(zip_mode(Some(0o104755)), 0o755);
     }
 
+    /// An in-tree symlink is never walked through, even one [`symlink_within_dest`] accepts.
+    ///
+    /// A link `a/b` pointing at `..` passes the lexical check on its own, so this is the half of the
+    /// confinement only the directory walk covers.
     #[test]
     fn safe_make_dirs_refuses_to_traverse_a_symlinked_parent() {
         let dir = tempfile::tempdir().expect("tempdir");

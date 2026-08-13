@@ -1,10 +1,10 @@
 //! The Windows launch arm: the game is spawned directly, with no prefix and no runner.
 //!
-//! Everything the Linux path builds around wine is absent here, and what is left is a process the
-//! launcher started: the argument string reaches the game as its own single token, the environment is
-//! the plan's plus the compatibility layers below, and supervision is the child handle the operating
-//! system already hands back. There is no `/proc` scan and nothing to resolve, because the process
-//! that was spawned *is* the game.
+//! There is nothing to manage on this target, so a launch is a process the launcher started. The
+//! argument string reaches the game as its own single token, the environment is the plan's plus the
+//! compatibility layers below, and supervision is the child handle the operating system already
+//! hands back: nothing is scanned for and nothing is resolved, because the process that was spawned
+//! *is* the game.
 
 use std::sync::Arc;
 
@@ -17,20 +17,24 @@ use crate::progress::{Progress, RuntimeEvent};
 
 /// The variable the Windows application-compatibility engine reads its layers out of. Both layers a
 /// launch applies travel in this one variable, space-separated.
+// The engine re-spells each layer it applied the way its own database names it, so `HighDPIAware`
+// reaches the game as `HighDpiAware` (measured on Windows 11 25H2). Anything asserting on the value
+// as the *child* sees it has to compare case-insensitively; the tests below read the command before
+// it is spawned, where the value is still what was written.
 const COMPAT_LAYER: &str = "__COMPAT_LAYER";
 
-/// Runs the game on the launcher's own token rather than letting it ask for one of its own, so a game
-/// started from an un-elevated launcher cannot silently elevate itself. It does not de-elevate a
-/// launcher that is already elevated: that half is the user's to get right by not starting the
-/// launcher as an administrator.
+/// Runs the game on the launcher's own token rather than letting it ask for one of its own, so a
+/// game started from an un-elevated launcher cannot silently elevate itself.
+// It does not de-elevate a launcher that is already elevated: that half is the user's to get right
+// by not starting the launcher as an administrator.
 const RUN_AS_INVOKER: &str = "RunAsInvoker";
 
 /// The game declares its own DPI awareness to Windows and is left to scale itself.
 const HIGH_DPI_AWARE: &str = "HighDPIAware";
 
-/// Windows scales the game's output for it. Named explicitly rather than left out, because with no DPI
-/// layer at all the executable's manifest decides, which is a third behaviour and not what asking for
-/// an unaware launch means.
+/// Windows scales the game's output for it.
+// Named explicitly rather than left out, because with no DPI layer at all the executable's manifest
+// decides, which is a third behaviour and not what asking for an unaware launch means.
 const DPI_UNAWARE: &str = "DPIUnaware";
 
 /// The compatibility layers a launch runs under: the privilege one always, then the DPI one `plan`
@@ -46,12 +50,12 @@ fn compat_layers(dpi_aware: bool) -> String {
 
 /// Build the process command for `plan`.
 ///
-/// The argument string is one argv token, as it is on the Linux path: the game parses that string
-/// itself, so anything an injectable inserted goes ahead of it rather than appended to it.
+/// The argument string is one argv token: the game parses that string itself, so anything an
+/// injectable inserted goes ahead of it rather than appended to it.
 ///
 /// # Errors
-/// [`RuntimeError::InvalidLaunchPlan`] for a plan this arm cannot honour: one carrying wrappers, or one
-/// naming another process to supervise.
+/// [`RuntimeError::InvalidLaunchPlan`] for a plan this arm cannot honour: one carrying wrappers, or
+/// one naming another process to supervise.
 pub(crate) fn build_command(plan: &LaunchPlan) -> Result<Command, RuntimeError> {
     // Wrappers compose *around* the launch, which would make the spawned process something other than
     // the game. Supervision here is the child handle, so accepting one would mean reporting a wrapper's
@@ -95,7 +99,8 @@ pub(crate) fn build_command(plan: &LaunchPlan) -> Result<Command, RuntimeError> 
 /// Spawn `plan` and supervise the process it started.
 ///
 /// # Errors
-/// [`RuntimeError::Spawn`] if the process could not be started, plus what [`build_command`] raises.
+/// [`RuntimeError::Spawn`] if the process could not be started, [`RuntimeError::InvalidLaunchPlan`]
+/// from [`build_command`] or if the process exited before its id could be read.
 pub(crate) fn launch(plan: &LaunchPlan, progress: &Progress) -> Result<GameSession, RuntimeError> {
     let mut command = build_command(plan)?;
     let program = plan.program().to_owned();
@@ -113,26 +118,36 @@ pub(crate) fn launch(plan: &LaunchPlan, progress: &Progress) -> Result<GameSessi
     Ok(GameSession::supervising(child, program, pid))
 }
 
-/// An opaque marker that the game process exited. Opaque on both platforms: the Linux path cannot reap
-/// a status at all, and a launcher that reported one here and nothing there would be describing its own
-/// implementation rather than the game.
+/// An opaque marker that the game process exited.
+// Carries no status on purpose: reporting one here and nothing on the target that cannot reap a
+// status at all would describe the launcher's own implementation rather than the game.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct GameExit {}
 
 /// A running game process.
 ///
-/// The child handle it was spawned with lives in a task rather than in this struct, because both verbs
-/// take `&self` and both need the handle: a shared lock would have `kill` waiting on the `wait` that is
-/// holding it. The task owns the handle, [`kill`](Self::kill) asks it to stop the process, and
-/// [`wait`](Self::wait) reads the answer it publishes.
+/// # Examples
+///
+/// ```
+/// # use apogee_runtime::{GameSession, RuntimeError};
+/// # async fn demo(session: &GameSession) -> Result<(), RuntimeError> {
+/// let pid = session.game_pid();
+/// let exit = session.wait().await?;
+/// # let _ = (pid, exit);
+/// # Ok(())
+/// # }
+/// ```
+// The child handle lives in a task rather than in this struct, because both verbs take `&self` and
+// both need the handle: a shared lock would have `kill` waiting on the `wait` that is holding it.
+// The task owns the handle, `kill` asks it to stop the process, and `wait` reads what it publishes.
 pub struct GameSession {
     pid: i32,
     program: String,
     /// Raised once, by `kill`; the task consumes it and terminates the process.
     stop: Arc<Notify>,
-    /// `true` once the process has been reaped. Watched rather than awaited, so any number of callers
-    /// can wait and a caller that arrives late still sees it.
+    /// `true` once the process has been reaped. Watched rather than awaited, so any number of
+    /// callers can wait and a caller that arrives late still sees it.
     exited: watch::Receiver<bool>,
 }
 
@@ -172,12 +187,11 @@ impl GameSession {
         Ok(GameExit {})
     }
 
-    /// Stop the game process, resolving once it is gone. A process that has already exited is not an
-    /// error: the request is dropped and the exit that already happened is what comes back.
+    /// Stop the game process, resolving once it is gone.
     ///
-    /// Unlike the Linux path's targeted signal this reaches only the process that was spawned. Nothing
-    /// else was: there is no prefix here, so there is no wineserver and no second process holding the
-    /// session open.
+    /// Only the process that was spawned is reached, and nothing else was started: there is no
+    /// prefix here, so no second process holds the session open. A game that has already exited is
+    /// not an error, the request is dropped and the exit that already happened is what comes back.
     ///
     /// # Errors
     /// As [`Self::wait`].
@@ -246,8 +260,8 @@ mod tests {
         )
     }
 
-    /// Both layers travel in the one variable: the privilege one that keeps the game on the launcher's
-    /// token, and the DPI one the plan selected.
+    /// Both layers travel in the one variable: the privilege one that keeps the game on the
+    /// launcher's token, and the DPI one the plan selected.
     #[test]
     fn a_launch_carries_both_compatibility_layers() {
         let command = build_command(&plan()).expect("build");
@@ -257,8 +271,8 @@ mod tests {
         );
     }
 
-    /// Turning DPI awareness off names the unaware layer rather than dropping the token: with neither
-    /// named the executable's manifest decides, which is not what off means.
+    /// Turning DPI awareness off names the unaware layer rather than dropping the token: with
+    /// neither named the executable's manifest decides, which is not what off means.
     #[test]
     fn an_unaware_launch_names_the_unaware_layer() {
         let command = build_command(&plan().dpi_aware(false)).expect("build");
@@ -269,7 +283,8 @@ mod tests {
     }
 
     /// There is no prefix on this platform, so nothing that places a program in one may be set: a
-    /// `WINEPREFIX` a launch inherited from somewhere would be a lie about where the game is running.
+    /// `WINEPREFIX` a launch inherited from somewhere would be a lie about where the game is
+    /// running.
     #[test]
     fn no_prefix_variables_reach_the_game() {
         let command = build_command(&plan()).expect("build");
@@ -282,9 +297,8 @@ mod tests {
         }
     }
 
-    /// The plan's own environment reaches the game, and it is merged after the layers, so a caller that
-    /// sets the variable itself is the one that decides. Same rule as the prefix variables on the Linux
-    /// path: what the caller hands in wins.
+    /// The plan's own environment reaches the game, merged after the layers, so a caller that sets
+    /// the variable itself is the one that decides.
     #[test]
     fn the_callers_environment_is_merged_last() {
         let mut env = BTreeMap::new();
@@ -315,7 +329,8 @@ mod tests {
         assert_eq!(args, ["--mode=inject", "//**sqex0003redacted**//"]);
     }
 
-    /// The game runs from its own install directory, so it resolves its data paths relative to the exe.
+    /// The game runs from its own install directory, so it resolves its data paths relative to the
+    /// exe.
     #[test]
     fn the_working_directory_is_the_plans() {
         let command =
@@ -326,8 +341,8 @@ mod tests {
         );
     }
 
-    /// A wrapper would make the spawned process something other than the game, and the spawned process
-    /// is the whole of the supervision here.
+    /// A wrapper would make the spawned process something other than the game, and the spawned
+    /// process is the whole of the supervision here.
     #[test]
     fn a_wrapped_launch_is_refused() {
         let plan = plan().with_wrappers(vec!["gamemoderun".to_owned()]);

@@ -1,33 +1,65 @@
-//! In-process unix ↔ windows path translation from a prefix's `dosdevices/` drive symlinks.
+//! Unix to windows path translation from a prefix's `dosdevices/` drive symlinks.
 //!
-//! A prefix's `dosdevices/` directory is a set of drive-letter symlinks (`c:` → `../drive_c`, `z:` →
-//! `/`, plus any mapped drives) — static and parseable. Reading them once and mapping in-process
-//! replaces XL's per-path `winepath` subprocess (seven spawns per Dalamud launch). Matching mirrors
-//! `winepath`: the drive whose target is the longest path-prefix of the input wins.
+//! A prefix maps its drives with one symlink per letter under `dosdevices/`: `c:` at `../drive_c`,
+//! `z:` at `/`, plus whatever else has been mapped. They are static, so reading them once and
+//! matching in process replaces a `winepath` subprocess per path (seven spawns per Dalamud launch).
+//! Matching mirrors `winepath`: the drive whose target is the longest path prefix of the input wins.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::RuntimeError;
 
-/// A parsed DOS drive map: each drive letter resolved to an absolute unix target, sorted so the
-/// longest (most specific) target is tried first.
+/// A prefix's drive letters, each resolved to an absolute unix path.
+///
+/// Drives are held longest-target-first, so the most specific one is the one that matches.
+///
+/// # Examples
+///
+/// ```
+/// # use apogee_runtime::DriveMap;
+/// # fn demo() -> Result<(), apogee_runtime::RuntimeError> {
+/// # let dir = tempfile::tempdir().expect("tempdir");
+/// # let root = dir.path().canonicalize().expect("canonicalize");
+/// # std::fs::create_dir_all(root.join("drive_c/windows")).expect("drive_c");
+/// # std::fs::create_dir_all(root.join("dosdevices")).expect("dosdevices");
+/// # std::os::unix::fs::symlink("../drive_c", root.join("dosdevices/c:")).expect("c:");
+/// # std::os::unix::fs::symlink("/", root.join("dosdevices/z:")).expect("z:");
+/// // `root` is a prefix whose `dosdevices/c:` points at `drive_c` and whose `z:` points at `/`.
+/// let map = DriveMap::from_prefix(&root)?;
+///
+/// assert_eq!(map.to_windows(&root.join("drive_c/windows"))?, r"C:\windows");
+/// assert_eq!(map.to_unix(r"C:\windows")?, root.join("drive_c/windows"));
+/// // A path no other drive covers falls to the one mapping `/`.
+/// assert_eq!(map.to_windows(std::path::Path::new("/"))?, r"Z:\");
+/// assert_eq!(map.to_unix(r"Z:\etc\hosts")?, std::path::PathBuf::from("/etc/hosts"));
+/// # Ok(())
+/// # }
+/// # demo().unwrap();
+/// ```
 #[derive(Debug, Clone)]
 pub struct DriveMap {
     drives: Vec<Drive>,
 }
 
+/// One drive letter and the unix path it points at.
 #[derive(Debug, Clone)]
 struct Drive {
     /// Lowercase ASCII drive letter.
     letter: char,
-    /// Absolute unix target the drive points at, canonicalized where it exists.
+    /// Absolute unix target, canonicalized where it exists.
     target: PathBuf,
 }
 
 impl DriveMap {
-    /// Parse the drive map from `<wine_root>/dosdevices`. Only `<letter>:` symlinks are considered;
-    /// device links (`c::`), ports (`com1`), and non-symlinks are ignored.
+    /// Read the drive map out of `<wine_root>/dosdevices`.
+    ///
+    /// Only symlinks named exactly `<letter>:` are drives. Device links (`c::`), ports (`com1`) and
+    /// a plain file or directory carrying a drive's name are all skipped.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Io`] if the `dosdevices` directory cannot be listed or one of its entries
+    /// cannot be read.
     pub fn from_prefix(wine_root: &Path) -> Result<Self, RuntimeError> {
         let dosdevices = wine_root.join("dosdevices");
         let entries = std::fs::read_dir(&dosdevices).map_err(|source| RuntimeError::Io {
@@ -51,7 +83,7 @@ impl DriveMap {
         Ok(Self::from_drives(drives))
     }
 
-    /// Sort drives longest-target-first (ties broken by letter) so the most specific mapping wins.
+    /// Sort drives longest-target-first, ties broken by letter, so the most specific mapping wins.
     fn from_drives(mut drives: Vec<Drive>) -> Self {
         drives.sort_by(|a, b| {
             b.target
@@ -63,8 +95,17 @@ impl DriveMap {
         Self { drives }
     }
 
-    /// Map a unix path to its windows form (`Z:\home\user`). The longest matching drive wins, as
-    /// `winepath -w` does. Errors if no drive covers the path (a `z:` → `/` mapping normally does).
+    /// Map a unix path to its windows spelling, as `winepath -w` does.
+    ///
+    /// The longest matching drive wins and its letter comes back uppercase (`Z:\home\user`). The
+    /// input is resolved first: an existing path is canonicalized, and one that does not exist yet
+    /// is resolved through its longest existing ancestor, so a path under a symlinked prefix still
+    /// maps to the drive it is under whether or not its leaf has been created.
+    ///
+    /// # Errors
+    /// [`RuntimeError::PathMapping`] when no drive's target is a prefix of the path (with the usual
+    /// `z:` mapping of `/`, only a relative path that does not exist), or when a component is not
+    /// UTF-8 and so has no windows spelling.
     pub fn to_windows(&self, unix: &Path) -> Result<String, RuntimeError> {
         let key = resolve(unix);
         let (drive, rest) = self
@@ -99,8 +140,16 @@ impl DriveMap {
         Ok(out)
     }
 
-    /// Map a windows path (`C:\windows\system32`, `Z:/`, forward or back slashes) to its unix form.
-    /// Errors if it is not a drive-letter path or names a drive the prefix does not have.
+    /// Map a windows path to its unix form, reading nothing from the filesystem.
+    ///
+    /// The drive letter is matched case-insensitively and both slash styles are accepted, so
+    /// `C:\windows` and `c:/windows` are one path. `.` and `..` resolve against the drive root and
+    /// `..` is clamped there, as NT reads `C:\..` as `C:\`, so the result is always inside the
+    /// drive's target.
+    ///
+    /// # Errors
+    /// [`RuntimeError::PathMapping`] when the path does not begin with a drive letter and a colon
+    /// (a UNC or relative path), or when this prefix has no such drive.
     pub fn to_unix(&self, windows: &str) -> Result<PathBuf, RuntimeError> {
         let bytes = windows.as_bytes();
         if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
@@ -143,7 +192,7 @@ impl DriveMap {
 }
 
 /// The lowercase drive letter of a `dosdevices` entry named exactly `<letter>:`, or `None` for
-/// anything else (device links, ports, non-drive names).
+/// anything else.
 fn drive_letter(name: &OsStr) -> Option<char> {
     let s = name.to_str()?;
     let mut chars = s.chars();
@@ -156,8 +205,10 @@ fn drive_letter(name: &OsStr) -> Option<char> {
 }
 
 /// The absolute unix target a `<letter>:` drive symlink resolves to, or `None` if it is missing or
-/// not a symlink. Shared by [`DriveMap::from_prefix`] and the health check so drive-link resolution
-/// lives in one place.
+/// is not a symlink.
+///
+/// Shared by [`DriveMap::from_prefix`] and the prefix health check, so drive-link resolution lives
+/// in one place.
 pub(crate) fn resolve_drive_target(dosdevices: &Path, letter: char) -> Option<PathBuf> {
     let target = std::fs::read_link(dosdevices.join(format!("{letter}:"))).ok()?;
     let absolute = if target.is_absolute() {
@@ -168,12 +219,13 @@ pub(crate) fn resolve_drive_target(dosdevices: &Path, letter: char) -> Option<Pa
     Some(resolve(&absolute))
 }
 
-/// Resolve `path` to an absolute, canonical form for matching, the way `winepath` sees it. An existing
-/// path is canonicalized outright; for a not-yet-created path, the longest existing ancestor is
-/// canonicalized and the missing tail re-appended, so ancestor symlinks resolve identically whether or
-/// not the leaf exists. Both a drive target and a translation input pass through here, so their
-/// symlink resolution stays symmetric. A path with no canonicalizable ancestor falls back to a lexical
-/// normalize.
+/// Resolve `path` to the absolute, canonical form matching compares, the way `winepath` sees it.
+///
+/// An existing path is canonicalized outright; for one not created yet, the longest existing
+/// ancestor is canonicalized and the missing tail re-appended, so ancestor symlinks resolve the same
+/// whether or not the leaf exists. Both a drive target and a translation input pass through here, so
+/// their symlink resolution stays symmetric. A path with no canonicalizable ancestor falls back to a
+/// lexical [`normalize`].
 fn resolve(path: &Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
@@ -196,8 +248,8 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-/// Lexically normalize an absolute path: drop `.`, resolve `..` against prior components, and strip a
-/// trailing separator. Does not touch the filesystem.
+/// Lexically normalize a path: drop `.`, resolve `..` against prior components, strip a trailing
+/// separator. Touches no filesystem.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
@@ -221,7 +273,7 @@ fn normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// Build a map directly from `(letter, absolute target)` pairs, bypassing the filesystem, so the
+    /// Build a map straight from `(letter, absolute target)` pairs, bypassing the filesystem, so the
     /// translation logic is testable without a real prefix.
     fn map(drives: &[(char, &str)]) -> DriveMap {
         DriveMap::from_drives(
@@ -235,6 +287,8 @@ mod tests {
         )
     }
 
+    /// Only a name that is exactly a letter and a colon is a drive, so device links and ports in the
+    /// same directory are not read as one.
     #[test]
     fn drive_letter_accepts_only_two_char_drive_names() {
         assert_eq!(drive_letter(OsStr::new("c:")), Some('c'));
@@ -244,6 +298,8 @@ mod tests {
         assert_eq!(drive_letter(OsStr::new("c")), None);
     }
 
+    /// The most specific drive wins over the `z:` mapping of `/` that would also match, and a drive
+    /// root itself maps to `X:\`.
     #[test]
     fn to_windows_picks_the_longest_matching_drive() {
         let m = map(&[('z', "/"), ('c', "/home/u/pfx/drive_c")]);
@@ -264,6 +320,8 @@ mod tests {
         );
     }
 
+    /// Matching is by whole path component, so a drive target that is a string prefix of the input
+    /// but not a path prefix of it does not match.
     #[test]
     fn to_windows_does_not_match_a_partial_component() {
         // `/home/user` must not match a drive at `/home/us`.
@@ -274,6 +332,8 @@ mod tests {
         );
     }
 
+    /// Both slash styles and either letter case name the same path, and a bare `X:\` is the drive
+    /// target itself.
     #[test]
     fn to_unix_reverses_both_slash_styles() {
         let m = map(&[('z', "/"), ('c', "/home/u/pfx/drive_c")]);
@@ -289,6 +349,8 @@ mod tests {
         assert_eq!(m.to_unix("Z:\\home\\u").unwrap(), PathBuf::from("/home/u"));
     }
 
+    /// `..` resolves inside the drive and is clamped at its root, so a windows path from anywhere
+    /// cannot name a unix path outside the drive's subtree.
     #[test]
     fn to_unix_clamps_parent_at_the_drive_root() {
         let m = map(&[('z', "/"), ('c', "/home/u/pfx/drive_c")]);
@@ -304,6 +366,8 @@ mod tests {
         );
     }
 
+    /// The two directions are inverses: a path translated to windows and back is the path it started
+    /// as, whichever drive covered it.
     #[test]
     fn round_trip_holds_for_paths_under_each_drive() {
         let m = map(&[('z', "/"), ('c', "/home/u/pfx/drive_c")]);
@@ -317,6 +381,8 @@ mod tests {
         }
     }
 
+    /// What is not a drive-letter path this prefix has is an error rather than a guessed-at unix
+    /// path: a UNC path, a relative one, and a letter no drive carries.
     #[test]
     fn non_drive_windows_paths_are_rejected() {
         let m = map(&[('z', "/")]);
@@ -325,6 +391,8 @@ mod tests {
         assert!(m.to_unix("q:\\nope").is_err()); // no such drive
     }
 
+    /// The parse against a real prefix directory: relative and absolute drive links both resolve,
+    /// and a device link sharing the directory is skipped.
     #[test]
     fn from_prefix_reads_real_symlinks() {
         let dir = apogee_test_support::sandbox::build_minimal_prefix().expect("prefix");
@@ -339,6 +407,8 @@ mod tests {
         assert_eq!(m.to_windows(Path::new("/")).unwrap(), "Z:\\");
     }
 
+    /// A path whose leaf does not exist yet still maps, because the drive target and the input
+    /// resolve the same ancestor symlink identically.
     #[test]
     fn to_windows_resolves_symlinked_ancestors_of_a_missing_path() {
         // A prefix reached through a symlinked ancestor, translating a path whose leaf does not exist

@@ -1,8 +1,9 @@
-//! The signed runner catalog: a JSON manifest whose Ed25519 signature is verified against
-//! compiled-in keys *before* any pin inside is trusted.
+//! The signed runner catalog: a JSON manifest of runners, tools and DXVK builds, authenticated by a
+//! detached Ed25519 signature before anything inside it is trusted.
 //!
-//! [`Catalog::from_json_bytes`] is a pure, total parser over untrusted input (the fuzz entry point);
-//! [`Catalog::parse_and_verify`] gates it behind the signature check.
+//! [`Catalog::from_json_bytes`] is a pure, total parser over untrusted bytes and carries no
+//! authenticity guarantee of its own. [`Catalog::parse_and_verify`] gates that parse behind the
+//! signature check, and is what a caller that downloaded a manifest uses.
 
 use apogee_fetch::{DigestPin, HexPins};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -12,21 +13,23 @@ use url::Url;
 use crate::error::CatalogError;
 
 /// The manifest schema version this build understands.
+///
+/// Compared for equality rather than as a minimum: a manifest carrying any other `version` is
+/// refused with [`CatalogError::UnsupportedVersion`] instead of being read best-effort.
 pub const CATALOG_MANIFEST_VERSION: u32 = 1;
 
 /// The public keys a runner catalog may be authenticated against, the one it is signed with today
 /// first.
 ///
-/// Its own keys, not the component catalog's: the two are published on different cadences by
-/// different steps, and one compromised signer should not authenticate both. The matching private
-/// seeds are held offline by the maintainer, and only these public bytes are committed.
+/// A signature is accepted when it verifies against any entry, so the list is a rotation window and
+/// not a set of co-equal signers: a new key is added here and released, the hosted manifest is
+/// re-signed once that build is in the field, and the retired key is dropped in a later release. A
+/// single constant admits no such ordering, since re-signing first rejects every client in the field
+/// and shipping first rejects the catalog until the re-sign.
 ///
-/// **A list, because a single constant cannot be rotated without an outage.** With one key,
-/// replacing it means both re-signing the hosted file and shipping a build that trusts the new key,
-/// and one of those has to happen first: re-sign first and every client in the field rejects the
-/// catalog until it updates, ship first and every updated client rejects it until the re-sign. A
-/// list removes the ordering. The new key is added here and released, the file is re-signed once
-/// that build is in the field, and the retired key is dropped in a later release.
+/// These are the runner catalog's own keys, not the component catalog's: the two are published by
+/// different steps on different cadences, and one compromised signer should not authenticate both.
+/// Only the public bytes are committed; the matching seeds are held offline.
 // It widens nothing. Every entry was compiled into this binary by the same build, so anyone who can
 // append one can already replace the first, and a retired key is dropped rather than kept forever:
 // the window is for finishing a rotation, not for keeping an old signer trusted.
@@ -44,9 +47,9 @@ const _: () = assert!(
 
 /// Which of the trusted keys admitted a catalog.
 ///
-/// The answer stops being uninteresting the moment [`CATALOG_PUBLIC_KEYS`] holds more than one. A
-/// catalog that only ever verifies against a retired key is a rotation whose re-sign never happened,
-/// and the release that drops that key from the list is where it becomes an outage.
+/// Worth reading once [`CATALOG_PUBLIC_KEYS`] holds more than one entry. A catalog that only ever
+/// verifies against a retired key is a rotation whose re-sign never happened, and the release that
+/// drops that key from the list is where it becomes an outage.
 ///
 /// # Examples
 ///
@@ -58,10 +61,10 @@ const _: () = assert!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustedKey {
-    /// The key the catalog is signed with today.
+    /// The first entry in [`CATALOG_PUBLIC_KEYS`]: the key the catalog is signed with today.
     Current,
-    /// A key still inside its overlap window. Whatever served this catalog has not been re-signed
-    /// since the rotation started.
+    /// A later entry, still inside its overlap window. Whatever served this catalog has not been
+    /// re-signed since the rotation started.
     #[non_exhaustive]
     Retired {
         /// Its index in [`CATALOG_PUBLIC_KEYS`], which is what locates it in a release.
@@ -70,6 +73,7 @@ pub enum TrustedKey {
 }
 
 impl TrustedKey {
+    /// Classify the position that verified: index zero is current, anything else is retired.
     const fn at(position: usize) -> Self {
         if position == 0 {
             Self::Current
@@ -87,16 +91,21 @@ impl TrustedKey {
 
 /// The keys compiled into this build.
 ///
-/// One place, so every path that admits a catalog against a shipping key goes through the same
-/// constant and no field anywhere holds a key that could have been substituted.
+/// One accessor, so every path that admits a catalog against a shipping key reads the same constant
+/// and no field anywhere holds a key that could have been substituted.
 pub(crate) const fn default_keys() -> &'static [[u8; 32]] {
     CATALOG_PUBLIC_KEYS
 }
 
-/// Decompress raw key bytes into usable ones, preserving order.
+/// Decompress raw key bytes into verifying keys, preserving order.
 ///
-/// Takes any list rather than reading [`CATALOG_PUBLIC_KEYS`], so the failure and the position it
-/// names are testable without a build whose own constant is broken.
+/// Takes any list rather than reading [`CATALOG_PUBLIC_KEYS`] itself, so the failure and the
+/// position it names are testable without a build whose own constant is broken.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::TrustedKeyUnusable`] naming the first position whose bytes are not a
+/// usable ed25519 key.
 fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, CatalogError> {
     raw.iter()
         .enumerate()
@@ -111,8 +120,13 @@ fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, CatalogError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RunnerKind {
+    /// A Proton build driven through the umu launcher (`proton_umu` in the manifest). umu relocates
+    /// the live prefix to a `pfx` directory inside the prefix root.
     ProtonUmu,
+    /// A Wine build launched by running its own `wine` binary (`wine` in the manifest).
     Wine,
+    /// A bring-your-own runner directory (`custom` in the manifest), driven exactly like
+    /// [`RunnerKind::Wine`].
     Custom,
 }
 
@@ -120,17 +134,21 @@ pub enum RunnerKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ArchiveFormat {
+    /// A gzip-compressed tar (`tar.gz`), and what a DXVK or nvapi row that names no format gets.
     TarGz,
+    /// An xz-compressed tar (`tar.xz`).
     TarXz,
+    /// A zstd-compressed tar (`tar.zst`).
     TarZst,
-    /// What the Windows-side companions publish. Never a runner container, but the same extractor
-    /// lays it down, so a component row picks it like any other format.
+    /// A zip archive (`zip`). What the Windows-side companions publish. Never a runner container,
+    /// but the same extractor lays it down, so a component row picks it like any other format.
     Zip,
 }
 
 /// How to lay a downloaded archive onto disk.
 #[derive(Debug, Clone)]
 pub struct ArchiveLayout {
+    /// The container the archive is packed in.
     pub format: ArchiveFormat,
     /// A leading path component stripped from every entry (upstream tarballs wrap their content in a
     /// versioned top directory).
@@ -141,12 +159,17 @@ pub struct ArchiveLayout {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Runner {
+    /// The build's name, one half of the identity [`Catalog::runner`] matches on.
     pub name: String,
+    /// The build's version, the other half of that identity.
     pub version: String,
+    /// How a launch through this build is driven.
     pub kind: RunnerKind,
+    /// Where the archive is downloaded from.
     pub url: Url,
     /// The whole-file digest, carrying which function a row pinned it under.
     pub pin: DigestPin,
+    /// How to unpack the downloaded archive.
     pub archive: ArchiveLayout,
     /// Whether this build uses ntsync, which is a property of the build rather than of the kernel:
     /// a row omits it when nobody has said. Read [`Runner::uses_ntsync`] rather than this field,
@@ -157,31 +180,37 @@ pub struct Runner {
 impl Runner {
     /// Whether a launch through this runner may resolve to ntsync.
     ///
-    /// An unstated capability reads as **no**. ntsync is selected by setting no variable at all, so a
+    /// An unstated capability reads as no. ntsync is selected by setting no variable at all, so a
     /// build wrongly assumed to use it runs with neither esync nor fsync either: a prefix with no
     /// accelerated synchronization that still launches and reports success. Wrongly assuming the
-    /// other way costs fsync, which every build back to kernel 5.16 has.
+    /// other way costs fsync, which has been available since kernel 5.16.
     #[must_use]
     pub fn uses_ntsync(&self) -> bool {
         self.ntsync.unwrap_or(false)
     }
 }
 
-/// A supporting tool managed as data (currently `umu-launcher`), installed like a runner.
+/// A supporting tool managed as data (`umu-launcher` today), installed like a runner.
 #[derive(Debug, Clone)]
 pub struct ToolEntry {
+    /// The tool's name, what [`Catalog::tool`] matches on.
     pub name: String,
+    /// The tool's version.
     pub version: String,
+    /// Where the archive is downloaded from.
     pub url: Url,
     /// The whole-file digest, carrying which function a row pinned it under.
     pub pin: DigestPin,
+    /// How to unpack the downloaded archive.
     pub archive: ArchiveLayout,
 }
 
 /// A DXVK build: the pinned tarball plus an optional, equally-pinned `dxvk-nvapi` companion.
 #[derive(Debug, Clone)]
 pub struct DxvkEntry {
+    /// The DXVK release, as the manifest spells it.
     pub version: String,
+    /// Where the archive is downloaded from.
     pub url: Url,
     /// The whole-file digest, carrying which function a row pinned it under.
     pub pin: DigestPin,
@@ -191,49 +220,100 @@ pub struct DxvkEntry {
     pub nvapi: Option<NvapiRef>,
 }
 
-/// A pinned `dxvk-nvapi` artifact (its own url + pin + format), installed alongside a [`DxvkEntry`].
+/// A pinned `dxvk-nvapi` artifact, installed alongside a [`DxvkEntry`].
 #[derive(Debug, Clone)]
 pub struct NvapiRef {
+    /// Where the archive is downloaded from.
     pub url: Url,
+    /// The whole-file digest, carrying which function a row pinned it under.
     pub pin: DigestPin,
+    /// The container the archive is packed in (`tar.gz` by default).
     pub format: ArchiveFormat,
 }
 
-/// A verified runner catalog.
+/// A parsed runner catalog.
+///
+/// Holding one is not evidence that it was authenticated: [`Catalog::from_json_bytes`] builds one
+/// from any bytes that parse.
 #[derive(Debug, Clone)]
 pub struct Catalog {
+    /// The manifest's schema version, always [`CATALOG_MANIFEST_VERSION`] for a catalog that parsed.
     pub version: u32,
+    /// The runner rows, in manifest order.
     pub runners: Vec<Runner>,
+    /// The DXVK rows, in manifest order; the first is the default (see [`Catalog::default_dxvk`]).
     pub dxvk: Vec<DxvkEntry>,
+    /// The supporting-tool rows, in manifest order.
     pub tools: Vec<ToolEntry>,
 }
 
 impl Catalog {
-    /// Parse a catalog from untrusted JSON. Pure and total: any byte sequence yields a `Catalog` or a
-    /// typed [`CatalogError`], never a panic or an unbounded allocation. This is the fuzz target and
-    /// carries **no** authenticity guarantee on its own — callers must have verified the signature
-    /// (see [`parse_and_verify`](Self::parse_and_verify)).
+    /// Parse a catalog from untrusted JSON.
+    ///
+    /// Pure and total: any byte sequence yields a `Catalog` or a typed [`CatalogError`], never a
+    /// panic or an unbounded allocation, which is what makes it the fuzz entry point. It carries no
+    /// authenticity guarantee, so a caller that has not already verified a signature over these
+    /// exact bytes wants [`Catalog::parse_and_verify`] instead.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Malformed`] if the bytes are not JSON in the schema,
+    /// [`CatalogError::UnsupportedVersion`] if `version` is not [`CATALOG_MANIFEST_VERSION`],
+    /// [`CatalogError::UnknownRunnerKind`] or [`CatalogError::UnknownArchiveFormat`] for a value
+    /// outside the fixed sets, [`CatalogError::BadPin`] for a row carrying neither a `blake3` nor a
+    /// `sha256` pin of 32 hex bytes (or a `dxvk-nvapi` companion that gives a URL without a pin, or
+    /// the reverse), and [`CatalogError::BadUrl`] for a URL that does not parse.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), apogee_runtime::CatalogError> {
+    /// use apogee_runtime::{ArchiveFormat, Catalog, RunnerKind};
+    ///
+    /// let json = br#"{
+    ///   "version": 1,
+    ///   "runners": [
+    ///     { "name": "GE-Proton", "version": "11-1", "kind": "proton_umu",
+    ///       "url": "https://example.invalid/GE-Proton11-1.tar.gz",
+    ///       "blake3": "0000000000000000000000000000000000000000000000000000000000000000",
+    ///       "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-1" } }
+    ///   ]
+    /// }"#;
+    ///
+    /// let catalog = Catalog::from_json_bytes(json)?;
+    /// let runner = catalog.runner("GE-Proton", "11-1").expect("the row parsed");
+    /// assert_eq!(runner.kind, RunnerKind::ProtonUmu);
+    /// assert_eq!(runner.archive.format, ArchiveFormat::TarGz);
+    /// assert!(catalog.default_dxvk().is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, CatalogError> {
         let raw: RawCatalog = serde_json::from_slice(bytes).map_err(CatalogError::Malformed)?;
         Self::try_from(raw)
     }
 
     /// Verify `signature` over the exact `manifest_json` bytes against `keys`, in order, then parse.
-    /// The signature is checked **first**, so no pin is trusted before authenticity is established.
-    /// Returns which key admitted it.
     ///
-    /// Raw 32-byte keys, the shape [`CATALOG_PUBLIC_KEYS`] is compiled in as, rather than a type from
-    /// the signature crate. A key is 32 bytes on any implementation, and naming that crate's type here
-    /// would put its major version in this one's surface for nothing.
+    /// Returns the catalog and which key admitted it. The signature is checked first, so no pin is
+    /// trusted before authenticity is established, and it covers the byte string as handed in:
+    /// a manifest reformatted after signing no longer verifies. Nothing else about the contents is
+    /// authenticated, and the manifest carries no expiry or counter, so a stale file that was
+    /// properly signed still verifies.
     ///
-    /// The keys are an argument rather than this build's own, so a test can drive the gate with a key
-    /// it signs with. Nothing about that weakens it: a caller cannot verify against keys it does not
-    /// have, and the launcher passes the ones compiled into it (see [`Self::verify_trusted`]).
+    /// Raw 32-byte keys, the shape [`CATALOG_PUBLIC_KEYS`] is compiled in as, rather than a type
+    /// from the signature crate, which would put that crate's major version in this one's surface
+    /// for nothing. Passing the keys in rather than reading the constant lets a test drive the gate
+    /// with a key it signs with; nothing about that weakens it, since a caller cannot verify against
+    /// keys it does not have and the launcher passes the ones compiled into it (see
+    /// [`Catalog::verify_trusted`]).
     ///
     /// # Errors
-    /// [`CatalogError::TrustedKeyUnusable`] if one of `keys` is not a usable key,
-    /// [`CatalogError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
-    /// none of `keys`, then anything [`Self::from_json_bytes`] raises.
+    ///
+    /// [`CatalogError::TrustedKeyUnusable`] if one of `keys` is not a usable ed25519 key,
+    /// [`CatalogError::BadSignature`] if `signature` is not exactly 64 bytes or verifies against
+    /// none of `keys` (an empty `keys` therefore admits nothing), then anything
+    /// [`Catalog::from_json_bytes`] raises.
     pub fn parse_and_verify(
         manifest_json: &[u8],
         signature: &[u8],
@@ -251,11 +331,27 @@ impl Catalog {
         ))
     }
 
-    /// [`Self::parse_and_verify`] against the keys compiled into this build.
+    /// [`Catalog::parse_and_verify`] against the keys compiled into this build.
     ///
     /// # Errors
+    ///
     /// [`CatalogError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
-    /// [`Self::parse_and_verify`] raises.
+    /// [`Catalog::parse_and_verify`] raises.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_runtime::{Catalog, CatalogError};
+    /// # fn demo(manifest_json: &[u8], signature: &[u8]) -> Result<Catalog, CatalogError> {
+    /// let (catalog, trusted) = Catalog::verify_trusted(manifest_json, signature)?;
+    /// if !trusted.is_current() {
+    ///     // Still signed by a key that is being retired: the re-sign has not happened.
+    ///     let needs_resign = true;
+    /// #   let _ = needs_resign;
+    /// }
+    /// # Ok(catalog)
+    /// # }
+    /// ```
     pub fn verify_trusted(
         manifest_json: &[u8],
         signature: &[u8],
@@ -263,7 +359,9 @@ impl Catalog {
         Self::parse_and_verify(manifest_json, signature, default_keys())
     }
 
-    /// Resolve a runner by identity. `None` → the caller maps to
+    /// Resolve a runner by name and version, both of which must match.
+    ///
+    /// `None` is what the caller maps to
     /// [`RuntimeError::RunnerUnavailable`](crate::RuntimeError::RunnerUnavailable).
     #[must_use]
     pub fn runner(&self, name: &str, version: &str) -> Option<&Runner> {
@@ -272,7 +370,7 @@ impl Catalog {
             .find(|r| r.name == name && r.version == version)
     }
 
-    /// Resolve a supporting tool by name (e.g. `umu-launcher`).
+    /// Resolve a supporting tool by name (`umu-launcher` is the only one published today).
     #[must_use]
     pub fn tool(&self, name: &str) -> Option<&ToolEntry> {
         self.tools.iter().find(|t| t.name == name)
@@ -291,6 +389,8 @@ impl Catalog {
 
 // ---- raw deserialization + validation -------------------------------------------------------
 
+/// The manifest as it is spelled on the wire. Every list defaults to empty, so a manifest may
+/// publish only some of the three kinds of row.
 #[derive(Deserialize)]
 struct RawCatalog {
     version: u32,
@@ -302,6 +402,7 @@ struct RawCatalog {
     tools: Vec<RawTool>,
 }
 
+/// A `runners` row. The pin may be spelled either way, and a row that carries neither is refused.
 #[derive(Deserialize)]
 struct RawRunner {
     name: String,
@@ -319,6 +420,7 @@ struct RawRunner {
     ntsync: Option<bool>,
 }
 
+/// A `tools` row, laid out like a runner row minus the kind and the sync key.
 #[derive(Deserialize)]
 struct RawTool {
     name: String,
@@ -331,6 +433,9 @@ struct RawTool {
     archive: RawArchive,
 }
 
+/// A `dxvk` row. The `nvapi_*` keys describe the companion and are all-or-nothing; the archive is a
+/// bare `format` rather than a whole layout, because the install path finds the per-architecture DLL
+/// directories in the extracted tree instead of stripping a prefix.
 #[derive(Deserialize)]
 struct RawDxvk {
     version: String,
@@ -351,6 +456,7 @@ struct RawDxvk {
     nvapi_format: Option<String>,
 }
 
+/// An `archive` object: the container, and optionally the top directory to strip from it.
 #[derive(Deserialize)]
 struct RawArchive {
     format: String,
@@ -361,6 +467,13 @@ struct RawArchive {
 impl TryFrom<RawCatalog> for Catalog {
     type Error = CatalogError;
 
+    /// Check the schema version, then build every row.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::UnsupportedVersion`] before any row is looked at, then whatever the row
+    /// builders raise: [`CatalogError::UnknownRunnerKind`], [`CatalogError::UnknownArchiveFormat`],
+    /// [`CatalogError::BadPin`], [`CatalogError::BadUrl`].
     fn try_from(raw: RawCatalog) -> Result<Self, CatalogError> {
         if raw.version != CATALOG_MANIFEST_VERSION {
             return Err(CatalogError::UnsupportedVersion {
@@ -392,6 +505,12 @@ impl TryFrom<RawCatalog> for Catalog {
     }
 }
 
+/// Validate a runner row: a known kind, a parseable archive, one usable pin, an absolute URL.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownRunnerKind`], [`CatalogError::UnknownArchiveFormat`],
+/// [`CatalogError::BadPin`] or [`CatalogError::BadUrl`], each naming the row.
 fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
     let kind = match r.kind.as_str() {
         "proton_umu" => RunnerKind::ProtonUmu,
@@ -423,6 +542,11 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
     })
 }
 
+/// Validate a tool row, on the same rules as a runner row minus the kind.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownArchiveFormat`], [`CatalogError::BadPin`] or [`CatalogError::BadUrl`].
 fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
     let archive = build_archive(t.archive)?;
     let pin = DigestPin::from_hex(HexPins {
@@ -446,6 +570,13 @@ fn build_tool(t: RawTool) -> Result<ToolEntry, CatalogError> {
     })
 }
 
+/// Validate a DXVK row and its optional companion, both pinned or the row is refused.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownArchiveFormat`], [`CatalogError::BadPin`] (also for a companion given as a
+/// URL without a pin or a pin without a URL) or [`CatalogError::BadUrl`], named `dxvk` or
+/// `dxvk-nvapi` after the half that failed.
 fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
     let pin = DigestPin::from_hex(HexPins {
         blake3: d.blake3.as_deref(),
@@ -495,6 +626,11 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
     })
 }
 
+/// Validate an archive object. Unlike a DXVK row, `format` is required here.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownArchiveFormat`] for a format outside the fixed set.
 fn build_archive(a: RawArchive) -> Result<ArchiveLayout, CatalogError> {
     Ok(ArchiveLayout {
         format: parse_format(Some(&a.format))?,
@@ -502,8 +638,13 @@ fn build_archive(a: RawArchive) -> Result<ArchiveLayout, CatalogError> {
     })
 }
 
-/// Map an archive-format string to [`ArchiveFormat`]. `None` defaults to `tar.gz` (the DXVK/nvapi
-/// convention, so a manifest row can omit it); an unrecognized value is a typed error.
+/// Map an archive-format string to [`ArchiveFormat`], `None` defaulting to `tar.gz`.
+///
+/// The default is the DXVK and nvapi convention, so those rows can omit the key.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownArchiveFormat`] carrying the unrecognized value.
 fn parse_format(format: Option<&str>) -> Result<ArchiveFormat, CatalogError> {
     match format.unwrap_or("tar.gz") {
         "tar.gz" => Ok(ArchiveFormat::TarGz),
@@ -556,8 +697,10 @@ mod tests {
         )
     }
 
+    /// A pin of the accepted shape: 32 hex bytes, all zero.
     const GOOD_PIN: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+    /// A manifest signed by a listed key parses, and its rows survive the trip intact.
     #[test]
     fn signature_accepts_a_valid_manifest() {
         let json = manifest(GOOD_PIN);
@@ -576,6 +719,8 @@ mod tests {
         assert!(cat.tool("umu-launcher").is_some());
     }
 
+    /// One flipped byte in the body is refused, so the signature covers the manifest and not just
+    /// its shape.
     #[test]
     fn signature_rejects_a_tampered_manifest() {
         let json = manifest(GOOD_PIN);
@@ -601,6 +746,8 @@ mod tests {
         assert!(matches!(err, CatalogError::BadSignature));
     }
 
+    /// Anything that is not a 64-byte signature is refused as a bad signature rather than reaching
+    /// the verifier.
     #[test]
     fn signature_rejects_absent_or_short() {
         let json = manifest(GOOD_PIN);
@@ -612,8 +759,8 @@ mod tests {
         }
     }
 
-    /// The property the overlap window buys. Without the second half a rotation nobody finished looks
-    /// exactly like one that is done, right up until the retiring release.
+    /// The property the overlap window buys. Without the second half a rotation nobody finished
+    /// looks exactly like one that is done, right up until the retiring release.
     #[test]
     fn a_retired_key_still_admits_a_catalog_and_says_it_did() {
         let json = manifest(GOOD_PIN);
@@ -651,9 +798,9 @@ mod tests {
         ));
     }
 
-    /// Reported as a bad signature it would send whoever hits it to go and check the hosted file, which
-    /// is the one thing that cannot be at fault. The position matters too: with a list, "which entry"
-    /// is the only part of the message that locates the typo.
+    /// Reported as a bad signature it would send whoever hits it to go and check the hosted file,
+    /// which is the one thing that cannot be at fault. The position matters too: with a list,
+    /// "which entry" is the only part of the message that locates the typo.
     #[test]
     fn a_key_that_is_not_a_key_is_a_build_problem_rather_than_a_bad_signature() {
         // Not a decompressable compressed Edwards point, so it can never verify anything.
@@ -666,6 +813,7 @@ mod tests {
         ));
     }
 
+    /// A kind outside the fixed set is a typed refusal, not a runner the launch path cannot drive.
     #[test]
     fn schema_rejects_unknown_runner_kind() {
         let json = manifest(GOOD_PIN).replace("proton_umu", "proton_flatpak");
@@ -709,13 +857,14 @@ mod tests {
         ));
     }
 
+    /// A pin that is not 32 hex bytes is refused at parse time, not at download time.
     #[test]
     fn schema_rejects_a_bad_pin() {
         let err = Catalog::from_json_bytes(manifest("not-hex").as_bytes()).expect_err("bad pin");
         assert!(matches!(err, CatalogError::BadPin { .. }));
     }
 
-    /// A DXVK row, with `extra` raw JSON fields appended (an nvapi pair, a `format`, …).
+    /// A DXVK row, with `extra` raw JSON fields appended (an nvapi pair, a `format`, and so on).
     fn dxvk_manifest(extra: &str) -> String {
         format!(
             r#"{{ "version": 1, "dxvk": [
@@ -724,6 +873,8 @@ mod tests {
         )
     }
 
+    /// A URL and a pin together are the companion, so it rides the DXVK row rather than needing a
+    /// row of its own.
     #[test]
     fn dxvk_parses_a_pinned_nvapi_pair() {
         let nvapi = format!(
@@ -735,12 +886,15 @@ mod tests {
         assert!(entry.nvapi.is_some(), "nvapi companion parsed");
     }
 
+    /// Omitting the companion is a row with no companion, not a malformed row.
     #[test]
     fn dxvk_without_nvapi_parses_and_has_none() {
         let cat = Catalog::from_json_bytes(dxvk_manifest("").as_bytes()).expect("parse");
         assert!(cat.dxvk.first().expect("dxvk row").nvapi.is_none());
     }
 
+    /// A DXVK row may omit its format and get `tar.gz`, and naming one still moves the container
+    /// without a code change.
     #[test]
     fn dxvk_format_defaults_to_tar_gz_and_honors_an_override() {
         let default = Catalog::from_json_bytes(dxvk_manifest("").as_bytes()).expect("parse");
@@ -750,6 +904,7 @@ mod tests {
         assert_eq!(xz.dxvk[0].format, ArchiveFormat::TarXz);
     }
 
+    /// A format nothing can unpack is refused at parse time rather than after the download.
     #[test]
     fn dxvk_rejects_an_unknown_format() {
         let err = Catalog::from_json_bytes(dxvk_manifest(r#", "format": "tar.brotli""#).as_bytes())
@@ -757,6 +912,8 @@ mod tests {
         assert!(matches!(err, CatalogError::UnknownArchiveFormat { .. }));
     }
 
+    /// Half a companion is a malformed row: the all-or-nothing rule is what keeps every download
+    /// pinned.
     #[test]
     fn dxvk_rejects_an_unpinned_nvapi_url() {
         // An nvapi URL without a pin would be an unauthenticated download.
@@ -765,6 +922,8 @@ mod tests {
         assert!(matches!(err, CatalogError::BadPin { .. }));
     }
 
+    /// The version gate is equality, and the error names both numbers so the mismatch is readable
+    /// without the file in hand.
     #[test]
     fn schema_rejects_an_unsupported_version() {
         let json = manifest(GOOD_PIN).replace("\"version\": 1", "\"version\": 999");
@@ -778,6 +937,7 @@ mod tests {
         ));
     }
 
+    /// A runner row's archive goes through the same fixed set as a DXVK row's.
     #[test]
     fn schema_rejects_an_unknown_archive_format() {
         let json = manifest(GOOD_PIN).replace("tar.gz", "tar.brotli");
@@ -785,6 +945,8 @@ mod tests {
         assert!(matches!(err, CatalogError::UnknownArchiveFormat { .. }));
     }
 
+    /// The parser is total over untrusted bytes, which is what the fuzz target depends on: empty,
+    /// non-JSON and truncated input are all typed errors.
     #[test]
     fn malformed_json_is_a_typed_error_not_a_panic() {
         for bytes in [
@@ -797,18 +959,19 @@ mod tests {
         }
     }
 
-    /// Every key this build would accept has to be usable, or it can admit nothing and the build says
-    /// so as a signature failure on a user's machine instead.
+    /// Every key this build would accept has to be usable, or it can admit nothing and the build
+    /// says so as a signature failure on a user's machine instead.
     #[test]
     fn every_compiled_in_key_parses() {
         trusted_keys(default_keys())
             .expect("every trusted key in this build is a usable ed25519 key");
     }
 
-    /// The rotation failure an accepted-key list otherwise hides: a new key added and released while
-    /// the hosted file was never re-signed, which works everywhere until the retired key is dropped and
-    /// then works nowhere. Its own test, so a failure names the unfinished rotation rather than the
-    /// rows.
+    /// The rotation failure an accepted-key list otherwise hides.
+    ///
+    /// A new key added and released while the hosted file was never re-signed works everywhere
+    /// until the retired key is dropped, and then works nowhere. Its own test, so a failure names
+    /// the unfinished rotation rather than the rows.
     #[test]
     fn the_hosted_manifest_is_signed_by_the_key_in_use_today() {
         let (manifest, signature) = hosted();

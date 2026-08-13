@@ -1,26 +1,17 @@
 //! What kind of machine this is, where that changes how a game should be launched.
 //!
-//! Three facts that are routinely conflated and are not the same question. The **machine** says what
-//! the hardware is, from the product name its firmware reports, and only that answers whether this is
-//! a Steam Deck at all. The **OS image** says whether SteamOS is installed, which is neither necessary
-//! (a Deck runs Bazzite or Arch just as well) nor sufficient (SteamOS ships on machines that are not
-//! Decks). The **session** says whether
-//! the launch is happening under the Steam compositor rather than a desktop, which is a property of
-//! how the user is logged in and changes between reboots on one machine.
+//! Three facts that are routinely conflated and are not the same question. The machine says what
+//! the hardware is, from the product name its firmware reports, and only that answers whether this
+//! is a Steam Deck at all. The OS image says whether SteamOS is installed, which is neither
+//! necessary (a Deck runs Bazzite or Arch just as well) nor sufficient (SteamOS ships on machines
+//! that are not Decks). The session says whether the launch is happening under the Steam compositor
+//! rather than a desktop, which is a property of how the user is logged in and changes between
+//! reboots on one machine.
 //!
-//! Each is read separately and reported separately. The reads are split from the parsing the same way
-//! the kernel version is ([`crate::env`]), so what a given firmware string means is decided by a test
-//! over literals rather than by whatever machine happens to run the suite.
-//!
-//! **No launch variable follows from any of it, and that is a finding rather than an omission.** The
-//! tuning a Steam Deck wants is applied by the session that starts the game: the display limits, the
-//! backlight, the fan curve and the CPU topology are all exported before this launcher's process
-//! exists, so a launch from inside that session already has them. Restating one of them here would be
-//! redundant there and, worse, would take a decision away somewhere else: the CPU topology in
-//! particular is what a Proton runner's own per-title fixes set, and they skip their own adjustment
-//! whenever the variable is already present, so pre-setting it silently disables a correction that
-//! knows more about the title than this crate does. What the detection is for is telling a user what
-//! their machine is, and letting the launch path ask.
+//! Each is probed separately and reported separately, and no launch variable follows from any of
+//! it: the tuning a Deck wants is exported by the session that starts the game, before this
+//! launcher's process exists. What the detection is for is telling a user what their machine is,
+//! and letting the launch path ask.
 
 /// A Steam Deck, by the product name Valve ships in its firmware.
 ///
@@ -38,7 +29,7 @@ pub enum DeckModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct HostIdentity {
-    /// The Steam Deck this is, from the firmware itself. `None` on everything else.
+    /// Which Steam Deck this is, from the firmware itself; `None` on everything else.
     pub deck: Option<DeckModel>,
     /// SteamOS is the installed distribution. Independent of `deck` in both directions.
     pub steamos: bool,
@@ -46,10 +37,32 @@ pub struct HostIdentity {
     pub game_mode: bool,
 }
 
+// Restating any of the session's own tuning here would be redundant at best, and in one case
+// harmful: `WINE_CPU_TOPOLOGY` is what a Proton runner's per-title fixes set, and they skip their
+// own adjustment whenever the variable is already present, so pre-setting it silently disables a
+// correction that knows more about the title than this crate does. Deck tuning belongs to the
+// session that launched the game, not to a default here.
 impl HostIdentity {
-    /// Read the host's identity. Every probe degrades to "no" rather than failing, because a machine
-    /// that cannot answer is a machine with no Deck tuning to apply, not a launch to refuse. On a
-    /// target with none of these paths that is every probe, which is the correct answer there.
+    /// Read the host's identity.
+    ///
+    /// Every probe degrades to "no" rather than failing, because a machine that cannot answer is a
+    /// machine with no Deck tuning to apply, not a launch to refuse. On a target with none of these
+    /// paths that is every probe, which is the correct answer there.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_runtime::HostIdentity;
+    ///
+    /// let host = HostIdentity::detect();
+    /// if host.deck.is_some() && !host.steamos {
+    ///     // A Deck that was reimaged: the model and the OS are independent probes.
+    ///     let reimaged = true;
+    /// #   let _ = reimaged;
+    /// }
+    /// ```
+    // Exercised on a machine impersonating a Deck: rewriting `/etc/os-release` moved the SteamOS
+    // claim and left the model claim standing, which is the independence the three fields promise.
     #[must_use]
     pub fn detect() -> Self {
         Self {
@@ -62,8 +75,13 @@ impl HostIdentity {
     }
 }
 
-/// The system's own product name, as the firmware reports it. Valve names the machine here, not in
-/// the board fields, which on a Deck carry the mainboard's part identity instead.
+// The reads are split from the parsing so that what a given firmware or `os-release` string means is
+// decided by a test over literals rather than by whatever machine happens to run the suite.
+
+/// The system's own product name, as the firmware reports it.
+///
+/// Valve names the machine here, not in the board fields, which on a Deck carry the mainboard's part
+/// identity instead.
 fn read_product_name() -> Option<String> {
     std::fs::read_to_string("/sys/class/dmi/id/product_name").ok()
 }
@@ -89,16 +107,17 @@ fn parse_deck_model(product_name: &str) -> Option<DeckModel> {
 
 /// Whether an `os-release` file describes SteamOS.
 ///
-/// Keyed on `ID`, never on `VARIANT_ID`: the variant is an image label that says which edition was
+/// Keyed on `ID`, never on `VARIANT_ID`: the variant is an image label saying which edition was
 /// installed, so reading it as hardware calls a Steam Machine a handheld.
 fn os_release_is_steamos(text: &str) -> bool {
     os_release_value(text, "ID").is_some_and(|id| id.eq_ignore_ascii_case("steamos"))
 }
 
-/// One `KEY=value` from an `os-release` file, unquoted. Comments and blank lines are skipped, and a
-/// repeated key keeps the **last**: the file is defined as something a shell can source, so a second
-/// assignment overwrites the first, and reading it any other way disagrees with every other consumer
-/// on the machine.
+/// One `KEY=value` from an `os-release` file, unquoted.
+///
+/// Comments and blank lines are skipped, and a repeated key keeps the last: the file is defined as
+/// something a shell can source, so a second assignment overwrites the first, and reading it any
+/// other way disagrees with every other consumer on the machine.
 fn os_release_value(text: &str, key: &str) -> Option<String> {
     let mut found = None;
     for line in text.lines() {
@@ -124,8 +143,10 @@ fn os_release_value(text: &str, key: &str) -> Option<String> {
     found
 }
 
-/// Whether the session is the Steam compositor. It names itself in the desktop variable, which is
-/// what distinguishes a Deck booted into its game session from the same Deck at a desktop.
+/// Whether the session is the Steam compositor.
+///
+/// It names itself in the desktop variable, which is what distinguishes a Deck booted into its game
+/// session from the same Deck at a desktop.
 fn session_is_game_mode() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| desktop_is_game_mode(&desktop))
 }
@@ -142,6 +163,7 @@ fn desktop_is_game_mode(desktop: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The two names Valve ships, as the firmware node hands them over.
     #[test]
     fn product_names_identify_the_two_deck_models() {
         assert_eq!(parse_deck_model("Jupiter"), Some(DeckModel::Lcd));
@@ -151,6 +173,7 @@ mod tests {
         assert_eq!(parse_deck_model("galileo"), Some(DeckModel::Oled));
     }
 
+    /// Nothing else is a Deck, including the names that only start like one.
     #[test]
     fn no_other_machine_is_a_deck() {
         for name in [
@@ -164,8 +187,8 @@ mod tests {
         }
     }
 
-    /// The distribution and the hardware are separate answers, and the pairing that proves it is a
-    /// Deck running something else: the firmware still says Jupiter while `ID` says otherwise.
+    /// The distribution and the hardware are separate answers. The pairing that proves it is a Deck
+    /// running something else: the firmware still says Jupiter while `ID` says otherwise.
     #[test]
     fn steamos_is_read_from_the_id_and_not_from_the_variant() {
         let steamos = "NAME=\"SteamOS\"\nID=steamos\nID_LIKE=arch\nVARIANT_ID=steamdeck\n";
@@ -178,6 +201,7 @@ mod tests {
         assert!(!os_release_is_steamos("ID=arch\nVARIANT_ID=steamdeck\n"));
     }
 
+    /// The shapes a real `os-release` line arrives in: quoted, commented, spaced, absent.
     #[test]
     fn os_release_values_survive_quoting_comments_and_spacing() {
         let text = "# a comment\n\nNAME=\"SteamOS\"\nID = steamos \nPRETTY='Steam Deck'\n";
@@ -213,13 +237,14 @@ mod tests {
         );
     }
 
+    /// Unquoting happens before the comparison, and it is still an exact one.
     #[test]
     fn a_quoted_id_that_is_not_steamos_stays_not_steamos() {
         assert!(os_release_is_steamos("ID=\"steamos\"\n"));
         assert!(!os_release_is_steamos("ID=\"steamos-like\"\n"));
     }
 
-    /// The desktop variable is a colon-separated list, so an exact string comparison misses a
+    /// The desktop variable is a colon-separated list. An exact string comparison would miss a
     /// session that names the compositor alongside anything else.
     #[test]
     fn game_mode_is_found_anywhere_in_the_desktop_list() {

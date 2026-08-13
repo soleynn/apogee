@@ -1,16 +1,15 @@
 //! Frame-consistency metrics over one run's per-frame frametimes.
 //!
-//! The default-runner sweep records a frametime log per run; this module turns the raw per-frame
-//! frametimes into the figures the matrix ranks on: time-weighted average FPS, the 1% and 0.1%
-//! lows, and the frametime spread. Pure and host-free. The log decode that feeds it is a separate
-//! concern; a [`BenchStats`] is computed from frametimes already in milliseconds.
+//! [`FrameLog`] reads a MangoHud frametime-log CSV and [`BenchStats`] reduces the frametimes to the
+//! figures a runner comparison ranks on: average FPS, the 1% and 0.1% lows, and the frametime
+//! spread. Pure and host-free, and every frametime here is in milliseconds.
 
 use std::collections::BTreeMap;
 
 use serde::Serialize;
 use thiserror::Error;
 
-/// Why frametime statistics could not be computed.
+/// Why a frametime log could not be read or reduced to statistics.
 #[derive(Debug, Error, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum BenchError {
@@ -19,36 +18,49 @@ pub enum BenchError {
     NoFrames,
     /// A frametime was zero, negative, or non-finite, so FPS is undefined.
     #[error("frametime #{index} is not a positive finite value ({value})")]
-    BadFrametime { index: usize, value: f64 },
-    /// No MangoHud data header (a line beginning `fps,frametime,...`) was found in the log.
+    BadFrametime {
+        /// Position of the offending value among the frametimes, which is not a log line number.
+        index: usize,
+        /// The value as it was given, in milliseconds.
+        value: f64,
+    },
+    /// No MangoHud data header (a line beginning `fps,frametime,`) was found in the log.
     #[error("no MangoHud data header found")]
     NoDataHeader,
     /// A column the parser needs is absent from the log's data header.
     #[error("required column {name} is missing from the log header")]
-    MissingColumn { name: &'static str },
-    /// A data row could not be read (short row or an unparseable frametime cell).
+    MissingColumn {
+        /// The column that was looked for.
+        name: &'static str,
+    },
+    /// A data row could not be read: a short row, or a frametime cell that is not a number.
     #[error("line {line}: {reason}")]
-    MalformedRow { line: usize, reason: &'static str },
+    MalformedRow {
+        /// The row's 1-based line number in the log.
+        line: usize,
+        /// What was wrong with it.
+        reason: &'static str,
+    },
 }
 
-/// Frame-consistency metrics for one run (see [`BenchStats::from_frametimes`]).
+/// Frame-consistency metrics for one run.
 ///
-/// FPS figures are time-weighted (frames over elapsed time), so `average_fps` equals
-/// `1000 / frametime_mean_ms`. The lows are the mean FPS across the slowest tail of frames:
-/// `low_1pct` over the slowest 1%, `low_0_1pct` over the slowest 0.1% (tail size rounds up, minimum
-/// one frame). `frametime_stddev_ms` is the population standard deviation of the frametimes, the
-/// headline consistency figure.
+/// Every FPS figure here is a mean frametime inverted rather than an average of per-frame rates, so
+/// `average_fps` is exactly `1000 / frametime_mean_ms` and the lows are the same calculation over
+/// the slowest tail of frames. A tail size rounds up and is never less than one frame, so a short
+/// run still yields lows. `frametime_stddev_ms` is the population standard deviation, the headline
+/// consistency figure.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct BenchStats {
     /// Number of frames in the run.
     pub frame_count: usize,
-    /// Wall-clock length of the run, in seconds (sum of frametimes).
+    /// Wall-clock length of the run in seconds, the frametimes summed.
     pub duration_s: f64,
-    /// Time-weighted average FPS over the whole run.
+    /// Average FPS over the whole run.
     pub average_fps: f64,
-    /// Mean FPS across the slowest 1% of frames.
+    /// FPS implied by the mean frametime of the slowest 1% of frames.
     pub low_1pct: f64,
-    /// Mean FPS across the slowest 0.1% of frames.
+    /// FPS implied by the mean frametime of the slowest 0.1% of frames.
     pub low_0_1pct: f64,
     /// Mean frametime, in milliseconds.
     pub frametime_mean_ms: f64,
@@ -57,12 +69,31 @@ pub struct BenchStats {
 }
 
 impl BenchStats {
-    /// Compute the metrics from a run's per-frame frametimes, given in milliseconds and capture
-    /// order. Ordering does not affect the result.
+    /// Compute the metrics from a run's per-frame frametimes, in milliseconds.
+    ///
+    /// The order of `frametimes_ms` does not affect the result.
     ///
     /// # Errors
-    /// [`BenchError::NoFrames`] if `frametimes_ms` is empty, or [`BenchError::BadFrametime`] if any
-    /// entry is not a positive finite number (FPS would be undefined).
+    ///
+    /// [`BenchError::NoFrames`] if `frametimes_ms` is empty, or [`BenchError::BadFrametime`] naming
+    /// the first entry that is not a positive finite number, for which FPS would be undefined.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_runtime::BenchStats;
+    ///
+    /// // Ten frames at 10 ms and one 100 ms stutter.
+    /// let mut frametimes_ms = vec![10.0; 10];
+    /// frametimes_ms.push(100.0);
+    /// let stats = BenchStats::from_frametimes(&frametimes_ms)?;
+    ///
+    /// assert_eq!(stats.frame_count, 11);
+    /// assert!((stats.average_fps - 1000.0 / stats.frametime_mean_ms).abs() < 1e-9);
+    /// // The slowest 1% rounds up to a single frame: the stutter, at 10 FPS.
+    /// assert!((stats.low_1pct - 10.0).abs() < 1e-9);
+    /// # Ok::<(), apogee_runtime::BenchError>(())
+    /// ```
     pub fn from_frametimes(frametimes_ms: &[f64]) -> Result<Self, BenchError> {
         if frametimes_ms.is_empty() {
             return Err(BenchError::NoFrames);
@@ -103,9 +134,11 @@ impl BenchStats {
     }
 }
 
-/// Mean FPS across the slowest `fraction` of frames. `sorted_ascending` holds the frametimes in
-/// ascending order, so the slowest frames are the tail. The tail size rounds up and is at least one
-/// frame, so even a short run yields a figure.
+/// FPS implied by the mean frametime of the slowest `fraction` of frames.
+///
+/// `sorted_ascending` holds the frametimes in milliseconds in ascending order, so the slowest frames
+/// are its tail. The tail size rounds up and is at least one frame, so even a short run yields a
+/// figure.
 fn slowest_tail_fps(sorted_ascending: &[f64], fraction: f64) -> f64 {
     let n = sorted_ascending.len();
     let count = ((n as f64) * fraction).ceil() as usize;
@@ -118,30 +151,50 @@ fn slowest_tail_fps(sorted_ascending: &[f64], fraction: f64) -> f64 {
 /// A parsed MangoHud frametime log: the capture machine's metadata block and the per-frame
 /// frametimes.
 ///
-/// MangoHud writes a CSV whose leading lines carry the machine (`os,cpu,gpu,...` keys, then their
-/// values), followed by a data header beginning `fps,frametime,...` and one row per frame. Only the
-/// `frametime` column (milliseconds) is required; the rest is provenance.
+/// MangoHud writes a CSV whose leading lines carry the machine (`os,cpu,gpu,` keys, then their
+/// values), followed by a data header beginning `fps,frametime,` and one row per frame. Only the
+/// `frametime` column, in milliseconds, is required; the rest is provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameLog {
-    /// The capture machine, keyed by MangoHud's metadata column names (`os`, `cpu`, `gpu`, ...).
+    /// The capture machine, keyed by MangoHud's metadata column names (`os`, `cpu`, `gpu`).
     pub metadata: BTreeMap<String, String>,
     /// Per-frame frametimes in milliseconds, in capture order.
     pub frametimes_ms: Vec<f64>,
-    /// Rows dropped as instrumentation artifacts: a frametime longer than the process's uptime at
-    /// the moment it was logged (the `elapsed` column) is not a frame. Some MangoHud builds write
-    /// one such garbage row first, having no prior frame to diff against.
+    /// How many rows were dropped as instrumentation artifacts.
+    ///
+    /// A frametime longer than the process had been alive when it was logged is not a frame. Some
+    /// MangoHud builds write one such row first, having no prior frame to diff against.
     pub artifacts_dropped: usize,
 }
 
 impl FrameLog {
-    /// Parse a MangoHud frametime-log CSV. The metadata block is optional; the `fps,frametime,...`
-    /// data header and a `frametime` column are required. Rows whose frametime exceeds the
-    /// process's uptime at log time (the `elapsed` column) are dropped as instrumentation
-    /// artifacts and counted in [`FrameLog::artifacts_dropped`].
+    /// Parse a MangoHud frametime-log CSV.
+    ///
+    /// The metadata block is optional; the `fps,frametime,` data header and a `frametime` column
+    /// are required. A row whose frametime exceeds the process's uptime at log time (the `elapsed`
+    /// column, in nanoseconds) is dropped as an instrumentation artifact and counted in
+    /// [`FrameLog::artifacts_dropped`] rather than rejected.
     ///
     /// # Errors
-    /// [`BenchError::NoDataHeader`], [`BenchError::MissingColumn`], or [`BenchError::MalformedRow`]
-    /// for a header-less, column-less, or unparseable log.
+    ///
+    /// [`BenchError::NoDataHeader`] if no data header line is present, or
+    /// [`BenchError::MalformedRow`] naming the line of a row that is short or whose frametime cell
+    /// is not a number.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_runtime::FrameLog;
+    ///
+    /// let csv = "fps,frametime,elapsed\n\
+    ///            60.2,16.6,100000000\n\
+    ///            59.9,16.7,200000000\n";
+    /// let log = FrameLog::from_mangohud_csv(csv)?;
+    ///
+    /// assert_eq!(log.frametimes_ms, vec![16.6, 16.7]);
+    /// assert_eq!(log.artifacts_dropped, 0);
+    /// # Ok::<(), apogee_runtime::BenchError>(())
+    /// ```
     pub fn from_mangohud_csv(text: &str) -> Result<Self, BenchError> {
         let lines: Vec<&str> = text.lines().collect();
         let header_idx = lines
@@ -153,6 +206,9 @@ impl FrameLog {
             .ok_or(BenchError::NoDataHeader)?;
 
         let header: Vec<&str> = lines[header_idx].split(',').map(str::trim).collect();
+        // Unreachable as written: the header line was recognized by holding an exact `frametime`
+        // cell, and trimming leaves it exact. Kept so the search has an answer if either the
+        // recognition predicate or the required-column set moves.
         let ft = header
             .iter()
             .position(|c| *c == "frametime")
@@ -208,10 +264,12 @@ impl FrameLog {
         })
     }
 
-    /// Compute the frame-consistency metrics for this log.
+    /// Compute the frame-consistency metrics over this log's frametimes.
     ///
     /// # Errors
-    /// Propagates [`BenchStats::from_frametimes`].
+    ///
+    /// [`BenchError::NoFrames`] if the log kept no frames, or [`BenchError::BadFrametime`] if one
+    /// of them is not a positive finite number.
     pub fn stats(&self) -> Result<BenchStats, BenchError> {
         BenchStats::from_frametimes(&self.frametimes_ms)
     }
@@ -221,11 +279,12 @@ impl FrameLog {
 mod tests {
     use super::*;
 
-    /// Assert two FPS/ms figures agree to floating-point tolerance.
+    /// Assert two FPS or millisecond figures agree to floating-point tolerance.
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
     }
 
+    /// A perfectly steady run reports its rate on every figure and zero spread.
     #[test]
     fn steady_sixty_is_flat() {
         let frame = 1000.0 / 60.0;
@@ -241,6 +300,8 @@ mod tests {
         close(stats.duration_s, 10.0);
     }
 
+    /// The lows are what a stutter moves: they land on the slow tail while the average barely
+    /// shifts, which is the whole reason both are reported.
     #[test]
     fn a_slow_tail_pulls_the_lows_down_not_the_average() {
         // 990 fast frames (10 ms) and 10 stutters (100 ms): the slowest 1% is exactly the stutters.
@@ -256,6 +317,7 @@ mod tests {
         close(stats.low_0_1pct, 10.0);
     }
 
+    /// Every figure is order-independent, so a caller may pass frametimes in any order.
     #[test]
     fn capture_order_does_not_matter() {
         let ascending = vec![8.0, 9.0, 10.0, 40.0, 50.0];
@@ -267,6 +329,7 @@ mod tests {
         assert_eq!(a, BenchStats::from_frametimes(&shuffled).unwrap());
     }
 
+    /// The tail size floor of one frame makes a one-frame run yield lows rather than divide by zero.
     #[test]
     fn a_single_frame_has_no_spread_and_equal_lows() {
         let stats = BenchStats::from_frametimes(&[20.0]).unwrap();
@@ -277,11 +340,13 @@ mod tests {
         close(stats.frametime_stddev_ms, 0.0);
     }
 
+    /// An empty run is refused rather than reported as zero frames at zero FPS.
     #[test]
     fn empty_run_is_rejected() {
         assert_eq!(BenchStats::from_frametimes(&[]), Err(BenchError::NoFrames));
     }
 
+    /// Zero, negative, NaN and infinite frametimes are all refused, and the error names the index.
     #[test]
     fn non_positive_and_non_finite_frametimes_are_rejected() {
         assert_eq!(
@@ -312,6 +377,7 @@ mod tests {
     // No Square Enix bytes; just the tool's own log of a trivial renderer.
     const FIXTURE: &str = include_str!("../tests/fixtures/mangohud_frametime.csv");
 
+    /// A real capture parses whole: frame count, metadata block, and a snapshot of every figure.
     #[test]
     fn parses_a_real_mangohud_capture() {
         let log = FrameLog::from_mangohud_csv(FIXTURE).unwrap();
@@ -339,6 +405,7 @@ mod tests {
         ));
     }
 
+    /// A frametime longer than the process's uptime is dropped and counted, not measured.
     #[test]
     fn an_impossible_first_sample_is_dropped_as_an_artifact() {
         // Some MangoHud builds log a garbage first row: a frametime longer than the process has
@@ -352,6 +419,7 @@ mod tests {
         assert_eq!(log.frametimes_ms, vec![36.6042, 4.3695]);
     }
 
+    /// Text that is not a MangoHud log is refused rather than read as zero frames.
     #[test]
     fn a_header_less_log_is_rejected() {
         assert_eq!(
@@ -360,6 +428,8 @@ mod tests {
         );
     }
 
+    /// A bad cell reports the log's own line number, counting the header, so a capture can be
+    /// inspected at that line.
     #[test]
     fn a_bad_frametime_cell_names_its_line() {
         let csv = "fps,frametime,elapsed\n60,16.6,1\n60,oops,2\n";

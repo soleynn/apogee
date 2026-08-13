@@ -1,93 +1,114 @@
-//! The environment matrix: resolving a profile's graphics and sync knobs into the concrete
-//! environment variables and wrapper commands a launch runs with.
+//! The environment matrix: the variables and wrappers a launch runs with.
 //!
-//! The computation is pure and host-injected ([`HostCaps`]), so a fixed profile yields a byte-exact
-//! result a golden test can pin. The one rule that overrides everything else: the user's free-form
-//! overrides are merged **last**, so they always win over Apogee's computed values.
-//!
-//! The matrix produces the *graphics/sync/user* environment. The structural prefix variables
-//! (`WINEPREFIX`, `GAMEID`, `PROTONPATH`) are set by the spawner from the prepared prefix, not here.
+//! A profile's graphics and synchronization knobs are resolved against the host by
+//! [`compute_environment`], which is pure and takes those capabilities as an argument
+//! ([`HostCaps`]), so one fixed profile always yields the same [`Environment`] and a golden test
+//! can pin it. It produces the graphics, sync and user half only: the structural prefix variables
+//! (`WINEPREFIX`, `GAMEID`, `PROTONPATH`) are set by the spawner from the prepared prefix.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// The Direct3D DLL stems DXVK provides. The single source of truth shared with the DXVK install and
-/// health check ([`crate::dxvk`]), so the set overridden to native and the set verified on disk cannot
-/// drift apart.
+/// The Direct3D DLL stems DXVK provides.
+///
+/// Shared with the DXVK install and its health check, so the set overridden to native at launch and
+/// the set verified on disk cannot drift apart.
 pub(crate) const DXVK_DLL_STEMS: [&str; 4] = ["d3d9", "d3d10core", "d3d11", "dxgi"];
 
-/// The DLL stems `dxvk-nvapi` provides, which is every `.dll` its archive carries across both
-/// architectures (measured against the pinned v0.9.2 build: `x64/nvapi64.dll`, `x64/nvofapi64.dll`,
-/// `x32/nvapi.dll`).
+/// The DLL stems `dxvk-nvapi` provides.
 ///
-/// Wider than the set the health check requires on disk, and deliberately: naming a stem a given
-/// build does not ship costs nothing, because an override only decides what happens when something
-/// loads that name, while *requiring* one would report a prefix as broken for a file its companion
-/// never had.
+/// Every `.dll` its archive carries across both architectures, measured on the pinned v0.9.2 build:
+/// `x64/nvapi64.dll`, `x64/nvofapi64.dll` and `x32/nvapi.dll`.
+// Wider than the set the health check requires on disk, and deliberately so: an override only
+// decides what happens when something loads that name, so naming a stem a given build does not ship
+// costs nothing, while *requiring* one would report a prefix as broken for a file its companion
+// never had.
 pub(crate) const NVAPI_DLL_STEMS: [&str; 3] = ["nvapi", "nvapi64", "nvofapi64"];
 
-/// Which wine synchronization primitive the user wants. `Auto` resolves to the best the host supports.
+/// Which wine synchronization primitive the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncChoice {
-    /// Pick the best available: ntsync, else fsync, else esync.
+    /// Take the best the host supports: ntsync, else fsync, else esync.
     #[default]
     Auto,
+    /// Force ntsync, whatever the host reports.
     Ntsync,
+    /// Force fsync, whatever the host reports.
     Fsync,
+    /// Force esync, whatever the host reports.
     Esync,
-    /// No accelerated sync (server-side synchronization); for debugging.
+    /// No accelerated synchronization, leaving wine's server-side path; for debugging.
     None,
 }
 
-/// The synchronization primitive a launch will actually use, surfaced to the user as status (not a
-/// folklore toggle): "your setup will use ntsync".
+/// The synchronization primitive a launch will actually use.
+///
+/// Status rather than a second toggle: it is the resolved [`SyncChoice`], and what a front end
+/// tells the user their setup came out as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStatus {
+    /// ntsync, which a runner that supports it uses with no variable set.
     Ntsync,
+    /// fsync, via `WINEFSYNC=1`.
     Fsync,
+    /// esync, via `WINEESYNC=1` with `WINEFSYNC=0`.
     Esync,
+    /// Neither, leaving wine's server-side synchronization.
     None,
 }
 
-/// The in-game overlay. Mutually exclusive by construction: never DXVK's HUD and MangoHud at once.
+/// The in-game overlay.
+///
+/// Mutually exclusive by construction: DXVK's HUD and MangoHud are never both enabled.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Hud {
+    /// No overlay.
     #[default]
     None,
-    /// DXVK's built-in HUD; the string is the `DXVK_HUD` spec (e.g. `"fps,frametimes"`).
+    /// DXVK's built-in HUD; the string is the `DXVK_HUD` spec, such as `"fps,frametimes"`.
     Dxvk(String),
     /// MangoHud, enabled with `MANGOHUD=1`.
     Mango,
 }
 
-/// Hybrid-GPU selection. The per-vendor variable sets are the ones observed on real hybrid laptops; a
-/// bump is a change to one arm, not the launch path.
+/// Which GPU a hybrid-graphics host renders on.
+///
+/// The per-vendor variable sets are the ones observed on real hybrid laptops, so keeping up with a
+/// driver is a change to one arm rather than to the launch path.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuSelect {
     /// The system default GPU; set nothing.
     #[default]
     Default,
-    /// NVIDIA PRIME render offload (the proprietary driver).
+    /// PRIME render offload on the proprietary NVIDIA driver.
     NvidiaPrime,
-    /// Mesa PRIME offload to a discrete AMD/Intel GPU (`DRI_PRIME=1`).
+    /// Mesa PRIME offload to a discrete AMD or Intel GPU (`DRI_PRIME=1`).
     MesaPrime,
-    /// A specific Vulkan device via `MESA_VK_DEVICE_SELECT` (e.g. `"10de:2482"`).
+    /// A specific Vulkan device for `MESA_VK_DEVICE_SELECT`, such as `"10de:2482"`.
     VulkanDevice(String),
 }
 
-/// gamescope embedding options, composed as the outermost wrapper around the launch.
+/// gamescope options, composed as the outermost wrapper around the launch.
+///
+/// Every field defaults, so a hand-written partial object still loads rather than making the whole
+/// profile unreadable.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Gamescope {
+    /// Output width, gamescope's `-W`; `None` leaves its own default.
     pub width: Option<u32>,
+    /// Output height, gamescope's `-H`; `None` leaves its own default.
     pub height: Option<u32>,
+    /// Refresh rate in Hz, gamescope's `-r`; `None` leaves its own default.
     pub refresh: Option<u32>,
+    /// Run fullscreen (`-f`).
     pub fullscreen: bool,
+    /// Enable HDR output (`--hdr-enabled`).
     pub hdr: bool,
     /// Extra raw gamescope arguments, appended before the `--` separator.
     pub extra: Vec<String>,
@@ -96,69 +117,100 @@ pub struct Gamescope {
 /// What a launch says about `dxvk-nvapi`'s DLLs.
 ///
 /// Three states rather than a flag, because saying nothing is not the same as saying no. The
-/// companion's DLLs have no builtin behind them, so wine loads whichever copy is in `system32` when
-/// nothing names them (measured on wine 10.0), which means an install that ran once keeps loading
-/// forever unless a launch says otherwise; and a prefix nobody installed into may still have the
-/// runner's own build, which is not this launcher's to switch off.
+/// companion's DLLs have no wine builtin behind them, so when nothing names them wine loads
+/// whichever copy is in `system32` (measured on wine 10.0), which means an install that ran once
+/// keeps loading forever unless a launch says otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NvapiOverride {
-    /// Name the DLLs to nobody: whatever the prefix and the runner resolve on their own stands. The
-    /// answer wherever this launcher did not install the companion, in either direction — overriding
-    /// to native would name a file that may not exist, and disabling would take away a runner's own
-    /// build nobody here provided.
+    /// Name the DLLs to nobody: whatever the prefix and the runner resolve on their own stands.
+    ///
+    /// The answer wherever this launcher did not install the companion, in either direction:
+    /// overriding to native would name a file that may not exist, and disabling would take away a
+    /// runner's own build nobody here provided.
     #[default]
     Unset,
     /// Override them to the native `dxvk-nvapi` build the prefix has.
     Native,
-    /// Disable them, so nothing loads them. This is what turning an installed companion off means: the
-    /// DLLs are never removed (they may be the runner's own, and an uninstall that guessed would delete
-    /// files this launcher did not write), so refusing to load them is the whole of "off".
+    /// Refuse to load them, which is the whole of turning an installed companion off.
+    ///
+    /// The DLLs are never deleted, so there is no uninstall path: they may be the runner's own, and
+    /// an uninstall that guessed would remove files this launcher did not write.
     Disabled,
 }
 
-/// The DXVK runtime environment, present when a prefix has DXVK installed. Distinct from the DXVK
-/// *install* (the DLLs on disk): this is only the env that activates and tunes it.
+/// The DXVK runtime environment, for a prefix that has DXVK installed.
+///
+/// Distinct from the DXVK install (the DLLs on disk): this is only the environment that activates
+/// and tunes them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DxvkEnv {
-    /// Where DXVK persists its shader state cache (`DXVK_STATE_CACHE_PATH`); `None` leaves the default.
+    /// Where DXVK persists its shader state cache; `None` leaves the build's own default.
     pub state_cache: Option<PathBuf>,
-    /// What this launch says about `dxvk-nvapi`'s DLLs.
+    /// What this launch says about the `dxvk-nvapi` DLLs.
     pub nvapi: NvapiOverride,
 }
 
-/// The user/profile-chosen environment knobs Apogee resolves into an [`Environment`].
+/// The environment knobs a profile chooses, before a host resolves them.
+///
+/// [`compute_environment`] turns one of these into an [`Environment`]. The `env` map is merged
+/// last and wins over every value the other fields compute, so a variable the user set by hand is
+/// never overwritten by one of these knobs; `wrappers` composes innermost for the same reason.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_runtime::{EnvConfig, HostCaps, SyncChoice, compute_environment};
+///
+/// let mut config = EnvConfig {
+///     sync: SyncChoice::Fsync,
+///     ..Default::default()
+/// };
+/// config.env.insert("WINEFSYNC".to_owned(), "0".to_owned());
+///
+/// let env = compute_environment(&config, &HostCaps { ntsync: false, fsync: true });
+/// assert_eq!(env.vars["WINEFSYNC"], "0");
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct EnvConfig {
+    /// Which synchronization primitive to use; [`SyncChoice::Auto`] by default.
     pub sync: SyncChoice,
+    /// The in-game overlay; [`Hud::None`] by default.
     pub hud: Hud,
+    /// Which GPU to render on; [`GpuSelect::Default`] by default.
     pub gpu: GpuSelect,
-    /// DXVK env, `Some` when the prefix has DXVK installed.
+    /// The DXVK environment, `Some` when the prefix has DXVK installed.
     pub dxvk: Option<DxvkEnv>,
+    /// gamescope options, `Some` to run the launch inside it.
     pub gamescope: Option<Gamescope>,
+    /// Wrap the launch in `gamemoderun`.
     pub gamemode: bool,
     /// Free-form wrapper commands, composed innermost (closest to the runner).
     pub wrappers: Vec<String>,
-    /// Free-form per-profile environment overrides, merged last so they always win.
+    /// Free-form variables, merged last so they win over every computed value.
     pub env: BTreeMap<String, String>,
 }
 
-/// What the host supports, injected so the matrix stays pure and testable. `ntsync` must already
-/// reflect the selected runner's support, which [`HostCaps::for_runner`] is how a caller applies,
-/// since ntsync needs both a new-enough kernel and a runner build that uses it.
+/// What the host supports, passed in so the matrix stays pure and testable.
+///
+/// `ntsync` has to account for the selected runner as well as the kernel, which is what
+/// [`for_runner`](Self::for_runner) applies.
 // Deliberately exhaustive, unlike the enums around it: the whole point of the type is that a caller
 // can build one, so a test can compute an environment for a host it is not running on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostCaps {
-    /// ntsync is usable: `/dev/ntsync` present, kernel new enough, and the runner supports it.
+    /// ntsync is usable: `/dev/ntsync` present, kernel 6.14 or newer, and the runner uses it.
     pub ntsync: bool,
-    /// fsync is usable (kernel has `futex_waitv`, 5.16+).
+    /// fsync is usable: kernel 5.16 or newer, so `futex_waitv` exists.
     pub fsync: bool,
 }
 
 impl HostCaps {
-    /// Detect the host's capabilities from `/dev` and the kernel version. `ntsync` here reflects only
-    /// the host; pass the selected runner through [`for_runner`](Self::for_runner) before computing an
-    /// environment.
+    /// Detect the host's capabilities from `/dev` and the kernel version.
+    ///
+    /// The ntsync half is a hint taken from the device node, never a load of the module: a host
+    /// that could support ntsync but has not loaded it reads as not supporting it. `ntsync` here
+    /// reflects the host alone, so pass the selected runner through
+    /// [`for_runner`](Self::for_runner) before computing an environment.
     #[must_use]
     pub fn detect() -> Self {
         let kernel = read_kernel_version();
@@ -169,12 +221,13 @@ impl HostCaps {
         }
     }
 
-    /// The same host as seen through `runner`: ntsync survives only if that build uses it.
+    /// The same host seen through a [`Runner`](crate::Runner): ntsync survives only if that build
+    /// uses it.
     ///
-    /// Without this the two halves of the requirement drift apart. A kernel that offers `/dev/ntsync`
-    /// is not enough on its own, and the failure is silent in the worst direction: ntsync is selected
-    /// by setting no variable, so a build that ignores it gets no esync or fsync toggle either and
-    /// runs on server-side synchronization while every report says ntsync.
+    /// Without this the two halves of the requirement drift apart, and the failure is silent in the
+    /// worst direction: ntsync is selected by setting no variable, so a build that ignores it gets
+    /// no esync or fsync toggle either and runs on server-side synchronization while every report
+    /// says ntsync.
     #[must_use]
     pub fn for_runner(self, runner: &crate::catalog::Runner) -> Self {
         Self {
@@ -184,21 +237,37 @@ impl HostCaps {
     }
 }
 
-/// The resolved launch environment: the variables to set, the wrappers to compose, and the sync
-/// primitive that will be used (for display).
+/// A resolved launch environment: what to set, what to wrap it in, and what sync it came out as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
-    /// The computed variables, user overrides already merged in (and winning).
+    /// The computed variables, with the user's own overrides already merged in.
     pub vars: BTreeMap<String, String>,
-    /// Wrapper commands, outermost first: gamescope, then gamemode, then the user's free-form ones.
+    /// Wrapper commands, outermost first: gamescope, then gamemode, then the free-form ones.
     pub wrappers: Vec<String>,
     /// The synchronization primitive this launch resolves to.
     pub sync: SyncStatus,
 }
 
-/// Resolve `config` against `host` into the concrete launch [`Environment`]. Pure: the same inputs
-/// always produce the same output. User overrides in `config.env` are applied last and win over every
-/// computed value.
+/// Resolve `config` against `host` into a launch [`Environment`].
+///
+/// Pure: the same inputs always produce the same output. The `config.env` overrides are applied
+/// last and win over every computed value.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_runtime::{EnvConfig, HostCaps, SyncChoice, SyncStatus, compute_environment};
+///
+/// let config = EnvConfig {
+///     sync: SyncChoice::Esync,
+///     ..Default::default()
+/// };
+/// let env = compute_environment(&config, &HostCaps { ntsync: true, fsync: true });
+///
+/// assert_eq!(env.sync, SyncStatus::Esync);
+/// assert_eq!(env.vars["WINEESYNC"], "1");
+/// assert_eq!(env.vars["WINEFSYNC"], "0");
+/// ```
 #[must_use]
 pub fn compute_environment(config: &EnvConfig, host: &HostCaps) -> Environment {
     let mut vars = BTreeMap::new();
@@ -223,8 +292,8 @@ pub fn compute_environment(config: &EnvConfig, host: &HostCaps) -> Environment {
     }
 }
 
-/// Resolve the sync choice against host support. `Auto` prefers ntsync, then fsync, then esync; an
-/// explicit choice is honored as status even where the host cannot back it (a debugging override).
+/// Resolve the choice against host support. An explicit choice is honored even where the host
+/// cannot back it, which is what makes it usable as a debugging override.
 fn resolve_sync(choice: SyncChoice, host: &HostCaps) -> SyncStatus {
     match choice {
         SyncChoice::Auto => {
@@ -243,8 +312,8 @@ fn resolve_sync(choice: SyncChoice, host: &HostCaps) -> SyncStatus {
     }
 }
 
-/// Set the sync environment. ntsync needs no variable (a supporting runner uses it automatically);
-/// fsync and esync are explicit toggles, and esync forces fsync off so it does not shadow it.
+/// Set the synchronization variables. ntsync needs none (a runner that supports it uses it on its
+/// own); esync forces fsync off so it cannot shadow it.
 fn apply_sync(vars: &mut BTreeMap<String, String>, sync: SyncStatus) {
     match sync {
         SyncStatus::Ntsync => {}
@@ -291,6 +360,7 @@ fn apply_hud(vars: &mut BTreeMap<String, String>, hud: &Hud) {
     }
 }
 
+/// Set the DLL overrides DXVK needs, and the shader-cache path when one was chosen.
 fn apply_dxvk(vars: &mut BTreeMap<String, String>, dxvk: &DxvkEnv) {
     // Override the Direct3D DLLs (and nvapi, when this launch activates it) to the native DXVK
     // builds. Turning the companion off adds a second group instead: an empty right-hand side is
@@ -321,9 +391,9 @@ fn apply_dxvk(vars: &mut BTreeMap<String, String>, dxvk: &DxvkEnv) {
     }
 }
 
-/// Compose the wrapper token list, outermost first. gamescope owns the window so it wraps everything
-/// (its arguments end at a `--` separator); gamemode is next; the user's free-form wrappers sit
-/// innermost, directly around the runner.
+/// Compose the wrapper token list, outermost first. gamescope owns the window so it wraps
+/// everything, its arguments ending at a `--` separator; gamemode is next; the free-form wrappers
+/// sit innermost, directly around the runner.
 fn build_wrappers(config: &EnvConfig) -> Vec<String> {
     let mut wrappers = Vec::new();
     if let Some(gs) = &config.gamescope {
@@ -356,8 +426,7 @@ fn build_wrappers(config: &EnvConfig) -> Vec<String> {
     wrappers
 }
 
-/// Parse a `major.minor` pair from a kernel version string (`/proc/sys/kernel/osrelease`, e.g.
-/// `"6.14.0-27-generic"`).
+/// Parse the leading `major.minor` of a kernel release string such as `"6.14.0-27-generic"`.
 fn parse_kernel_version(release: &str) -> Option<(u32, u32)> {
     let mut parts = release.split(['.', '-', '+']);
     let major = parts.next()?.parse().ok()?;
@@ -427,6 +496,8 @@ mod tests {
         assert!(!host.for_runner(&runner_with_ntsync(Some(true))).ntsync);
     }
 
+    /// Real release strings yield their major and minor. Anything else yields nothing rather than a
+    /// wrong version.
     #[test]
     fn kernel_version_parses_common_release_strings() {
         assert_eq!(parse_kernel_version("6.14.0-27-generic"), Some((6, 14)));
@@ -437,6 +508,7 @@ mod tests {
         assert_eq!(parse_kernel_version("garbage"), None);
     }
 
+    /// The preference order `Auto` resolves through, at each level of host support.
     #[test]
     fn auto_sync_prefers_ntsync_then_fsync_then_esync() {
         assert_eq!(
@@ -453,6 +525,8 @@ mod tests {
         );
     }
 
+    /// Only `Auto` consults the host. A named primitive passes through either way, which is what
+    /// lets a user reproduce a bug on a host that would not have chosen it.
     #[test]
     fn an_explicit_sync_choice_is_honored_regardless_of_host() {
         assert_eq!(
@@ -465,6 +539,7 @@ mod tests {
         );
     }
 
+    /// The precedence rule: a variable the user set by hand survives the knob that computes it.
     #[test]
     fn a_user_override_wins_over_a_computed_value() {
         let mut env = BTreeMap::new();
@@ -482,6 +557,7 @@ mod tests {
         assert_eq!(out.sync, SyncStatus::Fsync);
     }
 
+    /// One overlay at a time: neither arm leaves the other's variable behind.
     #[test]
     fn hud_is_mutually_exclusive_by_construction() {
         let dxvk = compute_environment(
@@ -505,13 +581,13 @@ mod tests {
         assert!(!mango.vars.contains_key("DXVK_HUD"));
     }
 
-    /// The override the three nvapi states produce.
+    /// The override string each of the three nvapi states produces.
     ///
     /// The disabled arm is the one that carries weight. Measured on wine 10.0 with a companion's DLL
     /// in `system32`: with no override naming it, `LoadLibraryA("nvapi64.dll")` loads it from
-    /// `C:\windows\system32`; with the empty override it fails with 126. Nothing else stops it, since
-    /// wine ships no builtin `nvapi64` for the loader to prefer, so this string is the whole of what
-    /// turning the companion off does at launch.
+    /// `C:\windows\system32`; with the empty override it fails with 126. Nothing else stops it,
+    /// since wine ships no builtin `nvapi64` for the loader to prefer, so this string is the whole
+    /// of what turning the companion off does at launch.
     #[test]
     fn the_nvapi_dlls_are_named_by_what_the_launch_decided() {
         let cases = [
@@ -544,6 +620,7 @@ mod tests {
         }
     }
 
+    /// The wrapper order, including where the `--` separator ends gamescope's own arguments.
     #[test]
     fn gamescope_and_gamemode_compose_outermost_first() {
         let config = EnvConfig {
@@ -580,8 +657,8 @@ mod tests {
         );
     }
 
-    /// The name of the shader-cache variable changed between the translation's major versions, and a
-    /// catalog can pin either. Naming only one is a cache that silently goes somewhere else.
+    /// The shader-cache variable was renamed between DXVK's major versions. A catalog can pin
+    /// either, so naming only one is a cache that silently goes somewhere else.
     #[test]
     fn the_shader_cache_is_named_the_way_both_generations_read_it() {
         let out = compute_environment(
@@ -604,10 +681,9 @@ mod tests {
         );
     }
 
-    /// The wrapper options are the one knob with no command to set them, so a hand-written partial
-    /// object is the realistic way one arrives. Every field defaulting means such an object loads
-    /// rather than making the whole profile unreadable, which is what a missing field would cost when
-    /// one bad profile fails the listing of every profile.
+    /// The wrapper options are the one knob with no command to set them. A hand-written partial
+    /// object is the realistic way one arrives, and every field defaulting is what keeps a single
+    /// bad profile from failing the listing of every profile.
     #[test]
     fn a_partly_written_wrapper_configuration_still_loads() {
         let partial: Gamescope =
