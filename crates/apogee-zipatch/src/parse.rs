@@ -176,13 +176,17 @@ impl<R: Read> PatchReader<R> {
         }
     }
 
-    /// Read the next `frame_len` bytes (`type + payload + crc`) into the reusable buffer. The buffer is
-    /// cleared and grown without zero-filling (every byte is about to be overwritten), and a short read
+    /// Read the next `frame_len` bytes (`type + payload + crc`) into the reusable buffer. A short read
     /// is mapped to truncation at the exact byte that ran off the end, so the reported offset/needed
     /// match the `Cursor`'s field-level precision rather than the frame start.
+    ///
+    /// The buffer grows as bytes actually arrive rather than being reserved to `frame_len` up front,
+    /// which is what keeps the declared length from being an allocation on its own: a twenty-byte
+    /// stream claiming a chunk at the cap would otherwise reserve the cap (256 MiB by default) before
+    /// discovering the truncation. `clear` keeps the capacity earlier chunks earned, so the steady
+    /// state still reallocates nothing; only the first chunk of a run pays the growth.
     fn fill_frame(&mut self, frame_len: usize, frame_off: u64) -> Result<()> {
         self.frame.clear();
-        self.frame.reserve(frame_len);
         match (&mut self.reader)
             .take(frame_len as u64)
             .read_to_end(&mut self.frame)
@@ -1043,6 +1047,27 @@ mod tests {
             }
             other => panic!("expected LimitExceeded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_declared_length_is_not_an_allocation_on_its_own() {
+        // A chunk header claiming the full default cap over a stream holding a handful of bytes. The
+        // declared length is under the cap, so nothing rejects it before the read; only growing the
+        // buffer as bytes arrive keeps it from being a 256 MiB allocation. Reserving `frame_len`
+        // up front instead makes the capacity below the cap rather than the stream length.
+        let mut patch = MAGIC.to_vec();
+        patch.extend_from_slice(&bytes::write_u32_be(DEFAULT_MAX_CHUNK_SIZE));
+        patch.extend_from_slice(b"XXXX");
+        patch.extend_from_slice(&[0u8; 8]);
+        let stream_len = patch.len();
+
+        let mut reader = PatchReader::open(&patch[..]).unwrap();
+        assert!(matches!(reader.next_chunk(), Err(Error::Truncated { .. })));
+        assert!(
+            reader.frame.capacity() < stream_len * 4,
+            "buffer grew to {} for a {stream_len}-byte stream",
+            reader.frame.capacity(),
+        );
     }
 
     #[test]
