@@ -7,10 +7,15 @@ use crate::Repo;
 /// A progress frame from an install, relayed onto one stream from fetch (download) and zipatch
 /// (apply). Clockless like the underlying frames: a consumer derives rate from successive
 /// `bytes_done`, and an ETA only for the phase that carries a total (`Downloading`). `index` is the
-/// patch's position in the SE-ordered set. `#[non_exhaustive]` so repair phases can be added later
-/// without a break.
+/// patch's position in the SE-ordered set.
+///
+/// Deliberately exhaustive, like [`Recoveries`](apogee_fetch::Recoveries) and for the same reason: a
+/// renderer that matches every variant is what keeps a future phase from rotting unrendered, and
+/// `#[non_exhaustive]` would forbid exactly that match. It carried the attribute to leave room for
+/// the repair phases; those have landed, and what the attribute leaves behind is a `_` arm in the
+/// renderer that would print a new phase as the word "progress" and fail nothing. A phase nobody can
+/// read is not a phase, so a new variant breaks that build instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum PatchProgress {
     /// A patch's bytes are being fetched (relayed from `apogee_fetch::Progress`).
     Downloading {

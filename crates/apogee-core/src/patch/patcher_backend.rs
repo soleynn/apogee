@@ -267,7 +267,7 @@ fn cdn_base_for(repo: Repo) -> Option<Url> {
     let path = match repo {
         Repo::Boot => "boot/2b5cbc63/",
         Repo::Game => "game/4e9a232b/",
-        _ => return None,
+        Repo::Expansion(_) => return None,
     };
     Url::parse(&format!("http://patch-dl.ffxiv.com/{path}")).ok()
 }

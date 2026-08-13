@@ -93,11 +93,10 @@ pub(crate) fn classify_repo<'a>(segments: impl IntoIterator<Item = &'a str>) -> 
 
 /// The `.ver` path for `repo` beneath `game_root`, in the standard install layout the patcher writes
 /// and `sqex_proto::InstallPaths` reads (`boot/ffxivboot.ver`, `game/ffxivgame.ver`,
-/// `game/sqpack/ex{n}/ex{n}.ver`). `None` for a repo with no fixed on-disk location. The flow reads
-/// it (for a repair plan) and the test fake writes it, so the mapping lives in one place on this side
-/// of the seam.
-pub(crate) fn repo_ver_path(game_root: &Path, repo: Repo) -> Option<PathBuf> {
-    Some(match repo {
+/// `game/sqpack/ex{n}/ex{n}.ver`). The flow reads it (for a repair plan) and the test fake writes it,
+/// so the mapping lives in one place on this side of the seam.
+pub(crate) fn repo_ver_path(game_root: &Path, repo: Repo) -> PathBuf {
+    match repo {
         Repo::Boot => game_root.join("boot").join("ffxivboot.ver"),
         Repo::Game => game_root.join("game").join("ffxivgame.ver"),
         Repo::Expansion(n) => game_root
@@ -105,8 +104,7 @@ pub(crate) fn repo_ver_path(game_root: &Path, repo: Repo) -> Option<PathBuf> {
             .join("sqpack")
             .join(format!("ex{n}"))
             .join(format!("ex{n}.ver")),
-        _ => return None,
-    })
+    }
 }
 
 /// Drives `apogee-patcher` for install and repair, relaying progress onto the core event stream.
@@ -269,9 +267,7 @@ pub(crate) mod fake {
     /// also lays down the four boot EXEs (in version-report hash order), so a sentinel version report
     /// over a from-nothing install can hash them on the next round.
     fn materialize(game_root: &Path, repo: Repo, version: &str) {
-        let Some(ver_path) = super::repo_ver_path(game_root, repo) else {
-            return;
-        };
+        let ver_path = super::repo_ver_path(game_root, repo);
         if repo == Repo::Boot {
             let boot = game_root.join("boot");
             let _ = std::fs::create_dir_all(&boot);

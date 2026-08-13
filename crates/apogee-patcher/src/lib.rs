@@ -27,7 +27,6 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use apogee_fetch::{FetchError, Fetcher};
@@ -65,11 +64,19 @@ pub use request::{
 };
 
 /// Which game repository a patch operation targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
+///
+/// The whole taxonomy Square Enix ships: the boot chain, the base game, and expansions numbered by a
+/// `u8`. Exhaustive, so a caller mapping a repo to a path or a URL has to answer for all three and
+/// gets told when that stops being all of them. It is also not serializable on purpose: the one
+/// spelling this crate commits to is [`from_label`](Self::from_label), and a derived encoding beside
+/// it would be a second, silently different name for the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Repo {
+    /// The launcher and updater chain, patched before login.
     Boot,
+    /// The base game.
     Game,
+    /// Expansion `n`, as its patchlist path spells it (`ex1`).
     Expansion(u8),
 }
 
