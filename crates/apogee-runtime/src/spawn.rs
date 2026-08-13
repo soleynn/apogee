@@ -1,4 +1,4 @@
-//! Building the launch command for a runner (umu-run for Proton, or plain wine).
+//! Building the launch command for a runner (`umu-run` for Proton, or plain wine).
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,14 @@ pub(crate) fn find_wine(runner_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The binary that runs a program inside `prefix`: `umu-run` for a Proton runner, the runner's own
-/// `wine` otherwise. `umu_run` is the resolved umu-run path (managed or on `PATH`).
+/// `wine` otherwise.
+///
+/// `umu_run` is the already-resolved `umu-run` path, managed or on `PATH`.
+///
+/// # Errors
+///
+/// [`RuntimeError::MissingHostTool`] naming [`HostTool::Umu`] when a Proton runner was given no
+/// `umu-run`, or [`HostTool::Wine`] when the runner directory holds no `wine` binary.
 pub(crate) fn prefix_launcher(
     prefix: &Prefix,
     umu_run: Option<&Path>,
@@ -59,13 +66,19 @@ pub(crate) fn prefix_env(cmd: &mut Command, prefix: &Prefix) {
     }
 }
 
-/// Build the process command for `plan` (which must carry a prefix). `umu_run` is the resolved
-/// umu-run path (managed or on `PATH`) for Proton runners.
+/// Build the process command for `plan`, which must carry a prefix.
 ///
-/// The whole invocation runs on one side of a sandbox boundary and that side is the sandbox
-/// ([`crate::flatpak`]), so `confinement` decides nothing about composition here. What it does
-/// decide is whether the outermost wrapper is pre-flighted: inside a sandbox, a wrapper the build
-/// does not ship fails as itself rather than as an `ENOENT` naming a path the user has never seen.
+/// `umu_run` is the already-resolved `umu-run` path for a Proton runner. The whole invocation runs on
+/// one side of a sandbox boundary and that side is the sandbox, so `confinement` decides nothing
+/// about composition here. What it does decide is whether the outermost wrapper is pre-flighted:
+/// inside a sandbox, a wrapper the build does not ship fails as itself rather than as an `ENOENT`
+/// naming a path the user has never seen.
+///
+/// # Errors
+///
+/// [`RuntimeError::InvalidLaunchPlan`] if the plan names no prefix, or if the assembled argv is
+/// empty. [`RuntimeError::MissingHostTool`] if the runner's launcher cannot be resolved, or if the
+/// outermost wrapper is one a confined build does not carry.
 pub(crate) fn build_command(
     plan: &LaunchPlan,
     umu_run: Option<&Path>,
@@ -95,6 +108,8 @@ pub(crate) fn build_command(
     argv.extend(plan.wrappers().iter().cloned());
     argv.extend(invocation);
 
+    // Unreachable as the argv is assembled above, which always starts with the launcher; kept so the
+    // split has an answer that is not a panic if a later change makes the wrappers the only source.
     let (exe, rest) = argv.split_first().ok_or(RuntimeError::InvalidLaunchPlan {
         reason: "empty launch command",
     })?;
@@ -110,6 +125,11 @@ pub(crate) fn build_command(
 }
 
 /// Kill everything in a prefix: the separate, explicit broad stop.
+///
+/// # Errors
+///
+/// [`RuntimeError::MissingHostTool`] if the tool that performs the stop cannot be resolved, and
+/// [`RuntimeError::Spawn`] if it cannot be run.
 pub(crate) async fn kill_prefix(
     prefix: &Prefix,
     umu_run: Option<PathBuf>,
@@ -125,6 +145,11 @@ pub(crate) async fn kill_prefix(
 
 /// Compose the broad-stop command for `prefix`: `wineserver -k` for a wine runner, `wineboot -k`
 /// through umu for a Proton one.
+///
+/// # Errors
+///
+/// [`RuntimeError::MissingHostTool`] naming [`HostTool::Umu`] when a Proton runner was given no
+/// `umu-run`, or [`HostTool::Wine`] when the runner directory holds no `wineserver`.
 fn kill_command(prefix: &Prefix, umu_run: Option<PathBuf>) -> Result<Command, RuntimeError> {
     let runner = prefix.runner();
     match runner.kind() {
@@ -157,7 +182,7 @@ fn kill_command(prefix: &Prefix, umu_run: Option<PathBuf>) -> Result<Command, Ru
     }
 }
 
-/// Set the launch environment: prefix/runner variables first, then the plan's own, merged last so
+/// Set the launch environment: prefix and runner variables first, then the plan's own, merged last so
 /// they win. The plan's variables are already resolved (synchronization, graphics, the user's
 /// overrides), so nothing is decided here.
 fn apply_env(cmd: &mut Command, plan: &LaunchPlan, prefix: &Prefix) {
@@ -206,6 +231,8 @@ mod tests {
     use super::*;
     use crate::plan::{Prefix, RunnerHandle};
 
+    /// A working directory the plan carries reaches the spawned command, which is what makes the game
+    /// resolve its data paths relative to its own install directory.
     #[test]
     fn build_command_sets_the_working_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -257,6 +284,8 @@ mod tests {
         assert_eq!(Path::new(wineprefix), prefix_dir);
     }
 
+    /// A plan that names no directory leaves the child inheriting the launcher's own, rather than
+    /// being given a default this crate invented.
     #[test]
     fn build_command_leaves_the_working_directory_unset_by_default() {
         let tmp = tempfile::tempdir().unwrap();

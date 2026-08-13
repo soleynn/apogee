@@ -1,33 +1,28 @@
 //! Registering this launcher with Steam as a compatibility tool, so a game can be started from the
 //! Steam interface without a desktop.
 //!
-//! Steam lets a user force any installed game through a "compatibility tool", which is a directory
-//! holding two declaration files and a program to run. Steam then invokes that program with a verb
-//! and the game it was going to start. That is the only mechanism by which anything can be launched
-//! from the Steam interface on a handheld, where there is no desktop to click a launcher in, so it is
-//! the mechanism used here even though nothing about this launcher is a compatibility layer.
+//! Steam lets a user force a game through a "compatibility tool": a directory holding two
+//! declaration files and a program, which Steam then runs with a verb and the game it was going to
+//! start. On a handheld there is no desktop to click a launcher in, so that is the only route into
+//! the Steam interface, and it is the one used here even though nothing about this launcher is a
+//! compatibility layer.
 //!
-//! Two consequences follow from bending it that way, and both are deliberate:
+//! Bending it that way has two consequences, both deliberate. The named game is ignored: this
+//! launcher already knows which installation and account it starts, and the two need not be the same
+//! game, which is why a registration works against any title the user owns. And only one verb acts:
+//! Steam calls the tool more than once per launch, and starting the game on more than the verb
+//! meaning "start it and wait" would start it twice.
 //!
-//! - **The named game is ignored.** Steam passes the executable of whichever title the tool was
-//!   forced onto; this launcher already knows which installation and profile it launches, and the
-//!   two need not be the same game or even the same account. That is also why the registration works
-//!   against any title the user owns rather than requiring a particular one.
-//! - **Only one verb acts.** Steam calls the tool more than once per launch, with a verb saying what
-//!   the call is for. Acting on more than the one that means "start it and wait" would start the
-//!   game twice, so every other verb succeeds without doing anything.
-//!
-//! The declaration files are Valve's key-value format, written here rather than parsed: this crate
-//! emits its own registration and never reads anyone else's.
+//! The declaration files are Valve's key-value format, written here and never parsed: this crate
+//! emits its own registration and reads nobody else's.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::{HostTool, RuntimeError};
 
-/// The directory this launcher registers itself under, inside a Steam installation's tool directory.
-/// Also the internal name Steam keys the registration on, so changing it orphans an existing
-/// registration rather than replacing it.
+/// The directory a registration is written to, and the internal name Steam keys it on: changing it
+/// orphans an existing registration rather than replacing it.
 const TOOL_DIR: &str = "apogee";
 
 /// Where a Steam installation keeps the tools a user added.
@@ -36,11 +31,29 @@ const TOOLS_SUBDIR: &str = "compatibilitytools.d";
 /// The program Steam runs, relative to the tool directory.
 const LAUNCH_SCRIPT: &str = "apogee-run";
 
-/// The verb that means "start it and wait for it to finish". Every other verb is a call this
-/// registration has nothing to do, and starting the game on more than one of them starts it twice.
+/// The verb that means "start it and wait for it to finish".
+///
+/// Every other verb is a call this registration has nothing to do, and starting the game on more
+/// than one of them starts it twice.
 const RUN_VERB: &str = "waitforexitandrun";
 
 /// A registration: the command Steam should end up running, and the name it is offered under.
+///
+/// # Examples
+///
+/// ```
+/// # use apogee_runtime::{CompatTool, RuntimeError};
+/// # fn demo(launcher: &std::path::Path, profile: &str) -> Result<(), RuntimeError> {
+/// let tool = CompatTool::new(launcher, vec!["launch".to_owned(), profile.to_owned()])
+///     .display_name("Apogee (main)");
+/// // A confined client would list the registration and fail when it was chosen.
+/// for install in apogee_runtime::steam_installs().into_iter().filter(|i| !i.confined) {
+///     let written = tool.install(&install.path)?;
+/// #   let _ = written;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct CompatTool {
     launcher: PathBuf,
@@ -61,9 +74,10 @@ pub struct CompatToolInstall {
 impl CompatTool {
     /// A registration running `launcher` with `args`.
     ///
-    /// `launcher` must be an absolute path to a program that can start a game on its own, since
-    /// nothing about Steam's invocation is passed on to it. A relative path would resolve against
-    /// whatever directory Steam happens to run the tool from.
+    /// Nothing about Steam's invocation is passed on, so `args` has to name everything the launch
+    /// needs, the account or profile included. `launcher` must be an absolute path to a program that
+    /// can start a game on its own; a relative one would resolve against whatever directory Steam
+    /// happens to run the tool from.
     #[must_use]
     pub fn new(launcher: impl Into<PathBuf>, args: Vec<String>) -> Self {
         Self {
@@ -73,8 +87,10 @@ impl CompatTool {
         }
     }
 
-    /// The name Steam offers the registration under. Worth setting when it names the profile it
-    /// launches, because that name is all the user has to choose between two registrations by.
+    /// The name Steam offers the registration under.
+    ///
+    /// Worth setting when it names what the registration launches, because that name is all the user
+    /// has to choose between two registrations by.
     #[must_use]
     pub fn display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = name.into();
@@ -82,12 +98,18 @@ impl CompatTool {
     }
 
     /// Write the registration into the Steam installation at `steam_root`, replacing any previous
-    /// one. Steam reads its tool list at startup, so an installation made while it is running is not
-    /// visible until it restarts.
+    /// one.
+    ///
+    /// Three files go into one directory of this launcher's own under the installation's tool
+    /// directory: the two declarations, and the script Steam runs, which is written executable.
+    /// Nothing else has to be in place, neither an installed game nor a running Steam, but Steam
+    /// reads its tool list at startup, so a registration written while it is running is not offered
+    /// until it restarts.
     ///
     /// # Errors
-    /// [`RuntimeError::MissingHostTool`] if `steam_root` is not a directory, which is what a path
-    /// that Steam has never created looks like, and [`RuntimeError::Io`] on a failed write.
+    /// [`RuntimeError::MissingHostTool`] carrying [`HostTool::Steam`] if `steam_root` is not a
+    /// directory, which is what a path Steam has never created looks like, and [`RuntimeError::Io`]
+    /// on a failed write or permission change.
     pub fn install(&self, steam_root: &Path) -> Result<CompatToolInstall, RuntimeError> {
         if !steam_root.is_dir() {
             return Err(RuntimeError::MissingHostTool {
@@ -109,8 +131,8 @@ impl CompatTool {
         Ok(CompatToolInstall { dir, command })
     }
 
-    /// The shell command the launch script runs, with each token quoted so a path holding a space
-    /// stays one argument.
+    /// The shell command the launch script runs, each token quoted so a path holding a space stays
+    /// one argument.
     fn command_line(&self) -> String {
         std::iter::once(self.launcher.to_string_lossy().into_owned())
             .chain(self.args.iter().cloned())
@@ -120,7 +142,7 @@ impl CompatTool {
     }
 }
 
-/// The tool directory inside a Steam installation.
+/// This launcher's own directory inside a Steam installation's tool directory.
 fn tool_dir(steam_root: &Path) -> PathBuf {
     steam_root.join(TOOLS_SUBDIR).join(TOOL_DIR)
 }
@@ -132,15 +154,16 @@ pub fn installed_compat_tool(steam_root: &Path) -> Option<PathBuf> {
     dir.join(LAUNCH_SCRIPT).is_file().then_some(dir)
 }
 
-/// Remove the registration from `steam_root`, reporting whether there was one. Only the directory
-/// this launcher writes is removed, never the tool directory it sits in, which holds everyone else's.
+/// Remove the registration from `steam_root`, reporting whether there was one.
 ///
-/// Removal is gated on the same test that reports one as present, so a directory that merely shares
-/// the name is left alone. The two disagreeing is how a recursive delete reaches something this
-/// launcher never wrote.
+/// Only the one directory this launcher writes is removed, never the tool directory it sits in,
+/// which holds everyone else's. Removing nothing is not an error, so a second call succeeds.
 ///
 /// # Errors
 /// [`RuntimeError::Io`] if the registration is there and cannot be removed.
+// Gated on the same test that reports a registration as present, so a directory that merely shares
+// the name is left alone. The two disagreeing is how a recursive delete reaches something this
+// launcher never wrote.
 pub fn remove_compat_tool(steam_root: &Path) -> Result<bool, RuntimeError> {
     let Some(dir) = installed_compat_tool(steam_root) else {
         return Ok(false);
@@ -158,18 +181,18 @@ pub struct SteamInstall {
     /// The client runs confined, seeing a filesystem of its own rather than the host's.
     ///
     /// A registration names a program by absolute path, and a confined client resolves that path
-    /// inside its own view, where this launcher is not installed. So a registration written here would
+    /// inside its own view, where this launcher is not installed. A registration written here would
     /// be listed by Steam and fail when chosen, which is worse than not offering it.
     pub confined: bool,
 }
 
-/// Every Steam installation belonging to this user, most conventional first.
+/// Every Steam installation belonging to this user, most conventional location first.
 ///
-/// Only directories that exist are returned, and a path is included once however many ways it can be
-/// reached: the usual layout reaches one installation through a symlink and a real path both, and
-/// offering the same installation twice would let a user register into one name and look for it under
-/// the other. System-wide tool directories are deliberately absent: they are not this user's to write
-/// to, and a registration there would apply to every account on the machine.
+/// Only directories that exist are returned, and an installation is listed once however many ways it
+/// can be reached: the usual layout reaches one through a symlink and through the real path both,
+/// and offering it twice would let a user register under one name and look for it under the other.
+// System-wide tool directories are deliberately absent: they are not this user's to write to, and a
+// registration there would apply to every account on the machine.
 #[must_use]
 pub fn steam_installs() -> Vec<SteamInstall> {
     std::env::var_os("HOME")
@@ -178,8 +201,8 @@ pub fn steam_installs() -> Vec<SteamInstall> {
         .unwrap_or_default()
 }
 
-/// The same search rooted at `home`, so the ordering, the de-duplication and which locations count as
-/// confined are decided by a test over a directory tree rather than by the machine running it.
+/// The same search rooted at `home`, so the ordering, the de-duplication and which locations count
+/// as confined are decided by a test over a directory tree rather than by the machine running it.
 fn installs_under(home: &Path) -> Vec<SteamInstall> {
     // (relative path, whether the client that owns it runs confined)
     let candidates = [
@@ -209,7 +232,7 @@ fn installs_under(home: &Path) -> Vec<SteamInstall> {
     found
 }
 
-/// The registration Steam reads to offer the tool in its list.
+/// The declaration Steam reads to offer the tool in its list.
 fn registration_vdf(display_name: &str) -> String {
     format!(
         "\"compatibilitytools\"\n\
@@ -230,11 +253,10 @@ fn registration_vdf(display_name: &str) -> String {
     )
 }
 
-/// What Steam runs, and how. The verb is substituted by Steam into the placeholder.
-///
-/// No supporting runtime is requested. One would place the tool inside Steam's own container, which
-/// changes what is on the path and what is visible on disk; this launcher brings its own runtime for
-/// the runners that want one and needs the host's view for everything else.
+/// The declaration saying what Steam runs, and how. Steam substitutes the verb into the placeholder.
+// No supporting runtime is requested. One would place the tool inside Steam's own container, which
+// changes what is on the path and what is visible on disk; this launcher brings its own runtime for
+// the runners that want one and needs the host's view for everything else.
 fn tool_manifest_vdf() -> String {
     format!(
         "\"manifest\"\n\
@@ -271,6 +293,7 @@ fn vdf_escape(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"")
 }
 
+/// Write `contents` to `path` and set its permissions to `mode`.
 fn write_file(path: &Path, contents: &str, mode: u32) -> Result<(), RuntimeError> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -278,6 +301,7 @@ fn write_file(path: &Path, contents: &str, mode: u32) -> Result<(), RuntimeError
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(io_at(path))
 }
 
+/// A mapper that names `path` in whatever [`RuntimeError::Io`] the call it wraps produces.
 fn io_at(path: &Path) -> impl Fn(io::Error) -> RuntimeError + '_ {
     move |source| RuntimeError::Io {
         path: path.to_path_buf(),
@@ -300,6 +324,8 @@ mod tests {
         )
     }
 
+    /// One installation writes exactly three files into one directory, the script among them
+    /// executable, and the manifest names the script by the name it was written under.
     #[test]
     fn installing_writes_a_registration_a_manifest_and_a_runnable_script() {
         use std::os::unix::fs::PermissionsExt;
@@ -364,6 +390,8 @@ mod tests {
         );
     }
 
+    /// A root Steam has never created is refused as a missing Steam rather than reported as an
+    /// unwritable path.
     #[test]
     fn a_path_steam_has_never_created_is_reported_as_no_steam() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -378,6 +406,8 @@ mod tests {
         ));
     }
 
+    /// Removal is idempotent and answers whether it did anything, and it takes only this launcher's
+    /// own directory: the one holding everyone else's tools survives.
     #[test]
     fn removing_reports_whether_there_was_anything_to_remove() {
         let steam = tempfile::tempdir().expect("tempdir");
@@ -420,8 +450,8 @@ mod tests {
     }
 
     /// A confined client resolves the registration's program path inside its own filesystem, where
-    /// this launcher is not installed. The fact travels with the installation so a caller decides what
-    /// to do about it instead of matching on the path.
+    /// this launcher is not installed. The fact travels with the installation so a caller decides
+    /// what to do about it instead of matching on the path.
     #[test]
     fn a_packaged_client_is_reported_as_confined() -> std::io::Result<()> {
         let home = tempfile::tempdir()?;
@@ -436,6 +466,8 @@ mod tests {
         Ok(())
     }
 
+    /// Only directories that exist are offered, so a machine that has never run Steam yields
+    /// nothing rather than a path to write into.
     #[test]
     fn a_home_with_no_steam_offers_nothing() -> std::io::Result<()> {
         let home = tempfile::tempdir()?;
@@ -443,6 +475,8 @@ mod tests {
         Ok(())
     }
 
+    /// A display name is escaped into its quoted value, so a quote or a backslash in it cannot end
+    /// the value early and rewrite the keys Steam reads around it.
     #[test]
     fn a_display_name_cannot_break_out_of_its_quoted_value() {
         let vdf = registration_vdf(r#"Apogee "main" \ profile"#);

@@ -1,29 +1,42 @@
 //! Reading a prefix's own registry files, so a caller can ask what is in the registry without
 //! starting the runner.
 //!
-//! `reg query` is the accurate way to ask a *live* prefix, and it is what [`crate::registry`] uses to
+//! `reg query` is the accurate way to ask a *live* prefix, and it is what the write path uses to
 //! read a removal it could not report on. It is the wrong way to ask a prefix that is not running:
-//! every query is a Windows program launched through the runner, and under Proton that means umu
+//! every query is a windows program launched through the runner, and under Proton that means umu
 //! bringing up its whole container for a single answer (measured at roughly four seconds). A caller
 //! that asks on every launch, about a value that is almost always still there, would pay that every
 //! time to be told nothing changed.
 //!
-//! A wine prefix keeps its registry in text files at the prefix root, so the same question is a file
-//! read. Two properties make that trustworthy at the point it is asked. Nothing has run in the prefix
-//! yet, so the files are what the last wineserver flushed and there is no in-memory registry they are
-//! behind. And an unreadable file is a distinct answer rather than an absence: the same distinction
-//! [`crate::registry::readable_probe`] draws for the live path, since "it is gone" and "nothing could
-//! be read" have opposite consequences for a caller that reapplies what is missing.
+//! # The file
+//!
+//! A prefix keeps its registry as UTF-8 text at its root, one file per root: `user.reg` holds
+//! `HKEY_CURRENT_USER` and `system.reg` holds `HKEY_LOCAL_MACHINE`, each opening with the line
+//! `WINE REGISTRY Version 2`. Keys are spelled relative to the root their file holds, so
+//! `HKCU\Software\Wine` is written `[Software\\Wine] 1785455678`, the trailing number being a
+//! modification time. A key's values follow it, one per line, as `"name"=data`, with its default
+//! value written `@=data`. Data is a quoted string for `REG_SZ`, `str(2):` and a quoted string for
+//! `REG_EXPAND_SZ`, `dword:` and hex digits for `REG_DWORD`, and a `hex` form of comma-separated
+//! bytes for everything else, wrapping onto indented continuation lines when it is long. Key names,
+//! value names and strings are escaped: `\\`, `\"`, the usual `\n`-style control escapes, and `\x`
+//! with four hex digits for anything else. Names are case-insensitive. Blank lines, `;;` comments
+//! and `#arch=`/`#time=` directives carry nothing this reads.
+//!
+//! Two properties make that read trustworthy at the point it is taken. Nothing has run in the prefix
+//! yet, so the files are what the last wineserver flushed and there is no in-memory registry they
+//! are behind. And an unreadable file is a distinct answer rather than an absence, the same
+//! distinction the live path draws with its control probe, since "it is gone" and "nothing could be
+//! read" have opposite consequences for a caller that reapplies what is missing.
 //!
 //! **The flush is asynchronous**, which is what confines this to that moment. A wineserver persists
-//! the registry on an idle shutdown some time after the program that wrote it exited, so a read taken
-//! straight after a write can still show the old file. Reading these files to check what a write just
-//! did would therefore report a value that landed as missing; that check belongs to `reg add`'s own
-//! exit status, which is what the write path already reads.
+//! the registry on an idle shutdown some time after the program that wrote it exited, so a read
+//! taken straight after a write can still show the old file. Reading these files to check what a
+//! write just did would therefore report a value that landed as missing; that check belongs to
+//! `reg add`'s own exit status, which the write path already reads.
 //!
 //! Only the two roots a prefix keeps in a file of their own are answerable here. `HKEY_CLASSES_ROOT`
-//! is a merge of two subtrees rather than a file, and `HKEY_CURRENT_CONFIG` is volatile, so a question
-//! about either is reported as unanswerable instead of guessed at.
+//! is a merge of two subtrees rather than a file, and `HKEY_CURRENT_CONFIG` is volatile, so a
+//! question about either is reported as unanswerable instead of guessed at.
 
 use std::path::{Path, PathBuf};
 
@@ -31,10 +44,12 @@ use crate::registry::{RegistryDelete, RegistryEdit, RegistryValue};
 
 /// Whether a prefix still carries what a registry op declared it would produce.
 ///
-/// Three answers rather than two. A registry file that cannot be read, a root this build does not
-/// locate, and a value stored in an encoding it does not decode are all "no answer", and reading any
-/// of them as an absence would have a caller reapply a verb forever against a prefix it cannot see
-/// into.
+/// Three answers rather than two. A registry file that cannot be read and a root this build does
+/// not locate are always [`Self::Unknown`], and reading either as an absence would have a caller
+/// reapply a step forever against a prefix it cannot see into. A value in an encoding this build
+/// does not decode is [`Self::Unknown`] for an edit, where the question is whether the data matches,
+/// and counts as found for a removal, where the question is only whether anything is there. Produced by [`crate::Prefix::registry_effect`] and
+/// [`crate::Prefix::registry_removal_effect`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RegistryEffect {
@@ -42,17 +57,23 @@ pub enum RegistryEffect {
     Present,
     /// The registry was read and does not hold it.
     Absent,
-    /// It could not be answered from the prefix's own files, described by the reading that says so.
-    Unknown { reason: &'static str },
+    /// It could not be answered from the prefix's own files.
+    Unknown {
+        /// The reading that says why there is no answer.
+        reason: &'static str,
+    },
 }
 
-/// The registry files a prefix keeps, by the roots they hold.
+/// The registry file holding `HKEY_CURRENT_USER`.
 const USER_HIVE: &str = "user.reg";
+/// The registry file holding `HKEY_LOCAL_MACHINE`.
 const MACHINE_HIVE: &str = "system.reg";
 
-/// The first line of every wine registry file. Its absence means whatever is at that path is not one.
+/// The first line of every wine registry file. Its absence means whatever is at that path is not
+/// one.
 const HIVE_HEADER: &str = "WINE REGISTRY Version 2";
 
+/// The readings that make an answer [`RegistryEffect::Unknown`].
 const NO_SUCH_ROOT: &str = "that registry root is not one a prefix keeps in a file of its own";
 const UNREADABLE: &str = "this prefix has no registry file that can be read for that root";
 const NOT_A_HIVE: &str = "the prefix's registry file is not in a form this build reads";
@@ -60,8 +81,10 @@ const UNDECODED: &str = "the value is stored in an encoding this build does not 
 
 /// Whether `edit`'s value is in `wine_root`'s registry, as it was written.
 ///
-/// The value is compared, not merely looked for: a verb whose override was overwritten with something
-/// else has had its effect undone just as surely as one whose value was removed.
+/// The value is compared, not merely looked for: type and data both have to match, so an override
+/// overwritten with something else this build decodes is [`RegistryEffect::Absent`] just as surely
+/// as one that was removed, while one it cannot decode is [`RegistryEffect::Unknown`]. An empty `REG_SZ` reads back as [`RegistryValue::Disabled`], which is how the writer
+/// spells it.
 pub(crate) fn edit_effect(wine_root: &Path, edit: &RegistryEdit) -> RegistryEffect {
     let (path, key) = match locate(wine_root, &edit.key) {
         Ok(located) => located,
@@ -80,9 +103,10 @@ pub(crate) fn edit_effect(wine_root: &Path, edit: &RegistryEdit) -> RegistryEffe
 
 /// Whether what `delete` removes is still gone from `wine_root`'s registry.
 ///
-/// A removal's effect is an absence, so the readings are inverted: finding the target is what says the
-/// effect is gone. An encoding this build cannot decode is still a value that is there, so it counts
-/// as found rather than as no answer.
+/// A removal's effect is an absence, so the readings are inverted: finding the target is what says
+/// the effect is gone. A whole-key removal is answered by the key or anything below it, and a value
+/// in an encoding this build cannot decode is still a value that is there, so it counts as found
+/// rather than as no answer.
 pub(crate) fn removal_effect(wine_root: &Path, delete: &RegistryDelete) -> RegistryEffect {
     let (path, key) = match locate(wine_root, &delete.key) {
         Ok(located) => located,
@@ -103,8 +127,11 @@ pub(crate) fn removal_effect(wine_root: &Path, delete: &RegistryDelete) -> Regis
     }
 }
 
-/// The registry file `key` lives in, and `key` with its root stripped: a hive's keys are stored
-/// relative to the root it holds.
+/// The registry file `key` lives in, and `key` with its root stripped, since a file's keys are
+/// stored relative to the root it holds.
+///
+/// # Errors
+/// [`NO_SUCH_ROOT`] for a root no prefix keeps in a file of its own.
 fn locate(wine_root: &Path, key: &str) -> Result<(PathBuf, String), &'static str> {
     let (root, rest) = key.split_once('\\').unwrap_or((key, ""));
     let file = match root.to_ascii_uppercase().as_str() {
@@ -134,8 +161,12 @@ struct Found {
 
 /// Read `path` for `key`, and for `name` within it when one is asked about.
 ///
-/// A streaming pass rather than a parse into a tree: a machine hive is a few megabytes of keys nothing
-/// here is asking about, and the question is always one value.
+/// A streaming pass rather than a parse into a tree: a machine hive is a few megabytes of keys
+/// nothing here is asking about, and the question is always one value.
+///
+/// # Errors
+/// [`UNREADABLE`] if the file cannot be read, [`NOT_A_HIVE`] if it does not open with the wine
+/// registry header.
 fn scan(path: &Path, key: &str, name: Option<&str>) -> Result<Found, &'static str> {
     let text = std::fs::read_to_string(path).map_err(|_| UNREADABLE)?;
     let mut lines = text.lines();
@@ -179,7 +210,7 @@ fn scan(path: &Path, key: &str, name: Option<&str>) -> Result<Found, &'static st
     Ok(found)
 }
 
-/// Whether `declared` names a key below `key`.
+/// Whether `declared` names a key below `key`, by whole component rather than by string prefix.
 fn is_below(declared: &str, key: &str) -> bool {
     declared
         .get(..key.len())
@@ -189,7 +220,7 @@ fn is_below(declared: &str, key: &str) -> bool {
 
 /// What `line` stores for `name`, or `None` when it is not that value's line.
 ///
-/// A value line is `"name"=data`. The default value is written as `@=data`, which no op can name: both
+/// A value line is `"name"=data`. The default value is written `@=data`, which no op can name: both
 /// [`RegistryEdit`] and [`RegistryDelete`] refuse an empty value name.
 fn value_on(line: &str, name: &str) -> Option<Stored> {
     let (declared, rest) = split_quoted(line.strip_prefix('"')?)?;
@@ -204,9 +235,10 @@ fn value_on(line: &str, name: &str) -> Option<Stored> {
 
 /// Decode the right-hand side of a value line.
 ///
-/// Wine writes a properly terminated string as a quoted one, tagged with its type unless it is a
-/// `REG_SZ`, and everything else as hex. The hex forms are left opaque: nothing this launcher writes
-/// comes back in one, and a decoder for a form no verb produces would be a guess with no subject.
+/// Wine writes a quoted string for `REG_SZ`, a `str(2):`-tagged quoted string for `REG_EXPAND_SZ`,
+/// `dword:` for `REG_DWORD`, and a comma-separated `hex` form for everything else. Only the hex
+/// forms are left [`Stored::Opaque`]: nothing this launcher writes comes back in one, and a decoder
+/// for a form no verb produces would be a guess with no subject.
 fn decode(data: &str) -> Stored {
     if let Some(body) = quoted_body(data) {
         return match unescape(body) {
@@ -254,11 +286,11 @@ fn split_quoted(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Undo the escaping wine writes key names, value names and strings with, or `None` for an escape this
-/// build does not know.
+/// Undo the escaping wine writes key names, value names and strings with, or `None` for an escape
+/// this build does not know.
 ///
-/// `None` rather than a lossy best effort: every caller is comparing the result against something, and
-/// a dropped escape would make two different strings compare equal.
+/// `None` rather than a lossy best effort: every caller is comparing the result against something,
+/// and a dropped escape would make two different strings compare equal.
 fn unescape(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars();
@@ -296,9 +328,9 @@ fn unescape(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The shape of a real `user.reg`, down to the header comment and the per-key modification times.
-    /// Written out rather than generated, because what these tests are about is reading the format
-    /// wine writes rather than one this file also produces.
+    /// The shape of a real `user.reg`, down to the header comment and the per-key modification
+    /// times. Written out rather than generated, because what these tests are about is reading the
+    /// format wine writes rather than one this file also produces.
     const USER_REG: &str = concat!(
         "WINE REGISTRY Version 2\n",
         ";; All keys relative to REGISTRY\\\\User\\\\S-1-5-21-0-0-0-1000\n",
@@ -323,7 +355,7 @@ mod tests {
         "\"guid\"=hex:9f,7f,7e,2d,b6,01,1b,47\n",
     );
 
-    /// A prefix root holding `USER_REG`, plus whatever else a case needs.
+    /// A prefix root holding `contents` as its user hive, plus whatever else a case needs.
     fn hive(contents: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join(USER_HIVE), contents).expect("write the hive");
@@ -347,8 +379,8 @@ mod tests {
         )
     }
 
-    /// The reading the whole thing exists for: the value the shipped verb writes is found in the file
-    /// wine wrote it to, with no runner started.
+    /// The reading the whole thing exists for: the value a shipped verb writes is found in the file
+    /// wine wrote it to, in each of the types this decodes, with no runner started.
     #[test]
     fn the_value_a_verb_wrote_is_read_back_out_of_the_prefix() {
         let dir = hive(USER_REG);
@@ -397,8 +429,8 @@ mod tests {
         assert_eq!(edit_effect(dir.path(), &shipped()), RegistryEffect::Absent);
     }
 
-    /// A whole key removed takes its values with it, and an absent key is an absent value rather than
-    /// a file that could not answer.
+    /// A whole key removed takes its values with it, and an absent key is an absent value rather
+    /// than a file that could not answer.
     #[test]
     fn a_key_that_is_not_in_the_file_reads_as_absent() {
         let dir = hive(USER_REG);
@@ -415,7 +447,7 @@ mod tests {
         );
     }
 
-    /// Overwritten is undone. A verb's effect is the value it wrote, so a key that still carries the
+    /// Overwritten is undone. A verb's effect is the value it wrote, so a key still carrying the
     /// name under a different value has lost that effect exactly as a removal would.
     #[test]
     fn a_value_overwritten_with_something_else_is_not_the_effect_that_was_applied() {
@@ -458,7 +490,7 @@ mod tests {
         );
     }
 
-    /// The three ways there is no answer, each of which a caller must not read as an absence: it would
+    /// The three ways there is no answer, none of which a caller may read as an absence: it would
     /// reapply a verb on every launch against a prefix it cannot see into.
     #[test]
     fn nothing_that_could_not_be_read_is_reported_as_gone() {
@@ -493,8 +525,8 @@ mod tests {
         );
     }
 
-    /// A value stored in an encoding this build does not decode is there but unreadable, which is not
-    /// the same as gone. Reading it as gone would rewrite it on every launch.
+    /// A value stored in an encoding this build does not decode is there but unreadable, which is
+    /// not the same as gone. Reading it as gone would rewrite it on every launch.
     #[test]
     fn a_value_in_an_encoding_this_build_does_not_decode_is_not_an_absence() {
         let dir = hive(USER_REG);
@@ -540,8 +572,9 @@ mod tests {
         );
     }
 
-    /// A backslash inside a value is written escaped, and so is the separator between key components.
-    /// Comparing the escaped text instead of the value would make `C:\` and `C:\\` different strings.
+    /// A backslash inside a value is written escaped, and so is the separator between key
+    /// components. Comparing the escaped text instead of the value would make `C:\` and `C:\\`
+    /// different strings.
     #[test]
     fn an_escaped_backslash_is_one_backslash() {
         let dir = hive(USER_REG);
@@ -558,8 +591,8 @@ mod tests {
         );
     }
 
-    /// The machine hive is a separate file, so a question about `HKLM` must not be answered out of the
-    /// user one.
+    /// The machine hive is a separate file, so a question about `HKLM` must not be answered out of
+    /// the user one, and both spellings of a root name the same file.
     #[test]
     fn each_root_is_read_from_its_own_file() {
         let dir = hive(USER_REG);
@@ -654,8 +687,8 @@ mod tests {
         );
     }
 
-    /// An unreadable value is still a value that is there. A removal that reads it as no-answer would
-    /// leave a caller unable to tell it never happened.
+    /// An unreadable value is still a value that is there. A removal that read it as no answer would
+    /// leave a caller unable to tell the removal never happened.
     #[test]
     fn a_removals_target_counts_as_there_even_when_it_cannot_be_decoded() {
         let dir = hive(USER_REG);
@@ -668,8 +701,8 @@ mod tests {
         );
     }
 
-    /// The escapes the writer emits, round-tripped. An unknown one yields nothing rather than a string
-    /// missing a character, since every caller compares what comes back.
+    /// The escapes the writer emits, round-tripped. An unknown one yields nothing rather than a
+    /// string missing a character, since every caller compares what comes back.
     #[test]
     fn unescaping_covers_what_the_writer_emits_and_refuses_what_it_does_not() {
         assert_eq!(unescape("plain").as_deref(), Some("plain"));

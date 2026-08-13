@@ -1,14 +1,14 @@
 //! Running one program inside a prefix and waiting for it to finish.
 //!
-//! This is the primitive the component layer builds prefix setup on: `reg` for a registry tweak, an
-//! installer for a redistributable. It differs from both of the other spawn paths on purpose. The game
+//! The primitive that prefix setup is built on: `reg` for a registry tweak, an installer for a
+//! redistributable. It differs from the crate's other two spawn paths on purpose. The game
 //! ([`crate::GameSession`]) is resolved through `/proc` and detached, so it reports no status; a
 //! companion ([`crate::Companion`]) is held for its whole life and stopped by the caller. A setup
 //! program is neither: it is short, it is expected to end, and its exit status is the answer.
 //!
 //! Output is captured for diagnostics and is never parsed. Wine's console programs write through the
-//! console API and fall back to the console codepage when redirected, so the bytes on a pipe are not a
-//! stable interface across wine versions or locales. Every decision this crate makes about a setup
+//! console API and fall back to the console codepage when redirected, so the bytes on a pipe are not
+//! a stable interface across wine versions or locales. Every decision this crate makes about a setup
 //! program reads its exit status instead.
 
 use std::collections::BTreeMap;
@@ -46,8 +46,21 @@ const MAX_CAPTURED: usize = 8 * 1024;
 /// A program to run inside a prefix.
 ///
 /// `program` is resolved by the runner, not by this crate: a bare name is a program the prefix knows
-/// (`reg`, `cmd`), and a path is handed through as written. Arguments are an argv, passed verbatim, so
-/// there is no shell and no quoting dialect.
+/// (`reg`, `cmd`), and a path is handed through as written. Arguments are an argv, passed verbatim,
+/// so there is no shell and no quoting dialect.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_runtime::ProgramInPrefix;
+///
+/// let program = ProgramInPrefix::new(
+///     "reg",
+///     vec!["add".to_owned(), r"HKCU\Software\Wine".to_owned()],
+/// );
+/// assert_eq!(program.program(), "reg");
+/// assert_eq!(program.args(), ["add", r"HKCU\Software\Wine"]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ProgramInPrefix {
     program: String,
@@ -78,7 +91,11 @@ impl ProgramInPrefix {
         self
     }
 
-    /// The child's working directory on the host side.
+    /// The directory the runner is started from, so a program that resolves its own files relatively
+    /// finds them.
+    ///
+    /// A host path, not a path inside the prefix. An absolute one is unambiguous; a relative one is
+    /// resolved against the calling process's own working directory, which this crate never changes.
     #[must_use]
     pub fn working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.working_dir = Some(dir.into());
@@ -107,14 +124,16 @@ impl ProgramInPrefix {
 
 /// How a program run inside a prefix ended.
 ///
-/// `stdout` and `stderr` are lossily decoded and truncated: they exist to put in an error message, not
-/// to branch on (see the module note on wine's redirected-output encoding).
+/// The captured streams are lossily decoded and truncated: they exist to put in an error message, not
+/// to branch on (see the module note on wine's redirected output).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PrefixRun {
     /// The exit status, or `None` when the program was ended by a signal.
     pub code: Option<i32>,
+    /// The tail of what the program wrote to standard output.
     pub stdout: String,
+    /// The tail of what the program wrote to standard error.
     pub stderr: String,
 }
 
@@ -125,9 +144,10 @@ impl PrefixRun {
         self.code == Some(0)
     }
 
-    /// The captured output, for an error message. Prefers stderr, since that is where a wine program
-    /// puts its complaint, and falls back to stdout so a program that only writes there is not
-    /// reported as having said nothing.
+    /// The captured output, for an error message.
+    ///
+    /// Prefers stderr, since that is where a wine program puts its complaint, and falls back to
+    /// stdout so a program that only writes there is not reported as having said nothing.
     #[must_use]
     pub fn diagnostic(&self) -> &str {
         let stderr = self.stderr.trim();
@@ -148,9 +168,9 @@ fn capture(bytes: &[u8]) -> String {
 /// What the child branch of the race means once the token is taken into account.
 ///
 /// `select!` picks pseudo-randomly among branches that are ready together, so a program that ends in
-/// the same instant the token fires wins the race about half the time and would come back as a run that
-/// succeeded. Callers record a completed step, which is exactly the thing a stopped run must not leave
-/// behind, so the token outranks the child: cancelled is cancelled whichever branch the race went to.
+/// the same instant the token fires wins the race about half the time and would come back as a run
+/// that succeeded. Callers record a completed step, which is exactly what a stopped run must not
+/// leave behind, so the token outranks the child: cancelled is cancelled whichever branch won.
 ///
 /// The token is consulted before the wait's own result, so an io error draining the pipes is read the
 /// same way. Killing a child to stop it is a routine way for that read to fail, and reporting it as a
@@ -181,8 +201,15 @@ fn completed(
 /// Run `program` inside `prefix` through its runner and wait for it.
 ///
 /// A non-zero exit is not an error here: it is a fact in the returned [`PrefixRun`], because what a
-/// non-zero status means is the caller's rule. Only failing to run it, running past the budget, or
-/// cancellation are errors.
+/// non-zero status means is the caller's rule.
+///
+/// # Errors
+///
+/// [`RuntimeError::MissingHostTool`] when the runner's `wine`, or the `umu-run` a Proton runner needs,
+/// cannot be resolved, and [`RuntimeError::Spawn`] when the child cannot be started or its pipes
+/// cannot be drained. [`RuntimeError::InPrefixIncomplete`] covers the two ways a started program
+/// yields no status: `cancel` fired, or it ran past its time budget and was killed. The two are told
+/// apart by [`RuntimeError::is_cancellation`], not by the variant.
 #[cfg(target_os = "linux")]
 pub(crate) async fn run(
     prefix: &Prefix,
@@ -277,7 +304,7 @@ mod tests {
     /// that resolves its own files relatively finds them.
     ///
     /// The one builder on this type with no caller in the workspace, which left the branch reading it
-    /// never taken. It is public and about to be frozen, so it is exercised rather than trusted.
+    /// never taken. It is public, so it is exercised here rather than trusted to compile.
     #[tokio::test]
     async fn the_working_directory_reaches_the_runner() {
         let (dir, prefix) = scripted_prefix("pwd");
@@ -321,8 +348,8 @@ mod tests {
     }
 
     /// The tie the race itself cannot settle: the child finished and the token fired together, and
-    /// `select!` hands the win to either one. Reported as a completed run, the caller records a step it
-    /// performed after the run was stopped, so the token is what decides.
+    /// `select!` hands the win to either one. Reported as a completed run, the caller records a step
+    /// it performed after the run was stopped, so the token is what decides.
     ///
     /// Both readings of that branch are held to it. A wait that ended in an io error rather than a
     /// status is the same run from the user's side, and reported as a spawn failure it is a stop
@@ -368,8 +395,8 @@ mod tests {
     }
 
     /// A run the user stopped and a program that hung are the same variant, and a shell has to tell
-    /// them apart: one is a disposition to narrate, the other a failure to report. Read off the variant
-    /// alone, Ctrl-C is a failed install.
+    /// them apart: one is a disposition to narrate, the other a failure to report. Read off the
+    /// variant alone, Ctrl-C is a failed install.
     #[tokio::test]
     async fn a_run_the_token_stopped_reads_as_a_cancellation_and_an_overrun_does_not() {
         let (_dir, prefix) = scripted_prefix("sleep 30");
@@ -406,6 +433,7 @@ mod tests {
         (dir, prefix, pid_file)
     }
 
+    /// Point the script at `pid_file` through the child environment.
     fn with_pid_file(program: ProgramInPrefix, pid_file: &Path) -> ProgramInPrefix {
         let mut env = BTreeMap::new();
         env.insert(
@@ -441,9 +469,9 @@ mod tests {
         panic!("the program was left running: /proc/{pid} is still there");
     }
 
-    /// A hung setup program must not hang the launcher, and must not be left running either. The second
-    /// half has exactly one line of code behind it, so it gets an assertion of its own rather than
-    /// riding on the returned error.
+    /// A hung setup program must not hang the launcher, and must not be left running either. The
+    /// second half has exactly one line of code behind it, so it gets an assertion of its own rather
+    /// than riding on the returned error.
     #[tokio::test]
     async fn a_program_that_never_finishes_fails_the_budget_and_is_killed() {
         let (_dir, prefix, pid_file) = hanging_prefix();
@@ -465,6 +493,8 @@ mod tests {
         wait_until_gone(&pid_file).await;
     }
 
+    /// A token that fires while the program is up ends the wait and kills the program, rather than
+    /// leaving it running with nothing holding it.
     #[tokio::test]
     async fn cancelling_stops_waiting_and_kills_the_program() {
         let (_dir, prefix, pid_file) = hanging_prefix();
