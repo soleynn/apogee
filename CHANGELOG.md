@@ -107,6 +107,7 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-sqpack
 - Pre-freeze API review and hardening (#229) _(changed)_
 - Give a foreign file in an added container its real extent (#231) _(fixed)_
+- Extract entries a third-party writer produced (#232) _(fixed)_
 
 ### apogee-test-support
 - Stop a corpus gate passing when it cannot run (#189) _(fixed)_
