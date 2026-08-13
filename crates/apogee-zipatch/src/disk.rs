@@ -140,9 +140,14 @@ impl PatchSink for DiskSink {
         let rel = target.as_path();
         let wipe_len = u64::from(blocks) << 7;
         check_wipe(wipe_len, MAX_WIPE_BYTES)?;
-        // `off` is a `u32 << 7` (≤ 2^39) and `wipe_len` a `u32 << 7` (≤ 2^39), so the span cannot
-        // overflow a `u64`.
-        let end = off + wipe_len;
+        // The interpreter only ever passes a `u32 << 7` (≤ 2^39) here, so this cannot overflow on
+        // any real patch. Checked anyway because this is a public trait method: a sink outside the
+        // crate holds a `TargetPath` and can hand it to this one with an offset of its own choosing,
+        // and a wrapping span is how "no panics" would stop being true through a seam.
+        let end = off.checked_add(wipe_len).ok_or(Error::Corrupt {
+            offset: off,
+            detail: "empty-block span overflows the address space",
+        })?;
         let file = self.store.get(&self.root, rel)?;
         let cur = file
             .metadata()

@@ -178,6 +178,14 @@ pub trait PatchSink {
     /// Hint that `target` is about to be filled to `len` bytes, so a sink may preallocate. Advisory:
     /// the default does nothing, and an implementation must never let a failed hint change the bytes
     /// it writes (so byte-identity holds whether or not preallocation is available).
+    ///
+    /// [`DiskSink`] honors it on Linux only, through `fallocate`. Windows has no arm and is not
+    /// getting one here: `SetEndOfFile`/`SetFileValidData` need `unsafe`, which the crate forbids
+    /// outright, and the second also needs a volume privilege and leaves unwritten disk contents
+    /// readable. What that costs is fragmentation, never a byte, which is exactly what makes the
+    /// no-op default the right floor rather than a hole.
+    ///
+    /// [`DiskSink`]: crate::DiskSink
     fn reserve(&mut self, _target: &TargetPath, _len: u64) -> Result<()> {
         Ok(())
     }

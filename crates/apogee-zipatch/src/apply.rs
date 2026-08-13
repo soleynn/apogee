@@ -72,7 +72,9 @@ pub fn apply<R: Read, S: PatchSink>(
             return Err(Error::Cancelled);
         }
         match chunk {
-            // Metadata: parsed for the model, with no sink call of its own.
+            // Metadata: parsed for the model, with no sink call of its own. `APLY`'s two flags are
+            // deliberately not read here; see `ApplyOptionKind` for why honoring them could only
+            // make an apply stricter than the reference's.
             Chunk::FileHeader(_) | Chunk::ApplyOption(_) | Chunk::ApplyFreeSpace(_) => {}
             Chunk::AddDirectory(d) => sink.make_dir_tree(&SafePath::confine(&d.path)?)?,
             Chunk::DeleteDirectory(d) => sink.remove_dir(&SafePath::confine(&d.path)?)?,

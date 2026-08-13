@@ -191,6 +191,16 @@ fn decode_body(body: &[u8]) -> Result<Index> {
         let mut next_off = 0u64;
         for _ in 0..part_count {
             let part = take_part(&mut c)?;
+            // The builder drops a zero-length write rather than tiling it, so a part that covers no
+            // bytes is not something this format describes. Rejected rather than tolerated because
+            // it is also the cheapest record on the wire that costs nothing in `final_len`: without
+            // this, a body may be packed with them, and each one still costs a `Part` in memory.
+            if part.target_len == 0 {
+                return Err(Error::Corrupt {
+                    offset: c.offset(),
+                    detail: "index part covers no bytes",
+                });
+            }
             if part.target_off != next_off {
                 return Err(Error::Corrupt {
                     offset: c.offset(),
@@ -555,6 +565,24 @@ mod tests {
             &Part {
                 target_off: u64::MAX,
                 target_len: 1,
+                source: Source::Zeros,
+                crc32: 0,
+                crc_valid: false,
+            },
+        );
+        assert!(matches!(read_framed(&body), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn a_zero_length_part_is_corrupt() {
+        // `TargetFile::update` drops a zero-length write, so the builder cannot emit one; a body
+        // carrying one did not come from a build. It is also the cheapest way to spend a body on
+        // parts, since it consumes no `final_len`.
+        let body = one_part_body(
+            0,
+            &Part {
+                target_off: 0,
+                target_len: 0,
                 source: Source::Zeros,
                 crc32: 0,
                 crc_valid: false,
