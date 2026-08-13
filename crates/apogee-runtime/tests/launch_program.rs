@@ -167,7 +167,7 @@ async fn a_loader_that_returns_early_reports_its_status_while_the_game_runs()
             &progress,
         )
         .await?;
-    let mut plan = LaunchPlan::new(LOADER, String::new(), BTreeMap::new()).prefix(&prefix);
+    let mut plan = LaunchPlan::new(LOADER, String::new(), BTreeMap::new()).in_prefix(&prefix);
     plan.set_supervised("ffxiv_dx11.exe");
     let session = runtime
         .launch(plan, &CancellationToken::new(), &progress)
@@ -220,7 +220,7 @@ async fn a_runner_that_outlives_the_game_still_reports_its_status() -> Result<()
             &progress,
         )
         .await?;
-    let mut plan = LaunchPlan::new(LOADER, String::new(), BTreeMap::new()).prefix(&prefix);
+    let mut plan = LaunchPlan::new(LOADER, String::new(), BTreeMap::new()).in_prefix(&prefix);
     plan.set_supervised("ffxiv_dx11.exe");
     let session = runtime
         .launch(plan, &CancellationToken::new(), &progress)
@@ -266,7 +266,7 @@ async fn an_ordinary_launch_reports_no_status_for_the_runner() -> Result<(), Box
         String::new(),
         BTreeMap::new(),
     )
-    .prefix(&prefix);
+    .in_prefix(&prefix);
     let session = runtime
         .launch(plan, &CancellationToken::new(), &progress)
         .await?;

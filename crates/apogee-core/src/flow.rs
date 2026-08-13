@@ -1054,7 +1054,7 @@ async fn launch_game(
     .in_directory(&game_dir)
     .with_wrappers(environment.wrappers);
     if let Some(prefix) = &prepared.prefix {
-        plan = plan.prefix(prefix);
+        plan = plan.in_prefix(prefix);
     }
     // Comes back with the proof to watch for when something took the launch over, which is the
     // companion layer's answer rather than something read back off the plan: what a redirect leaves in

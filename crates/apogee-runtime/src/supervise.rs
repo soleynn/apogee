@@ -58,6 +58,7 @@ pub(crate) async fn resolve_game(
     loop {
         if cancel.is_cancelled() {
             return Err(RuntimeError::GameWaitCancelled {
+                program: program_basename.to_owned(),
                 waited: start.elapsed(),
             });
         }
@@ -78,6 +79,8 @@ pub(crate) async fn resolve_game(
         }
         if start.elapsed() >= RESOLVE_DEADLINE {
             return Err(RuntimeError::GameProcessNotFound {
+                program: program_basename.to_owned(),
+                prefix: expected,
                 waited: RESOLVE_DEADLINE,
             });
         }
@@ -373,6 +376,32 @@ mod tests {
         .await
         .expect_err("a wait that was stopped resolved no game");
         assert!(err.is_cancellation(), "{err:?}");
+        // Which launch was stopped, not just that one was: a consumer logging the stop has nothing
+        // else to name it by, the scan having produced no pid.
+        let RuntimeError::GameWaitCancelled { program, .. } = &err else {
+            panic!("a stopped wait is its own variant, got {err:?}");
+        };
+        assert_eq!(program, "ffxiv_dx11.exe");
+    }
+
+    /// A launch that resolves nothing reports what it scanned for, because that is where the answer
+    /// usually is: the match is on `comm`, which the kernel caps at 15 bytes and the runner renames
+    /// its loader into, and neither the basename nor the prefix is recoverable from a duration.
+    ///
+    /// Constructed rather than waited for: the deadline is half a minute, and what is being pinned is
+    /// the triage the variant carries, not the polling that reaches it.
+    #[test]
+    fn a_game_that_never_appeared_names_what_was_scanned_for() {
+        let err = RuntimeError::GameProcessNotFound {
+            program: "ffxiv_dx11.exe".to_owned(),
+            prefix: PathBuf::from("/prefixes/default"),
+            waited: RESOLVE_DEADLINE,
+        };
+        let message = err.to_string();
+        assert!(message.contains("ffxiv_dx11.exe"), "{message}");
+        assert!(message.contains("/prefixes/default"), "{message}");
+        // Not a cancellation: nothing was found either way, and only this one is worth reporting.
+        assert!(!err.is_cancellation(), "{err:?}");
     }
 
     #[test]

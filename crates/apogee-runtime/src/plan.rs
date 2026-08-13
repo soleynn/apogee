@@ -268,8 +268,12 @@ impl LaunchPlan {
     }
 
     /// Launch into `prefix` (through its runner).
+    ///
+    /// Named as [`CompanionSpec::in_prefix`](crate::CompanionSpec::in_prefix) is, and for the same
+    /// reason [`in_directory`](Self::in_directory) is: it places the launch rather than reporting on
+    /// it, which leaves the bare noun to [`prefix`](Self::prefix).
     #[must_use]
-    pub fn prefix(mut self, prefix: &Prefix) -> Self {
+    pub fn in_prefix(mut self, prefix: &Prefix) -> Self {
         self.prefix = Some(prefix.clone());
         self
     }
@@ -375,7 +379,7 @@ impl LaunchPlan {
 
     /// The prefix this plan launches into, if it has one.
     #[must_use]
-    pub fn prefix_of(&self) -> Option<&Prefix> {
+    pub fn prefix(&self) -> Option<&Prefix> {
         self.prefix.as_ref()
     }
 
@@ -389,10 +393,6 @@ impl LaunchPlan {
     #[must_use]
     pub fn wrappers(&self) -> &[String] {
         &self.wrappers
-    }
-
-    pub(crate) fn prefix_ref(&self) -> Option<&Prefix> {
-        self.prefix.as_ref()
     }
 }
 

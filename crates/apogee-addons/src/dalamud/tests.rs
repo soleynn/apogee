@@ -71,7 +71,7 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
         "//**sqex0003**//",
         BTreeMap::new(),
     )
-    .prefix(prefix)
+    .in_prefix(prefix)
 }
 
 /// Prepare a launch and apply what came back, which is the pass the loop makes over one companion.
