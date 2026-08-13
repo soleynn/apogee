@@ -284,6 +284,7 @@ mod tests {
     const ACCOUNT: Uuid = Uuid::from_u128(0x0194_8f2c_7d3e_4a51_9b60_c2e8_1f45_a903);
     const OTHER: Uuid = Uuid::from_u128(2);
 
+    /// A secret that was written reads back exactly, and one that was never stored is `Ok(None)`.
     #[test]
     fn a_written_secret_reads_back_and_a_missing_one_is_absent() {
         let store = MemoryStore::new();
@@ -338,6 +339,7 @@ mod tests {
         );
     }
 
+    /// A store built with [`MemoryStore::in_state`] reports exactly that state from `probe()`.
     #[test]
     fn a_scripted_state_is_what_the_report_says() {
         let store = MemoryStore::new().in_state(BackendState::Locked);

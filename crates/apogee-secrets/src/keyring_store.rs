@@ -93,10 +93,11 @@ fn map_error(err: &keyring_core::Error, step: &'static str) -> SecretsError {
         keyring_core::Error::NoStorageAccess(_) => no_storage_access(err, step),
         keyring_core::Error::PlatformFailure(_) => platform_failure(err, step),
         // `NoEntry` is answered by the callers, which turn it into an absence rather than a
-        // failure. `TooLong`, `Invalid`, `BadEncoding` and `BadDataFormat` are unreachable with the
-        // keys and the binary API this crate uses; `NoDefaultStore` is unreachable because entries
-        // are built from an owned store rather than the process-wide one, and `NotSupportedByStore`
-        // because nothing here calls an optional operation. The enum is non-exhaustive besides.
+        // failure. `TooLong`, `Invalid`, `BadEncoding`, `BadDataFormat` and `BadStoreFormat` are
+        // unreachable with the keys and the binary API this crate uses; `NoDefaultStore` is
+        // unreachable because entries are built from an owned store rather than the process-wide
+        // one, and `NotSupportedByStore` because nothing here calls an optional operation. The enum
+        // is non-exhaustive besides.
         _ => SecretsError::Backend { step },
     }
 }
@@ -114,9 +115,10 @@ fn no_storage_access(err: &keyring_core::Error, step: &'static str) -> SecretsEr
 
 /// Neither of these stores has a locked state that reaches here. On Windows this variant is only
 /// ever `ERROR_NO_SUCH_LOGON_SESSION`, meaning there is no credential store session at all; on macOS
-/// it covers an unavailable, missing, or invalid keychain, plus a read-only one. Keyring boxes the
-/// platform error without the code, so the read-only case cannot be told from the other three and is
-/// reported with them as no store rather than as a refusal.
+/// it covers several `OSStatus` codes for a keychain that is unavailable, missing, or invalid, plus
+/// a couple of permission-shaped refusals including a read-only keychain. Keyring boxes the platform
+/// error without the code, so none of those can be told apart here and all of them are reported as
+/// no store rather than as a distinct refusal.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
 fn no_storage_access(_err: &keyring_core::Error, _step: &'static str) -> SecretsError {
     SecretsError::NoBackend
@@ -147,7 +149,8 @@ fn platform_failure(err: &keyring_core::Error, step: &'static str) -> SecretsErr
 ///
 /// This returns `None` for good if the store crate ever resolves to a different major version of the
 /// Secret Service crate than this one does, which would quietly flatten every classification below
-/// into `Backend`. Nothing about that drift is a compile error, so it is asserted twice: off the
+/// into [`SecretsError::Backend`]. Nothing about that drift is a compile error, so it is asserted
+/// twice: off the
 /// resolved graph by `scripts/audit.sh`, and against a real store by the live integration test.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 fn source_error(err: &keyring_core::Error) -> Option<&secret_service::Error> {
@@ -155,6 +158,8 @@ fn source_error(err: &keyring_core::Error) -> Option<&secret_service::Error> {
     err.source()?.downcast_ref::<secret_service::Error>()
 }
 
+/// Fold a raw Secret Service error into the taxonomy this crate speaks, shared by the store path
+/// here and by the foreign-credential importer, which reads the same bus with the same store.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 pub(crate) fn classify_secret_service(
     err: &secret_service::Error,
@@ -287,17 +292,21 @@ mod tests {
         }
     }
 
+    /// More than one matching credential maps to [`SecretsError::Ambiguous`], not a guess at which
+    /// one was meant.
     #[test]
     fn several_matching_items_are_their_own_condition() {
         let err = keyring_core::Error::Ambiguous(Vec::new());
         assert!(matches!(map_error(&err, "read"), SecretsError::Ambiguous));
     }
 
-    /// The store API's enum is non-exhaustive and five of its variants are unreachable with the keys
-    /// and the binary API used here, so they all land on the catch-all rather than on a guess.
-    /// `NoDefaultStore` is among them because entries are built from an owned store rather than the
-    /// process-wide default, so the condition it reports cannot arise; it is asserted rather than
-    /// assumed, because a later edit reaching for `Entry::new` would make it the answer to every
+    /// The store API's enum is non-exhaustive and six of its variants land on the catch-all rather
+    /// than on a guess: five (`TooLong`, `Invalid`, `NoDefaultStore`, `NotSupportedByStore`,
+    /// `BadStoreFormat`) because the keys and the binary API used here cannot produce them, and
+    /// `NoEntry` for a different reason: it is genuinely reachable, but every real caller (`get`,
+    /// `delete`) intercepts it before `map_error` is ever called, so this test pins `map_error`'s own
+    /// default treatment of it rather than an unreachable case. `NoDefaultStore` is asserted rather
+    /// than assumed, because a later edit reaching for `Entry::new` would make it the answer to every
     /// call and it would read as an ordinary backend failure.
     #[test]
     fn unreachable_variants_land_on_the_catch_all() {
@@ -385,6 +394,8 @@ mod tests {
             }
         }
 
+        /// Both an unreachable bus and a bus with nothing owning the credential-store name map to
+        /// [`SecretsError::NoBackend`], the condition nothing here will retry its own way out of.
         #[test]
         fn no_bus_or_no_provider_maps_to_no_backend() {
             let outer =

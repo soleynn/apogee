@@ -68,6 +68,7 @@ pub(crate) fn no_default_collection() -> bool {
     })
 }
 
+/// Probe the Secret Service and report its reachability, lock state, and sandbox.
 pub(crate) fn probe() -> BackendReport {
     let (state, sandbox) = probe_within(BUS_DEADLINE);
     let report = BackendReport::new(BACKEND, state);
@@ -370,12 +371,14 @@ mod tests {
     const UNFILTERED_SOCKET: &str = "[Context]\nsockets=x11;pulseaudio;session-bus;\n\n[Session Bus Policy]\ncom.canonical.AppMenu.Registrar=talk\n";
     const SEE_ONLY: &str = "[Session Bus Policy]\norg.freedesktop.secrets=see\n";
 
+    /// A bus policy entry naming the credential-store name as `talk` or `own` is a grant either way.
     #[test]
     fn a_policy_that_names_the_service_is_a_grant() {
         assert!(flatpak_can_talk_to_secrets(GRANTED));
         assert!(flatpak_can_talk_to_secrets(OWNS_IT));
     }
 
+    /// A sandbox handed the session bus socket itself needs no bus policy grant at all.
     #[test]
     fn holding_the_session_bus_socket_is_a_grant() {
         assert!(flatpak_can_talk_to_secrets(UNFILTERED_SOCKET));
@@ -388,6 +391,8 @@ mod tests {
         assert!(!flatpak_can_talk_to_secrets(SEE_ONLY));
     }
 
+    /// A bus policy that never names the credential-store name at all grants nothing, empty body
+    /// included.
     #[test]
     fn a_policy_without_the_service_is_not_a_grant() {
         assert!(!flatpak_can_talk_to_secrets(DENIED));
@@ -478,6 +483,8 @@ mod tests {
         ));
     }
 
+    /// The Flatpak application id comes from the `[Application]` section's `name` key, and is
+    /// `None` when that section is absent.
     #[test]
     fn the_application_name_is_the_app_id() {
         let info = "[Application]\nname=dev.apogee.Launcher\nruntime=org.freedesktop.Platform\n";
@@ -485,6 +492,8 @@ mod tests {
         assert_eq!(flatpak_app_id(DENIED), None);
     }
 
+    /// A Flatpak body without the bus grant reports `bus_filtered: true`; one with it reports
+    /// `false`.
     #[test]
     fn a_sandbox_without_the_grant_is_marked_filtered() {
         assert!(matches!(
@@ -617,6 +626,8 @@ mod tests {
         ));
     }
 
+    /// A bus policy refusal classifies as [`BackendState::SandboxDenied`] on its own, with no
+    /// sandbox sample needed to decide it.
     #[test]
     fn a_refused_call_is_the_sandbox_regardless_of_what_was_sampled() {
         let denied =
@@ -624,6 +635,8 @@ mod tests {
         assert_eq!(classify(&denied, None), BackendState::SandboxDenied);
     }
 
+    /// The Secret Service conditions with no bus-level or sandbox nuance each map to exactly one
+    /// [`BackendState`].
     #[test]
     fn the_remaining_conditions_map_one_for_one() {
         let cases = [

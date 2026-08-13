@@ -6,7 +6,7 @@
 //! length before the file is read at all. The key derivation is only entered once every field below
 //! has been checked.
 //!
-//! Big-endian throughout, and the only place in this crate that converts. The header is the on-disk
+//! Big-endian throughout, and the only place the header layout is defined. The header is the on-disk
 //! contract: a change to a field's offset, width, or meaning orphans every secret already stored.
 
 use crate::SecretsError;
@@ -112,7 +112,9 @@ pub(crate) struct Header {
 }
 
 impl Header {
-    /// Lay the header out, ready to be the associated data the body is sealed under.
+    /// Lay the header out as the bytes written to disk, and as the associated data the check
+    /// envelope is sealed under directly and the body envelope is sealed under via
+    /// [`Header::body_aad`].
     pub(crate) fn to_bytes(self) -> [u8; HEADER_LEN] {
         let mut out = [0u8; HEADER_LEN];
         out[OFF_MAGIC..OFF_VERSION].copy_from_slice(&MAGIC);

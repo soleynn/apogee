@@ -14,6 +14,7 @@ use crate::{BackendReport, BackendState};
 /// A key nothing ever writes. Reading it asks the store to answer without changing anything.
 const PROBE_KEY: &str = "probe";
 
+/// Probe the Credential Manager or the Keychain and report its reachability and lock state.
 pub(crate) fn probe() -> BackendReport {
     // Neither platform has the sandbox this reports on, which is what the bare constructor says.
     BackendReport::new(BACKEND, probe_state())
@@ -37,9 +38,9 @@ fn classify(answer: Result<Vec<u8>, keyring_core::Error>) -> BackendState {
         // something else wrote it, and the store still answered.
         Ok(_) | Err(keyring_core::Error::NoEntry) => BackendState::Ready,
         // Windows raises this only when there is no credential store session at all. On macOS it
-        // covers an unavailable, missing, invalid, or read-only keychain, plus a write-permissions
-        // refusal; the store boxes the code rather than reporting it, so the read-only case cannot be
-        // separated out here.
+        // covers several `OSStatus` codes for an unavailable, missing, or invalid keychain, plus a
+        // couple of permission-shaped refusals including a read-only keychain; the store boxes the
+        // code rather than reporting it, so none of those can be separated out here.
         Err(keyring_core::Error::NoStorageAccess(_)) => BackendState::NoProvider,
         // A keychain that is shut rather than broken. It is worth writing to: the write raises the
         // unlock prompt and then succeeds, so reporting it as unreachable makes `is_usable()` false
@@ -54,6 +55,8 @@ fn classify(answer: Result<Vec<u8>, keyring_core::Error>) -> BackendState {
 mod tests {
     use super::*;
 
+    /// A hit and the expected miss (`NoEntry`, since the probe key is never written) both classify
+    /// as [`BackendState::Ready`]: either way, the store answered.
     #[test]
     fn a_store_that_answers_at_all_is_ready() {
         assert_eq!(classify(Ok(Vec::new())), BackendState::Ready);
@@ -63,6 +66,8 @@ mod tests {
         );
     }
 
+    /// [`keyring_core::Error::NoStorageAccess`] classifies as [`BackendState::NoProvider`], not as
+    /// a lock.
     #[test]
     fn no_storage_access_is_no_provider() {
         let err =

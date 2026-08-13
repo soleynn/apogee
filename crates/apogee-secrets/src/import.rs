@@ -5,6 +5,10 @@
 //! must find their setup intact. The import writes to *our* keys through the ordinary
 //! [`SecretStore`](crate::SecretStore), and the source is left exactly as it was found.
 //!
+//! Only [`SecretKind::Password`](crate::SecretKind::Password) is ever imported. The other launcher
+//! this reads from has no one-time-code secret of its own to import: it stores a password alone, so
+//! there is no path here for [`SecretKind::TotpSecret`](crate::SecretKind::TotpSecret).
+//!
 //! The key strings below are the whole interoperability contract, and getting one wrong fails the
 //! same way as there being nothing to import: silently, with an empty answer. So they are built by
 //! pure functions that need no store to test, and frozen by unit tests that run on every platform,
@@ -290,8 +294,9 @@ fn read_credential(target: &str, name: &str) -> Result<Import, SecretsError> {
         step: "address the other launcher's credential",
     };
 
-    // Service and user are recorded on the credential but are not what this store looks it up by,
-    // so they only have to be present. The `target` modifier above is the whole key.
+    // The `service`/`user` values passed to `build` below are only there to satisfy the API's
+    // validation; this store never persists or looks anything up by them once a `target` modifier is
+    // given, so they only have to be present, not correct.
     let modifiers = HashMap::from([("target", target)]);
     let entry = crate::keyring_store::open()
         .map_err(|_| addressing())?
@@ -617,6 +622,8 @@ mod tests {
             ));
         }
 
+        /// A platform failure that is not the no-session status stays an unclassified backend
+        /// failure rather than being guessed at.
         #[test]
         fn any_other_store_failure_is_a_backend_failure() {
             let err =
@@ -638,6 +645,8 @@ mod tests {
             (dir, path)
         }
 
+        /// Reading one account's entry by name returns only that account's password, not every
+        /// entry the file holds.
         #[test]
         fn a_named_account_is_found_and_the_others_are_not_returned() {
             let (_dir, path) = write(r#"{"alice":"pw-alice","bob":"pw-bob"}"#);
@@ -759,6 +768,8 @@ mod tests {
             }
         }
 
+        /// A stored name outside ASCII, and the value read back for it, survive the round trip
+        /// unmangled.
         #[test]
         fn a_name_stored_with_other_characters_round_trips() {
             let (_dir, path) = write(r#"{"ırssi":"pw-é"}"#);
@@ -789,6 +800,8 @@ mod tests {
             assert_eq!(decoded, "pw-\u{e9}\u{1f600}".as_bytes());
         }
 
+        /// A blob that cannot be UTF-16LE (odd length, or an unpaired surrogate) is reported as a
+        /// condition, never as an error carrying the undecodable bytes back out.
         #[test]
         fn a_blob_that_is_not_text_is_a_condition_rather_than_an_error_holding_it() {
             // An odd length cannot be code units at all, and an unpaired surrogate is not text.
