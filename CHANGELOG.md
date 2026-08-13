@@ -64,6 +64,7 @@ is tagged with its change type. Versioning aims to follow
 - Apply through a privileged Windows worker (#209) _(added)_
 - Refuse to install or repair while the game is running (#211) _(added)_
 - Cover the untested disk-exhaustion paths (#212) _(testing)_
+- Repair an install that needs elevation (#215) _(added)_
 
 ### apogee-runtime
 - Report the exit status of a redirected launch's program (#165) _(fixed)_
