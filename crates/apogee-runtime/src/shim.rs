@@ -9,8 +9,8 @@
 //! cancellation, because a spawn failure is not one either, so they pass for the wrong reason.
 //!
 //! The window closes on its own once every child that inherited the descriptor has exec'd, so the
-//! shim answers a probe argument before it does anything else and [`scripted_prefix`] runs that probe
-//! until it succeeds. By the time a prefix is handed back, the script is known to be runnable.
+//! shim answers a probe argument before it does anything else and [`scripted_prefix`] runs that
+//! probe until it succeeds. By the time a prefix is handed back, the script is known to be runnable.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -21,15 +21,18 @@ use crate::plan::{Prefix, RunnerHandle};
 /// The argument a shim answers before running its body. Passed only by [`wait_until_runnable`].
 pub(crate) const PROBE: &str = "--shim-probe";
 
-/// How many times a probe may come back `ETXTBSY` before the helper gives up. Each inheriting child
-/// clears the descriptor as it execs, so this drains in microseconds in practice; the ceiling exists
-/// so a genuinely unrunnable script fails as itself rather than hanging the suite.
+/// How many times a probe may come back `ETXTBSY` before the helper gives up.
+///
+/// Each inheriting child clears the descriptor as it execs, so this drains in microseconds in
+/// practice; the ceiling exists so a genuinely unrunnable script fails as itself rather than
+/// hanging the suite.
 const PROBE_ATTEMPTS: u32 = 500;
 
 /// A prefix whose runner is `body` wrapped in a shell script.
 ///
-/// The script sees the composed argv (`wine reg add …`) as its own, so a test reads back exactly what
-/// the spawn path passed, and exits with whatever status the body asks for.
+/// The script sees the composed argv (`wine reg add ...`) as its own, so a test reads back exactly
+/// what the spawn path passed, and exits with whatever status the body asks for. The returned
+/// directory owns the prefix: keep it alive for as long as the prefix is used.
 pub(crate) fn scripted_prefix(body: &str) -> (tempfile::TempDir, Prefix) {
     let dir = tempfile::tempdir().expect("tempdir");
     let runner_dir = dir.path().join("runner");
@@ -50,6 +53,8 @@ pub(crate) fn scripted_prefix(body: &str) -> (tempfile::TempDir, Prefix) {
 
 /// Run the shim's probe until it starts, so no descriptor a sibling's fork inherited is still open
 /// against it when the test spawns for real.
+///
+/// Panics if the script cannot be run at all, or is still busy after [`PROBE_ATTEMPTS`] probes.
 pub(crate) fn wait_until_runnable(shim: &Path) {
     for _ in 0..PROBE_ATTEMPTS {
         match std::process::Command::new(shim).arg(PROBE).status() {

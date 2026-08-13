@@ -7,12 +7,11 @@
 //! so every companion leads its own process group and the stop signals the group.
 //!
 //! Inside a Flatpak sandbox a host companion is relayed out through `flatpak-spawn`
-//! ([`crate::flatpak`]), and the group stops being the whole story: the group then holds the relay
-//! rather than the tool. What survives is measured in that module, and it is the graceful half.
-//! `SIGTERM` is forwarded across the boundary, so an ordinary stop still reaches the tool and its
-//! exit status still comes back; the `SIGKILL` that follows a grace reaches only the relay, so a
-//! host tool that ignores `SIGTERM` outlives it, and a stopped launcher cannot see whatever the tool
-//! backgrounded.
+//! ([`crate::flatpak`]), and the group stops being the whole story: it then holds the relay rather
+//! than the tool. What survives is the graceful half. `SIGTERM` is forwarded across the boundary,
+//! so an ordinary stop still reaches the tool and its exit status still comes back; the `SIGKILL`
+//! that follows a grace reaches only the relay, so a host tool that ignores `SIGTERM` outlives it,
+//! and a stopped launcher cannot see whatever the tool backgrounded.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +31,22 @@ use crate::supervise::{ExitWatch, wait_exit, watch_exit};
 const GROUP_POLL: Duration = Duration::from_millis(50);
 
 /// What to run and where.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use apogee_runtime::CompanionSpec;
+///
+/// let mut env = BTreeMap::new();
+/// env.insert("APOGEE_GAME_PID".to_owned(), "4242".to_owned());
+/// let spec = CompanionSpec::host("/opt/overlay/tool", vec!["--attach".to_owned()])
+///     .env(env)
+///     .working_dir("/opt/overlay");
+///
+/// assert!(spec.prefix().is_none());
+/// ```
 #[derive(Debug, Clone)]
 pub struct CompanionSpec {
     program: PathBuf,
@@ -42,8 +57,10 @@ pub struct CompanionSpec {
 }
 
 impl CompanionSpec {
-    /// A companion run directly on the host: a native binary, invoked with an argv list that is
-    /// passed through verbatim (no shell, so no quoting rules and no word splitting).
+    /// A companion run directly on the host: a native binary and its argv.
+    ///
+    /// The arguments are passed through verbatim, with no shell, so no quoting rules and no word
+    /// splitting apply.
     #[must_use]
     pub fn host(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
         Self {
@@ -56,6 +73,20 @@ impl CompanionSpec {
     }
 
     /// A companion run inside `prefix` through its runner, for a Windows executable.
+    ///
+    /// A prefix whose runner is umu runs the program inside a container that stays up for the whole
+    /// session and consumes the program's status there, so [`Companion::wait`] then resolves at the
+    /// end of the session with the container's status rather than the program's. An exit status is
+    /// a usable report only on a plain wine runner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_runtime::{CompanionSpec, Prefix};
+    /// # fn demo(prefix: &Prefix) -> CompanionSpec {
+    /// CompanionSpec::in_prefix("Z:\\tools\\overlay.exe", Vec::new(), prefix)
+    /// # }
+    /// ```
     #[must_use]
     pub fn in_prefix(program: impl Into<PathBuf>, args: Vec<String>, prefix: &Prefix) -> Self {
         Self {
@@ -64,8 +95,9 @@ impl CompanionSpec {
         }
     }
 
-    /// Add environment variables for the child. Merged after the prefix variables, so a caller can
-    /// override them.
+    /// Set the environment variables for the child.
+    ///
+    /// Applied after the prefix variables, so a caller can override them.
     #[must_use]
     pub fn env(mut self, env: BTreeMap<String, String>) -> Self {
         self.env = env;
@@ -79,7 +111,7 @@ impl CompanionSpec {
         self
     }
 
-    /// The prefix this companion runs in, if it is not a host tool.
+    /// The prefix this companion runs in, or `None` for a host tool.
     #[must_use]
     pub fn prefix(&self) -> Option<&Prefix> {
         self.prefix.as_ref()
@@ -95,6 +127,19 @@ pub struct CompanionExit {
 }
 
 /// A running companion process and its process group.
+///
+/// # Examples
+///
+/// ```
+/// # use std::time::Duration;
+/// # use apogee_runtime::{Companion, RuntimeError};
+/// # async fn demo(companion: &mut Companion) -> Result<(), RuntimeError> {
+/// if companion.try_wait()?.is_none() {
+///     companion.stop(Duration::from_secs(2)).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Companion {
     child: Child,
@@ -103,13 +148,13 @@ pub struct Companion {
 }
 
 impl Companion {
-    /// The unix PID of the spawned process, which is also its process-group id.
+    /// The unix pid of the spawned process, which is also its process-group id.
     #[must_use]
     pub fn pid(&self) -> i32 {
         self.pid
     }
 
-    /// Wait for the companion to exit and reap it.
+    /// Wait for the companion to exit, and reap it.
     ///
     /// # Errors
     /// [`RuntimeError::Spawn`] if the process could not be waited on.
@@ -144,12 +189,12 @@ impl Companion {
         }))
     }
 
-    /// Resolve once the companion and everything it started have exited: the leader is reaped for its
-    /// status, then its process group is polled until nothing is left in it.
+    /// Resolve once the companion and everything it started have exited.
     ///
-    /// A launcher script that backgrounds the real work and returns immediately would otherwise be
-    /// reported as finished while the tool it started is still running. The group's surviving members
-    /// hold the group id open, so a recycled pid cannot be mistaken for the group still being alive.
+    /// The leader is reaped for its status, then its process group is polled until nothing is left
+    /// in it. A launcher script that backgrounds the real work and returns immediately would
+    /// otherwise be reported as finished while the tool it started is still running. The surviving
+    /// members hold the group id open, so a recycled pid cannot read as the group still being alive.
     ///
     /// # Errors
     /// [`RuntimeError::Spawn`] if the leader could not be reaped.
@@ -169,9 +214,9 @@ impl Companion {
     ///
     /// The leader is watched through a pidfd rather than reaped, so it stays a zombie for the whole
     /// sequence. That matters twice: it anchors the group id, so the final `SIGKILL` cannot land on
-    /// a recycled one, and it means a launcher script that exits immediately after backgrounding the
-    /// real tool does not end the sequence early. The group is signalled either way, so the
-    /// backgrounded tool is reached rather than orphaned.
+    /// a recycled one, and a launcher script that exits immediately after backgrounding the real
+    /// tool does not end the sequence early. The group is signalled either way, so the backgrounded
+    /// tool is reached rather than orphaned.
     ///
     /// # Errors
     /// [`RuntimeError::Spawn`] if the process could not be reaped after being signalled.
@@ -212,8 +257,9 @@ impl Companion {
 ///
 /// # Errors
 /// [`RuntimeError::MissingHostTool`] if a prefix companion has no resolvable runner launcher, or if
-/// a host companion is being started from a sandbox that carries no `flatpak-spawn`, and
-/// [`RuntimeError::Spawn`] if the process could not be started.
+/// a host companion is being started from a sandbox that carries no `flatpak-spawn`;
+/// [`RuntimeError::Spawn`] if the process could not be started; and
+/// [`RuntimeError::InvalidLaunchPlan`] if it exited before its pid could be read.
 pub(crate) fn spawn(
     spec: &CompanionSpec,
     tools_dir: &Path,
@@ -258,6 +304,10 @@ pub(crate) fn spawn(
 /// host companion is the one invocation in this crate that is a host one by definition: the user
 /// points at a program on their own machine, which a sandbox neither installed nor can see, so
 /// under confinement it is relayed out through `flatpak-spawn` ([`crate::flatpak`]).
+///
+/// # Errors
+/// [`RuntimeError::MissingHostTool`] if the prefix's runner launcher or the sandbox's
+/// `flatpak-spawn` could not be resolved.
 fn compose(
     spec: &CompanionSpec,
     tools_dir: &Path,
@@ -316,7 +366,7 @@ mod tests {
     }
 
     /// A stand-in for `flatpak-spawn` that writes the argv it was handed, one token per line, and
-    /// then stops. It does not relay anything: what a test needs to read is exactly what crossed the
+    /// then stops. It relays nothing: what a test needs to read is exactly what crossed the
     /// boundary, and a real relay is the thing being stood in for.
     ///
     /// Written and then probed until it runs, because a sibling thread's fork can inherit the
@@ -351,10 +401,11 @@ mod tests {
         Some(text.lines().map(str::to_owned).collect())
     }
 
-    /// A host companion started from inside a sandbox goes out through the relay, and everything the
-    /// caller set travels as an argument rather than as inherited state: measured on flatpak 1.16.6,
-    /// a host command gets the host session's environment and none of the sandbox's, so a variable
-    /// merely set on the child is a variable the tool never sees.
+    /// A host companion started from inside a sandbox goes out through the relay, with everything
+    /// the caller set named as an argument.
+    ///
+    /// Measured on flatpak 1.16.6: a host command gets the host session's environment and none of
+    /// the sandbox's, so a variable merely set on the child is one the tool never sees.
     #[tokio::test]
     async fn a_host_companion_under_confinement_is_relayed_with_its_environment_named() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -427,8 +478,8 @@ mod tests {
     }
 
     /// The group stop must reach a process the companion backgrounded and left behind. A shell that
-    /// starts a sleeper and exits immediately is the shim shape that orphans a descendant when the
-    /// stop only follows the direct child.
+    /// starts a sleeper and exits immediately is the shape that orphans a descendant when the stop
+    /// only follows the direct child.
     #[tokio::test]
     async fn stopping_a_companion_reaches_a_process_it_backgrounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -462,7 +513,7 @@ mod tests {
         );
     }
 
-    /// A companion that ignores `SIGTERM` must still be stopped once the grace expires.
+    /// A companion that ignores `SIGTERM` is still stopped once the grace expires.
     #[tokio::test]
     async fn a_companion_that_ignores_the_first_signal_is_killed_after_the_grace() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -486,7 +537,8 @@ mod tests {
         );
     }
 
-    /// The exit status is the companion's own, which the game supervision path cannot report.
+    /// A host companion's own exit status comes back, which the game supervision path cannot report
+    /// and which an in-prefix companion behind umu cannot either.
     #[tokio::test]
     async fn a_companion_reports_its_exit_status() {
         let dir = tempfile::tempdir().expect("tempdir");

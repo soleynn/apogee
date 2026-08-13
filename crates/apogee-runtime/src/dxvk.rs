@@ -1,7 +1,9 @@
-//! Installing DXVK (and its `dxvk-nvapi` companion) into a prefix: the pinned tarballs are downloaded
-//! and extracted through the injected fetcher, their 64- and 32-bit DLLs copied into the prefix's
-//! `system32`/`syswow64`, and the result recorded in `prefix.json`. The environment matrix
-//! ([`crate::env`]) is what overrides the DLLs to native at launch; this only places them.
+//! Installing DXVK, and its `dxvk-nvapi` companion, into a prefix.
+//!
+//! The pinned archives are downloaded and extracted through the injected fetcher, their 64- and
+//! 32-bit DLLs are copied into the prefix's `system32` and `syswow64`, and the result is recorded
+//! in `prefix.json`. Placing the DLLs is all this does: what overrides them to native at launch is
+//! the environment matrix.
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -21,13 +23,22 @@ use crate::plan::Prefix;
 use crate::progress::{Progress, RuntimeEvent};
 use crate::{SetupStep, error::HealthIssue, error::PrefixWants};
 
-/// The 64-bit `dxvk-nvapi` DLL, checked additionally when nvapi was installed.
+/// The 64-bit `dxvk-nvapi` DLL, the one the health check requires when nvapi was installed.
 const NVAPI_DLL: &str = "nvapi64.dll";
-/// A per-prefix scratch directory for downloads and extraction, removed after each install.
+/// The per-prefix scratch directory for downloads and extraction, removed after every install.
 const WORK_DIR: &str = ".apogee-dxvk";
 
-/// Install `dxvk` into `prefix`, optionally including `dxvk-nvapi`, and record it in `prefix.json`.
-/// `nvapi` is honored only if the catalog entry actually carries a pinned nvapi artifact.
+/// Install `dxvk` into `prefix`, with `dxvk-nvapi` if asked for, and record it in `prefix.json`.
+///
+/// `nvapi` is honored only where the catalog entry actually carries a pinned nvapi artifact.
+///
+/// # Errors
+///
+/// Whatever [`download_verified`] raises, including a [`RuntimeError::Download`] carrying the
+/// cancellation ([`RuntimeError::is_cancellation`] recognizes it). [`RuntimeError::Extract`] if an
+/// archive cannot be extracted or holds no `x64`/`x32` DLLs, [`RuntimeError::Io`] if a DLL cannot be
+/// written or an existing record cannot be read, and [`RuntimeError::PrefixJson`] if that record is
+/// corrupt or the updated one cannot be serialized.
 pub(crate) async fn install(
     fetcher: &Fetcher,
     dxvk: &DxvkEntry,
@@ -71,8 +82,10 @@ pub(crate) async fn install(
     Ok(())
 }
 
-/// The DXVK DLLs the health check requires in `system32`, given what `prefix.json` recorded. Derived
-/// from the same [`DXVK_DLL_STEMS`] the environment matrix overrides, so the two cannot diverge.
+/// The DLL file names the health check requires, given what `prefix.json` recorded.
+///
+/// Derived from the same [`DXVK_DLL_STEMS`] the environment matrix overrides, so the set placed and
+/// the set verified cannot diverge.
 pub(crate) fn expected_dlls(dxvk: &DxvkRef) -> Vec<String> {
     let mut dlls: Vec<String> = DXVK_DLL_STEMS
         .iter()
@@ -86,19 +99,22 @@ pub(crate) fn expected_dlls(dxvk: &DxvkRef) -> Vec<String> {
 
 /// Whether the prefix lacks the companion that was asked for.
 ///
-/// A free function so it goes red on its own. It reads the *record* rather than the DLLs, and has to:
-/// a Proton prefix carries its runner's own `nvapi64.dll` from the moment it is built (measured
-/// byte-identical to GE-Proton 11-1's `files/lib/wine/nvapi/x86_64-windows/nvapi64.dll` on a prefix
-/// recording `nvapi: false`), so a file check would call the companion installed on every Proton
-/// prefix and never report the one thing this exists to report.
+/// Reads the record rather than the DLLs, and has to: a Proton prefix carries its runner's own
+/// `nvapi64.dll` from the moment it is built (measured byte-identical to GE-Proton 11-1's
+/// `files/lib/wine/nvapi/x86_64-windows/nvapi64.dll` on a prefix recording `nvapi: false`), so a
+/// file check would call the companion installed on every Proton prefix and never report the one
+/// thing this exists to report.
+// A free function rather than a branch inside `check`, so it goes red on its own.
 pub(crate) fn nvapi_missing(recorded: Option<&DxvkRef>, wanted: bool) -> bool {
     wanted && !recorded.is_some_and(|dxvk| dxvk.nvapi)
 }
 
-/// Report any recorded DXVK DLL missing from the prefix's 64-bit `system32`, and a companion that was
-/// wanted and is not recorded. The DLL half is intentionally scoped to the 64-bit DLLs the game
-/// (`ffxiv_dx11.exe`) actually loads; the 32-bit `syswow64` copies do not affect a 64-bit launch, so a
-/// missing one is not treated as a health problem.
+/// Report what the prefix recorded and does not have.
+///
+/// Appends a [`HealthIssue`] for every recorded DXVK DLL missing from `system32`, and one for a
+/// companion that was wanted and is not recorded. The DLL half is scoped to the 64-bit `system32`
+/// on purpose: the game (`ffxiv_dx11.exe`) is 64-bit, so a missing `syswow64` copy cannot affect a
+/// launch and is not a health problem.
 pub(crate) fn check(
     wine_root: &Path,
     recorded: Option<&DxvkRef>,
@@ -119,7 +135,12 @@ pub(crate) fn check(
     }
 }
 
-/// Install the DXVK tarball, then the nvapi one if requested. The caller owns cleanup of `work`.
+/// Install the DXVK archive, then the nvapi one when requested. The caller owns `work` and its
+/// cleanup.
+///
+/// # Errors
+///
+/// As [`install_dlls`].
 #[allow(clippy::too_many_arguments)]
 async fn install_all(
     fetcher: &Fetcher,
@@ -165,7 +186,14 @@ async fn install_all(
     Ok(())
 }
 
-/// Download, extract, and copy one artifact's `x64`/`x32` DLLs into `system32`/`syswow64`.
+/// Download, extract, and copy one artifact's `x64` and `x32` DLLs into `system32` and `syswow64`.
+///
+/// `name` labels the artifact in the scratch paths and in the error for an archive with no DLLs.
+///
+/// # Errors
+///
+/// Whatever [`download_verified`] raises, [`RuntimeError::Extract`] if the extraction fails or
+/// panics or the archive yields no DLLs at all, and [`RuntimeError::Io`] from [`copy_arch_dlls`].
 #[allow(clippy::too_many_arguments)]
 async fn install_dlls(
     fetcher: &Fetcher,
@@ -209,8 +237,15 @@ async fn install_dlls(
     Ok(())
 }
 
-/// Copy every `.dll` from the `arch` subdirectory of the extracted tree into `dest`, returning the
-/// count. A missing `arch` directory (e.g. an nvapi build with no 32-bit half) copies nothing.
+/// Copy every `.dll` from the extracted tree's `arch` directory into `dest`, returning the count.
+///
+/// A missing `arch` directory copies nothing and is not an error: an nvapi build with no 32-bit
+/// half is the ordinary case.
+///
+/// # Errors
+///
+/// [`RuntimeError::Io`] if `dest` cannot be created, the source directory cannot be read, or a copy
+/// fails.
 fn copy_arch_dlls(staging: &Path, arch: &str, dest: &Path) -> Result<usize, RuntimeError> {
     let Some(src) = find_dir(staging, arch) else {
         return Ok(0);
@@ -244,9 +279,10 @@ fn copy_arch_dlls(staging: &Path, arch: &str, dest: &Path) -> Result<usize, Runt
     Ok(copied)
 }
 
-/// Find the shallowest directory named exactly `name` in the extracted tree (breadth-first, since the
-/// tarball may or may not wrap its `x64`/`x32` dirs in a top-level version directory). An unreadable
-/// subdirectory is skipped, not fatal.
+/// The shallowest directory named exactly `name` in the extracted tree, if there is one.
+///
+/// Breadth-first because an archive may or may not wrap its `x64` and `x32` directories in a
+/// top-level version directory. An unreadable subdirectory is skipped rather than fatal.
 fn find_dir(root: &Path, name: &str) -> Option<PathBuf> {
     let mut queue = VecDeque::from([root.to_path_buf()]);
     while let Some(dir) = queue.pop_front() {
@@ -265,7 +301,13 @@ fn find_dir(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Record the DXVK install in `prefix.json`: set the `dxvk` field and append a setup step.
+/// Record the install in `prefix.json`: set the `dxvk` field and append a setup step.
+///
+/// # Errors
+///
+/// [`RuntimeError::PrefixJson`] if the existing file is corrupt or the new one cannot be
+/// serialized, [`RuntimeError::Io`] if the existing one cannot be read or the new one cannot be
+/// written.
 fn record(prefix: &Prefix, version: &str, nvapi: bool) -> Result<(), RuntimeError> {
     let path = prefix.metadata_path();
     let mut meta = PrefixMetadata::load(&path)?
@@ -291,9 +333,9 @@ mod tests {
 
     /// Both halves of the comparison, including the two that are not drift.
     ///
-    /// A prefix that has the companion nobody asked for is not a problem: the record is per prefix and
-    /// the wish is per profile, so two profiles sharing one prefix disagree by design, and the launch
-    /// that does not want it says so in its environment instead.
+    /// A prefix that has the companion nobody asked for is not a problem: the record is per prefix
+    /// and the wish is per profile, so two profiles sharing one prefix disagree by design, and the
+    /// launch that does not want it says so in its environment instead.
     #[test]
     fn the_companion_is_missing_only_where_it_was_wanted_and_is_not_recorded() {
         assert!(nvapi_missing(Some(&recorded(false)), true));

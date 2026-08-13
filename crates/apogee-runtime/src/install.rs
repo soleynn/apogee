@@ -1,5 +1,7 @@
-//! Downloading and extracting runners and supporting tools through the injected fetcher, plus
-//! fetching the signed catalog itself.
+//! Runner and tool installation, and the catalog fetch that names them.
+//!
+//! Artifacts are downloaded and extracted through the injected fetcher; the catalog is downloaded and
+//! verified against a caller-supplied key list.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,19 +15,28 @@ use crate::error::RuntimeError;
 use crate::extract::extract_archive;
 use crate::progress::{Progress, RuntimeEvent};
 
-/// A marker written into a runner/tool directory once its extraction completed, so a re-run skips a
-/// finished install but retries an interrupted one. It lives outside the extracted tree so an
-/// archive entry cannot plant it and a partial extraction cannot leave a stale one.
+/// Where the marker for a finished install is written.
+///
+/// A re-run skips a completed install and retries an interrupted one. The markers are siblings of the
+/// extracted directories rather than files inside them, so an archive entry cannot plant one and a
+/// partial extraction cannot leave a stale one.
 const INSTALLED_DIR: &str = ".installed";
 
-/// How many times to (re)start a download before giving up, over whatever the injected fetcher
-/// already spent on the request internally; each restart resumes from the journal rather than from
-/// zero. Which failures are worth a restart is [`FetchError::is_transient`], answered by the crate
-/// that raises them.
+/// How many attempts a download gets in total: one initial and three restarts.
+///
+/// These sit on top of whatever the injected fetcher already spent inside one request, and each
+/// resumes from its journal rather than from zero. Which failures are worth a restart is
+/// [`FetchError::is_transient`], answered by the crate that raises them.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
+
+/// The pause between those restarts.
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Ensure `runner` is installed under `runners_root`, returning its directory.
+///
+/// # Errors
+///
+/// As [`install_artifact`].
 pub(crate) async fn install_runner(
     fetcher: &Fetcher,
     runner: &Runner,
@@ -52,7 +63,11 @@ pub(crate) async fn install_runner(
     Ok(dir)
 }
 
-/// Ensure `tool` (e.g. `umu-launcher`) is installed under `tools_root`, returning its directory.
+/// Ensure `tool`, such as `umu-launcher`, is installed under `tools_root`, returning its directory.
+///
+/// # Errors
+///
+/// As [`install_artifact`].
 pub(crate) async fn install_tool(
     fetcher: &Fetcher,
     tool: &ToolEntry,
@@ -79,6 +94,16 @@ pub(crate) async fn install_tool(
     Ok(dir)
 }
 
+/// Download, verify, and extract one pinned artifact into `<root>/<name>-<version>`.
+///
+/// Returns that directory. A run whose marker is already in [`INSTALLED_DIR`] returns it without
+/// touching the network; a completed run writes the marker and removes the cached tarball.
+///
+/// # Errors
+///
+/// Whatever [`download_verified`] raises, [`RuntimeError::Extract`] if the extraction fails, panics,
+/// or yields nothing under the strip prefix, and [`RuntimeError::Io`] if the marker cannot be
+/// written.
 #[allow(clippy::too_many_arguments)]
 async fn install_artifact(
     fetcher: &Fetcher,
@@ -133,8 +158,18 @@ async fn install_artifact(
     Ok(dir)
 }
 
-/// Download `url` to `dest`, verifying its whole-file digest and relaying download progress into the
-/// runtime event stream. A dropped connection resumes from the fetcher's journal on the next attempt.
+/// Download `url` to `dest` under its whole-file digest.
+///
+/// Relays transfer progress into the runtime event stream. A dropped connection resumes from the
+/// fetcher's journal on the next attempt, over at most [`MAX_DOWNLOAD_ATTEMPTS`] attempts.
+///
+/// # Errors
+///
+/// [`RuntimeError::Io`] if `dest`'s parent cannot be created, [`RuntimeError::Spec`] if the download
+/// request is not one the fetcher accepts, and otherwise whatever
+/// [`RuntimeError::from_fetch`] routes the last attempt's failure
+/// to: [`RuntimeError::OutOfSpace`] for a full disk, [`RuntimeError::Download`] for anything else,
+/// including the [`FetchError::Cancelled`] a stopped transfer raises.
 pub(crate) async fn download_verified(
     fetcher: &Fetcher,
     url: &Url,
@@ -183,21 +218,27 @@ pub(crate) async fn download_verified(
 
 /// The names a fetched catalog and its detached signature are cached under.
 const CATALOG_FILES: [&str; 2] = ["catalog.json", "catalog.json.sig"];
+
 /// Where a catalog fetch in progress writes, cleared before every attempt.
 const CATALOG_STAGING: &str = ".fetching";
 
-/// Fetch the signed catalog: download the manifest and its detached signature over HTTPS, then verify
-/// against `keys`. The manifest's own bytes are not sha-pinned ahead of time; the Ed25519 signature is
-/// the authenticity gate. The keys are a parameter rather than read here, so the caller decides what
-/// the catalog is trusted against (a shipping caller passes the compiled-in ones) and a test can drive
-/// this path with a signature it can produce.
+/// Fetch the signed catalog and verify it against `keys`.
 ///
-/// It downloads into a staging directory that is removed first, and that is load-bearing rather than
-/// tidiness. The fetcher's `overwrite` knob could force the re-fetch on its own (an unpinned
-/// destination is otherwise served back forever, which is exactly the property "a runner bump is a
-/// manifest edit" denies), but staging buys the part that knob cannot: the catalog and its detached
-/// signature verify as a pair before either replaces the last good copy, so a failed, truncated, or
-/// unverifiable fetch never leaves a half-updated cache behind.
+/// The manifest and its detached signature both come down unpinned: the manifest's bytes are not
+/// digest-pinned ahead of time, and the Ed25519 signature over them is the whole authenticity gate.
+/// The keys are a parameter rather than read here, so the caller decides what the catalog is trusted
+/// against (a shipping caller passes the compiled-in ones) and a test can drive this path with a
+/// signature it can produce.
+///
+/// Both files land in a staging directory first, so the pair verifies together before either replaces
+/// the last good copy and a failed, truncated, or unverifiable fetch never leaves a half-updated
+/// cache behind.
+///
+/// # Errors
+///
+/// [`RuntimeError::Catalog`] if the manifest verifies against none of `keys` or does not parse,
+/// [`RuntimeError::Io`] if the staging directory, the reads, or the renames into the cache fail, and
+/// whatever [`download_unverified`] raises for either transfer.
 pub(crate) async fn fetch_catalog(
     fetcher: &Fetcher,
     manifest_url: &Url,
@@ -206,6 +247,9 @@ pub(crate) async fn fetch_catalog(
     keys: &[[u8; 32]],
     cancel: &CancellationToken,
 ) -> Result<Catalog, RuntimeError> {
+    // Staging, not the fetcher's `overwrite` knob. That knob would force the re-fetch on its own (an
+    // unpinned destination is otherwise served back forever, which is exactly the property "a runner
+    // bump is a manifest edit" denies), but it cannot buy the verified-pair swap below.
     let staging = cache_dir.join(CATALOG_STAGING);
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging)
@@ -244,8 +288,14 @@ pub(crate) async fn fetch_catalog(
     Ok(catalog)
 }
 
-/// Download `url` to `dest` over HTTPS without a content pin (the caller authenticates the bytes some
-/// other way, e.g. an Ed25519 signature). Refused over plain `http`.
+/// Download `url` to `dest` with no content pin, for bytes the caller authenticates some other way.
+///
+/// # Errors
+///
+/// [`RuntimeError::Io`] if `dest`'s parent cannot be created, [`RuntimeError::Spec`] if the fetcher
+/// refuses the request, which an unverified download over plain `http` always is, and otherwise
+/// [`RuntimeError::OutOfSpace`] or [`RuntimeError::Download`] as
+/// [`RuntimeError::from_fetch`] routes it.
 async fn download_unverified(
     fetcher: &Fetcher,
     url: &Url,
@@ -267,6 +317,7 @@ async fn download_unverified(
     Ok(())
 }
 
+/// A filesystem failure on this module's own bookkeeping, naming the path it happened at.
 fn io_err(path: &Path, source: std::io::Error) -> RuntimeError {
     RuntimeError::Io {
         path: path.to_path_buf(),
@@ -287,9 +338,11 @@ mod tests {
     use crate::error::RuntimeError;
     use crate::progress::Progress;
 
-    /// A gzip'd tar with one file under `top/files/bin/`, carrying `payload`. These tests exercise the
-    /// download/extract path directly (not the full `prepare`, which would go on to `wineboot` a fake
-    /// runner), so the payload is an opaque blob, not a real wine binary.
+    /// A gzip'd tar with one file under `top/files/bin/`, carrying `payload`.
+    ///
+    /// These tests exercise the download and extract path directly, not the full `prepare` (which
+    /// would go on to `wineboot` a fake runner), so the payload is an opaque blob rather than a real
+    /// wine binary.
     fn runner_targz(top: &str, payload: &[u8]) -> std::io::Result<Vec<u8>> {
         let mut builder = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
@@ -303,6 +356,10 @@ mod tests {
         encoder.finish()
     }
 
+    /// A host that drops mid-stream costs a resume, not a refetch.
+    ///
+    /// The whole install path end to end, so the extracted file also has to come back byte-identical
+    /// to what was packed.
     #[tokio::test]
     async fn install_downloads_resumes_and_extracts_a_runner() {
         // An incompressible payload keeps the gz sizable, so a mid-stream drop is meaningful.
@@ -361,6 +418,9 @@ mod tests {
         );
     }
 
+    /// A second install of the same runner sends no further request.
+    ///
+    /// The marker is what makes re-preparing a ready runner free.
     #[tokio::test]
     async fn a_finished_install_re_downloads_nothing() {
         let payload = generated_vec(7, 0, 8 * 1024);
@@ -411,14 +471,15 @@ mod tests {
         );
     }
 
-    /// Ctrl-C while a runner is downloading is the one stop that arrives from the fetcher rather than
-    /// from this crate's own spawn or prefix paths, and it comes back wrapped in [`RuntimeError`] like
-    /// any other transfer failure. A shell reading the variant alone therefore cannot tell a stopped
-    /// download from a broken mirror, so it reads the disposition off the error instead and this pins
-    /// what that answers.
+    /// A runner download the token stopped reads as a cancellation, not a failed install.
+    ///
+    /// Ctrl-C here is the one stop that arrives from the fetcher rather than from this crate's own
+    /// spawn or prefix paths, and it comes back wrapped in [`RuntimeError`] like any other transfer
+    /// failure. A shell reading the variant alone cannot tell a stopped download from a broken
+    /// mirror, so it reads the disposition off the error instead, and this pins what that answers.
     ///
     /// The token is fired before the install starts, so the stop lands at the transfer's first
-    /// cancellation check instead of at a chosen offset, and the outcome is the same on every run.
+    /// cancellation check rather than at a chosen offset, and the outcome is the same on every run.
     #[tokio::test]
     async fn a_download_the_token_stopped_reads_as_a_cancellation() {
         let tar = runner_targz("stopped-1", b"payload").expect("build archive");
@@ -457,13 +518,15 @@ mod tests {
         );
     }
 
-    /// A host that throttles for longer than the fetcher's own budget hands the status back as a
-    /// plain [`FetchError::Http`], which is the one failure whose disposition cannot be read off the
-    /// variant. The restart loop here has to keep asking until the host recovers; reporting the first
-    /// `503` would fail an install over a CDN node that was busy for a second.
+    /// A `503` outlasting the fetcher's own budget is restarted, not reported.
+    ///
+    /// Such a host hands the status back as a plain [`FetchError::Http`], the one failure whose
+    /// disposition cannot be read off the variant, so the restart loop has to keep asking until it
+    /// recovers. Reporting the first refusal would fail an install over a CDN node that was busy for
+    /// a second.
     ///
     /// The injected fetcher gets a single attempt, so every refusal reaches that loop rather than
-    /// being absorbed (and waited out) inside one `download` call.
+    /// being absorbed, and waited out, inside one `download` call.
     #[tokio::test]
     async fn a_throttled_runner_download_is_restarted_until_the_host_serves() {
         let payload = generated_vec(11, 0, 16 * 1024);
