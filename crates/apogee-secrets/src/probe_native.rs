@@ -15,12 +15,8 @@ use crate::{BackendReport, BackendState};
 const PROBE_KEY: &str = "probe";
 
 pub(crate) fn probe() -> BackendReport {
-    BackendReport {
-        backend: BACKEND,
-        state: probe_state(),
-        // Neither platform has the sandbox this reports on.
-        sandbox: None,
-    }
+    // Neither platform has the sandbox this reports on, which is what the bare constructor says.
+    BackendReport::new(BACKEND, probe_state())
 }
 
 fn probe_state() -> BackendState {
@@ -96,11 +92,7 @@ mod tests {
             ));
             assert_eq!(classify(Err(err)), BackendState::Locked, "{code}");
         }
-        let report = BackendReport {
-            backend: BACKEND,
-            state: BackendState::Locked,
-            sandbox: None,
-        };
+        let report = BackendReport::new(BACKEND, BackendState::Locked);
         assert!(report.is_usable());
     }
 }

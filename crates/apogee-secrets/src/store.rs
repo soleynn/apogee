@@ -32,6 +32,42 @@ pub(crate) fn refuse_empty(value: &Secret) -> Result<(), SecretsError> {
 ///
 /// Every method blocks and may raise the platform's unlock prompt, so a caller on an async runtime
 /// must wrap the call in `tokio::task::spawn_blocking`.
+///
+/// # Examples
+/// A backend of a caller's own is the four methods without defaults. The probe is the one that
+/// needs something from this crate, and [`BackendReport::new`] is it: the report is
+/// `#[non_exhaustive]`, so a struct literal does not reach across a crate boundary.
+/// ```
+/// use std::sync::Arc;
+///
+/// use apogee_secrets::{
+///     Backend, BackendReport, BackendState, Secret, SecretKind, SecretStore, Secrets, SecretsError,
+/// };
+/// use uuid::Uuid;
+///
+/// /// A store that answers every read with nothing and refuses every write.
+/// struct KeepsNothing;
+///
+/// impl SecretStore for KeepsNothing {
+///     fn get(&self, _: Uuid, _: SecretKind) -> Result<Option<Secret>, SecretsError> {
+///         Ok(None)
+///     }
+///     fn set(&self, _: Uuid, _: SecretKind, _: Secret) -> Result<(), SecretsError> {
+///         Err(SecretsError::NotStoring)
+///     }
+///     fn delete(&self, _: Uuid, _: SecretKind) -> Result<(), SecretsError> {
+///         Ok(())
+///     }
+///     fn probe(&self) -> BackendReport {
+///         BackendReport::new(Backend::Null, BackendState::NotStoring)
+///     }
+/// }
+///
+/// let secrets = Secrets::with_backend(Arc::new(KeepsNothing));
+/// assert!(!secrets.store().probe().is_usable());
+/// assert!(secrets.store().get(Uuid::nil(), SecretKind::Password)?.is_none());
+/// # Ok::<(), SecretsError>(())
+/// ```
 pub trait SecretStore {
     /// Read a secret. A secret that was never stored is `Ok(None)`, not an error.
     ///
@@ -117,11 +153,15 @@ impl Secrets {
     /// The choice is the composition root's: this is how a user who has turned storage off, or who
     /// picked the fallback, gets the store that matches. Nothing here probes to make the decision,
     /// for the same reason [`Secrets::new`] does not.
+    ///
+    /// Takes the share rather than the box. The handle holds its backend behind a reference count
+    /// either way, so an owning box only means the caller cannot keep a handle on what it just
+    /// injected: a test that wants to read back what the store was asked has to wrap it in a
+    /// forwarding type first, and a forwarding type that forgets to pass [`SecretStore::seal`] on
+    /// is a bug nothing catches.
     #[must_use]
-    pub fn with_backend(backend: Box<dyn SecretStore + Send + Sync>) -> Self {
-        Self {
-            backend: Arc::from(backend),
-        }
+    pub fn with_backend(backend: Arc<dyn SecretStore + Send + Sync>) -> Self {
+        Self { backend }
     }
 
     /// Borrow the active backend.

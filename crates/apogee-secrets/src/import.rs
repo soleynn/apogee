@@ -16,7 +16,7 @@
 //! read as a specification and never copied; the launcher half of it is GPL-3.0.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use zeroize::Zeroize;
 
@@ -44,23 +44,18 @@ const LEGACY_TARGET_PREFIX: &str = "FINAL FANTASY XIV";
 // three arguments into a bus item: `makeSchema` (`:41-49`) makes the package the schema name, and
 // `getPassword` (`:108-121`) files the other two under the attribute names declared at `:33-34`,
 // `service` and `username`.
+//
+// The third of them, the schema (`PACKAGE`, `KeychainSecretProvider.cs:9`, `dev.goats.xivlauncher`),
+// is not a constant here because the search below deliberately does not use it: whether it reaches
+// the bus as an attribute depends on the binding it goes through rather than on the launcher, so a
+// query that named it would return nothing on an install that stores the item without it. The two
+// attributes that are searched are enough to identify one account's password.
 
 /// The value its native build files passwords under on the Secret Service. Not the account name:
 /// it is a fixed marker, the same for every account.
 ///
 /// `SERVICE`, `KeychainSecretProvider.cs:10`, passed to every verb at `:51`, `:65` and `:71`.
 const SECRET_SERVICE_SERVICE: &str = "SEID";
-
-/// The schema its native build declares on the Secret Service.
-///
-/// `PACKAGE`, `KeychainSecretProvider.cs:9`, which reaches the bus as the schema name rather than as
-/// anything the launcher passes per call.
-///
-/// Deliberately *not* part of the search below. Whether it reaches the bus as an attribute depends
-/// on the binding it goes through rather than on the launcher, and a query that named it would
-/// return nothing on an install that stores the item without it. The two attributes that are
-/// searched are enough to identify one account's password.
-pub const FOREIGN_SCHEMA: &str = "dev.goats.xivlauncher";
 
 /// The keys another launcher stores one account's password under.
 ///
@@ -376,12 +371,6 @@ impl ForeignSecretsFile {
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
-    }
-
-    /// The file this reads.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 

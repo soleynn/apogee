@@ -354,11 +354,11 @@ impl Core {
             .unwrap_or_default();
         let secrets = match chosen {
             SecretBackend::Platform => Secrets::new(),
-            SecretBackend::EncryptedFile => Secrets::with_backend(Box::new(EncryptedFile::open(
+            SecretBackend::EncryptedFile => Secrets::with_backend(Arc::new(EncryptedFile::open(
                 config.secrets_path(),
                 passphrase,
             ))),
-            SecretBackend::Nothing => Secrets::with_backend(Box::new(Null::new())),
+            SecretBackend::Nothing => Secrets::with_backend(Arc::new(Null::new())),
         };
         Self::with_secrets(config, transport, secrets)
     }
@@ -1211,39 +1211,18 @@ mod tests {
         use crate::model::{ListenerSettings, OtpDelivery};
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
+        ///
+        /// The same `Arc` goes in and stays out here: the handle shares its backend, so a test does
+        /// not have to wrap the double in a forwarding type to keep hold of it.
         fn core_with(store: Arc<MemoryStore>) -> (TempDir, Core) {
             let dir = TempDir::new().unwrap();
             let core = Core::with_secrets(
                 CoreConfig::with_base(dir.path()),
                 Arc::new(FixtureTransport::new([])),
-                Secrets::with_backend(Box::new(SharedStore(Arc::clone(&store)))),
+                Secrets::with_backend(store),
             )
             .unwrap();
             (dir, core)
-        }
-
-        /// Lets a test keep a handle on the store the core is using. `Secrets` takes ownership of its
-        /// backend, so without this the recorded calls would be unreachable.
-        struct SharedStore(Arc<MemoryStore>);
-
-        impl apogee_secrets::SecretStore for SharedStore {
-            fn get(&self, account: Uuid, kind: SecretKind) -> Result<Option<Secret>, SecretsError> {
-                self.0.get(account, kind)
-            }
-            fn set(
-                &self,
-                account: Uuid,
-                kind: SecretKind,
-                value: Secret,
-            ) -> Result<(), SecretsError> {
-                self.0.set(account, kind, value)
-            }
-            fn delete(&self, account: Uuid, kind: SecretKind) -> Result<(), SecretsError> {
-                self.0.delete(account, kind)
-            }
-            fn probe(&self) -> apogee_secrets::BackendReport {
-                self.0.probe()
-            }
         }
 
         fn seeded(core: &Core, store: &MemoryStore) -> (Account, Profile) {
@@ -1361,7 +1340,7 @@ mod tests {
             let core = Core::with_secrets(
                 CoreConfig::with_base(dir.path()),
                 Arc::new(FixtureTransport::new([])),
-                Secrets::with_backend(Box::new(SharedStore(Arc::clone(&working)))),
+                Secrets::with_backend(Arc::clone(&working) as Arc<dyn SecretStore + Send + Sync>),
             )
             .unwrap();
 

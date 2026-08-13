@@ -70,10 +70,10 @@ pub(crate) fn no_default_collection() -> bool {
 
 pub(crate) fn probe() -> BackendReport {
     let (state, sandbox) = probe_within(BUS_DEADLINE);
-    BackendReport {
-        backend: BACKEND,
-        state,
-        sandbox,
+    let report = BackendReport::new(BACKEND, state);
+    match sandbox {
+        Some(sandbox) => report.in_sandbox(sandbox),
+        None => report,
     }
 }
 
