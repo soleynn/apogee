@@ -217,8 +217,13 @@ fn pad_header(mut head: Vec<u8>) -> Vec<u8> {
 /// One thing to lay into the data region, in the order it was asked for.
 #[derive(Debug, Clone)]
 enum Item {
-    /// An entry, with the slack its slot reserves past the data it stores.
-    Entry { spec: EntrySpec, slack_units: u32 },
+    /// An entry, with the slack its slot reserves past the data it stores, and whether its slot
+    /// words are wiped once its data is laid down.
+    Entry {
+        spec: EntrySpec,
+        slack_units: u32,
+        empty_slot_words: bool,
+    },
     /// Space no entry claims, as a chain of wiped regions of that many units each.
     Gap(Vec<u32>),
     /// Space no entry claims, verbatim, padded out to a whole unit.
@@ -237,6 +242,8 @@ pub struct DatBuilder {
     items: Vec<Item>,
     /// Slack to leave in the slot of every entry pushed from here on, in 128-byte units.
     slack_units: u32,
+    /// Wipe the slot words of every entry pushed from here on.
+    empty_slot_words: bool,
     container_kind: Option<u32>,
     /// Write the first twenty-four bytes the way the spanned dat files with no magic carry them.
     no_magic: bool,
@@ -283,6 +290,7 @@ impl DatBuilder {
         Self {
             items: Vec::new(),
             slack_units: 0,
+            empty_slot_words: false,
             container_kind: None,
             no_magic: false,
             max_file_size: 2_000_000_000,
@@ -299,7 +307,12 @@ impl DatBuilder {
     /// Lay down one entry after whatever is already there.
     pub fn entry(&mut self, spec: EntrySpec) -> &mut Self {
         let slack_units = self.slack_units;
-        self.items.push(Item::Entry { spec, slack_units });
+        let empty_slot_words = self.empty_slot_words;
+        self.items.push(Item::Entry {
+            spec,
+            slack_units,
+            empty_slot_words,
+        });
         self
     }
 
@@ -308,6 +321,14 @@ impl DatBuilder {
     /// a slot; the space between slots is [`DatBuilder::gap`].
     pub fn slack(&mut self, units: u32) -> &mut Self {
         self.slack_units = units;
+        self
+    }
+
+    /// Write both slot words of every entry pushed after this as zero, while still laying its data
+    /// down and its table over it, the way a third-party writer that never fills them does. The
+    /// entry still occupies the space it stores, so the container around it is laid out as usual.
+    pub fn empty_slot_words(&mut self) -> &mut Self {
+        self.empty_slot_words = true;
         self
     }
 
@@ -419,8 +440,15 @@ impl DatBuilder {
         for item in &self.items {
             let at = DATA_REGION_OFFSET + region.len() as u64;
             match item {
-                Item::Entry { spec, slack_units } => {
-                    let (bytes_out, content) = self.entry_bytes(spec, *slack_units);
+                Item::Entry {
+                    spec,
+                    slack_units,
+                    empty_slot_words,
+                } => {
+                    let (mut bytes_out, content) = self.entry_bytes(spec, *slack_units);
+                    if *empty_slot_words {
+                        bytes_out[12..ENTRY_HEADER_LEN].fill(0);
+                    }
                     region.extend_from_slice(&bytes_out);
                     placed.push(Placed {
                         offset: at,
