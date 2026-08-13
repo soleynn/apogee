@@ -1,17 +1,19 @@
-//! What is checked before an install or a repair touches anything: that the game is not running in
-//! the install, and that the two disk pools have room.
+//! What is checked before anything is touched: that the game is not running in the install, and, for
+//! an install specifically, that the two disk pools have room.
 //!
-//! The game check comes first and has no escape hatch. It is a positive question asked of a
-//! [`GameProbe`] the composition root injects, rather than something inferred from a write that
-//! failed: a running client holds its own files open, so an apply into a live install fails partway
-//! through, at a moment that varies by which file the patch reached first. Asking beforehand is what
-//! makes the refusal say what to do about it.
+//! The game check runs before both an install and a repair, and has no escape hatch. It is a positive
+//! question asked of a [`GameProbe`] the composition root injects, rather than something inferred from
+//! a write that failed: a running client holds its own files open, so an apply into a live install
+//! fails partway through, at a moment that varies by which file the patch reached first. Asking
+//! beforehand is what makes the refusal say what to do about it.
 //!
-//! The space check is a heuristic with an escape hatch ([`PatcherConfig::ignore_space`], which covers
-//! space and nothing else) and a backstop. The patch store must hold the concurrent downloads (a
-//! rolling window, or all of them when kept); the install dir must hold the applied result, which
-//! patch length overestimates since patches both add and delete. A pool whose free space cannot be
-//! read (a non-existent tree, or a non-Unix target) is not blocked on.
+//! The space check runs only before an install (a repair rewrites bytes already on disk rather than
+//! adding new ones, so it has no comparable pool to predict against). It is a heuristic with an escape
+//! hatch ([`PatcherConfig::ignore_space`], which covers space and nothing else) and a backstop. The
+//! patch store must hold the concurrent downloads (a rolling window, or all of them when kept); the
+//! install dir must hold the applied result, which patch length overestimates since patches both add
+//! and delete. A pool whose free space cannot be read (a non-existent tree, or a non-Unix target) is
+//! not blocked on.
 //!
 //! Two pools, but not always two filesystems: a patch store under the game root, or both under one
 //! home directory, is the ordinary arrangement. Pools that resolve onto the same mount are guarded

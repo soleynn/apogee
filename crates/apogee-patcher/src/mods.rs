@@ -33,7 +33,12 @@ pub enum MapError {
     /// and the user would be told a repair reverts work they never did. A stale map is not a
     /// partial map, and nothing downstream can tell them apart.
     #[error("the index describes version {indexed}, the install is at {installed}")]
-    VersionMismatch { indexed: String, installed: String },
+    VersionMismatch {
+        /// The version the index was built for.
+        indexed: String,
+        /// The version the install reports it is at.
+        installed: String,
+    },
 }
 
 /// Describe every SqPack container `index` covers into `map`, with what `report` measured about it.
