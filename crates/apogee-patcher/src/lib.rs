@@ -27,7 +27,6 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use apogee_fetch::{FetchError, Fetcher};
@@ -45,10 +44,7 @@ mod request;
 mod staging;
 mod store;
 
-pub use catalog::{
-    INDEX_CATALOG_MANIFEST_VERSION, INDEX_CATALOG_PUBLIC_KEY, IndexCatalog, IndexCatalogError,
-    IndexEntry,
-};
+pub use catalog::{IndexCatalog, IndexCatalogError, IndexEntry};
 pub use elevated::{Elevation, probe_writable};
 pub use job::Job;
 pub use preflight::GameProbe;
@@ -65,11 +61,19 @@ pub use request::{
 };
 
 /// Which game repository a patch operation targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
+///
+/// The whole taxonomy Square Enix ships: the boot chain, the base game, and expansions numbered by a
+/// `u8`. Exhaustive, so a caller mapping a repo to a path or a URL has to answer for all three and
+/// gets told when that stops being all of them. It is also not serializable on purpose: the one
+/// spelling this crate commits to is [`from_label`](Self::from_label), and a derived encoding beside
+/// it would be a second, silently different name for the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Repo {
+    /// The launcher and updater chain, patched before login.
     Boot,
+    /// The base game.
     Game,
+    /// Expansion `n`, as its patchlist path spells it (`ex1`).
     Expansion(u8),
 }
 
@@ -92,10 +96,15 @@ impl Repo {
 
 /// Names one broken part for repair reporting: the repo-relative file and the byte offset of the run
 /// that failed verification.
-#[derive(Debug, Clone)]
+///
+/// Carries no repo of its own. It is only ever reached through
+/// [`PatchError::Verify`](PatchError::Verify), which names the repo already, and two copies of one
+/// value are two chances for a caller to read the one that was not set.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartRef {
-    pub repo: Repo,
+    /// The repo-relative path of the file holding the run.
     pub path: PathBuf,
+    /// The byte offset of the failing run within that file.
     pub offset: u64,
 }
 
@@ -178,10 +187,23 @@ pub enum PatchError {
         #[source]
         source: FetchError,
     },
-    #[error("{broken} broken part(s) in {repo:?}")]
+    /// A repo still failed verification after the last repair pass.
+    ///
+    /// The message names `first` as well as the count. The count alone says a repair did not
+    /// converge and gives nobody a file to look at, and this variant carries no `#[source]`, so a
+    /// part left out of the message is a part that reaches no caller at all: the error chain a
+    /// launcher renders is built from `Display`.
+    #[error(
+        "{broken} broken part(s) in {repo:?}, first {} at offset {}",
+        first.path.display(),
+        first.offset,
+    )]
     Verify {
+        /// The repo that did not come clean.
         repo: Repo,
+        /// How many runs still failed verification.
         broken: usize,
+        /// The first of those runs, in verification order.
         first: PartRef,
     },
     #[error("apply failed")]
@@ -249,7 +271,10 @@ pub struct PatcherConfig {
 }
 
 /// The reference launcher's reattempt budget, adopted as the default repair pass count.
-pub const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
+///
+/// Not public: [`PatcherConfig::new`] applies it, which is how every caller has ever obtained it, and
+/// a public constant is a number the crate would owe callers forever for tuning that belongs here.
+const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
 
 impl PatcherConfig {
     /// A config over `game_probe` with no patch store set (the caller must fill
