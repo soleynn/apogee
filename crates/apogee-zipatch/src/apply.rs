@@ -86,12 +86,17 @@ pub fn apply<R: Read, S: PatchSink>(
 }
 
 /// Scan a patch to `EOF_`, verifying every chunk CRC, without applying anything. This is how a boot
-/// patch (which has no block-SHA1 list) earns admission: the chunk CRC is its integrity proof. Open
-/// the reader with `.verify_crc(true)` before calling.
+/// patch (which has no block-SHA1 list) earns admission: the chunk CRC is its integrity proof.
+///
+/// Verification is switched on here rather than trusted to the caller. The reader defaults to on, so
+/// this changes nothing for a caller that never touched it; what it removes is the case where a
+/// reader opened `.verify_crc(false)` for some earlier purpose is handed to the one pass whose entire
+/// output is the checksum, and admits the patch having checked nothing.
 ///
 /// # Errors
 /// The first parse or CRC fault; carries the patch-file offset.
 pub fn scan_crc<R: Read>(reader: &mut PatchReader<R>) -> Result<()> {
+    reader.force_verify_crc();
     while reader.next_chunk()?.is_some() {}
     Ok(())
 }

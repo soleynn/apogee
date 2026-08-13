@@ -89,6 +89,13 @@ impl<R: Read> PatchReader<R> {
         self
     }
 
+    /// Force CRC verification on for the rest of this reader, for a pass whose whole purpose is the
+    /// checksum ([`scan_crc`](crate::scan_crc)). Not public: a caller turning verification *off* has
+    /// to say so through [`PatchReader::verify_crc`] at construction, where the decision is visible.
+    pub(crate) fn force_verify_crc(&mut self) {
+        self.verify_crc = true;
+    }
+
     /// The absolute file offset the reader sits at: the start of the next chunk before a call to
     /// [`PatchReader::next_chunk`], the byte just past the returned chunk after one. The dump tool
     /// records it before each read to label chunks by offset.
