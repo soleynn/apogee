@@ -167,8 +167,19 @@ impl RuntimeError {
 pub enum CatalogError {
     #[error("manifest is not valid JSON or violates the schema")]
     Malformed(#[source] serde_json::Error),
-    #[error("manifest signature did not verify against the trusted key")]
+    #[error("manifest signature did not verify against any trusted key")]
     BadSignature,
+    /// A key compiled into this build is not a point on the curve, so it can admit nothing.
+    ///
+    /// A build problem, and the one failure on this path the hosted file cannot be the cause of.
+    /// Reporting it as a bad signature would send whoever reads it to check the one thing that is
+    /// not wrong.
+    #[error("the trusted key at position {position} in this build is not a usable ed25519 key")]
+    #[non_exhaustive]
+    TrustedKeyUnusable {
+        /// Its index in the key list, which is the only part of the message that locates the typo.
+        position: usize,
+    },
     #[error("unsupported manifest version {found} (expected {expected})")]
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("unknown runner kind {kind:?}")]

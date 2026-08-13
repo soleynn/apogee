@@ -1,5 +1,5 @@
-//! The signed runner catalog: a JSON manifest whose Ed25519 signature is verified against a
-//! compiled-in key *before* any pin inside is trusted.
+//! The signed runner catalog: a JSON manifest whose Ed25519 signature is verified against
+//! compiled-in keys *before* any pin inside is trusted.
 //!
 //! [`Catalog::from_json_bytes`] is a pure, total parser over untrusted input (the fuzz entry point);
 //! [`Catalog::parse_and_verify`] gates it behind the signature check.
@@ -14,15 +14,98 @@ use crate::error::CatalogError;
 /// The manifest schema version this build understands.
 pub const CATALOG_MANIFEST_VERSION: u32 = 1;
 
-/// The compiled-in public key runner catalogs are authenticated against.
+/// The public keys a runner catalog may be authenticated against, the one it is signed with today
+/// first.
 ///
-/// The matching private key is held offline by the maintainer; it signs the hosted `manifest.json`
-/// and only these public bytes are committed. Rotating the key is a change to this constant plus a
-/// re-sign of the manifest.
-pub const CATALOG_PUBLIC_KEY: [u8; 32] = [
+/// Its own keys, not the component catalog's: the two are published on different cadences by
+/// different steps, and one compromised signer should not authenticate both. The matching private
+/// seeds are held offline by the maintainer, and only these public bytes are committed.
+///
+/// **A list, because a single constant cannot be rotated without an outage.** With one key,
+/// replacing it means both re-signing the hosted file and shipping a build that trusts the new key,
+/// and one of those has to happen first: re-sign first and every client in the field rejects the
+/// catalog until it updates, ship first and every updated client rejects it until the re-sign. A
+/// list removes the ordering. The new key is added here and released, the file is re-signed once
+/// that build is in the field, and the retired key is dropped in a later release.
+// It widens nothing. Every entry was compiled into this binary by the same build, so anyone who can
+// append one can already replace the first, and a retired key is dropped rather than kept forever:
+// the window is for finishing a rotation, not for keeping an old signer trusted.
+pub const CATALOG_PUBLIC_KEYS: &[[u8; 32]] = &[[
     0x5e, 0x3e, 0xed, 0x4c, 0xe1, 0x58, 0xa5, 0xb5, 0xf0, 0x4e, 0x6c, 0x36, 0x3c, 0xcb, 0x98, 0xc8,
     0x5c, 0xb4, 0xea, 0x34, 0x7a, 0x69, 0x86, 0x9c, 0x59, 0x2d, 0xe8, 0xca, 0xd7, 0x2b, 0xa3, 0x27,
-];
+]];
+
+// A build with no key admits nothing, and would say so as a signature that did not verify, at a
+// launch, on a user's machine. It is a typo, so it is caught here instead.
+const _: () = assert!(
+    !CATALOG_PUBLIC_KEYS.is_empty(),
+    "a build with no trusted key can admit no catalog at all"
+);
+
+/// Which of the trusted keys admitted a catalog.
+///
+/// The answer stops being uninteresting the moment [`CATALOG_PUBLIC_KEYS`] holds more than one. A
+/// catalog that only ever verifies against a retired key is a rotation whose re-sign never happened,
+/// and the release that drops that key from the list is where it becomes an outage.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_runtime::TrustedKey;
+///
+/// assert!(TrustedKey::Current.is_current());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrustedKey {
+    /// The key the catalog is signed with today.
+    Current,
+    /// A key still inside its overlap window. Whatever served this catalog has not been re-signed
+    /// since the rotation started.
+    #[non_exhaustive]
+    Retired {
+        /// Its index in [`CATALOG_PUBLIC_KEYS`], which is what locates it in a release.
+        position: usize,
+    },
+}
+
+impl TrustedKey {
+    const fn at(position: usize) -> Self {
+        if position == 0 {
+            Self::Current
+        } else {
+            Self::Retired { position }
+        }
+    }
+
+    /// Whether the signature came from the key in use today.
+    #[must_use]
+    pub const fn is_current(&self) -> bool {
+        matches!(self, Self::Current)
+    }
+}
+
+/// The keys compiled into this build.
+///
+/// One place, so every path that admits a catalog against a shipping key goes through the same
+/// constant and no field anywhere holds a key that could have been substituted.
+pub(crate) const fn default_keys() -> &'static [[u8; 32]] {
+    CATALOG_PUBLIC_KEYS
+}
+
+/// Decompress raw key bytes into usable ones, preserving order.
+///
+/// Takes any list rather than reading [`CATALOG_PUBLIC_KEYS`], so the failure and the position it
+/// names are testable without a build whose own constant is broken.
+fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, CatalogError> {
+    raw.iter()
+        .enumerate()
+        .map(|(position, bytes)| {
+            VerifyingKey::from_bytes(bytes)
+                .map_err(|_| CatalogError::TrustedKeyUnusable { position })
+        })
+        .collect()
+}
 
 /// The three runner kinds the launch path understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,19 +218,49 @@ impl Catalog {
         Self::try_from(raw)
     }
 
-    /// Verify `signature` over the exact `manifest_json` bytes against `key`, then parse. The
-    /// signature is checked **first**, so no pin is trusted before authenticity is
-    /// established. A signature that is not exactly 64 bytes, or does not verify, is
-    /// [`CatalogError::BadSignature`].
+    /// Verify `signature` over the exact `manifest_json` bytes against `keys`, in order, then parse.
+    /// The signature is checked **first**, so no pin is trusted before authenticity is established.
+    /// Returns which key admitted it.
+    ///
+    /// Raw 32-byte keys, the shape [`CATALOG_PUBLIC_KEYS`] is compiled in as, rather than a type from
+    /// the signature crate. A key is 32 bytes on any implementation, and naming that crate's type here
+    /// would put its major version in this one's surface for nothing.
+    ///
+    /// The keys are an argument rather than this build's own, so a test can drive the gate with a key
+    /// it signs with. Nothing about that weakens it: a caller cannot verify against keys it does not
+    /// have, and the launcher passes the ones compiled into it (see [`Self::verify_trusted`]).
+    ///
+    /// # Errors
+    /// [`CatalogError::TrustedKeyUnusable`] if one of `keys` is not a usable key,
+    /// [`CatalogError::BadSignature`] if the signature is not exactly 64 bytes or verifies against
+    /// none of `keys`, then anything [`Self::from_json_bytes`] raises.
     pub fn parse_and_verify(
         manifest_json: &[u8],
         signature: &[u8],
-        key: &VerifyingKey,
-    ) -> Result<Self, CatalogError> {
+        keys: &[[u8; 32]],
+    ) -> Result<(Self, TrustedKey), CatalogError> {
+        let keys = trusted_keys(keys)?;
         let sig = Signature::from_slice(signature).map_err(|_| CatalogError::BadSignature)?;
-        key.verify_strict(manifest_json, &sig)
-            .map_err(|_| CatalogError::BadSignature)?;
-        Self::from_json_bytes(manifest_json)
+        let position = keys
+            .iter()
+            .position(|key| key.verify_strict(manifest_json, &sig).is_ok())
+            .ok_or(CatalogError::BadSignature)?;
+        Ok((
+            Self::from_json_bytes(manifest_json)?,
+            TrustedKey::at(position),
+        ))
+    }
+
+    /// [`Self::parse_and_verify`] against the keys compiled into this build.
+    ///
+    /// # Errors
+    /// [`CatalogError::TrustedKeyUnusable`] if this build's own key list is malformed, then anything
+    /// [`Self::parse_and_verify`] raises.
+    pub fn verify_trusted(
+        manifest_json: &[u8],
+        signature: &[u8],
+    ) -> Result<(Self, TrustedKey), CatalogError> {
+        Self::parse_and_verify(manifest_json, signature, default_keys())
     }
 
     /// Resolve a runner by identity. `None` → the caller maps to
@@ -406,7 +519,23 @@ fn parse_format(format: Option<&str>) -> Result<ArchiveFormat, CatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
+    use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key_bytes};
+
+    /// A key nothing here signs with, for the positions in a list that must not be the one that
+    /// admits a catalog.
+    fn other_key() -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .to_bytes()
+    }
+
+    /// The hosted catalog and its detached signature, embedded at build time.
+    const fn hosted() -> (&'static [u8], &'static [u8]) {
+        (
+            include_bytes!("../../../site/runners/manifest.json"),
+            include_bytes!("../../../site/runners/manifest.json.sig"),
+        )
+    }
 
     /// A well-formed single-runner manifest with the given hex pin, spelled `sha256`.
     fn manifest(pin: &str) -> String {
@@ -433,8 +562,10 @@ mod tests {
     fn signature_accepts_a_valid_manifest() {
         let json = manifest(GOOD_PIN);
         let sig = sign_manifest(json.as_bytes());
-        let cat = Catalog::parse_and_verify(json.as_bytes(), &sig, &test_verifying_key())
-            .expect("valid signature");
+        let (cat, trusted) =
+            Catalog::parse_and_verify(json.as_bytes(), &sig, &[test_verifying_key_bytes()])
+                .expect("valid signature");
+        assert!(trusted.is_current());
         let runner = cat.runner("UMU-Proton", "9-20").expect("runner present");
         assert_eq!(runner.kind, RunnerKind::ProtonUmu);
         assert_eq!(runner.archive.format, ArchiveFormat::TarGz);
@@ -452,18 +583,21 @@ mod tests {
         let mut tampered = json.into_bytes();
         // Flip a byte in the body; the detached signature no longer matches.
         tampered[40] ^= 0x01;
-        let err = Catalog::parse_and_verify(&tampered, &sig, &test_verifying_key())
+        let err = Catalog::parse_and_verify(&tampered, &sig, &[test_verifying_key_bytes()])
             .expect_err("tampered body");
         assert!(matches!(err, CatalogError::BadSignature));
     }
 
+    /// A signer on none of the trusted positions is refused, however many are listed: the list is an
+    /// overlap window and never a widening of who may sign.
     #[test]
-    fn signature_rejects_the_wrong_key() {
+    fn signature_rejects_a_key_on_no_position() {
         let json = manifest(GOOD_PIN);
         let sig = sign_manifest(json.as_bytes());
-        // The compiled-in key is a different key than the test signer.
-        let other = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).expect("compiled-in key parses");
-        let err = Catalog::parse_and_verify(json.as_bytes(), &sig, &other).expect_err("wrong key");
+        // Neither the compiled-in key nor the successor below is the test signer.
+        let keys = [CATALOG_PUBLIC_KEYS[0], other_key()];
+        let err =
+            Catalog::parse_and_verify(json.as_bytes(), &sig, &keys).expect_err("no listed signer");
         assert!(matches!(err, CatalogError::BadSignature));
     }
 
@@ -471,10 +605,65 @@ mod tests {
     fn signature_rejects_absent_or_short() {
         let json = manifest(GOOD_PIN);
         for sig in [b"".as_slice(), b"too-short".as_slice()] {
-            let err = Catalog::parse_and_verify(json.as_bytes(), sig, &test_verifying_key())
-                .expect_err("non-64-byte signature");
+            let err =
+                Catalog::parse_and_verify(json.as_bytes(), sig, &[test_verifying_key_bytes()])
+                    .expect_err("non-64-byte signature");
             assert!(matches!(err, CatalogError::BadSignature));
         }
+    }
+
+    /// The property the overlap window buys. Without the second half a rotation nobody finished looks
+    /// exactly like one that is done, right up until the retiring release.
+    #[test]
+    fn a_retired_key_still_admits_a_catalog_and_says_it_did() {
+        let json = manifest(GOOD_PIN);
+        let sig = sign_manifest(json.as_bytes());
+        let keys = [other_key(), test_verifying_key_bytes()];
+
+        let (_, trusted) = Catalog::parse_and_verify(json.as_bytes(), &sig, &keys)
+            .expect("a key inside its overlap window still admits the catalog");
+        assert_eq!(trusted, TrustedKey::Retired { position: 1 });
+        assert!(!trusted.is_current());
+    }
+
+    /// The order is the whole design: position zero is what the publisher signs with today, and a
+    /// retired key must never be reported as the current one.
+    #[test]
+    fn the_first_accepted_key_is_the_current_one() {
+        let json = manifest(GOOD_PIN);
+        let sig = sign_manifest(json.as_bytes());
+        let keys = [test_verifying_key_bytes(), other_key()];
+
+        let (_, trusted) =
+            Catalog::parse_and_verify(json.as_bytes(), &sig, &keys).expect("valid signature");
+        assert!(trusted.is_current());
+    }
+
+    /// An empty accepted list admits nothing. It cannot be reached from a shipping build (a const
+    /// assertion refuses one), so what this pins is that the loop does not fall through to success.
+    #[test]
+    fn a_build_that_trusts_no_key_admits_nothing() {
+        let json = manifest(GOOD_PIN);
+        let sig = sign_manifest(json.as_bytes());
+        assert!(matches!(
+            Catalog::parse_and_verify(json.as_bytes(), &sig, &[]),
+            Err(CatalogError::BadSignature)
+        ));
+    }
+
+    /// Reported as a bad signature it would send whoever hits it to go and check the hosted file, which
+    /// is the one thing that cannot be at fault. The position matters too: with a list, "which entry"
+    /// is the only part of the message that locates the typo.
+    #[test]
+    fn a_key_that_is_not_a_key_is_a_build_problem_rather_than_a_bad_signature() {
+        // Not a decompressable compressed Edwards point, so it can never verify anything.
+        let mut unusable = [0u8; 32];
+        unusable[0] = 0x02;
+
+        assert!(matches!(
+            trusted_keys(&[test_verifying_key_bytes(), unusable]),
+            Err(CatalogError::TrustedKeyUnusable { position: 1 })
+        ));
     }
 
     #[test]
@@ -608,21 +797,38 @@ mod tests {
         }
     }
 
+    /// Every key this build would accept has to be usable, or it can admit nothing and the build says
+    /// so as a signature failure on a user's machine instead.
     #[test]
-    fn the_compiled_in_key_parses() {
-        assert!(VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).is_ok());
+    fn every_compiled_in_key_parses() {
+        trusted_keys(default_keys())
+            .expect("every trusted key in this build is a usable ed25519 key");
+    }
+
+    /// The rotation failure an accepted-key list otherwise hides: a new key added and released while
+    /// the hosted file was never re-signed, which works everywhere until the retired key is dropped and
+    /// then works nowhere. Its own test, so a failure names the unfinished rotation rather than the
+    /// rows.
+    #[test]
+    fn the_hosted_manifest_is_signed_by_the_key_in_use_today() {
+        let (manifest, signature) = hosted();
+        let (_, trusted) = Catalog::verify_trusted(manifest, signature)
+            .expect("the hosted manifest verifies and parses against a trusted key");
+        assert_eq!(
+            trusted,
+            TrustedKey::Current,
+            "the hosted catalog is still signed by a retired key: finish the rotation by re-signing it"
+        );
     }
 
     /// The hosted manifest and its detached signature, embedded at build time, must verify against
-    /// the compiled-in key and expose the runner and tool the managed launch path resolves. This
+    /// the compiled-in keys and expose the runner and tool the managed launch path resolves. This
     /// catches a mistyped key, a manifest reformatted after signing, or a dropped entry.
     #[test]
     fn the_hosted_manifest_verifies_against_the_compiled_in_key() {
-        let manifest = include_bytes!("../../../site/runners/manifest.json");
-        let signature = include_bytes!("../../../site/runners/manifest.json.sig");
-        let key = VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY).expect("compiled-in key parses");
-        let catalog = Catalog::parse_and_verify(manifest, signature, &key)
-            .expect("hosted manifest verifies and parses against the compiled-in key");
+        let (manifest, signature) = hosted();
+        let (catalog, _) = Catalog::verify_trusted(manifest, signature)
+            .expect("hosted manifest verifies and parses against a compiled-in key");
         let runner = catalog
             .runner("GE-Proton", "11-1")
             .expect("proton runner present");

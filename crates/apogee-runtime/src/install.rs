@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apogee_fetch::{DigestPin, DownloadSpec, FetchError, Fetcher, Validator, VerifiedFile};
-use ed25519_dalek::VerifyingKey;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -188,10 +187,10 @@ const CATALOG_FILES: [&str; 2] = ["catalog.json", "catalog.json.sig"];
 const CATALOG_STAGING: &str = ".fetching";
 
 /// Fetch the signed catalog: download the manifest and its detached signature over HTTPS, then verify
-/// against `key`. The manifest's own bytes are not sha-pinned ahead of time; the Ed25519 signature is
-/// the authenticity gate. The key is a parameter rather than read here, so the caller decides what the
-/// catalog is trusted against (a shipping caller passes the compiled-in one) and a test can drive this
-/// path with a signature it can produce.
+/// against `keys`. The manifest's own bytes are not sha-pinned ahead of time; the Ed25519 signature is
+/// the authenticity gate. The keys are a parameter rather than read here, so the caller decides what
+/// the catalog is trusted against (a shipping caller passes the compiled-in ones) and a test can drive
+/// this path with a signature it can produce.
 ///
 /// It downloads into a staging directory that is removed first, and that is load-bearing rather than
 /// tidiness. The fetcher's `overwrite` knob could force the re-fetch on its own (an unpinned
@@ -204,7 +203,7 @@ pub(crate) async fn fetch_catalog(
     manifest_url: &Url,
     signature_url: &Url,
     cache_dir: &Path,
-    key: &VerifyingKey,
+    keys: &[[u8; 32]],
     cancel: &CancellationToken,
 ) -> Result<Catalog, RuntimeError> {
     let staging = cache_dir.join(CATALOG_STAGING);
@@ -223,7 +222,11 @@ pub(crate) async fn fetch_catalog(
     let signature = tokio::fs::read(&signature_path)
         .await
         .map_err(|e| io_err(&signature_path, e))?;
-    let catalog = Catalog::parse_and_verify(&manifest, &signature, key)?;
+    // Which key admitted it is dropped here and nothing on this path reads it. An overlap window exists
+    // so that a launch does not have to care which side of a rotation it is on; the re-sign it is
+    // waiting for is a maintainer's business, asserted where the hosted file is embedded rather than on
+    // a user's machine.
+    let (catalog, _) = Catalog::parse_and_verify(&manifest, &signature, keys)?;
 
     // Only bytes that verified reach the cache. Two renames rather than one, so a crash between them can
     // leave a manifest beside the previous signature; nothing reads the cache without verifying it, so
