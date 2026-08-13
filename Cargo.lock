@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "apogee-sqpack"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "apogee-sqpack",
  "crc32fast",
