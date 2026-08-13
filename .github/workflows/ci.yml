@@ -462,6 +462,39 @@ jobs:
       # it. The crate's other integration targets are Linux-proven and add no Windows-specific claim.
       - run: cargo test -p apogee-patcher --lib --test write_probe_windows
 
+  # The launch arm on the only platform it exists for. None of what it asserts survives a cross-build:
+  # the compatibility layers are read out of the environment a real child was given (Windows re-spells
+  # them on the way in, which is the engine having seen them), and the session's wait and kill are the
+  # child handle driven against a process that has to actually stop.
+  #
+  # `-p apogee-runtime` rather than the workspace, for the reason the job above names: other crates
+  # carry Windows test targets that do not compile today.
+  #
+  # Advisory, like the jobs above: the branch ruleset's required contexts are fixed, and promoting one
+  # is a separate change.
+  test-windows-launch:
+    name: test-windows-launch
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: windows-launch
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The type check no other job performs: `build-windows-cross` runs `cargo build`, which never
+      # reaches a test target.
+      - run: cargo clippy -p apogee-runtime --all-targets -- -D warnings
+      # The unit tests come along because this is the only job that runs them for Windows at all; the
+      # crate's other integration targets are Linux-only and compile away to nothing here.
+      - run: cargo test -p apogee-runtime --lib --test launch_windows
+
   # The Apple targets the crate declares support for, type-checked. There is no hardware for them
   # anywhere in this repository and no cross-compiler either: the Keychain backend links system
   # frameworks, so `build-windows-cross`'s trick does not carry over. Checking does, and it is what
