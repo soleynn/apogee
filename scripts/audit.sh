@@ -58,7 +58,7 @@ bad=$(deps_of sqex-proto | grep -xiE 'regex|regex-.*|scraper|html5ever|select|ku
 grep -q '^\* -text$' .gitattributes 2>/dev/null \
   || report "the checkout may rewrite line endings in byte-exact artifacts" \
      ".gitattributes does not disable text conversion, so a Windows checkout corrupts the signed catalogs"
-for m in site/indexes/manifest.json site/components/manifest.json; do
+for m in site/indexes/manifest.json site/components/manifest.json site/runners/manifest.json; do
   [ -f "$m" ] || continue
   ! grep -qU $'\r' "$m" || report "a signed manifest carries carriage returns" \
     "$m cannot verify against the compiled-in key with these bytes"

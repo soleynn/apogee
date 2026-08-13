@@ -51,8 +51,8 @@ use apogee_fetch::Fetcher;
 
 pub use bench::{BenchError, BenchStats, FrameLog};
 pub use catalog::{
-    ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEY, Catalog, DxvkEntry,
-    NvapiRef, Runner, RunnerKind, ToolEntry,
+    ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEYS, Catalog,
+    DxvkEntry, NvapiRef, Runner, RunnerKind, ToolEntry, TrustedKey,
 };
 #[cfg(target_os = "linux")]
 pub use companion::{Companion, CompanionExit, CompanionSpec};
@@ -230,35 +230,36 @@ impl Runtime {
         self.inner.paths.runners.join(".catalog")
     }
 
-    /// Fetch the signed runner catalog and verify it against the compiled-in key.
+    /// Fetch the signed runner catalog and verify it against the compiled-in keys.
     ///
     /// # Errors
-    /// [`RuntimeError::Catalog`] if the manifest does not verify or does not parse, plus anything the
-    /// download raises.
+    /// [`RuntimeError::Catalog`] if the manifest verifies against none of them or does not parse, plus
+    /// anything the download raises.
     pub async fn fetch_catalog(
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
-        let key = ed25519_dalek::VerifyingKey::from_bytes(&CATALOG_PUBLIC_KEY)
-            .map_err(|_| CatalogError::BadSignature)?;
         install::fetch_catalog(
             &self.inner.fetcher,
             manifest_url,
             signature_url,
             &self.catalog_cache(),
-            &key,
+            catalog::default_keys(),
             cancel,
         )
         .await
     }
 
-    /// The same fetch, verified against `key` instead of the compiled-in one, so a test can drive the
-    /// whole download-verify-publish path with a signature it can produce.
+    /// The same fetch, verified against `keys` instead of the compiled-in ones, so a test can drive
+    /// the whole download-verify-publish path with a signature it can produce.
+    ///
+    /// A slice rather than one key for the same reason the shipping path takes one: an overlap window
+    /// is only real if it is exercised through the path a launch takes.
     ///
     /// Behind a feature, so a shipping build cannot fetch a catalog trusted against anything but the
-    /// key compiled into it.
+    /// keys compiled into it.
     ///
     /// # Errors
     /// As [`Self::fetch_catalog`].
@@ -267,7 +268,7 @@ impl Runtime {
         &self,
         manifest_url: &url::Url,
         signature_url: &url::Url,
-        key: &ed25519_dalek::VerifyingKey,
+        keys: &[[u8; 32]],
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
         install::fetch_catalog(
@@ -275,7 +276,7 @@ impl Runtime {
             manifest_url,
             signature_url,
             &self.catalog_cache(),
-            key,
+            keys,
             cancel,
         )
         .await
@@ -645,7 +646,7 @@ impl Runtime {
         &self,
         _manifest_url: &url::Url,
         _signature_url: &url::Url,
-        _key: &ed25519_dalek::VerifyingKey,
+        _keys: &[[u8; 32]],
         _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
         Err(RuntimeError::Unsupported {

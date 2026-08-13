@@ -3,8 +3,8 @@
 //!
 //! Gated behind the `testing` feature for two injections, neither of which weakens anything the
 //! shipping path does: a client that trusts the test servers' self-signed loopback certificates (and
-//! nothing else new), and the verifying key the fetch checks the manifest against, so a test can sign
-//! bytes it can also produce. The shipping entry point still reads the compiled-in key.
+//! nothing else new), and the verifying keys the fetch checks the manifest against, so a test can sign
+//! bytes it can also produce. The shipping entry point still reads the compiled-in ones.
 //!
 //! Two properties, both invisible from outside. First, the one "a runner bump is a manifest edit"
 //! rests on: a catalog is fetched with no content pin and no declared length, and under those terms
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{CatalogError, Runtime, RuntimeError, RuntimePaths};
-use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key};
+use apogee_test_support::catalog_sign::{sign_manifest, test_verifying_key_bytes};
 use apogee_test_support::chaos::ChaosServer;
 use tokio_util::sync::CancellationToken;
 
@@ -103,7 +103,7 @@ async fn a_signature_that_does_not_verify_publishes_nothing() {
         .fetch_catalog_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.bad.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key_bytes()],
             &CancellationToken::new(),
         )
         .await
@@ -131,7 +131,7 @@ async fn a_verified_catalog_is_returned_and_published() {
         .fetch_catalog_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key_bytes()],
             &CancellationToken::new(),
         )
         .await
@@ -163,7 +163,7 @@ async fn a_failed_fetch_leaves_the_last_good_catalog_in_place() {
         .fetch_catalog_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.good.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key_bytes()],
             &cancel,
         )
         .await
@@ -173,7 +173,7 @@ async fn a_failed_fetch_leaves_the_last_good_catalog_in_place() {
         .fetch_catalog_for_testing(
             &servers.manifest.url("manifest.json"),
             &servers.bad.url("manifest.json.sig"),
-            &test_verifying_key(),
+            &[test_verifying_key_bytes()],
             &cancel,
         )
         .await
@@ -186,6 +186,39 @@ async fn a_failed_fetch_leaves_the_last_good_catalog_in_place() {
     assert_eq!(
         std::fs::read(&signature_path).expect("signature still there"),
         sign_manifest(CATALOG.as_bytes()).to_vec()
+    );
+}
+
+/// The overlap window, through the path a launch actually takes. A rotation's middle step is a client
+/// carrying the new key first and the old one behind it, served a catalog the re-sign has not reached
+/// yet; the launch has to keep working, and the bytes have to keep reaching the cache. Asserted here
+/// rather than only on the parser, because it is the fetch entry point that chooses which keys the
+/// verification sees, and passing only the first would be invisible to a unit test.
+#[tokio::test]
+async fn a_catalog_signed_by_a_retired_key_still_fetches_and_publishes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let servers = Servers::start().await.expect("servers");
+    let runtime = servers.runtime(dir.path()).expect("runtime");
+    let (manifest_path, _) = published(dir.path());
+    // A successor released ahead of the re-sign, so the key that signed this catalog is the second.
+    let successor = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+        .verifying_key()
+        .to_bytes();
+
+    let catalog = runtime
+        .fetch_catalog_for_testing(
+            &servers.manifest.url("manifest.json"),
+            &servers.good.url("manifest.json.sig"),
+            &[successor, test_verifying_key_bytes()],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a key inside its overlap window still admits the catalog");
+
+    assert_eq!(catalog.version, 1);
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("published manifest"),
+        CATALOG.as_bytes()
     );
 }
 
@@ -204,7 +237,7 @@ async fn a_second_catalog_fetch_goes_back_to_the_server() {
             .fetch_catalog_for_testing(
                 &servers.manifest.url("manifest.json"),
                 &servers.good.url("manifest.json.sig"),
-                &test_verifying_key(),
+                &[test_verifying_key_bytes()],
                 &cancel,
             )
             .await
