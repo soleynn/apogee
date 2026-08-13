@@ -37,7 +37,7 @@ impl GameData {
     #[must_use]
     pub fn inspect(&self, opts: &SweepOptions) -> Report {
         let archives = self.archives();
-        let reports = in_pool(opts, || {
+        let reports = in_pool(opts.parallelism, || {
             archives
                 .par_iter()
                 .map(|info| self.archive_report(info, opts))
@@ -57,7 +57,7 @@ impl GameData {
     /// pieces it can abandon between.
     #[must_use]
     pub fn inspect_archive(&self, info: &ArchiveInfo, opts: &SweepOptions) -> Report {
-        let mut out = in_pool(opts, || self.archive_report(info, opts));
+        let mut out = in_pool(opts.parallelism, || self.archive_report(info, opts));
         settle(&mut out);
         out
     }
@@ -217,8 +217,11 @@ fn inspect_dat_file(
 
 /// Run `work` under the caller's thread-count cap. A pool that will not build is not worth abandoning a
 /// sweep over, so the global one carries it instead.
-fn in_pool<T: Send>(opts: &SweepOptions, work: impl FnOnce() -> T + Send) -> T {
-    match opts.parallelism {
+///
+/// Shared with mod detection, which walks the same install for the same caller and has the same
+/// reason to be capped: it is the pass that runs while the game is still in the foreground.
+pub(crate) fn in_pool<T: Send>(parallelism: Option<usize>, work: impl FnOnce() -> T + Send) -> T {
+    match parallelism {
         Some(n) => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
             Ok(pool) => pool.install(work),
             Err(_) => work(),
@@ -487,6 +490,13 @@ mod tests {
         ))
         .unwrap();
         let game = GameData::open(game.game_dir()).unwrap();
+
+        // The cap itself, once, rather than in every caller that passes one down: both sweeps reach
+        // the same helper, and a report that merely came out equal at two settings would be equal
+        // whether or not either setting ever built a pool.
+        for n in [1, 3] {
+            assert_eq!(in_pool(Some(n), rayon::current_num_threads), n);
+        }
 
         let opts = |parallelism| SweepOptions {
             parallelism,

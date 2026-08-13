@@ -31,6 +31,7 @@ pub use finding::{
     Scope, Severity, Site,
 };
 pub use index::{IndexFacts, IndexInspection, Located, compare_index_forms, inspect_index};
+pub(crate) use sweep::in_pool;
 
 use crate::bytes;
 use crate::container::COMMON_HEADER_LEN;

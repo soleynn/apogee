@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use crate::game::{ArchiveInfo, GameData};
 use crate::index::{self, IndexKind};
 use crate::integrity::{
-    ContainerId, ContainerRef, IndexFacts, Located, SweepOptions, inspect_index,
+    ContainerId, ContainerRef, IndexFacts, Located, SweepOptions, in_pool, inspect_index,
 };
 use crate::mods::classify::{ContainerComparison, classify_entries, file_verdicts};
 use crate::mods::map::{Coverage, PristineMap};
@@ -29,11 +29,13 @@ impl GameData {
     /// checks [`ModReport::is_exhaustive`] before reading a clean result as "no mods".
     #[must_use]
     pub fn detect_mods(&self, map: &PristineMap, opts: &ModOptions) -> ModReport {
-        let reports: Vec<ModReport> = self
-            .archives()
-            .par_iter()
-            .map(|info| self.compare_archive(info, map, opts))
-            .collect();
+        let archives = self.archives();
+        let reports: Vec<ModReport> = in_pool(opts.parallelism, || {
+            archives
+                .par_iter()
+                .map(|info| self.compare_archive(info, map, opts))
+                .collect()
+        });
         let mut out = ModReport::default();
         for report in reports {
             merge(&mut out, report);
@@ -51,7 +53,7 @@ impl GameData {
         map: &PristineMap,
         opts: &ModOptions,
     ) -> ModReport {
-        let mut out = self.compare_archive(info, map, opts);
+        let mut out = in_pool(opts.parallelism, || self.compare_archive(info, map, opts));
         settle(&mut out);
         out
     }
@@ -90,7 +92,7 @@ impl GameData {
             }
         }
 
-        let Some(locations) = self.locations_of(info) else {
+        let Some(locations) = self.locations_of(info, opts) else {
             // Neither index form parsed, so nothing names the files this archive holds and none of
             // them can be judged. Reported rather than silently contributing no verdicts, which is
             // what would otherwise let a wrecked archive read as a clean one.
@@ -141,8 +143,14 @@ impl GameData {
     /// that check exists and compares the two form's locations directly. And two keys naming one
     /// offset, which is how a collision table spells a synonym, are two files sharing one entry and
     /// so two verdicts over one extent.
-    fn locations_of(&self, info: &ArchiveInfo) -> Option<Vec<Located>> {
-        let opts = SweepOptions::default();
+    fn locations_of(&self, info: &ArchiveInfo, opts: &ModOptions) -> Option<Vec<Located>> {
+        // The inspection is driven only for the locations it names; its findings are the structural
+        // sweep's to report, so everything but the caller's bounds is left at its default here.
+        let sweep = SweepOptions {
+            index_limits: opts.index_limits,
+            dat_limits: opts.dat_limits,
+            ..SweepOptions::default()
+        };
         for kind in [IndexKind::Index1, IndexKind::Index2] {
             if !info.has_index(kind) {
                 continue;
@@ -155,7 +163,7 @@ impl GameData {
                 named: kind,
                 dats: &info.dats,
             };
-            let inspection = inspect_index(&bytes, &facts, &opts);
+            let inspection = inspect_index(&bytes, &facts, &sweep);
             if inspection.index.is_some() {
                 return Some(inspection.locations);
             }
@@ -209,26 +217,27 @@ impl GameData {
             };
         }
 
-        let container = match crate::dat::Dat::open(info.dat_path(dat)) {
-            Ok(container) => container,
-            Err(_) => {
-                return ContainerComparison {
-                    verdict: Some(ContainerVerdict {
-                        container: at,
-                        standing: ContainerStanding::Unknown,
-                        pristine_len: coverage.map(crate::mods::Coverage::pristine_len),
-                        actual_len,
-                    }),
-                    totals: ModTotals {
-                        containers: 1,
-                        containers_unreadable: 1,
-                        unknown: named.len() as u64,
-                        ..ModTotals::default()
-                    },
-                    ..ContainerComparison::default()
-                };
-            }
-        };
+        let container =
+            match crate::dat::Dat::open_with_limits(info.dat_path(dat), &opts.dat_limits) {
+                Ok(container) => container,
+                Err(_) => {
+                    return ContainerComparison {
+                        verdict: Some(ContainerVerdict {
+                            container: at,
+                            standing: ContainerStanding::Unknown,
+                            pristine_len: coverage.map(crate::mods::Coverage::pristine_len),
+                            actual_len,
+                        }),
+                        totals: ModTotals {
+                            containers: 1,
+                            containers_unreadable: 1,
+                            unknown: named.len() as u64,
+                            ..ModTotals::default()
+                        },
+                        ..ContainerComparison::default()
+                    };
+                }
+            };
         classify_entries(&container, named, coverage, accounted, at, opts)
     }
 }
@@ -353,8 +362,10 @@ fn settle(out: &mut ModReport) {
 mod tests {
     use super::*;
     use crate::archive::ArchiveId;
+    use crate::dat::DatLimits;
     use crate::dat::builder::EntrySpec;
     use crate::game::Repo;
+    use crate::index::IndexLimits;
     use crate::integrity::fixture::ArchiveFixture;
     use crate::mods::{Confidence, MapBuilder, Standing};
     use std::path::{Path, PathBuf};
@@ -545,6 +556,15 @@ mod tests {
             "and has to span containers, or the ordering is within one"
         );
         assert_eq!(one, game.detect_mods(&map, &ModOptions::default()));
+        // And at any thread count, which is the half of that claim the worker cap can break: the
+        // report is folded in archive order and sorted at the end, not in the order workers finished.
+        for parallelism in [Some(1), Some(8), None] {
+            let opts = ModOptions {
+                parallelism,
+                ..ModOptions::default()
+            };
+            assert_eq!(one, game.detect_mods(&map, &opts), "{parallelism:?}");
+        }
         // Ascending by container, then by where in it the file sits, so a caller reads the list
         // archive by archive and in the order a repair would walk it.
         assert!(
@@ -558,6 +578,59 @@ mod tests {
                 .windows(2)
                 .all(|p| p[0].container <= p[1].container)
         );
+    }
+
+    #[test]
+    fn the_callers_bounds_reach_the_containers_this_pass_opens() {
+        // The comparison opens the same containers the structural sweep does, out of the same
+        // install, so a caller that bounded that walk has bounded this one. Left to a default, a
+        // caller who raised or lowered either limit would find it silently ignored here.
+        let fixtures = archives();
+        let (tmp, game) = write_tree(&fixtures);
+        let map = map_of(tmp.path(), &[Repo::Base, Repo::Ex(1)]);
+
+        // An index cap below the containers on disk: neither form can be read, so nothing names the
+        // files an archive holds and the archive itself is what the report carries.
+        let capped = ModOptions {
+            index_limits: IndexLimits { max_index_bytes: 1 },
+            ..ModOptions::default()
+        };
+        let report = game.detect_mods(&map, &capped);
+        assert!(!report.is_exhaustive());
+        assert_eq!(
+            report.totals.containers_unreadable,
+            game.archives().len() as u32
+        );
+
+        // A dat cap below the entry headers: the containers open, and every header the walk reaches
+        // refuses to parse, so the files it named are broken rather than judged. The map has to
+        // disagree with the tree first, or nothing is read at all and the cap never applies.
+        let mut b = PristineMap::builder();
+        b.accounts_for(Repo::Base).accounts_for(Repo::Ex(1));
+        for path in containers(tmp.path()) {
+            let rel = path.strip_prefix(tmp.path()).unwrap();
+            let at = ContainerRef::from_relative_path(rel).unwrap();
+            b.container(at, std::fs::metadata(&path).unwrap().len())
+                .dirty(at, 0, u64::MAX);
+        }
+        let dirty = b.build();
+        assert!(
+            game.detect_mods(&dirty, &ModOptions::default())
+                .totals
+                .broken
+                == 0
+        );
+
+        let capped = ModOptions {
+            dat_limits: DatLimits {
+                max_entry_header_bytes: 1,
+                ..DatLimits::default()
+            },
+            ..ModOptions::default()
+        };
+        let report = game.detect_mods(&dirty, &capped);
+        assert!(report.totals.broken > 0);
+        assert!(!report.is_exhaustive());
     }
 
     #[test]
