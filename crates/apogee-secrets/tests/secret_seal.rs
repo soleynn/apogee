@@ -19,6 +19,19 @@ fn secret_implements_none_of_the_forbidden_traits() {
     cases.compile_fail("tests/ui/secret_orphan_debug.rs");
 }
 
+/// The routes above are the ones that render a value. These two are the ones that hand the bytes
+/// over so something else renders them, which the absence of a `Debug` does nothing about.
+///
+/// Both are shaped like a convenience somebody would reach for rather than like a leak, which is
+/// why they are pinned: `expose` is the word that marks a deliberate read, and an impl either of
+/// these traits would make the same read happen without it.
+#[test]
+fn secret_hands_its_bytes_to_nothing_implicitly() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/secret_deref.rs");
+    cases.compile_fail("tests/ui/secret_as_ref.rs");
+}
+
 /// The other half of "no silent fallback": creating an encrypted store takes a token only a caller
 /// that can ask a user is supposed to mint, and the token is spent by the call it authorizes. Both
 /// properties rest on what the type does *not* offer, so both are pinned the same way.

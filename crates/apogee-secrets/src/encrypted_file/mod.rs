@@ -747,11 +747,7 @@ impl SecretStore for EncryptedFile {
             FileState::Absent => BackendState::NoDefaultCollection,
             FileState::Unreadable | FileState::Foreign => BackendState::Unreachable,
         };
-        BackendReport {
-            backend: Backend::EncryptedFile,
-            state,
-            sandbox: None,
-        }
+        BackendReport::new(Backend::EncryptedFile, state)
     }
 
     /// One rewrite rather than the default's one per kind.
