@@ -453,8 +453,10 @@ jobs:
       - run: cargo test -p apogee-elevate
       # The shipping worker binary driven as a real process against a real NT filesystem: the
       # protocol, the re-verification, the confinement, the named pipe, the elevation request, a
-      # cancel mid-apply, and a kill mid-apply that must leave this process running and the version
-      # file where it was.
+      # cancel mid-apply, and a kill mid-apply or mid-repair that must leave this process running and
+      # the version file where it was. Both pipelines end to end here as well, so an install and a
+      # repair routed through the worker are compared against the same ones run in process, on the
+      # filesystem whose path rules and file sharing are the reason this job exists at all.
       - run: cargo test -p apogee-elevated
       # The probe against a directory `icacls` genuinely denies, plus the unit tests either side of
       # it. The crate's other integration targets are Linux-proven and add no Windows-specific claim.

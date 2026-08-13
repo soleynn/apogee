@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{Error, Result};
 use crate::proto::{
-    Admission, PROTOCOL_VERSION, VersionWrite, WorkerErrorKind, WorkerProgress, WorkerRequest,
-    WorkerResponse, read_frame, write_frame,
+    Admission, PROTOCOL_VERSION, StagedWrite, VersionWrite, WorkerErrorKind, WorkerProgress,
+    WorkerRequest, WorkerResponse, read_frame, write_frame,
 };
 
 /// A live conversation with one worker.
@@ -106,6 +106,56 @@ where
     pub async fn copy_within(&mut self, from: &str, to: &str) -> Result<()> {
         self.request(
             &WorkerRequest::CopyWithin {
+                from: from.to_owned(),
+                to: to.to_owned(),
+            },
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+    }
+
+    /// Make one batch of repair writes, optionally advancing a version file after they land.
+    ///
+    /// `staging` is a file this process wrote and each byte-carrying write reads a span of; the
+    /// worker re-hashes every span against the digest the write carries, so a staging file rewritten
+    /// after this process measured it is rejected rather than written into the tree. A batch is one
+    /// request and one answer, so several are sent in turn rather than pipelined; each is independent
+    /// and every write in it is positioned, which is what lets a torn run be re-run.
+    ///
+    /// # Errors
+    /// [`Error::Worker`] carrying the worker's own [`WorkerErrorKind`] (a span that does not match
+    /// its digest is [`WorkerErrorKind::Verify`], and nothing from that batch onward is written),
+    /// [`Error::Gone`] if the worker died mid-batch, [`Error::Cancelled`] if `cancel` fired, or the
+    /// transport arms of [`Error`].
+    pub async fn repair(
+        &mut self,
+        staging: Option<&Path>,
+        writes: Vec<StagedWrite>,
+        advance: Option<VersionWrite>,
+        cancel: &CancellationToken,
+        on_progress: impl FnMut(WorkerProgress),
+    ) -> Result<()> {
+        self.request(
+            &WorkerRequest::Repair {
+                staging: staging.map(Path::to_path_buf),
+                writes,
+                advance,
+            },
+            cancel,
+            on_progress,
+        )
+        .await
+    }
+
+    /// Move one file to another place inside the bound tree (a stray relocated to the recycler).
+    ///
+    /// # Errors
+    /// [`Error::Worker`] if either path leaves the tree or the move fails, or the transport arms of
+    /// [`Error`].
+    pub async fn move_within(&mut self, from: &str, to: &str) -> Result<()> {
+        self.request(
+            &WorkerRequest::MoveWithin {
                 from: from.to_owned(),
                 to: to.to_owned(),
             },

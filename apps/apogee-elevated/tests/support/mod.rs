@@ -14,7 +14,7 @@ use std::error::Error;
 use std::path::Path;
 use std::process::Stdio;
 
-use apogee_elevate::{Admission, Session};
+use apogee_elevate::{Admission, Session, StagedOp, StagedWrite};
 use apogee_zipatch::fixtures::{self, PatchBuilder, WIN32};
 use sha1::{Digest, Sha1};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -80,6 +80,33 @@ pub fn block_sha1(bytes: &[u8]) -> Admission {
         block_size: BLOCK_SIZE as u32,
         hashes: block_sha1_hex(bytes),
     }
+}
+
+/// A staging file holding `spans` back to back, plus the [`StagedOp::Bytes`] that reads each one
+/// back out: `spans[i]` lands at `targets[i]` in the bound tree.
+///
+/// The digests are taken here, over the bytes as written, which is what the parent does: it measures
+/// what it staged and the worker measures what it reads.
+pub fn stage(
+    path: &Path,
+    spans: &[(&str, u64, Vec<u8>)],
+) -> Result<Vec<StagedWrite>, Box<dyn Error>> {
+    let mut staged = Vec::new();
+    let mut writes = Vec::new();
+    for (target, off, bytes) in spans {
+        writes.push(StagedWrite {
+            path: (*target).to_owned(),
+            op: StagedOp::Bytes {
+                off: *off,
+                staged_off: staged.len() as u64,
+                len: u32::try_from(bytes.len())?,
+                digest: *blake3::hash(bytes).as_bytes(),
+            },
+        });
+        staged.extend_from_slice(bytes);
+    }
+    std::fs::write(path, &staged)?;
+    Ok(writes)
 }
 
 /// A patch that writes `chunks` runs of `chunk_len` identical bytes into one file.

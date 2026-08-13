@@ -13,13 +13,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 ///
 /// A worker binary left behind by an older install answers with a number the parent does not know,
 /// which is a typed refusal rather than a misread frame.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The largest frame either side will read.
 ///
-/// Sized by the one message that grows with the work: an [`Admission::BlockSha1`] carries one hash
-/// per patch block, and a patch large enough to matter under an unusually small block size runs to a
-/// few megabytes of digests.
+/// Sized by the messages that grow with the work: an [`Admission::BlockSha1`] carries one hash per
+/// patch block, and a patch large enough to matter under an unusually small block size runs to a few
+/// megabytes of digests. A [`WorkerRequest::Repair`] grows the same way, with one entry per write,
+/// so a parent with more writes than fit sends them in several requests rather than one large one.
 pub const MAX_FRAME: u32 = 8 << 20;
 
 /// A request from the unprivileged parent to the worker.
@@ -50,10 +51,108 @@ pub enum WorkerRequest {
         /// Destination, relative to the bound root.
         to: String,
     },
+    /// Make a batch of repair writes, re-proving every byte-carrying one first.
+    ///
+    /// This is the repair counterpart of [`Apply`](Self::Apply), and the same division holds: the
+    /// parent verified the install, planned the heal and fetched the bytes, and the worker only
+    /// writes what it can prove. It is deliberately not a general "put these bytes there" channel.
+    /// Every path is relative to the bound root, the bytes come from one staging file the parent
+    /// named, and each carries the digest the parent took when it minted them.
+    Repair {
+        /// The staging file the byte-carrying writes read from, absolute. `None` when none of them
+        /// carries bytes, which is how a version advance rides in on its own.
+        staging: Option<PathBuf>,
+        /// The writes to make, in order.
+        writes: Vec<StagedWrite>,
+        /// The version file to write once every write above has landed, if any.
+        advance: Option<VersionWrite>,
+    },
+    /// Move one file to another place within the bound tree (a stray relocated to the repair
+    /// recycler). Never a delete: the bytes land at `to` or the request fails.
+    ///
+    /// The recycler is a sibling of the repo subtrees rather than inside one, so a session doing this
+    /// is bound to the install root and the heal that follows re-binds to the subtree it writes.
+    MoveWithin {
+        /// Source, relative to the bound root.
+        from: String,
+        /// Destination, relative to the bound root.
+        to: String,
+    },
     /// Abandon the in-flight request. Apply stops between commands and answers
     /// [`WorkerErrorKind::Cancelled`]; the partial tree is safe to re-apply.
     Cancel,
 }
+
+/// One write a [`WorkerRequest::Repair`] asks for, addressed relative to the bound root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedWrite {
+    /// The target file, relative to the bound root, with `/` separators.
+    pub path: String,
+    /// What to do to it.
+    pub op: StagedOp,
+}
+
+/// What one [`StagedWrite`] does.
+///
+/// Four shapes, which is what healing a tree against a block index needs: recreate a missing file at
+/// its indexed length, correct a wrong length, rewrite a broken part, and overwrite a broken zero
+/// run. There is no delete and no rename here, so the set cannot be composed into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum StagedOp {
+    /// Create the target, replacing whatever entry is there, and size it to `len`.
+    Create {
+        /// The length the index gives the file.
+        len: u64,
+    },
+    /// Set an existing target's length.
+    Resize {
+        /// The length the index gives the file.
+        len: u64,
+    },
+    /// Copy `len` staged bytes to `off`, once they hash to `digest`.
+    ///
+    /// The digest is what makes this crossing mean something. `digest` is a value the parent took
+    /// over bytes it had just CRC-checked against the index, and the staging file it took them from
+    /// is writable by the same unprivileged user, so the worker reads the span, hashes what it read,
+    /// and writes that same buffer. Nothing between the check and the write can substitute bytes,
+    /// because the bytes checked are the bytes written.
+    Bytes {
+        /// Where in the target they belong.
+        off: u64,
+        /// Where they start in the staging file.
+        staged_off: u64,
+        /// How many, at most [`MAX_STAGED_SPAN`].
+        len: u32,
+        /// The BLAKE3 digest of exactly those `len` bytes.
+        digest: [u8; 32],
+    },
+    /// Overwrite `len` bytes at `off` with zeros.
+    ///
+    /// Carries no staged bytes and needs no digest: a zero run is a constant, so there is nothing
+    /// for a rewritten staging file to substitute. The length comes from the index, as the others do.
+    Zeros {
+        /// Where the run starts.
+        off: u64,
+        /// How long it is.
+        len: u64,
+    },
+}
+
+/// The largest span one [`StagedOp::Bytes`] may carry.
+///
+/// The worker reads a span into memory to hash it, so this is the buffer a single write costs. The
+/// parent splits anything longer, which is free: the writes are positioned, so a part written in
+/// pieces lands exactly as one written whole.
+pub const MAX_STAGED_SPAN: u32 = 8 << 20;
+
+/// The longest run one [`StagedOp::Zeros`] may cover.
+///
+/// The one field on this side that names a length with no bytes behind it to bound it, so it is
+/// bounded here instead. The figure is the same one the in-process writer holds a zero fill to, and
+/// it clears any real dat-scale run with room to spare; agreeing on it is what keeps a repair that
+/// crosses the boundary from writing what a repair that stayed here would have refused.
+pub const MAX_ZERO_RUN: u64 = 8 << 30;
 
 /// How the worker re-proves a local patch file before writing a byte of it.
 ///

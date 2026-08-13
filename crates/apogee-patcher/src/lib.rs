@@ -18,10 +18,12 @@
 //! pulling from local patch files on the first (trusted) attempt and over HTTP after, reconstructing
 //! zero/empty regions with no fetch, and quarantining strays to a recycler rather than deleting them.
 //!
-//! Where the install tree is not writable by the user who launched, the apply runs in a separate
-//! privileged process instead. [`Elevation`] decides when; the boundary itself, and everything that
-//! crosses it, belongs to [`apogee_elevate`]. A worker that dies mid-apply arrives here as
-//! [`PatchError::Worker`], a value the caller renders: nothing in this crate ends the launcher.
+//! Where the install tree is not writable by the user who launched, the writes run in a separate
+//! privileged process instead: an install sends whole patches for that process to apply, a repair
+//! sends the writes its own verify and fetch produced. [`Elevation`] decides when; the boundary
+//! itself, and everything that crosses it, belongs to [`apogee_elevate`]. A worker that dies part
+//! way through arrives here as [`PatchError::Worker`], a value the caller renders: nothing in this
+//! crate ends the launcher.
 
 use std::path::PathBuf;
 
@@ -40,6 +42,7 @@ mod progress;
 mod recycler;
 mod repair;
 mod request;
+mod staging;
 mod store;
 
 pub use catalog::{

@@ -36,7 +36,7 @@ pub use chunk::{
     FileHeader, FileHeaderV3, FileOp, FileOperation, FileTarget, Header, HeaderFileKind,
     HeaderTargetKind, IndexCommand, IndexOp, MAGIC, PatchInfo, Platform, Sqpk, TargetInfo,
 };
-pub use disk::DiskSink;
+pub use disk::{DiskRepairSink, DiskSink};
 pub use error::{Error, Limit, Op, Result};
 pub use index::{
     Index, PartRef, RepairOutcome, SizeMismatch, SourceRef, StrayFile, VerifyOptions, VerifyReport,
@@ -44,4 +44,7 @@ pub use index::{
 };
 pub use local::LocalPatchSource;
 pub use parse::{DEFAULT_MAX_CHUNK_SIZE, Limits, PatchReader};
-pub use seam::{DataSource, KeepFilter, PatchId, PatchSink, RangeSource, SafePath, TargetPath};
+pub use seam::{
+    DataSource, KeepFilter, PatchId, PatchSink, RangeSource, RepairSink, RepairWrite, SafePath,
+    TargetPath,
+};
