@@ -66,6 +66,7 @@ is tagged with its change type. Versioning aims to follow
 - Cover the untested disk-exhaustion paths (#212) _(testing)_
 - Repair an install that needs elevation (#215) _(added)_
 - Tighten and pin the public API surface (#216) _(changed)_
+- Bring rustdoc to publication grade (#217) _(documentation)_
 
 ### apogee-runtime
 - Report the exit status of a redirected launch's program (#165) _(fixed)_
