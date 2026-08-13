@@ -3,14 +3,10 @@
 //! Pure-Rust decoders (`flate2`, `ruzstd`, `lzma-rs`) feed `tar` entry by entry, so peak memory is
 //! bounded by the decoder window and never by the archive size. Every entry is confined to the
 //! destination before it is written: an archive comes from the signed catalog, but its bytes are
-//! still treated as hostile. An entry's own parent components are created as real directories and
-//! never traversed through a symlink.
-//!
-//! That confinement is not total. A symlink and a hardlink target are checked lexically, by counting
-//! path components, which is exact only while no component of the target is itself an extracted
-//! symlink. An archive that plants one and then points a later entry through it is not caught, so
-//! the pinned digest on the catalog row, rather than this pass alone, is what stands between a
-//! hostile archive and the filesystem.
+//! still treated as hostile. No symlink is ever traversed: an entry's own parent components are
+//! created as real directories, a link target is resolved against the tree as it stands rather than
+//! counted, and a hardlink target has to be a regular file already below the destination. A crafted
+//! archive therefore cannot plant a link that redirects a later write out of the tree.
 //!
 //! Zip is here for the Windows-side companions, which is all anyone publishes them as. It shares the
 //! confinement and differs in the three ways the container forces: entries are addressed through a
@@ -38,11 +34,10 @@ const COPY_BUF: usize = 256 * 1024;
 ///
 /// Streams to disk and returns the number of entries written; zero means nothing matched the strip
 /// prefix. Entries are confined to `dest`: an absolute path, a `..` component that leaves the tree, a
-/// parent component that is an existing symlink or non-directory, and, for zip, a symlink entry at
-/// all are refusals rather than a write outside the tree. A symlink or hardlink target is confined
-/// lexically only, by component count, which does not account for a target routed through a symlink
-/// an earlier entry planted. Entry kinds a runner never contains, such as devices and fifos, are
-/// skipped and not counted.
+/// parent component that is an existing symlink or non-directory, a symlink target that resolves
+/// outside the tree, a hardlink target that is not a regular file already inside it, and, for zip,
+/// a symlink entry at all are refusals rather than a write outside the tree. Entry kinds a runner
+/// never contains, such as devices and fifos, are skipped and not counted.
 ///
 /// # Errors
 ///
@@ -214,9 +209,8 @@ fn unpack<R: Read>(
             }
         };
         let out = dest.join(&rel);
-        // Create every parent as a real directory, refusing to traverse a symlinked component. This
-        // guarantees `out`'s parents are real dirs, which is what makes `symlink_within_dest`'s
-        // lexical depth accounting exact.
+        // Create every parent as a real directory, refusing to traverse a symlinked component, so
+        // `out` is where its path says it is however the entry before it left the tree.
         safe_make_dirs(dest, &rel, archive)?;
 
         let kind = entry.header().entry_type();
@@ -225,7 +219,7 @@ fn unpack<R: Read>(
             fs::create_dir_all(&out).map_err(|e| io_err(archive, e))?;
         } else if kind.is_symlink() {
             let link = link_target(&mut entry, archive)?;
-            if !symlink_within_dest(&rel, &link) {
+            if !symlink_within_dest(dest, &rel, &link) {
                 return Err(confined(
                     archive,
                     "symlink target escapes the runner directory",
@@ -245,8 +239,9 @@ fn unpack<R: Read>(
                     ));
                 }
             };
+            let source = hardlink_source(dest, &target_rel, archive)?;
             let _ = fs::remove_file(&out);
-            fs::hard_link(dest.join(target_rel), &out).map_err(|e| io_err(archive, e))?;
+            fs::hard_link(source, &out).map_err(|e| io_err(archive, e))?;
         } else if kind.is_file() {
             // Never write through a symlink planted at the final component.
             unlink_if_symlink(&out, archive)?;
@@ -315,8 +310,8 @@ fn resolve(path: &Path, strip_prefix: Option<&str>) -> Resolved {
 /// Create the ancestor directories of `rel` under `dest`, refusing to traverse an existing symlink.
 ///
 /// A crafted archive could otherwise plant an in-tree symlink and relocate a later write outside
-/// `dest`. Refusing traversal keeps every parent a real directory, which is also what makes
-/// [`symlink_within_dest`]'s lexical depth accounting exact.
+/// `dest`. Refusing traversal keeps every parent a real directory, which is also the invariant
+/// [`symlink_within_dest`] walks the link's own path against.
 ///
 /// # Errors
 ///
@@ -362,34 +357,117 @@ fn unlink_if_symlink(out: &Path, archive: &Path) -> Result<(), RuntimeError> {
     }
 }
 
-/// Decide lexically whether a symlink at `link_path` with `target` stays inside the destination.
+/// How many symlinks one target may resolve through, matching the kernel's own `SYMLOOP_MAX`. What
+/// this actually stops is a cycle, which a crafted archive can write in two entries.
+const MAX_LINK_HOPS: u32 = 40;
+
+/// Decide whether a symlink at `link_path` with `target` resolves inside `dest`.
 ///
-/// No filesystem access is needed: [`safe_make_dirs`] guarantees the link's own parents are real
-/// directories, so the count is its true on-disk depth. The target's intermediate components carry
-/// no such guarantee, so the count is the true depth of what the target resolves to only while none
-/// of them is itself an extracted symlink. This alone therefore does not settle confinement: it
-/// accepts an in-tree link such as `a/b` pointing at `..`, and what stops a later entry from being
-/// written through that link is [`safe_make_dirs`] on the entry's own path.
-fn symlink_within_dest(link_path: &Path, target: &Path) -> bool {
-    if target.is_absolute() {
-        return false;
-    }
-    // Depth of the symlink's own directory below dest.
-    let mut depth = link_path.components().count().saturating_sub(1) as isize;
-    for comp in target.components() {
+/// Counting components is not enough. Component counting is exact for the link's own path, which
+/// [`safe_make_dirs`] has already made all real directories, but not for the target's, where a
+/// component may be a symlink an earlier entry planted, and the kernel would follow it. So the target
+/// is resolved against the tree as it stands, expanding each component that is already a link.
+fn symlink_within_dest(dest: &Path, link_path: &Path, target: &Path) -> bool {
+    let mut cur = dest.to_path_buf();
+    let mut depth = 0usize;
+    let mut hops = MAX_LINK_HOPS;
+    // From the link's own directory, which is where a relative target starts.
+    let parent = link_path.parent().unwrap_or(Path::new(""));
+    resolve_within(parent, &mut cur, &mut depth, &mut hops)
+        && resolve_within(target, &mut cur, &mut depth, &mut hops)
+}
+
+/// Walk `path`'s components from `cur`, following any that is already a symlink, and leave `cur` and
+/// `depth` at what the kernel would arrive at. False as soon as the walk would leave `dest`.
+///
+/// `depth` is the number of components below `dest`, so a `..` at zero is an escape and is the only
+/// thing that can pop `cur` past the destination.
+fn resolve_within(path: &Path, cur: &mut PathBuf, depth: &mut usize, hops: &mut u32) -> bool {
+    for comp in path.components() {
         match comp {
             Component::CurDir => {}
-            Component::Normal(_) => depth += 1,
             Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
+                if *depth == 0 {
                     return false;
                 }
+                cur.pop();
+                *depth -= 1;
             }
+            Component::Normal(c) => {
+                cur.push(c);
+                *depth += 1;
+                // A component that is not a link, or is not there at all, is walked as itself: only an
+                // existing link redirects, and only an existing one can be followed later.
+                let is_link =
+                    fs::symlink_metadata(&*cur).is_ok_and(|meta| meta.file_type().is_symlink());
+                if is_link {
+                    let Ok(next) = fs::read_link(&*cur) else {
+                        return false;
+                    };
+                    if *hops == 0 {
+                        return false;
+                    }
+                    *hops -= 1;
+                    // Step back to the link's own directory, which its target is relative to.
+                    cur.pop();
+                    *depth -= 1;
+                    if !resolve_within(&next, cur, depth, hops) {
+                        return false;
+                    }
+                }
+            }
+            // An absolute target is outside by definition: `dest` is where a relative walk starts.
             Component::RootDir | Component::Prefix(_) => return false,
         }
     }
     true
+}
+
+/// Resolve a hardlink entry's target to the file it names under `dest`, refusing to traverse a
+/// symlink.
+///
+/// [`fs::hard_link`] does not follow a link at the final component, but the kernel follows one at any
+/// component before it, and `dest.join(target)` alone cannot see that. So every component is checked:
+/// the parents must already be real directories and the target itself a regular file. That is all a
+/// hardlink in a tarball ever names, because it is a second name for a member the archive already
+/// wrote. Anything else is crafted.
+///
+/// # Errors
+///
+/// [`RuntimeError::Extract`] if a component is a symlink, is missing, or is not the kind of file it
+/// has to be.
+fn hardlink_source(
+    dest: &Path,
+    target_rel: &Path,
+    archive: &Path,
+) -> Result<PathBuf, RuntimeError> {
+    let mut cur = dest.to_path_buf();
+    let last = target_rel.components().count().saturating_sub(1);
+    for (index, comp) in target_rel.components().enumerate() {
+        // `resolve` guarantees only Normal components survive.
+        cur.push(comp.as_os_str());
+        // `symlink_metadata` reports a symlink as neither a file nor a directory, so a planted link is
+        // refused at whichever position it sits in.
+        let last_component = index == last;
+        let wrong_kind = if last_component {
+            "hardlink target is not a regular file in the runner directory"
+        } else {
+            "hardlink target is reached through a symlink or a non-directory"
+        };
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) if last_component && meta.is_file() => {}
+            Ok(meta) if !last_component && meta.is_dir() => {}
+            Ok(_) => return Err(confined(archive, wrong_kind)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(confined(
+                    archive,
+                    "hardlink target is not present in the runner directory",
+                ));
+            }
+            Err(e) => return Err(io_err(archive, e)),
+        }
+    }
+    Ok(cur)
 }
 
 /// The target a symlink or hardlink entry names.
@@ -501,22 +579,90 @@ mod tests {
     /// not. An absolute target is refused whatever its depth.
     #[test]
     fn symlink_confinement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path();
         assert!(symlink_within_dest(
+            dest,
             Path::new("lib/libfoo.so"),
             Path::new("libfoo.so.1")
         ));
         assert!(symlink_within_dest(
+            dest,
             Path::new("lib/a/b.so"),
             Path::new("../c.so")
         ));
         assert!(!symlink_within_dest(
+            dest,
             Path::new("bin/x"),
             Path::new("../../etc/passwd")
         ));
         assert!(!symlink_within_dest(
+            dest,
             Path::new("bin/x"),
             Path::new("/etc/passwd")
         ));
+    }
+
+    /// A target's own components are followed the way the kernel would follow them, so the depth a
+    /// count arrives at is not what settles this.
+    #[test]
+    fn symlink_confinement_follows_a_planted_link_in_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path();
+        // `a/b` -> `..` lands back on the destination, which is inside it, so it is allowed.
+        fs::create_dir_all(dest.join("a")).expect("mkdir a");
+        std::os::unix::fs::symlink("..", dest.join("a/b")).expect("symlink");
+        assert!(symlink_within_dest(dest, Path::new("a/b"), Path::new("..")));
+        // Routed through it, `a/b/..` is the destination's own parent, which a count reads as depth 1.
+        assert!(!symlink_within_dest(
+            dest,
+            Path::new("x"),
+            Path::new("a/b/..")
+        ));
+        // A link that resolves back inside is still fine, however many hops it takes.
+        std::os::unix::fs::symlink("a", dest.join("also_a")).expect("symlink");
+        assert!(symlink_within_dest(
+            dest,
+            Path::new("x"),
+            Path::new("also_a/../a/thing")
+        ));
+    }
+
+    /// Two links pointing at each other resolve forever, so the walk gives up rather than hangs.
+    #[test]
+    fn symlink_confinement_gives_up_on_a_cycle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path();
+        std::os::unix::fs::symlink("loop_b", dest.join("loop_a")).expect("symlink");
+        std::os::unix::fs::symlink("loop_a", dest.join("loop_b")).expect("symlink");
+        assert!(!symlink_within_dest(
+            dest,
+            Path::new("x"),
+            Path::new("loop_a/thing")
+        ));
+    }
+
+    #[test]
+    fn hardlink_source_refuses_anything_but_an_extracted_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path();
+        let archive = Path::new("archive.tar");
+        fs::create_dir_all(dest.join("bin")).expect("mkdir bin");
+        fs::write(dest.join("bin/wine"), b"#!/bin/sh\n").expect("write");
+        // The ordinary case: an earlier member, reached through real directories.
+        assert_eq!(
+            hardlink_source(dest, Path::new("bin/wine"), archive).expect("real member"),
+            dest.join("bin/wine")
+        );
+        // A symlinked component is refused rather than followed, which is the escape itself: `x`
+        // resolves above the destination, so the kernel would link an inode outside it.
+        std::os::unix::fs::symlink("..", dest.join("x")).expect("symlink");
+        assert!(hardlink_source(dest, Path::new("x/outside.txt"), archive).is_err());
+        // A symlink at the target itself, a directory, and a member no entry wrote are all refused.
+        std::os::unix::fs::symlink("bin/wine", dest.join("wine64")).expect("symlink");
+        assert!(hardlink_source(dest, Path::new("wine64"), archive).is_err());
+        assert!(hardlink_source(dest, Path::new("bin"), archive).is_err());
+        assert!(hardlink_source(dest, Path::new("bin/absent"), archive).is_err());
     }
 
     /// A zip entry with no usable mode still lands readable.
@@ -537,8 +683,8 @@ mod tests {
 
     /// An in-tree symlink is never walked through, even one [`symlink_within_dest`] accepts.
     ///
-    /// A link `a/b` pointing at `..` passes the lexical check on its own, so this is the half of the
-    /// confinement only the directory walk covers.
+    /// A link `a/b` pointing at `..` lands back on the destination, so it is allowed to exist. What
+    /// stops it being used is this walk, and only this walk.
     #[test]
     fn safe_make_dirs_refuses_to_traverse_a_symlinked_parent() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,11 +1,12 @@
 #![cfg(target_os = "linux")]
-//! Archive extraction: every format, prefix stripping, the exec bit, in-tree symlinks, and rejection
-//! of a symlink that escapes the destination. Zip is a component container rather than a runner one,
-//! so it is checked against what the tools that build those archives actually emit: `\`-separated
-//! names, missing modes, and a symlink smuggled in as a mode bit.
+//! Archive extraction: every format, prefix stripping, the exec bit, in-tree symlinks and hardlinks,
+//! and rejection of the shapes that leave the destination, including the ones that only leave it once
+//! a link already extracted is followed. Zip is a component container rather than a runner one, so it
+//! is checked against what the tools that build those archives actually emit: `\`-separated names,
+//! missing modes, and a symlink smuggled in as a mode bit.
 
 use std::io::{self, Cursor, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use apogee_runtime::{ArchiveFormat, ArchiveLayout, RuntimeError, extract_archive};
@@ -39,9 +40,9 @@ fn build_escaping_symlink_archive() -> io::Result<Vec<u8>> {
     compress(&tar, ArchiveFormat::TarGz)
 }
 
-/// The core of the symlink depth-inflation escape: an in-tree symlink `a/b` -> `..` (which the
-/// lexical check accepts on its own) followed by a write under it. The extractor must refuse to
-/// traverse the planted symlink rather than follow it out of the tree.
+/// The core of the symlink depth-inflation escape: an in-tree symlink `a/b` -> `..` (which lands back
+/// on the destination, so it is allowed to exist) followed by a write under it. The extractor must
+/// refuse to traverse the planted symlink rather than follow it out of the tree.
 fn build_symlink_traversal_archive() -> io::Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
     add_symlink(&mut builder, "a/b", "..")?;
@@ -68,6 +69,15 @@ fn add_symlink(builder: &mut tar::Builder<Vec<u8>>, path: &str, target: &str) ->
     header.set_size(0);
     header.set_mode(0o777);
     header.set_entry_type(tar::EntryType::Symlink);
+    builder.append_link(&mut header, path, target)
+}
+
+/// A hardlink entry. `target` is another member's path as the archive stores it, prefix and all.
+fn add_hardlink(builder: &mut tar::Builder<Vec<u8>>, path: &str, target: &str) -> io::Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_mode(0o644);
+    header.set_entry_type(tar::EntryType::Link);
     builder.append_link(&mut header, path, target)
 }
 
@@ -323,6 +333,135 @@ fn rejects_a_symlink_escaping_the_destination() {
     let err = extract_archive(&archive, &layout, &dest).expect_err("escaping symlink must reject");
     assert!(matches!(err, RuntimeError::Extract { .. }));
     assert!(!dest.join("escape").exists(), "nothing escaped");
+}
+
+/// A hardlink is how a tarball stores a second name for a member it already holds, so one that names
+/// a real member has to keep working: the two paths are one inode, not two copies.
+#[test]
+fn extracts_a_hardlink_to_an_earlier_member() {
+    let mut builder = tar::Builder::new(Vec::new());
+    add_file(&mut builder, "runner-1.0/bin/wine", b"#!/bin/sh\n", 0o755).expect("file");
+    add_hardlink(&mut builder, "runner-1.0/bin/wine64", "runner-1.0/bin/wine").expect("hardlink");
+    let bytes = compress(&builder.into_inner().expect("tar"), ArchiveFormat::TarGz).expect("gz");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let archive = tmp.path().join("runner.tar.gz");
+    std::fs::write(&archive, &bytes).expect("write archive");
+    let dest = tmp.path().join("out");
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::TarGz,
+        strip_prefix: Some("runner-1.0".to_owned()),
+    };
+
+    assert_eq!(
+        extract_archive(&archive, &layout, &dest).expect("extract"),
+        2
+    );
+    assert_eq!(
+        std::fs::read(dest.join("bin/wine64")).expect("read link"),
+        b"#!/bin/sh\n"
+    );
+    assert_eq!(
+        std::fs::metadata(dest.join("bin/wine"))
+            .expect("meta")
+            .ino(),
+        std::fs::metadata(dest.join("bin/wine64"))
+            .expect("meta")
+            .ino(),
+        "one inode under two names, not a copy"
+    );
+}
+
+/// The escape a component count cannot see: `a/b` -> `..` and then `x` -> `a/b/..`. Each passes a
+/// count on its own, and on disk the second resolves one level above the destination. No other entry
+/// kind is involved, so only the symlink target check stands between the archive and a link that
+/// names the outside of the tree.
+#[test]
+fn refuses_a_symlink_that_escapes_through_a_planted_symlink() {
+    let mut builder = tar::Builder::new(Vec::new());
+    add_symlink(&mut builder, "a/b", "..").expect("symlink");
+    add_symlink(&mut builder, "x", "a/b/..").expect("symlink");
+    let bytes = compress(&builder.into_inner().expect("tar"), ArchiveFormat::TarGz).expect("gz");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let archive = tmp.path().join("evil.tar.gz");
+    std::fs::write(&archive, &bytes).expect("write archive");
+    let dest = tmp.path().join("out");
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::TarGz,
+        strip_prefix: None,
+    };
+
+    let err = extract_archive(&archive, &layout, &dest).expect_err("the chain must reject");
+    assert!(matches!(err, RuntimeError::Extract { .. }));
+    assert!(
+        dest.join("x").symlink_metadata().is_err(),
+        "the escaping link never landed"
+    );
+}
+
+/// The reported escape end to end: the planted pair above, a hardlink through it, and a regular entry
+/// at the same path. The hardlink shares the outside inode and the regular entry truncates it, so a
+/// file the destination does not contain is rewritten by the archive.
+#[test]
+fn refuses_the_hardlink_chain_that_rewrites_a_file_outside_the_destination() {
+    let mut builder = tar::Builder::new(Vec::new());
+    add_symlink(&mut builder, "a/b", "..").expect("symlink");
+    add_symlink(&mut builder, "x", "a/b/..").expect("symlink");
+    add_hardlink(&mut builder, "planted", "x/outside.txt").expect("hardlink");
+    add_file(&mut builder, "planted", b"OVERWRITTEN", 0o644).expect("file");
+    let bytes = compress(&builder.into_inner().expect("tar"), ArchiveFormat::TarGz).expect("gz");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let archive = tmp.path().join("evil.tar.gz");
+    std::fs::write(&archive, &bytes).expect("write archive");
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, b"ORIGINAL").expect("write outside");
+    let dest = tmp.path().join("out");
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::TarGz,
+        strip_prefix: None,
+    };
+
+    let err = extract_archive(&archive, &layout, &dest).expect_err("the chain must reject");
+    assert!(matches!(err, RuntimeError::Extract { .. }));
+    assert_eq!(
+        std::fs::read(&outside).expect("read outside"),
+        b"ORIGINAL",
+        "the file outside the destination is untouched"
+    );
+}
+
+/// The same escape with the link already on disk rather than planted by this archive, which is what a
+/// destination left over from an earlier extraction looks like. Nothing in the archive is a symlink,
+/// so only the hardlink's own target check stands between it and the outside inode.
+#[test]
+fn refuses_a_hardlink_through_a_symlink_already_in_the_destination() {
+    let mut builder = tar::Builder::new(Vec::new());
+    add_hardlink(&mut builder, "planted", "x/outside.txt").expect("hardlink");
+    add_file(&mut builder, "planted", b"OVERWRITTEN", 0o644).expect("file");
+    let bytes = compress(&builder.into_inner().expect("tar"), ArchiveFormat::TarGz).expect("gz");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let archive = tmp.path().join("evil.tar.gz");
+    std::fs::write(&archive, &bytes).expect("write archive");
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, b"ORIGINAL").expect("write outside");
+    let dest = tmp.path().join("out");
+    std::fs::create_dir_all(&dest).expect("mkdir dest");
+    std::os::unix::fs::symlink("..", dest.join("x")).expect("plant symlink");
+    let layout = ArchiveLayout {
+        format: ArchiveFormat::TarGz,
+        strip_prefix: None,
+    };
+
+    let err = extract_archive(&archive, &layout, &dest).expect_err("the hardlink must reject");
+    assert!(matches!(err, RuntimeError::Extract { .. }));
+    assert_eq!(
+        std::fs::read(&outside).expect("read outside"),
+        b"ORIGINAL",
+        "the file outside the destination is untouched"
+    );
 }
 
 #[test]
