@@ -230,13 +230,22 @@ fn apply_add_file<S: PatchSink>(f: &FileOp<'_>, sink: &mut S) -> Result<u64> {
     let mut written = 0u64;
     let mut rest = f.blocks;
     let mut pos = f.blocks_off;
+    // The framing below is the codec's, minus the decode, so everything measured from the header
+    // reads the codec's length rather than restating it. `split_first_chunk` is the one place that
+    // cannot: a const-generic argument has to be a literal. This pins the two together, so a codec
+    // whose header stopped being sixteen bytes would not compile here rather than mis-frame a block.
+    const HEADER_LEN: usize = codec::BLOCK_HEADER_LEN as usize;
+    const _: () = assert!(
+        HEADER_LEN == 16,
+        "split_first_chunk::<16> below spells this"
+    );
     while !rest.is_empty() {
-        // Frame one block from its 16-byte header (payload size + stored/compressed), no decode.
+        // Frame one block from its header (payload size + stored/compressed), no decode.
         let (header_bytes, _) = rest
             .split_first_chunk::<16>()
             .ok_or_else(|| Error::Truncated {
                 offset: pos,
-                needed: (16 - rest.len()) as u64,
+                needed: (HEADER_LEN - rest.len()) as u64,
             })?;
         let header =
             codec::parse_header(header_bytes).map_err(|e| Error::from_block(e, pos, 0, 0))?;
@@ -263,8 +272,8 @@ fn apply_add_file<S: PatchSink>(f: &FileOp<'_>, sink: &mut S) -> Result<u64> {
                 needed: (block_len - rest.len()) as u64,
             });
         }
-        let payload = &rest[16..16 + payload_len as usize];
-        let payload_off = pos + 16;
+        let payload = &rest[HEADER_LEN..HEADER_LEN + payload_len as usize];
+        let payload_off = pos + HEADER_LEN as u64;
         if header.is_stored() {
             sink.write(
                 &target,
