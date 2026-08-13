@@ -75,6 +75,7 @@ is tagged with its change type. Versioning aims to follow
 - Accept a list of runner-catalog signing keys (#219) _(added)_
 - Launch the game directly on Windows (#220) _(added)_
 - Run host tools outside a Flatpak sandbox (#221) _(added)_
+- Close out the pre-freeze API review (#222) _(changed)_
 
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
