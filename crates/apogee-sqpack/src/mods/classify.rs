@@ -502,6 +502,7 @@ mod tests {
             at(),
             &ModOptions {
                 max_files_per_container: 2,
+                ..ModOptions::default()
             },
         );
         assert_eq!(out.files.len(), 2);

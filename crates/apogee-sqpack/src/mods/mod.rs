@@ -39,6 +39,8 @@ pub use classify::{ContainerComparison, classify_entries, content_extent};
 pub use map::{ByteRange, Coverage, MapBuilder, PristineMap};
 pub use verdict::{Confidence, ContainerStanding, ContainerVerdict, FileStanding, Standing};
 
+use crate::dat::DatLimits;
+use crate::index::IndexLimits;
 use crate::integrity::ContainerRef;
 
 /// Verdicts kept for one container before the rest are counted instead of carried. A container a mod
@@ -46,16 +48,30 @@ use crate::integrity::ContainerRef;
 pub const DEFAULT_MAX_FILES_PER_CONTAINER: usize = 4096;
 
 /// How a comparison runs.
+///
+/// The three fields past the budget are [`crate::integrity::SweepOptions`]'s, and they are here for
+/// the same reasons: this pass opens the same containers out of the same install, so a caller that
+/// bounded one walk has bounded both, and the cap on workers matters more here than there because
+/// this is the pass that answers "repair will revert these files" while the game is still running.
 #[derive(Debug, Clone)]
 pub struct ModOptions {
     /// Verdicts kept per container before the rest are counted instead of carried.
     pub max_files_per_container: usize,
+    /// Cap the comparison at this many worker threads; `None` uses the default pool.
+    pub parallelism: Option<usize>,
+    /// Bounds on reading an index container.
+    pub index_limits: IndexLimits,
+    /// Bounds on reading a dat container.
+    pub dat_limits: DatLimits,
 }
 
 impl Default for ModOptions {
     fn default() -> Self {
         Self {
             max_files_per_container: DEFAULT_MAX_FILES_PER_CONTAINER,
+            parallelism: None,
+            index_limits: IndexLimits::default(),
+            dat_limits: DatLimits::default(),
         }
     }
 }

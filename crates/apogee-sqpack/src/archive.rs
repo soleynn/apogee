@@ -167,12 +167,6 @@ impl ArchiveId {
         }
     }
 
-    /// The archive's category.
-    #[must_use]
-    pub fn category(self) -> Category {
-        Category::from_id(self.category)
-    }
-
     /// The six hex digits every one of the archive's file names starts with.
     #[must_use]
     pub fn stem(self) -> String {
