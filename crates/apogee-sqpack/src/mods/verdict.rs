@@ -287,42 +287,69 @@ mod tests {
         assert_eq!(unknown.to_string(), "sqpack/ex1/020101.win32.dat0: unknown");
     }
 
+    /// Every variant of an enum, as a list the compiler will not let go stale.
+    ///
+    /// The `match` has no wildcard, so a variant added to the enum stops this compiling until it is
+    /// named here too. Written as a bare array instead, the list would quietly stay one short —
+    /// which is what it was: `ContainerStanding::Missing` had no entry, so nothing checked its slug.
+    macro_rules! all_of {
+        ($ty:ty, [$($variant:path),+ $(,)?]) => {{
+            #[allow(dead_code)]
+            fn every_variant_is_listed(value: $ty) {
+                match value { $( $variant => () ),+ }
+            }
+            [$($variant),+]
+        }};
+    }
+
     #[test]
     fn every_slug_is_a_distinct_kebab_case_key() {
-        let mut seen: Vec<&str> = Vec::new();
-        for standing in [
-            Standing::Pristine,
-            Standing::Modified,
-            Standing::Foreign,
-            Standing::Broken,
-            Standing::Unknown,
-        ] {
-            seen.push(standing.slug());
-        }
-        for standing in [
-            ContainerStanding::Pristine,
-            ContainerStanding::Rewritten,
-            ContainerStanding::Grown,
-            ContainerStanding::Truncated,
-            ContainerStanding::Added,
-            ContainerStanding::Unknown,
-        ] {
-            seen.push(standing.slug());
-        }
-        seen.push(Confidence::Exact.slug());
-        seen.push(Confidence::Shared.slug());
-        assert!(
-            seen.iter()
-                .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
+        let files = all_of!(
+            Standing,
+            [
+                Standing::Pristine,
+                Standing::Modified,
+                Standing::Foreign,
+                Standing::Broken,
+                Standing::Unknown,
+            ]
         );
+        let containers = all_of!(
+            ContainerStanding,
+            [
+                ContainerStanding::Pristine,
+                ContainerStanding::Rewritten,
+                ContainerStanding::Grown,
+                ContainerStanding::Truncated,
+                ContainerStanding::Added,
+                ContainerStanding::Missing,
+                ContainerStanding::Unknown,
+            ]
+        );
+        let confidences = all_of!(Confidence, [Confidence::Exact, Confidence::Shared]);
+
+        let file_slugs: Vec<&str> = files.iter().map(|s| s.slug()).collect();
+        let container_slugs: Vec<&str> = containers.iter().map(|s| s.slug()).collect();
+        let confidence_slugs: Vec<&str> = confidences.iter().map(|c| c.slug()).collect();
+        for slug in file_slugs
+            .iter()
+            .chain(&container_slugs)
+            .chain(&confidence_slugs)
+        {
+            assert!(!slug.is_empty());
+            assert!(
+                slug.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+                    && !slug.starts_with('-')
+                    && !slug.ends_with('-'),
+                "{slug}"
+            );
+        }
         // The two standing enums share three words on purpose; within each set the keys are distinct.
-        let mut files = seen[..5].to_vec();
-        files.sort_unstable();
-        files.dedup();
-        assert_eq!(files.len(), 5);
-        let mut containers = seen[5..11].to_vec();
-        containers.sort_unstable();
-        containers.dedup();
-        assert_eq!(containers.len(), 6);
+        for mut slugs in [file_slugs, container_slugs, confidence_slugs] {
+            let named = slugs.len();
+            slugs.sort_unstable();
+            slugs.dedup();
+            assert_eq!(slugs.len(), named, "two variants share a slug: {slugs:?}");
+        }
     }
 }
