@@ -246,6 +246,8 @@ pub struct LaunchPlan {
 impl LaunchPlan {
     /// A plan to launch `program` (a PE basename, e.g. `ffxiv_dx11.exe`) with the opaque
     /// `encrypted_args` string and the caller's `env` overrides (merged last, so they always win).
+    ///
+    /// The launch is [DPI-aware](Self::dpi_aware) unless the caller says otherwise.
     #[must_use]
     pub fn new(
         program: impl Into<String>,
@@ -258,7 +260,7 @@ impl LaunchPlan {
             inserted_args: Vec::new(),
             env,
             wrappers: Vec::new(),
-            dpi_aware: false,
+            dpi_aware: true,
             prefix: None,
             working_dir: None,
             supervised: None,
@@ -287,11 +289,24 @@ impl LaunchPlan {
         self
     }
 
-    /// Mark the launch DPI-aware (carried through; inert on Linux until the Windows path lands).
+    /// Mark the launch DPI-aware. On by default.
+    ///
+    /// Windows-only: it selects the DPI compatibility layer the game runs under (`HighDPIAware` when
+    /// on, `DPIUnaware` when off). Off Windows nothing reads it, because the layer is applied by the
+    /// Windows compatibility engine and a launch through a runner never reaches it.
+    ///
+    /// Off is an explicit `DPIUnaware`, not the absence of a layer: with neither named the executable's
+    /// own manifest decides, which is a third behaviour and not what either setting means.
     #[must_use]
     pub fn dpi_aware(mut self, on: bool) -> Self {
         self.dpi_aware = on;
         self
+    }
+
+    /// Whether the launch is DPI-aware (see [`dpi_aware`](Self::dpi_aware)).
+    #[must_use]
+    pub fn is_dpi_aware(&self) -> bool {
+        self.dpi_aware
     }
 
     /// The program (PE basename) to launch.

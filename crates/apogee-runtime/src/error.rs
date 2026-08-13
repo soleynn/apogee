@@ -89,6 +89,12 @@ pub enum RuntimeError {
     /// telling them about.
     #[error("the wait for the game process was stopped after {waited:?}")]
     GameWaitCancelled { waited: Duration },
+    /// The supervision of a running game ended before the process was reaped, so whether it is still
+    /// running is no longer known. Raised where a launch is supervised by the child handle rather than
+    /// by the process table (Windows), and reachable only when the async runtime that owns the
+    /// supervision is itself going away.
+    #[error("supervision of {program} ended before it exited")]
+    SupervisionLost { program: String },
     #[error("path mapping failed for {path:?}: {reason}")]
     PathMapping { path: PathBuf, reason: &'static str },
     #[error("missing host tool: {tool:?}")]

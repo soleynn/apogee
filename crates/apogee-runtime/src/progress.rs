@@ -59,9 +59,11 @@ pub enum RuntimeEvent {
     DxvkInstalling { version: String, nvapi: bool },
     /// DXVK finished installing into a prefix.
     DxvkReady { version: String },
-    /// The game is being spawned through the runner.
+    /// The game is being spawned through the runner. Not raised by a launch that spawns the game
+    /// directly (Windows), where there is no runner to name.
     Spawning { runner: String },
-    /// The `/proc` scan resolved the real game process.
+    /// The real game process was resolved: by the `/proc` scan where a runner started it, and by the
+    /// spawn itself where the launcher started the game directly.
     GameResolved { pid: i32 },
     /// The game process exited.
     GameExited,
