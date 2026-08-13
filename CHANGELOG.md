@@ -101,6 +101,7 @@ is tagged with its change type. Versioning aims to follow
 - Match the seal and probe claims to the code (#158) _(documentation)_
 - Fuzz the exported password table, and decode it from bytes (#160) _(testing)_
 - Close out the pre-freeze API review (#226) _(changed)_
+- Bring rustdoc to publication grade (#227) _(documentation)_
 
 ### apogee-test-support
 - Stop a corpus gate passing when it cannot run (#189) _(fixed)_
