@@ -162,7 +162,8 @@ fn put_part(b: &mut Vec<u8>, part: &Part) {
 fn decode_body(body: &[u8]) -> Result<Index> {
     let mut c = Cursor::new(body, 0);
     let repo_version = take_str(&mut c)?;
-    let platform = platform_from_byte(c.u8()?)?;
+    let platform_off = c.offset();
+    let platform = platform_from_byte(c.u8()?, platform_off)?;
 
     let source_count = c.u32_be()?;
     let mut sources = Vec::new();
@@ -308,9 +309,9 @@ fn platform_byte(p: Platform) -> u8 {
     }
 }
 
-fn platform_from_byte(b: u8) -> Result<Platform> {
+fn platform_from_byte(b: u8, offset: u64) -> Result<Platform> {
     Platform::from_u16(u16::from(b)).ok_or(Error::Corrupt {
-        offset: 0,
+        offset,
         detail: "unknown index platform",
     })
 }
