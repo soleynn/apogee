@@ -105,26 +105,41 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read a single byte.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] if no byte remains.
     pub fn u8(&mut self) -> Result<u8> {
         Ok(self.array::<1>()?[0])
     }
 
     /// Read a little-endian `u16`.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] if fewer than 2 bytes remain.
     pub fn u16_le(&mut self) -> Result<u16> {
         Ok(u16_le(self.array()?))
     }
 
     /// Read a little-endian `u32`.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] if fewer than 4 bytes remain.
     pub fn u32_le(&mut self) -> Result<u32> {
         Ok(u32_le(self.array()?))
     }
 
     /// Read a little-endian `u64`.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] if fewer than 8 bytes remain.
     pub fn u64_le(&mut self) -> Result<u64> {
         Ok(u64_le(self.array()?))
     }
 
     /// Skip `n` bytes (alignment padding, reserved fields), erroring if fewer remain.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] if fewer than `n` bytes remain.
     pub fn skip(&mut self, n: usize) -> Result<()> {
         let start = self.window(n)?;
         self.pos = start + n;
@@ -132,6 +147,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// Borrow the next `n` bytes without copying, advancing the cursor.
+    ///
+    /// # Errors
+    /// [`Error::Truncated`] if fewer than `n` bytes remain.
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let start = self.window(n)?;
         self.pos += n;
