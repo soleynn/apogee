@@ -25,7 +25,9 @@ use tokio::sync::mpsc::UnboundedSender;
 /// // Hand `progress` to a runtime call and read events off `rx`. Dropping every clone is what
 /// // ends the consumer's read loop.
 /// drop(progress);
-/// assert!(rx.try_recv().is_err());
+/// // `RuntimeEvent` is not `PartialEq`, so the disconnect is matched rather than compared.
+/// use tokio::sync::mpsc::error::TryRecvError;
+/// assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Progress {
@@ -62,7 +64,7 @@ impl Progress {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RuntimeEvent {
-    /// Download progress for a runner or tool artifact, relayed verbatim from `apogee-fetch`.
+    /// Download progress for a runner, tool or DXVK artifact, relayed verbatim from `apogee-fetch`.
     Download(apogee_fetch::Progress),
     /// Extraction of a downloaded runner or tool artifact has begun.
     Extracting {
@@ -144,8 +146,8 @@ pub enum RuntimeEvent {
     ///
     /// Says nothing about the launch being over: when it arrives is a property of whatever was
     /// spawned, a loader that starts the game and returns exiting seconds in while a
-    /// container-style runner outlives the session. The game's own exit is
-    /// [`GameExited`](Self::GameExited).
+    /// container-style runner outlives the session. The game's own exit comes from awaiting
+    /// [`GameSession::wait`](crate::GameSession::wait), not from this stream.
     LaunchProgramExited {
         /// The program as it was spawned, verbatim from the plan.
         program: String,

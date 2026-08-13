@@ -33,7 +33,7 @@ impl From<&RunnerHandle> for RunnerRef {
     }
 }
 
-/// The DXVK build installed into a prefix. `None` until the environment matrix installs one.
+/// The DXVK build installed into a prefix. `None` until a DXVK install writes one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DxvkRef {
     /// The version that was installed, as the catalog row spelled it.

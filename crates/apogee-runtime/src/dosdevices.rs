@@ -1,4 +1,4 @@
-//! Unix to windows path translation from a prefix's `dosdevices/` drive symlinks.
+//! Path translation between unix and windows forms, from a prefix's `dosdevices/` drive symlinks.
 //!
 //! A prefix maps its drives with one symlink per letter under `dosdevices/`: `c:` at `../drive_c`,
 //! `z:` at `/`, plus whatever else has been mapped. They are static, so reading them once and

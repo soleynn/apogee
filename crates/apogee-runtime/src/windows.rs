@@ -1,8 +1,9 @@
 //! The Windows launch arm: the game is spawned directly, with no prefix and no runner.
 //!
 //! There is nothing to manage on this target, so a launch is a process the launcher started. The
-//! argument string reaches the game as its own single token, the environment is the plan's plus the
-//! compatibility layers below, and supervision is the child handle the operating system already
+//! argument string reaches the game as its own single token, the environment is the launcher's own
+//! plus the plan's and the compatibility layers below, and supervision is the child handle the
+//! operating system already
 //! hands back: nothing is scanned for and nothing is resolved, because the process that was spawned
 //! *is* the game.
 
@@ -37,8 +38,8 @@ const HIGH_DPI_AWARE: &str = "HighDPIAware";
 // decides, which is a third behaviour and not what asking for an unaware launch means.
 const DPI_UNAWARE: &str = "DPIUnaware";
 
-/// The compatibility layers a launch runs under: the privilege one always, then the DPI one `plan`
-/// selected.
+/// The compatibility layers a launch runs under: the privilege one always, then the DPI one
+/// `dpi_aware` selects.
 fn compat_layers(dpi_aware: bool) -> String {
     let dpi = if dpi_aware {
         HIGH_DPI_AWARE
@@ -144,10 +145,10 @@ pub struct GameExit {}
 pub struct GameSession {
     pid: i32,
     program: String,
-    /// Raised once, by `kill`; the task consumes it and terminates the process.
+    /// Raised by `kill`, once per call; the task consumes each and terminates the process.
     stop: Arc<Notify>,
-    /// `true` once the process has been reaped. Watched rather than awaited, so any number of
-    /// callers can wait and a caller that arrives late still sees it.
+    /// `true` once the wait ended, whether or not the process could be reaped. Watched rather than
+    /// awaited, so any number of callers can wait and a caller that arrives late still sees it.
     exited: watch::Receiver<bool>,
 }
 
@@ -174,8 +175,9 @@ impl GameSession {
     /// Resolve when the game process exits.
     ///
     /// # Errors
-    /// [`RuntimeError::SupervisionLost`] if the supervising task ended without reaping the process,
-    /// which is the async runtime it was spawned on going away.
+    /// [`RuntimeError::SupervisionLost`] if the supervising task went away without reporting at
+    /// all, which is the async runtime it was spawned on going away. A process that could not be
+    /// reaped is not this: the task reports the wait as ended either way.
     pub async fn wait(&self) -> Result<GameExit, RuntimeError> {
         let mut exited = self.exited.clone();
         exited
@@ -282,9 +284,9 @@ mod tests {
         );
     }
 
-    /// There is no prefix on this platform, so nothing that places a program in one may be set: a
-    /// `WINEPREFIX` a launch inherited from somewhere would be a lie about where the game is
-    /// running.
+    /// Nothing that places a program in a prefix is set on this platform, where there is no prefix
+    /// for one to name. This pins what the launch sets, not what it inherits: the child is not given
+    /// a cleared environment, so a variable already in the launcher's own still reaches the game.
     #[test]
     fn no_prefix_variables_reach_the_game() {
         let command = build_command(&plan()).expect("build");

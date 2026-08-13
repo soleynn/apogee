@@ -36,9 +36,9 @@ const WORK_DIR: &str = ".apogee-dxvk";
 ///
 /// Whatever [`download_verified`] raises, including a [`RuntimeError::Download`] carrying the
 /// cancellation ([`RuntimeError::is_cancellation`] recognizes it). [`RuntimeError::Extract`] if an
-/// archive cannot be extracted or holds no `x64`/`x32` DLLs, [`RuntimeError::Io`] if a DLL or the
-/// metadata cannot be written, and [`RuntimeError::PrefixJson`] if the existing `prefix.json` is
-/// corrupt.
+/// archive cannot be extracted or holds no `x64`/`x32` DLLs, [`RuntimeError::Io`] if a DLL cannot be
+/// written or an existing record cannot be read, and [`RuntimeError::PrefixJson`] if that record is
+/// corrupt or the updated one cannot be serialized.
 pub(crate) async fn install(
     fetcher: &Fetcher,
     dxvk: &DxvkEntry,
@@ -305,8 +305,9 @@ fn find_dir(root: &Path, name: &str) -> Option<PathBuf> {
 ///
 /// # Errors
 ///
-/// [`RuntimeError::PrefixJson`] if the existing file is corrupt, [`RuntimeError::Io`] if the new
-/// one cannot be written.
+/// [`RuntimeError::PrefixJson`] if the existing file is corrupt or the new one cannot be
+/// serialized, [`RuntimeError::Io`] if the existing one cannot be read or the new one cannot be
+/// written.
 fn record(prefix: &Prefix, version: &str, nvapi: bool) -> Result<(), RuntimeError> {
     let path = prefix.metadata_path();
     let mut meta = PrefixMetadata::load(&path)?

@@ -260,9 +260,11 @@ impl Catalog {
     /// [`CatalogError::Malformed`] if the bytes are not JSON in the schema,
     /// [`CatalogError::UnsupportedVersion`] if `version` is not [`CATALOG_MANIFEST_VERSION`],
     /// [`CatalogError::UnknownRunnerKind`] or [`CatalogError::UnknownArchiveFormat`] for a value
-    /// outside the fixed sets, [`CatalogError::BadPin`] for a row carrying neither a `blake3` nor a
-    /// `sha256` pin of 32 hex bytes (or a `dxvk-nvapi` companion that gives a URL without a pin, or
-    /// the reverse), and [`CatalogError::BadUrl`] for a URL that does not parse.
+    /// outside the fixed sets, [`CatalogError::BadPin`] for a row whose selected pin is not 32 hex
+    /// bytes (`blake3` is selected when present and `sha256` otherwise, so a malformed `blake3` is
+    /// refused even beside a well-formed `sha256`), including a row carrying neither, and for a
+    /// `dxvk-nvapi` companion that gives a URL without a pin or the reverse; and
+    /// [`CatalogError::BadUrl`] for a URL that does not parse.
     ///
     /// # Examples
     ///

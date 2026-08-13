@@ -3,13 +3,20 @@
 //! Pure-Rust decoders (`flate2`, `ruzstd`, `lzma-rs`) feed `tar` entry by entry, so peak memory is
 //! bounded by the decoder window and never by the archive size. Every entry is confined to the
 //! destination before it is written: an archive comes from the signed catalog, but its bytes are
-//! still treated as hostile, and no directory component is ever traversed through a symlink, so a
-//! crafted archive cannot plant a link that redirects a later write outside the tree.
+//! still treated as hostile. An entry's own parent components are created as real directories and
+//! never traversed through a symlink.
+//!
+//! That confinement is not total. A symlink and a hardlink target are checked lexically, by counting
+//! path components, which is exact only while no component of the target is itself an extracted
+//! symlink. An archive that plants one and then points a later entry through it is not caught, so
+//! the pinned digest on the catalog row, rather than this pass alone, is what stands between a
+//! hostile archive and the filesystem.
 //!
 //! Zip is here for the Windows-side companions, which is all anyone publishes them as. It shares the
-//! confinement and differs in the two ways the container forces: entries are addressed through a
-//! central directory rather than streamed, and a symlink entry is refused outright rather than
-//! recreated, because a zip encodes its target as file content and no companion archive contains one.
+//! confinement and differs in the three ways the container forces: entries are addressed through a
+//! central directory rather than streamed, a symlink entry is refused outright rather than recreated
+//! (a zip encodes its target as file content and no companion archive contains one), and a mode is
+//! synthesized rather than read, because Windows tooling writes attribute bits instead.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -30,10 +37,12 @@ const COPY_BUF: usize = 256 * 1024;
 /// Extract `archive` into `dest`, stripping `layout.strip_prefix` from every entry.
 ///
 /// Streams to disk and returns the number of entries written; zero means nothing matched the strip
-/// prefix. Entries are confined to `dest`: an absolute path, a `..` component, a symlink or hardlink
-/// target that does not resolve inside `dest`, a parent component that is an existing symlink or
-/// non-directory, and, for zip, a symlink entry at all are refusals rather than a write outside the
-/// tree. Entry kinds a runner never contains, such as devices and fifos, are skipped and not counted.
+/// prefix. Entries are confined to `dest`: an absolute path, a `..` component that leaves the tree, a
+/// parent component that is an existing symlink or non-directory, and, for zip, a symlink entry at
+/// all are refusals rather than a write outside the tree. A symlink or hardlink target is confined
+/// lexically only, by component count, which does not account for a target routed through a symlink
+/// an earlier entry planted. Entry kinds a runner never contains, such as devices and fifos, are
+/// skipped and not counted.
 ///
 /// # Errors
 ///
@@ -48,11 +57,12 @@ const COPY_BUF: usize = 256 * 1024;
 /// # use apogee_runtime::{ArchiveFormat, ArchiveLayout, RuntimeError, extract_archive};
 /// # fn demo(archive: &Path, dest: &Path) -> Result<(), RuntimeError> {
 /// let layout = ArchiveLayout {
-///     format: ArchiveFormat::TarXz,
-///     strip_prefix: Some("UMU-Proton-9-20".to_owned()),
+///     format: ArchiveFormat::TarGz,
+///     strip_prefix: Some("wine-xiv-staging-fsync-git-8.5.r4.g4211bac7".to_owned()),
 /// };
 /// let entries = extract_archive(archive, &layout, dest)?;
-/// assert!(entries > 0);
+/// // Zero is not an error: it means nothing in the archive matched the strip prefix.
+/// # let _ = entries;
 /// # Ok(())
 /// # }
 /// ```
@@ -354,10 +364,12 @@ fn unlink_if_symlink(out: &Path, archive: &Path) -> Result<(), RuntimeError> {
 
 /// Decide lexically whether a symlink at `link_path` with `target` stays inside the destination.
 ///
-/// No filesystem access is needed: [`safe_make_dirs`] guarantees every parent is a real directory, so
-/// the component count is the true on-disk depth. That also means this alone does not settle
-/// confinement, since it accepts an in-tree link such as `a/b` pointing at `..`; what stops a later
-/// entry from traversing that link is [`safe_make_dirs`].
+/// No filesystem access is needed: [`safe_make_dirs`] guarantees the link's own parents are real
+/// directories, so the count is its true on-disk depth. The target's intermediate components carry
+/// no such guarantee, so the count is the true depth of what the target resolves to only while none
+/// of them is itself an extracted symlink. This alone therefore does not settle confinement: it
+/// accepts an in-tree link such as `a/b` pointing at `..`, and what stops a later entry from being
+/// written through that link is [`safe_make_dirs`] on the entry's own path.
 fn symlink_within_dest(link_path: &Path, target: &Path) -> bool {
     if target.is_absolute() {
         return false;

@@ -25,7 +25,8 @@ pub(crate) const GAME_EXE: &str = "ffxiv_dx11.exe";
 const RESOLVE_DEADLINE: Duration = Duration::from_secs(30);
 /// How long to wait between `/proc` walks.
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
-/// How long the runner's own loader must be the only match before it is accepted as the game.
+/// How long the scan runs with no other match before the runner's own loader is accepted as the
+/// game.
 ///
 /// Wine renames its loader (the process that was spawned) to the PE basename. For a program that
 /// runs as one process that loader is the game; for one that starts a separate game process the
@@ -46,8 +47,8 @@ const KILL_TOTAL_GRACE: Duration = Duration::from_millis(2000);
 /// A process matches when its `comm` is `program_basename` and its `WINEPREFIX`, normalized for
 /// Proton's `/pfx` relocation, is `prefix_path`. `wrapper_pid` is the runner process that was
 /// spawned: wine renames that loader to the PE basename and then execs the game, so a match at that
-/// pid is preferred against until it has been the only match past [`LOADER_STABLE_GRACE`], which
-/// lets a separate game process win when there is one.
+/// pid is preferred against until [`LOADER_STABLE_GRACE`] has passed since the scan began with no
+/// other match, which lets a separate game process win when there is one.
 ///
 /// # Errors
 /// [`RuntimeError::GameWaitCancelled`] if `cancel` fired, [`RuntimeError::GameProcessNotFound`]
@@ -134,8 +135,8 @@ pub(crate) async fn terminate_pid(pid: i32) -> Result<(), RuntimeError> {
 /// Choose the game process from the current matches, or `None` to keep polling.
 ///
 /// Prefers a process that is not the runner's own loader (`wrapper_pid`), and accepts the loader
-/// only once `grace_elapsed` says it has been the sole match past the grace window, so a program
-/// that runs as a single process still resolves.
+/// once `grace_elapsed` says the grace window has passed since the scan began, so a program that
+/// runs as a single process still resolves.
 fn pick_game(pids: &[i32], wrapper_pid: Option<i32>, grace_elapsed: bool) -> Option<i32> {
     if let Some(&pid) = pids.iter().find(|&&p| Some(p) != wrapper_pid) {
         return Some(pid);
@@ -236,8 +237,9 @@ fn install_roots(game_root: &Path) -> Vec<PathBuf> {
 ///
 /// Either one is enough. The client runs with the install's `game/` directory as its cwd and is
 /// launched by path, so a client started elsewhere matches neither and a second install running
-/// from another directory is not mistaken for this one. Both files are restricted to the user who
-/// owns the process, so one that cannot be read is not a match.
+/// from another directory is not mistaken for this one. The `cwd` link is restricted to the user
+/// who owns the process, so it answers nothing across users; argv is world-readable, so a client
+/// owned by somebody else is still matched through its command line unless `/proc` hides it.
 fn in_install(pid: i32, roots: &[PathBuf]) -> bool {
     // Reading both is what covers the launchers that differ: the cwd link is resolved by the kernel
     // and survives a launcher that passes a wine drive path, while argv survives a launcher that

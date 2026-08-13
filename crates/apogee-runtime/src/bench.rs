@@ -71,7 +71,7 @@ pub struct BenchStats {
 impl BenchStats {
     /// Compute the metrics from a run's per-frame frametimes, in milliseconds.
     ///
-    /// The order of `frametimes_ms` does not affect the result.
+    /// Order affects nothing but the index a [`BenchError::BadFrametime`] reports.
     ///
     /// # Errors
     ///
@@ -156,7 +156,8 @@ fn slowest_tail_fps(sorted_ascending: &[f64], fraction: f64) -> f64 {
 /// `frametime` column, in milliseconds, is required; the rest is provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameLog {
-    /// The capture machine, keyed by MangoHud's metadata column names (`os`, `cpu`, `gpu`).
+    /// The capture machine, keyed by whatever metadata column names the capture wrote (`os`,
+    /// `cpu`, `gpu`, and others depending on the build).
     pub metadata: BTreeMap<String, String>,
     /// Per-frame frametimes in milliseconds, in capture order.
     pub frametimes_ms: Vec<f64>,

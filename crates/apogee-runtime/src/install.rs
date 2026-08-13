@@ -22,7 +22,7 @@ use crate::progress::{Progress, RuntimeEvent};
 /// partial extraction cannot leave a stale one.
 const INSTALLED_DIR: &str = ".installed";
 
-/// How many times to restart a download before giving up.
+/// How many attempts a download gets in total: one initial and three restarts.
 ///
 /// These sit on top of whatever the injected fetcher already spent inside one request, and each
 /// resumes from its journal rather than from zero. Which failures are worth a restart is
@@ -161,7 +161,7 @@ async fn install_artifact(
 /// Download `url` to `dest` under its whole-file digest.
 ///
 /// Relays transfer progress into the runtime event stream. A dropped connection resumes from the
-/// fetcher's journal on the next attempt, up to [`MAX_DOWNLOAD_ATTEMPTS`] restarts.
+/// fetcher's journal on the next attempt, over at most [`MAX_DOWNLOAD_ATTEMPTS`] attempts.
 ///
 /// # Errors
 ///

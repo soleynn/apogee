@@ -231,8 +231,10 @@ impl Prefix {
 
     /// Whether what `delete` removes is still absent from this prefix's registry.
     ///
-    /// On the same terms as [`registry_effect`](Self::registry_effect), with the readings inverted:
-    /// finding the target is the removal being gone.
+    /// On the same terms as [`registry_effect`](Self::registry_effect), with the readings
+    /// inverted: finding the target is the removal being gone. One divergence, because a value in
+    /// an encoding this build cannot decode is still a value that is there: here it counts as
+    /// found, where [`registry_effect`](Self::registry_effect) reports no answer.
     #[must_use]
     pub fn registry_removal_effect(&self, delete: &crate::RegistryDelete) -> crate::RegistryEffect {
         crate::hive::removal_effect(&self.wine_root(), delete)

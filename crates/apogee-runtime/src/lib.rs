@@ -199,8 +199,9 @@ pub async fn prefix_processes(
 ///
 /// It reads the process table as it is at the call, and a game can start the moment after. That
 /// makes it a guard against the ordinary mistake, patching an install someone is playing, not a
-/// lock. The kernel restricts the files it narrows on to the user who owns the process, so a client
-/// running as somebody else is invisible to it and answers `false`.
+/// lock. It narrows on a process's working directory, which the kernel restricts to the owning
+/// user, and on its command line, which is world-readable, so a client owned by somebody else is
+/// still found through the latter unless `/proc` is mounted to hide it.
 ///
 /// Synchronous, and it walks every process on the machine. That suits a caller asking once at the
 /// head of an operation; a caller that wants the answer somewhere hotter, on an async runtime,
@@ -393,7 +394,8 @@ impl Runtime {
     /// [`RuntimeError::Extract`] and [`RuntimeError::Io`] from installing the runner;
     /// [`RuntimeError::MissingHostTool`] if the runner has no resolvable launcher,
     /// [`RuntimeError::PrefixInit`] if `wineboot` failed or was cancelled, and
-    /// [`RuntimeError::PrefixJson`] if an existing prefix's record is corrupt.
+    /// [`RuntimeError::PrefixJson`] if the new record cannot be serialized. A corrupt existing
+    /// record is not an error: the prefix is re-initialized non-destructively instead.
     pub async fn prepare(
         &self,
         runner: &Runner,
@@ -473,8 +475,8 @@ impl Runtime {
     /// what the prefix already claims.
     ///
     /// # Errors
-    /// [`RuntimeError::Io`] if the prefix cannot be read, or [`RuntimeError::PrefixJson`] if its
-    /// record is corrupt.
+    /// [`RuntimeError::Io`] if the prefix's record is present and unreadable for a reason other
+    /// than being corrupt. A corrupt record is treated as no record, not as an error.
     pub async fn check_prefix(
         &self,
         prefix: &Prefix,
@@ -486,7 +488,8 @@ impl Runtime {
     /// Apply targeted fixes for `issues` and return the residual health.
     ///
     /// Rewrites a broken drive symlink in place and regenerates a missing skeleton with
-    /// `wineboot -u`; it never deletes the prefix. A [`HealthIssue::RunnerMismatch`] is left for an
+    /// `wineboot`, using `-u` where the registry survived and `-i` where it did not; it never
+    /// deletes the prefix. A [`HealthIssue::RunnerMismatch`] is left for an
     /// explicit [`recreate_prefix`](Self::recreate_prefix), and the two DXVK issues for an
     /// [`install_dxvk`](Self::install_dxvk) the caller drives with a catalog in hand. `wants` is
     /// what the residual re-check is taken against, so an issue nothing resolved is still reported.
@@ -533,7 +536,8 @@ impl Runtime {
     ///
     /// # Errors
     /// [`RuntimeError::Spec`], [`RuntimeError::Download`], [`RuntimeError::OutOfSpace`],
-    /// [`RuntimeError::Extract`] and [`RuntimeError::Io`].
+    /// [`RuntimeError::Extract`] and [`RuntimeError::Io`], plus [`RuntimeError::PrefixJson`] if the
+    /// prefix's existing record is corrupt or the updated one cannot be serialized.
     pub async fn install_dxvk(
         &self,
         dxvk: &DxvkEntry,
@@ -554,7 +558,8 @@ impl Runtime {
     /// # Errors
     /// [`RuntimeError::InvalidLaunchPlan`] if the plan names no prefix or is otherwise one this
     /// crate will not launch, [`RuntimeError::MissingHostTool`] if the runner or umu cannot be
-    /// resolved, [`RuntimeError::Spawn`] if the process could not be started,
+    /// resolved or if a confined build does not carry the launch's outermost wrapper,
+    /// [`RuntimeError::Spawn`] if the process could not be started,
     /// [`RuntimeError::GameProcessNotFound`] if the game never appeared inside the time budget,
     /// [`RuntimeError::GameWaitCancelled`] if the wait was stopped, and [`RuntimeError::Io`] if
     /// `/proc` could not be read.
@@ -626,9 +631,9 @@ impl Runtime {
     ///
     /// # Errors
     /// [`RuntimeError::MissingHostTool`] if the runner has no resolvable launcher,
-    /// [`RuntimeError::Spawn`] if the program could not be started, and
-    /// [`RuntimeError::InPrefixIncomplete`] if it outlived its time budget or the run was
-    /// cancelled.
+    /// [`RuntimeError::Spawn`] if the program could not be started or its pipes could not be
+    /// drained, and [`RuntimeError::InPrefixIncomplete`] if it outlived its time budget or the run
+    /// was cancelled.
     pub async fn run_in_prefix(
         &self,
         prefix: &Prefix,
@@ -730,7 +735,8 @@ impl Runtime {
     /// # Errors
     /// [`RuntimeError::MissingHostTool`] if a prefix companion has no resolvable runner launcher,
     /// or if a host companion is being started from a sandbox that carries no `flatpak-spawn`;
-    /// [`RuntimeError::InvalidLaunchPlan`] for a spec this crate will not run; and
+    /// [`RuntimeError::InvalidLaunchPlan`] if the companion exited before its process id could be
+    /// read; and
     /// [`RuntimeError::Spawn`] if the process could not be started.
     pub fn spawn_companion(&self, spec: &CompanionSpec) -> Result<Companion, RuntimeError> {
         companion::spawn(spec, &self.tools_dir(), &self.inner.confinement)
@@ -1080,7 +1086,7 @@ mod non_linux {
             self
         }
 
-        /// The prefix this companion runs in.
+        /// Always `None` on this target: the stand-in keeps no prefix.
         #[must_use]
         pub fn prefix(&self) -> Option<&crate::Prefix> {
             None

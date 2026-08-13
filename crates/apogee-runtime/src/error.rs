@@ -14,7 +14,8 @@ use crate::metadata::RunnerRef;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
-    /// The catalog has no entry for the requested runner name and version.
+    /// No usable runner: an adopted runner directory does not exist, or a caller above found no
+    /// matching catalog entry.
     #[error("runner {name} {version} unavailable")]
     RunnerUnavailable {
         /// The runner name that was requested.
@@ -137,7 +138,7 @@ pub enum RuntimeError {
         program: String,
         /// The prefix the scan narrowed to, by each process's own `WINEPREFIX`.
         prefix: PathBuf,
-        /// How long the scan ran before giving up.
+        /// The scan's time budget, which it exhausted.
         waited: Duration,
     },
     /// The wait for the game process ended because the run was stopped.

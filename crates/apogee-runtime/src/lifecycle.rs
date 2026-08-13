@@ -10,8 +10,9 @@
 //! verb, so nothing already in it is thrown away.
 //!
 //! [`repair`] is targeted, never `rm -rf`: a broken drive symlink is rewritten in place and a missing
-//! skeleton is regenerated with `wineboot -u`. [`recreate`] is the only path here that deletes
-//! anything, and a runner change is the drift that requires it.
+//! skeleton is regenerated with `wineboot`, `-u` where the registry survived and `-i` where it did
+//! not. [`recreate`] is the only path here that deletes the prefix, and a runner change is the drift
+//! that requires it; [`repair`] deletes nothing but the one drive entry it rewrites.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -215,7 +216,8 @@ fn recorded_metadata(prefix: &Prefix) -> Result<Option<PrefixMetadata>, RuntimeE
 /// Two issues are fixable here. [`HealthIssue::DriveMapping`] is rewritten in place with no wine
 /// involved, from this module's own idea of the drive rather than from the caller-supplied
 /// `expected`; a letter this module does not manage is left alone. [`HealthIssue::MissingSkeleton`]
-/// is regenerated with `wineboot -u`, which keeps user data. The other three are untouched and
+/// is regenerated with `wineboot -u`, which keeps user data, or with `-i` when `system.reg` is
+/// itself the missing file. The other three are untouched and
 /// reappear in the residual: [`HealthIssue::RunnerMismatch`] needs an explicit [`recreate`], and
 /// [`HealthIssue::MissingDxvkDll`] and [`HealthIssue::MissingNvapi`] need a DXVK install the caller
 /// drives with a catalog in hand.

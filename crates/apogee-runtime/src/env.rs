@@ -44,10 +44,12 @@ pub enum SyncChoice {
     None,
 }
 
-/// The synchronization primitive a launch will actually use.
+/// The synchronization primitive a launch resolved to.
 ///
 /// Status rather than a second toggle: it is the resolved [`SyncChoice`], and what a front end
-/// tells the user their setup came out as.
+/// tells the user their setup came out as. Not a guarantee about the process: a forced choice the
+/// host cannot honour, and a raw `env` entry that overrides the variable directly, both leave the
+/// launch running on something else while this still reports what was resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStatus {
     /// ntsync, which a runner that supports it uses with no variable set.
@@ -198,7 +200,8 @@ pub struct EnvConfig {
 // can build one, so a test can compute an environment for a host it is not running on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostCaps {
-    /// ntsync is usable: `/dev/ntsync` present, kernel 6.14 or newer, and the runner uses it.
+    /// ntsync is usable on this host: `/dev/ntsync` present and kernel 6.14 or newer. Whether the
+    /// selected build uses it is folded in by [`HostCaps::for_runner`].
     pub ntsync: bool,
     /// fsync is usable: kernel 5.16 or newer, so `futex_waitv` exists.
     pub fsync: bool,

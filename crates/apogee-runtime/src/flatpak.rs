@@ -39,7 +39,7 @@
 //! extracted that runner into the application's own data directory for the runtime the application
 //! was built against, and because supervision reads the process table above. `gamescope`,
 //! `gamemoderun` and a free-form wrapper are tokens of that same argv, so host-spawning one
-//! host-spawns the game inside it; the application's Flatpak has to carry the first two, and
+//! host-spawns the game inside it; the application's Flatpak has to carry `gamescope`, while
 //! `org.freedesktop.Platform` 25.08 already carries `gamemoderun` and `libgamemodeauto.so.0` (the
 //! daemon it drives is reached over D-Bus). A program run inside a prefix is the same runner and the
 //! same prefix, and the prefix-wide stop (`wineserver -k`, `umu-run wineboot -k`) has to reach the
@@ -66,9 +66,9 @@ const HOST_SPAWN: &str = "flatpak-spawn";
 /// The launch-chain tools this crate names rather than resolves, paired with what to call each one
 /// when it is not there.
 ///
-/// Only these two are ever the first token of a launch argv as a bare name; the runner, `wineserver`
-/// and a managed `umu-run` all arrive as absolute paths, and a free-form wrapper is the user's own
-/// word with no variant to report it under.
+/// Only these two are pre-flighted; the runner, `wineserver` and a managed `umu-run` all arrive as
+/// absolute paths. A free-form wrapper can also be the first token, and is deliberately left to the
+/// spawn: it is the user's own word, with no variant to report it under.
 const SANDBOX_TOOLS: &[(&str, HostTool)] = &[
     ("gamescope", HostTool::Gamescope),
     ("gamemoderun", HostTool::Gamemode),

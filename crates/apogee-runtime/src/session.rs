@@ -82,7 +82,8 @@ impl GameSession {
         }
     }
 
-    /// Kill the current game process only, delivered through its pidfd.
+    /// Kill the current game process only, delivered through its pidfd where one could be opened
+    /// and by pid otherwise.
     ///
     /// Nothing else in the prefix is touched; the broad stop is the separate, explicit
     /// [`Runtime::kill_prefix`](crate::Runtime::kill_prefix).

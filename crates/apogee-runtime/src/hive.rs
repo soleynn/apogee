@@ -44,10 +44,11 @@ use crate::registry::{RegistryDelete, RegistryEdit, RegistryValue};
 
 /// Whether a prefix still carries what a registry op declared it would produce.
 ///
-/// Three answers rather than two. A registry file that cannot be read, a root this build does not
-/// locate, and a value stored in an encoding it does not decode are all [`Self::Unknown`], and
-/// reading any of them as an absence would have a caller reapply a step forever against a prefix it
-/// cannot see into. Produced by [`crate::Prefix::registry_effect`] and
+/// Three answers rather than two. A registry file that cannot be read and a root this build does
+/// not locate are always [`Self::Unknown`], and reading either as an absence would have a caller
+/// reapply a step forever against a prefix it cannot see into. A value in an encoding this build
+/// does not decode is [`Self::Unknown`] for an edit, where the question is whether the data matches,
+/// and counts as found for a removal, where the question is only whether anything is there. Produced by [`crate::Prefix::registry_effect`] and
 /// [`crate::Prefix::registry_removal_effect`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -81,8 +82,8 @@ const UNDECODED: &str = "the value is stored in an encoding this build does not 
 /// Whether `edit`'s value is in `wine_root`'s registry, as it was written.
 ///
 /// The value is compared, not merely looked for: type and data both have to match, so an override
-/// overwritten with something else is [`RegistryEffect::Absent`] just as surely as one that was
-/// removed. An empty `REG_SZ` reads back as [`RegistryValue::Disabled`], which is how the writer
+/// overwritten with something else this build decodes is [`RegistryEffect::Absent`] just as surely
+/// as one that was removed, while one it cannot decode is [`RegistryEffect::Unknown`]. An empty `REG_SZ` reads back as [`RegistryValue::Disabled`], which is how the writer
 /// spells it.
 pub(crate) fn edit_effect(wine_root: &Path, edit: &RegistryEdit) -> RegistryEffect {
     let (path, key) = match locate(wine_root, &edit.key) {
@@ -234,10 +235,10 @@ fn value_on(line: &str, name: &str) -> Option<Stored> {
 
 /// Decode the right-hand side of a value line.
 ///
-/// Wine writes a properly terminated string as a quoted one, tagged with its type unless it is a
-/// `REG_SZ`, and everything else as hex. The hex forms are left [`Stored::Opaque`]: nothing this
-/// launcher writes comes back in one, and a decoder for a form no verb produces would be a guess
-/// with no subject.
+/// Wine writes a quoted string for `REG_SZ`, a `str(2):`-tagged quoted string for `REG_EXPAND_SZ`,
+/// `dword:` for `REG_DWORD`, and a comma-separated `hex` form for everything else. Only the hex
+/// forms are left [`Stored::Opaque`]: nothing this launcher writes comes back in one, and a decoder
+/// for a form no verb produces would be a guess with no subject.
 fn decode(data: &str) -> Stored {
     if let Some(body) = quoted_body(data) {
         return match unescape(body) {
