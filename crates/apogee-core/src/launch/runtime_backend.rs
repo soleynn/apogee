@@ -456,8 +456,15 @@ struct RuntimeGameHandle {
 
 #[async_trait::async_trait]
 impl GameHandle for RuntimeGameHandle {
+    #[cfg(not(target_os = "windows"))]
     fn prefix(&self) -> Option<apogee_runtime::Prefix> {
         Some(self.session.prefix().clone())
+    }
+
+    /// A Windows launch runs the game directly, so there is no prefix for a companion to be placed in.
+    #[cfg(target_os = "windows")]
+    fn prefix(&self) -> Option<apogee_runtime::Prefix> {
+        None
     }
 
     fn game_pid(&self) -> i32 {
