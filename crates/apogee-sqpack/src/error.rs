@@ -13,7 +13,7 @@
 
 use thiserror::Error;
 
-/// Crate result over [`Error`].
+/// Crate result over [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// SqPack access failures. Offsets and keys travel with every variant for triage.
@@ -34,16 +34,36 @@ pub enum Error {
     UnsupportedPlatform,
     /// Fewer bytes were available than a structure requires.
     #[error("truncated at offset {offset}: need {needed} more byte(s)")]
-    Truncated { offset: u64, needed: u64 },
+    Truncated {
+        /// Where the bytes ran out.
+        offset: u64,
+        /// How many more the structure needed.
+        needed: u64,
+    },
     /// An index entry resolved to an offset outside its dat file.
     #[error("entry out of bounds: index_key={index_key}, offset={offset}")]
-    EntryOutOfBounds { index_key: u64, offset: u64 },
+    EntryOutOfBounds {
+        /// The index key that named the offset.
+        index_key: u64,
+        /// The offset it named.
+        offset: u64,
+    },
     /// A compressed block's framing or payload was structurally invalid.
     #[error("block corrupt at offset {offset}: {detail}")]
-    BlockCorrupt { offset: u64, detail: &'static str },
+    BlockCorrupt {
+        /// Where the block starts, relative to whatever framed it.
+        offset: u64,
+        /// Which rule the block broke.
+        detail: &'static str,
+    },
     /// An index container's header or segment table contradicted the format.
     #[error("index corrupt at offset {offset}: {detail}")]
-    IndexCorrupt { offset: u64, detail: &'static str },
+    IndexCorrupt {
+        /// Where in the file the fault is.
+        offset: u64,
+        /// Which rule the container broke.
+        detail: &'static str,
+    },
     /// A dat container's headers, one of its entries, or one of that entry's tables contradicted
     /// the format. Kept distinct from [`Error::BlockCorrupt`] and [`Error::IndexCorrupt`] because
     /// the three reach different callers: a block fault is the codec's, an index fault the lookup's,
@@ -51,10 +71,18 @@ pub enum Error {
     /// index side has one, rather than a container arm and an entry arm, because the offset every
     /// variant carries already says which of the two it is.
     #[error("dat entry corrupt at offset {offset}: {detail}")]
-    EntryCorrupt { offset: u64, detail: &'static str },
+    EntryCorrupt {
+        /// Where in the container the fault is: the entry, or the container's own headers.
+        offset: u64,
+        /// Which rule the bytes broke.
+        detail: &'static str,
+    },
     /// A hash collision landed on a synonym entry that could not yet be resolved.
     #[error("unresolved synonym for key {key}")]
-    SynonymUnresolved { key: String },
+    SynonymUnresolved {
+        /// The shared key, as the container spells it.
+        key: String,
+    },
     /// A declared or decoded size exceeded the caller's [`crate::codec::Limits`].
     #[error("resource limit exceeded")]
     LimitExceeded,
@@ -63,8 +91,9 @@ pub enum Error {
     /// Reading an install while the game runs is ordinary here: mod detection answers "repair will
     /// revert these files" while the player is still in the world. Nothing this crate opens is opened
     /// for writing, and `File::open` already asks for the most permissive sharing there is, so this
-    /// arises only where the *other* process refused to share. See [`BUSY_CODES`] for what that means
-    /// per platform, and the module docs for why it is a Windows condition in practice.
+    /// arises only where the *other* process refused to share. Which OS codes mean that is a
+    /// per-platform table inside this crate; it is empty on Unix, so in practice this is a Windows
+    /// condition.
     #[error("archive busy")]
     Busy,
     /// An underlying I/O failure.
@@ -88,10 +117,10 @@ pub enum Error {
 /// also what keeps the two numbers from misfiring: 32 is `EPIPE` and 33 is `EDOM`, and this crate
 /// opens paths that may turn out to be pipes.
 #[cfg(windows)]
-pub const BUSY_CODES: &[i32] = &[32, 33];
+pub(crate) const BUSY_CODES: &[i32] = &[32, 33];
 /// The codes that mean "held by another process". Empty here; see the Windows definition.
 #[cfg(not(windows))]
-pub const BUSY_CODES: &[i32] = &[];
+pub(crate) const BUSY_CODES: &[i32] = &[];
 
 /// Whether `raw` is one of `codes`, the whole of the platform-dependence in one pure function.
 ///
@@ -99,7 +128,7 @@ pub const BUSY_CODES: &[i32] = &[];
 /// tested on either platform. CI builds for Windows but runs no test there, so a rule written
 /// `#[cfg(windows)]` would be compiled and never executed.
 #[must_use]
-pub fn is_busy_code(codes: &[i32], raw: Option<i32>) -> bool {
+pub(crate) fn is_busy_code(codes: &[i32], raw: Option<i32>) -> bool {
     raw.is_some_and(|code| codes.contains(&code))
 }
 

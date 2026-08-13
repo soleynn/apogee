@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 //! FFXIV SqPack container formats and the compressed-block codec.
 //!
 //! This crate is the read side of FFXIV's archive format: the shared block [`codec`], the container

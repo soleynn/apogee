@@ -39,7 +39,9 @@ pub enum Packing {
 pub enum EntrySpec {
     /// A placeholder whose leftover words describe a slot that is no longer there.
     Empty {
+        /// The declared file size, which on an empty entry is a leftover rather than a length.
         raw_size: u32,
+        /// The slot to reserve, in 128-byte units.
         allocated_units: u32,
         /// The word a standard entry spends on its block count. A real empty entry carries whatever
         /// its previous occupant left there, which is what a reader must not frame a table from.
@@ -47,13 +49,17 @@ pub enum EntrySpec {
     },
     /// A standard file, one block per chunk given.
     Standard {
+        /// The file's bytes, already split into the blocks it is stored as.
         chunks: Vec<Vec<u8>>,
+        /// How those blocks are packed.
         packing: Packing,
     },
     /// A texture: the uncompressed format header, then one mip level per group of chunks (a mip
     /// spans as many blocks as the packer needed, so a group of more than one is the ordinary case).
     Texture {
+        /// The uncompressed format header stored ahead of the mip levels.
         header: Vec<u8>,
+        /// One mip level per group, each group the blocks that level is stored in.
         mips: Vec<Vec<Vec<u8>>>,
         /// A file length to declare instead of the bytes laid down, which is how a volume texture
         /// declares padding between mip surfaces that the archive does not store.
@@ -63,7 +69,10 @@ pub enum EntrySpec {
     /// written file header carries. Boxed so one arm does not set the size of every spec.
     Model(Box<ModelSpec>),
     /// A content type this crate does not read.
-    Unknown { word: u32 },
+    Unknown {
+        /// The content-type word to declare.
+        word: u32,
+    },
 }
 
 /// A model entry's sections and the fields its written file header carries.
@@ -71,9 +80,13 @@ pub enum EntrySpec {
 pub struct ModelSpec {
     /// Each section as the blocks it is stored in, in the order an extraction writes them.
     pub sections: [Vec<Vec<u8>>; 2 + 3 * MODEL_LOD_COUNT],
+    /// The model format's version word.
     pub version: u32,
+    /// How many vertex declarations the written file header names.
     pub vertex_declaration_count: u16,
+    /// How many materials it names.
     pub material_count: u16,
+    /// How many levels of detail it names.
     pub lod_count: u8,
 }
 
@@ -240,7 +253,9 @@ pub struct DatBuilder {
 /// Where an entry was written, and what it should extract to.
 #[derive(Debug, Clone)]
 pub struct Placed {
+    /// Where the entry starts in the container.
     pub offset: u64,
+    /// What extracting it should produce.
     pub content: Vec<u8>,
 }
 
@@ -248,8 +263,11 @@ pub struct Placed {
 /// region no entry's slot covers.
 #[derive(Debug, Clone)]
 pub struct Built {
+    /// The container's bytes.
     pub bytes: Vec<u8>,
+    /// Every entry laid down, in container order.
     pub placed: Vec<Placed>,
+    /// Every run of the data region no slot covers, as `(offset, length)`.
     pub gaps: Vec<(u64, u64)>,
 }
 
@@ -278,6 +296,7 @@ impl DatBuilder {
         }
     }
 
+    /// Lay down one entry after whatever is already there.
     pub fn entry(&mut self, spec: EntrySpec) -> &mut Self {
         let slack_units = self.slack_units;
         self.items.push(Item::Entry { spec, slack_units });

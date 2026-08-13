@@ -63,8 +63,11 @@ pub struct ArchiveFixture {
 /// A built archive: the bytes of each of its files, and where each data file's entries and unclaimed
 /// runs landed.
 pub struct BuiltArchive {
+    /// The `.index` container's bytes.
     pub index1: Vec<u8>,
+    /// The `.index2` container's bytes, over the same file set.
     pub index2: Vec<u8>,
+    /// Each `.dat{n}`, in archive order.
     pub dats: Vec<Built>,
     /// Every path the archive names, with where its entry landed and what it should extract to. The
     /// answer a reader is checked against, derived from the bytes that were laid down rather than
@@ -75,8 +78,11 @@ pub struct BuiltArchive {
 /// One named file of a built archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacedFile {
+    /// The game path the indexes name it by.
     pub path: String,
+    /// Which `.dat{n}` holds it.
     pub dat: u8,
+    /// Where its entry starts in that container.
     pub offset: u64,
     /// What extracting the entry should produce.
     pub content: Vec<u8>,
