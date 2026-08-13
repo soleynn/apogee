@@ -55,12 +55,6 @@ impl ByteRange {
     pub fn len(self) -> u64 {
         self.end.saturating_sub(self.start)
     }
-
-    /// Whether the two ranges share a byte. Half-open, so ranges that merely touch do not.
-    #[must_use]
-    pub fn intersects(self, other: Self) -> bool {
-        self.start < other.end && other.start < self.end
-    }
 }
 
 /// What the map says one container should hold.

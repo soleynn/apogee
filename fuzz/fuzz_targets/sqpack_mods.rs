@@ -76,8 +76,11 @@ fuzz_target!(|data: &[u8]| {
         },
         ..SweepOptions::default()
     };
+    // The container this target hands to `classify_entries` is opened above under `sweep`'s bounds,
+    // so the only field of this that bears on the walk is the budget.
     let opts = ModOptions {
         max_files_per_container: 32,
+        ..ModOptions::default()
     };
 
     let archive = ContainerRef::new(

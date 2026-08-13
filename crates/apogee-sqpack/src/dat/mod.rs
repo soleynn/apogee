@@ -243,12 +243,6 @@ impl<S: DatSource> Dat<S> {
         &self.source
     }
 
-    /// The bounds this container reads under.
-    #[must_use]
-    pub fn limits(&self) -> &DatLimits {
-        &self.limits
-    }
-
     /// Parse the entry at `offset`, which is what an index resolves a path to.
     ///
     /// # Errors

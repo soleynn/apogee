@@ -34,6 +34,10 @@ serde_json.workspace = true
 sha2.workspace = true
 # The lookup-agrees-with-a-linear-scan property over synthetic index containers.
 proptest.workspace = true
+# Self dev-dependency: enables `test-fixtures` for this crate's own tests without making it a default
+# feature. Without it the module the feature publishes is compiled only when some *other* crate
+# switches the feature on, so a rename inside the builders would break two other suites and pass here.
+apogee-sqpack = { path = ".", features = ["test-fixtures"] }
 
 [lints]
 workspace = true

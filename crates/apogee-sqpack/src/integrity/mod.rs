@@ -31,6 +31,7 @@ pub use finding::{
     Scope, Severity, Site,
 };
 pub use index::{IndexFacts, IndexInspection, Located, compare_index_forms, inspect_index};
+pub(crate) use sweep::in_pool;
 
 use crate::bytes;
 use crate::container::COMMON_HEADER_LEN;
@@ -214,7 +215,8 @@ pub struct Totals {
     /// is looking at a disconnected disk, not a corrupt install.
     pub containers_unreadable: u32,
     /// Containers another process holds and would not share, so this sweep did not look at them.
-    /// Counted rather than reported: see [`note_unreadable`].
+    /// Counted rather than reported: there is no [`Severity`] that fits "not examined", and grading
+    /// a healthy container [`Severity::Unusable`] would tell a caller to replace it.
     pub containers_busy: u32,
     /// Bytes of index container read.
     pub index_bytes: u64,

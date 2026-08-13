@@ -1337,6 +1337,170 @@ mod tests {
         assert_eq!(slugs, DEFECT_SLUGS);
     }
 
+    /// What every defect costs, in one place: the whole grading, in declaration order.
+    ///
+    /// [`Defect::slug`] is a match the compiler makes exhaustive, but `severity` and `scope` both end
+    /// in a wildcard, so a variant added to the enum is graded `Damaged`/`Container` by default and
+    /// nothing says so. That default is not harmless in one direction: [`Report::damaged_containers`]
+    /// is the set a targeted repair re-fetches, and a coherent rewrite graded into it re-fetches the
+    /// container a mod tool left behind — which is the mistake this module's `Altered` arm exists to
+    /// avoid. The table is what makes a new variant's grade a decision somebody made.
+    const DEFECT_GRADES: [(&str, Severity, Scope); DEFECT_SLUGS.len()] = [
+        ("container-unreadable", Severity::Unusable, Scope::Container),
+        ("index-form-missing", Severity::Unusable, Scope::Container),
+        ("data-file-missing", Severity::Unusable, Scope::Container),
+        ("header-hash-mismatch", Severity::Altered, Scope::Container),
+        ("segment-hash-mismatch", Severity::Altered, Scope::Container),
+        (
+            "data-region-hash-mismatch",
+            Severity::Altered,
+            Scope::Container,
+        ),
+        ("zero-region-dirty", Severity::Altered, Scope::Container),
+        ("header-word", Severity::Damaged, Scope::Container),
+        (
+            "index-kind-disagrees-with-name",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        ("segments-do-not-tile", Severity::Damaged, Scope::Container),
+        ("trailing-bytes", Severity::Damaged, Scope::Container),
+        ("segment-ragged", Severity::Damaged, Scope::Container),
+        (
+            "unclassified-segment-on-second-form",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "folder-table-on-second-form",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        ("folder-table-missing", Severity::Damaged, Scope::Container),
+        (
+            "entry-keys-not-ascending",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        ("duplicate-entry-key", Severity::Damaged, Scope::Container),
+        ("entry-pad-not-zero", Severity::Altered, Scope::Container),
+        (
+            "collision-flag-not-bare",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "entry-dat-out-of-range",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        ("declared-dat-count", Severity::Damaged, Scope::Archive),
+        (
+            "collision-table-unterminated",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-record-after-terminator",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-path-unterminated",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-path-not-ascii",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-path-key-mismatch",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-record-is-placeholder",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-conflict-index-unexpected",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "collision-record-without-flagged-entry",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "flagged-entry-without-records",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "folder-rows-not-ascending",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "folder-row-pad-not-zero",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "folder-rows-do-not-tile",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        (
+            "folder-hash-disagrees-with-entry",
+            Severity::Damaged,
+            Scope::Container,
+        ),
+        ("declared-length", Severity::Damaged, Scope::Container),
+        ("forms-disagree", Severity::Damaged, Scope::Archive),
+        ("entry-header-unreadable", Severity::Damaged, Scope::File),
+        ("entry-content-type-unknown", Severity::Damaged, Scope::File),
+        ("entry-header-misaligned", Severity::Damaged, Scope::File),
+        ("occupied-exceeds-allocated", Severity::Damaged, Scope::File),
+        ("slots-overlap", Severity::Damaged, Scope::File),
+        ("slot-before-data-region", Severity::Damaged, Scope::File),
+        ("slot-beyond-data-region", Severity::Damaged, Scope::File),
+        (
+            "gap-not-empty-block-chain",
+            Severity::Altered,
+            Scope::Container,
+        ),
+        ("entry-decode-failed", Severity::Damaged, Scope::File),
+    ];
+
+    #[test]
+    fn every_defect_is_graded_on_purpose() {
+        let graded: Vec<(&str, Severity, Scope)> = every_defect()
+            .into_iter()
+            .map(|defect| (defect.slug(), defect.severity(), defect.scope()))
+            .collect();
+        assert_eq!(graded, DEFECT_GRADES);
+        // The two axes' arms are not decoration: something has to be `Unusable`, or the sweep cannot
+        // say a container was not readable at all, and something has to be `Altered`, or a coherent
+        // rewrite lands in the set a repair re-fetches.
+        for severity in [Severity::Altered, Severity::Damaged, Severity::Unusable] {
+            assert!(
+                DEFECT_GRADES.iter().any(|(_, s, _)| *s == severity),
+                "{severity:?} grades nothing"
+            );
+        }
+        for scope in [Scope::File, Scope::Container, Scope::Archive] {
+            assert!(
+                DEFECT_GRADES.iter().any(|(_, _, s)| *s == scope),
+                "{scope:?} grades nothing"
+            );
+        }
+    }
+
     #[test]
     fn every_slug_is_a_distinct_kebab_case_key() {
         let mut seen = std::collections::BTreeSet::new();
