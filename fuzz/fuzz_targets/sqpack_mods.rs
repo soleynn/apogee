@@ -52,7 +52,9 @@ fn dat_container(body: &[u8]) -> Vec<u8> {
 // - the same input twice gives the same report, so a verdict that depends on anything but its input
 //   fails here rather than as a flake in somebody's pre-repair prompt.
 // - a map that vouches for the container end to end never reads an entry header, which is the short
-//   circuit a pristine install rests on.
+//   circuit a pristine install rests on, and neither does one that speaks for no repository.
+// - a foreign verdict names bytes. A container the map never had is where a real mod tool's files
+//   land, so a zero-length extent there is the whole answer being useless.
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
         return;
@@ -155,11 +157,29 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // The short circuit the pristine gate rests on: nothing is read when the map answers for the
-    // whole container, and nothing is read when it describes none of it.
+    // whole container, and nothing is read when it speaks for none of the repository.
     let whole = classify_entries(&dat, &named, vouched.coverage(at), true, at, &opts);
     assert_eq!(whole.totals.entry_headers_read, 0);
     assert_eq!(whole.totals.pristine, named.len() as u64);
-    let none = classify_entries(&dat, &named, None, true, at, &opts);
-    assert_eq!(none.totals.entry_headers_read, 0);
-    assert_eq!(none.totals.foreign, named.len() as u64);
+    let unjudged = classify_entries(&dat, &named, None, false, at, &opts);
+    assert_eq!(unjudged.totals.entry_headers_read, 0);
+    assert_eq!(unjudged.totals.unknown, named.len() as u64);
+
+    // A container the map never had in a repository it does account for is decided before anything
+    // is read, and read anyway so each verdict carries an extent. So no entry of it is pristine or
+    // unknown, and the walk reads at most one header apiece.
+    let added = classify_entries(&dat, &named, None, true, at, &opts);
+    assert_eq!(added.totals.pristine, 0);
+    assert_eq!(added.totals.unknown, 0);
+    assert_eq!(
+        added.totals.foreign + added.totals.broken,
+        named.len() as u64
+    );
+    assert!(added.totals.entry_headers_read <= named.len() as u64);
+    assert!(
+        added
+            .files
+            .iter()
+            .all(|f| f.standing != Standing::Foreign || f.len > 0)
+    );
 });
