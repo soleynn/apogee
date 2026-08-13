@@ -17,4 +17,21 @@ fuzz_target!(|data: &[u8]| {
         signature,
         apogee_runtime::CATALOG_PUBLIC_KEYS,
     );
+
+    // The trusted list is a list so a key can be rotated without an outage, and every entry is
+    // decompressed before any of it is used. That is parse surface of its own: a list of any length,
+    // holding bytes that need not be points on the curve, at any position. The constant above is a
+    // single valid key, which reaches none of it, so the same bytes are read as a key list too.
+    let keys: Vec<[u8; 32]> = body
+        .chunks_exact(32)
+        // Bounded because the list is a rotation window rather than a keyring, and an unbounded one
+        // would spend the run decompressing curve points instead of reaching the parser.
+        .take(8)
+        .map(|chunk| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(chunk);
+            key
+        })
+        .collect();
+    let _ = apogee_runtime::Catalog::parse_and_verify(body, signature, &keys);
 });

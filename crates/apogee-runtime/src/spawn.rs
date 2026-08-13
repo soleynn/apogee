@@ -71,7 +71,7 @@ pub(crate) fn build_command(
     umu_run: Option<&Path>,
     confinement: &Confinement,
 ) -> Result<Command, RuntimeError> {
-    let prefix = plan.prefix_ref().ok_or(RuntimeError::InvalidLaunchPlan {
+    let prefix = plan.prefix().ok_or(RuntimeError::InvalidLaunchPlan {
         reason: "launch plan has no prefix",
     })?;
     // The runner invocation: the launcher binary, the program, whatever an injectable inserted, then
@@ -117,7 +117,7 @@ pub(crate) async fn kill_prefix(
     let mut cmd = kill_command(prefix, umu_run)?;
     // A non-zero status (nothing to kill) is not an error.
     cmd.status().await.map_err(|source| RuntimeError::Spawn {
-        runner: prefix.runner().name().to_owned(),
+        program: prefix.runner().name().to_owned(),
         source,
     })?;
     Ok(())
@@ -223,7 +223,7 @@ mod tests {
         let runner = RunnerHandle::new(runner_dir, RunnerKind::Custom, "test", "custom");
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
         let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new())
-            .prefix(&prefix)
+            .in_prefix(&prefix)
             .in_directory(&working);
 
         let cmd = build_command(&plan, None, &Confinement::default()).unwrap();
@@ -268,7 +268,7 @@ mod tests {
 
         let runner = RunnerHandle::new(runner_dir, RunnerKind::Custom, "test", "custom");
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
-        let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
+        let plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).in_prefix(&prefix);
 
         let cmd = build_command(&plan, None, &Confinement::default()).unwrap();
         assert_eq!(cmd.as_std().get_current_dir(), None);
@@ -289,7 +289,7 @@ mod tests {
         let runner = RunnerHandle::new(runner_dir, RunnerKind::Custom, "test", "custom");
         let prefix = Prefix::new(tmp.path().join("prefix"), runner);
         let mut plan = LaunchPlan::new("/loader/Injector.exe", "//**sqex0003**//", BTreeMap::new())
-            .prefix(&prefix);
+            .in_prefix(&prefix);
         plan.set_inserted_args(vec!["launch".to_owned(), "--mode=inject".to_owned()]);
 
         let cmd = build_command(&plan, None, &Confinement::default()).unwrap();
@@ -329,7 +329,7 @@ mod tests {
         // nothing. The name is pinned in the matrix precisely so this failure can be told apart from
         // the program itself refusing to start.
         let wrapped = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new())
-            .prefix(&prefix)
+            .in_prefix(&prefix)
             .with_wrappers(vec!["gamescope".to_owned(), "--".to_owned()]);
         let err = build_command(&wrapped, None, &confined)
             .expect_err("a wrapper the sandbox does not carry is not a launch");
@@ -343,7 +343,7 @@ mod tests {
             "{err:?}"
         );
 
-        let plain = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
+        let plain = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).in_prefix(&prefix);
         build_command(&plain, None, &confined)
             .expect("the runner is a resolved path, not a name to vet");
     }

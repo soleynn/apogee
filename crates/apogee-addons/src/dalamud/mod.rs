@@ -853,7 +853,7 @@ impl Injectable for Dalamud {
                 installed.supported_game_ver, self.config.game_version
             ));
         }
-        let Some(prefix) = plan.prefix_of().cloned() else {
+        let Some(prefix) = plan.prefix().cloned() else {
             return decline("this launch has no prefix to translate paths against");
         };
         self.wrap(&prefix, &installed, plan).map(Contribution::Edit)

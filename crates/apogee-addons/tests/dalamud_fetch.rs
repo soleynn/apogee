@@ -473,7 +473,7 @@ async fn preparing_a_launch_on_its_own_contacts_nothing() -> Result<(), Box<dyn 
     let dalamud = dalamud(root.path(), &dist)?;
     let prefix = prefix(&root.path().join("prefix"))?;
     let plan =
-        apogee_runtime::LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).prefix(&prefix);
+        apogee_runtime::LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new()).in_prefix(&prefix);
 
     dalamud.prepare_launch(&plan, &SetupEvents::none())?;
 

@@ -182,7 +182,7 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
         "//**sqex0003**//",
         BTreeMap::new(),
     )
-    .prefix(prefix)
+    .in_prefix(prefix)
     .with_wrappers(vec!["gamemoderun".to_owned()])
 }
 

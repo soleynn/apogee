@@ -100,7 +100,7 @@ pub(crate) fn launch(plan: &LaunchPlan, progress: &Progress) -> Result<GameSessi
     let mut command = build_command(plan)?;
     let program = plan.program().to_owned();
     let child = command.spawn().map_err(|source| RuntimeError::Spawn {
-        runner: program.clone(),
+        program: program.clone(),
         source,
     })?;
     let pid = child
