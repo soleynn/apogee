@@ -66,9 +66,15 @@ pub enum RuntimeError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("spawn of {runner} failed")]
+    /// A process this crate started, or waited on, could not be.
+    ///
+    /// `program` is whatever was handed to the spawn, which is the runner only on the two paths that
+    /// spawn one: a launch through a prefix, and the prefix-wide stop. Everywhere else it is a
+    /// companion, a program run inside a prefix, or, on Windows, the game itself. Named as the two
+    /// variants below name theirs, rather than after the one caller in five it happens to describe.
+    #[error("spawn of {program} failed")]
     Spawn {
-        runner: String,
+        program: String,
         #[source]
         source: std::io::Error,
     },

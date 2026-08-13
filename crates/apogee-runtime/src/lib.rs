@@ -465,7 +465,7 @@ impl Runtime {
             runner: runner_name.clone(),
         });
         let mut child = command.spawn().map_err(|source| RuntimeError::Spawn {
-            runner: runner_name,
+            program: runner_name,
             source,
         })?;
 

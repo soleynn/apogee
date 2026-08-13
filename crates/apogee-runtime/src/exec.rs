@@ -168,7 +168,7 @@ fn completed(
         });
     }
     let output = waited.map_err(|source| RuntimeError::Spawn {
-        runner: name,
+        program: name,
         source,
     })?;
     Ok(PrefixRun {
@@ -215,7 +215,7 @@ pub(crate) async fn run(
 
     let name = program.program.clone();
     let child = command.spawn().map_err(|source| RuntimeError::Spawn {
-        runner: name.clone(),
+        program: name.clone(),
         source,
     })?;
 

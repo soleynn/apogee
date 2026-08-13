@@ -119,7 +119,7 @@ impl Companion {
             .wait()
             .await
             .map_err(|source| RuntimeError::Spawn {
-                runner: self.name.clone(),
+                program: self.name.clone(),
                 source,
             })?;
         Ok(CompanionExit {
@@ -136,7 +136,7 @@ impl Companion {
             .child
             .try_wait()
             .map_err(|source| RuntimeError::Spawn {
-                runner: self.name.clone(),
+                program: self.name.clone(),
                 source,
             })?;
         Ok(status.map(|status| CompanionExit {
@@ -201,7 +201,7 @@ impl Companion {
             .wait()
             .await
             .map_err(|source| RuntimeError::Spawn {
-                runner: self.name.clone(),
+                program: self.name.clone(),
                 source,
             })?;
         Ok(())
@@ -239,7 +239,7 @@ pub(crate) fn spawn(
     command.kill_on_drop(false);
 
     let child = command.spawn().map_err(|source| RuntimeError::Spawn {
-        runner: name.clone(),
+        program: name.clone(),
         source,
     })?;
     let pid = child

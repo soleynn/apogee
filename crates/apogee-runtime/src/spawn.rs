@@ -117,7 +117,7 @@ pub(crate) async fn kill_prefix(
     let mut cmd = kill_command(prefix, umu_run)?;
     // A non-zero status (nothing to kill) is not an error.
     cmd.status().await.map_err(|source| RuntimeError::Spawn {
-        runner: prefix.runner().name().to_owned(),
+        program: prefix.runner().name().to_owned(),
         source,
     })?;
     Ok(())
