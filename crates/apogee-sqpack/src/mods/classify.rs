@@ -8,11 +8,14 @@
 //!
 //! - a container the map vouches for end to end holds only pristine files, and **no byte of it is
 //!   read**: not one entry header. A pristine install therefore classifies out of its indexes alone.
-//! - a container the map does not describe, in a repository it claims to describe exhaustively,
-//!   holds only foreign files, and is likewise never read.
+//! - a container in a repository the map does not claim exhaustively is judged by nobody, and is
+//!   likewise never read. A map covering one repository leaves every other one here, so this is the
+//!   arm the cost of the whole install would otherwise land on.
 //!
-//! What is left is the container something actually changed, and there the walk is the integrity
-//! sweep's: twenty bytes at each location an index named.
+//! What is left is the container something changed and the container the map never had, and there
+//! the walk is the integrity sweep's: twenty bytes at each location an index named. The second of
+//! those is already decided before the walk, and is walked anyway because a verdict names an extent
+//! and only the entry knows it.
 
 use crate::dat::DATA_REGION_OFFSET;
 use crate::dat::{ContentType, Dat, DatSource, EntryHeader};
@@ -84,24 +87,50 @@ pub fn classify_entries<S: DatSource>(
         // Nothing describes this container. Whether that means a mod tool made it or that the map
         // was never asked is the caller's claim to make, and the difference is the whole reason
         // `accounts_for` exists.
-        let standing = if accounted {
-            Standing::Foreign
-        } else {
-            Standing::Unknown
-        };
+        if !accounted {
+            out.verdict = Some(ContainerVerdict {
+                container: at,
+                standing: ContainerStanding::Unknown,
+                pristine_len: None,
+                actual_len: Some(actual_len),
+            });
+            // No read at all. Nothing is claimed about these entries, and the map covering one
+            // repository leaves every other one here: reading a header apiece would put the cost of
+            // the whole install on a pass that judges none of it.
+            file_verdicts(&mut out, named, at, Standing::Unknown, opts);
+            return out;
+        }
         out.verdict = Some(ContainerVerdict {
             container: at,
-            standing: if accounted {
-                ContainerStanding::Added
-            } else {
-                ContainerStanding::Unknown
-            },
+            standing: ContainerStanding::Added,
             pristine_len: None,
             actual_len: Some(actual_len),
         });
-        // No read at all: no byte of this container came from a patch, so what each entry holds
-        // follows from that alone.
-        file_verdicts(&mut out, named, at, standing, opts);
+        // The verdict follows from the container, but the extent does not, and a caller is owed
+        // both: this is where a real mod tool's files land, and reporting them as zero bytes long
+        // is the difference between "five files, 6.4 MB" and "five files" in the prompt they feed.
+        // The walk is the same one a grown container gets, which is the same phenomenon written a
+        // different way, and it is bounded by the entries the index sends into a container no patch
+        // wrote.
+        let region_end = dat.data_header().declared_file_len().min(actual_len);
+        let extents = extents_of(dat, named, region_end, at, &mut out, opts);
+        for (located, extent) in named.iter().zip(&extents) {
+            let Some(extent) = *extent else {
+                continue; // already filed as broken by the walk
+            };
+            push(
+                &mut out,
+                FileStanding {
+                    container: at,
+                    key: located.key,
+                    offset: located.offset,
+                    len: extent.len(),
+                    standing: Standing::Foreign,
+                    confidence: Confidence::Exact,
+                },
+                opts,
+            );
+        }
         return out;
     };
 
@@ -460,13 +489,33 @@ mod tests {
     }
 
     #[test]
-    fn a_data_file_the_map_never_had_is_wholly_foreign_and_never_read() {
+    fn a_data_file_the_map_never_had_is_wholly_foreign_and_says_how_long_each_file_is() {
+        // The shape a real mod tool leaves: it writes a data file of its own and repoints the index
+        // into it, rather than growing one the chain wrote. The container decides the verdict, so
+        // nothing is read to reach it, but the extent is the entry's own and is read for.
         let (bytes, placed) = container();
         let named = located(&placed);
         let out = run(&bytes, &named, |_| {});
         assert_eq!(out.files.len(), 4);
-        assert!(out.files.iter().all(|f| f.standing == Standing::Foreign));
-        assert_eq!(out.totals.entry_headers_read, 0);
+        assert!(
+            out.files
+                .iter()
+                .all(|f| f.standing == Standing::Foreign && f.confidence == Confidence::Exact)
+        );
+        assert_eq!(out.totals.entry_headers_read, 4);
+        assert!(
+            out.files.iter().all(|f| f.len > 0),
+            "a file a repair would replace is not zero bytes long: {:?}",
+            &out.files[..]
+        );
+        // The same extents the walk over a described container produces, entry for entry.
+        let described = run(&bytes, &named, |b| {
+            b.container(at(), bytes.len() as u64)
+                .dirty(at(), 0, bytes.len() as u64);
+        });
+        let lengths: Vec<u64> = out.files.iter().map(|f| f.len).collect();
+        let expected: Vec<u64> = described.files.iter().map(|f| f.len).collect();
+        assert_eq!(lengths, expected);
         assert_eq!(out.verdict.unwrap().standing, ContainerStanding::Added);
     }
 

@@ -682,8 +682,10 @@ mod tests {
                 .all(|f| f.standing == Standing::Foreign
                     && f.container.file == ContainerId::Dat(1))
         );
-        // Not one byte of it was read to say so.
-        assert_eq!(report.totals.entry_headers_read, 0);
+        // Only that container was read, and only for the extents: every other data file of the
+        // install is answered from its length, which is what keeps the pass cheap.
+        assert_eq!(report.totals.entry_headers_read, report.would_be_replaced());
+        assert!(report.replaced().all(|f| f.len > 0));
         assert!(
             report
                 .containers
