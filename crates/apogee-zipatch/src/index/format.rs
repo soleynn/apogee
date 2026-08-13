@@ -646,6 +646,68 @@ mod tests {
         }
     }
 
+    // The three refusals below are reachable states the `apzi_index` fuzzer finds within a
+    // two-minute run and no test named. Pinned here so `cargo test` catches a regression in them
+    // rather than leaving it to the next fuzz session.
+
+    #[test]
+    fn an_unknown_source_tag_is_corrupt() {
+        // The four tags are the whole `Source` axis; a fifth is a body this build cannot read.
+        let mut body = Vec::new();
+        put_str(&mut body, "v");
+        body.push(platform_byte(Platform::Win32));
+        put_u32(&mut body, 0); // no sources
+        put_u32(&mut body, 1); // one target
+        put_str(&mut body, "a.dat");
+        put_u64(&mut body, 128); // final_len
+        put_u32(&mut body, 1); // one part
+        put_u64(&mut body, 0); // target_off
+        put_u64(&mut body, 128); // target_len
+        put_u32(&mut body, 0); // crc32
+        body.push(0); // crc_valid
+        body.push(9); // a source tag past TAG_UNAVAILABLE
+        assert!(matches!(
+            read_framed(&body),
+            Err(Error::Corrupt {
+                detail: "unknown index part source tag",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_platform_byte_is_corrupt_at_its_own_offset() {
+        // The byte sits right after the version string, so the fault reports where it was read, not
+        // the start of the body.
+        let mut body = Vec::new();
+        put_str(&mut body, "v");
+        let platform_off = body.len() as u64;
+        body.push(9); // not Win32/Ps3/Ps4
+        match read_framed(&body) {
+            Err(Error::Corrupt { detail, offset }) => {
+                assert_eq!(detail, "unknown index platform");
+                assert_eq!(offset, platform_off);
+            }
+            other => panic!("expected Corrupt at {platform_off}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_string_that_is_not_utf8_is_corrupt() {
+        // Strings are length-prefixed bytes on the wire, so nothing about the frame stops a body
+        // carrying a version label that is not text.
+        let mut body = Vec::new();
+        put_u32(&mut body, 2);
+        body.extend_from_slice(&[0xFF, 0xFE]);
+        assert!(matches!(
+            read_framed(&body),
+            Err(Error::Corrupt {
+                detail: "index string is not valid utf-8",
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn round_trips_an_unavailable_part() {
         // Unavailable parts only arise at repair time, but the format must still round-trip the tag.
