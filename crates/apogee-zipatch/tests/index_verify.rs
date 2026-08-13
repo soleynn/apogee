@@ -168,6 +168,14 @@ fn an_unindexed_file_is_a_stray_unless_ignored() {
         "a .ver file must be excused, got {:?}",
         report.stray_files
     );
+    // The two predicates part company exactly here. A stray is a fault the tree has and repair
+    // cannot heal, so a caller looping on `is_clean` would never converge; `needs_repair` is what a
+    // retry loop asks.
+    assert!(!report.is_clean(), "a stray is not a clean tree");
+    assert!(
+        !report.needs_repair(),
+        "a stray is nothing for repair to do, got {report:?}"
+    );
 }
 
 #[test]

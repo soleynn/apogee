@@ -438,11 +438,10 @@ fn ends_the_repair(fault: &PatchError) -> bool {
     }
 }
 
-/// Whether a verify report still names something to heal (strays are handled separately).
+/// Whether a verify report still names something to heal (strays are handled separately, by the
+/// recycler, so they are not work for another repair pass).
 fn has_work(report: &VerifyReport) -> bool {
-    !report.broken.is_empty()
-        || !report.missing_files.is_empty()
-        || !report.size_mismatches.is_empty()
+    report.needs_repair()
 }
 
 /// The range source for `attempt`: pass 0 reads from the local patch cache when the whole chain is
