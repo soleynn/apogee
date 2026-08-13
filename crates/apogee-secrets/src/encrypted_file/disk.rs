@@ -271,10 +271,11 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// Fold a filesystem failure into the taxonomy.
 ///
 /// Permission is its own answer because it is the one a user fixes somewhere other than in this
-/// launcher. The rest are carried in the `Io` variant unchanged, so a caller can still read the kind
-/// off them. Carrying it is safe here in a way it is not for the credential stores, but not because
-/// of what is in it: a standard-library filesystem error holds an errno and the C library's message
-/// for it and never the path it was opening, and `SecretsError` renders neither.
+/// launcher. The rest are carried in the [`SecretsError::Io`] variant unchanged, so a caller can
+/// still read the kind off them. Carrying it is safe here in a way it is not for the credential
+/// stores, but not because of what is in it: a standard-library filesystem error holds an errno and
+/// the C library's message for it and never the path it was opening, and [`SecretsError`] renders
+/// neither.
 fn map_io(err: std::io::Error) -> SecretsError {
     if err.kind() == ErrorKind::PermissionDenied {
         return SecretsError::Denied;

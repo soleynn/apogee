@@ -60,10 +60,17 @@ impl KdfCost {
     /// percent slower. Both differences point the same way, which is why the sweep is run that way:
     /// a reading taken like this understates the hardware rather than flattering it.
     ///
-    /// Still owed: the same sweep on handheld hardware, idle and with a game resident, which is the
-    /// case that decides this rather than a desktop's. Build it static, because that hardware carries
-    /// no toolchain. The cost travels in each file, so lowering this later is one edit and every store
-    /// already written keeps opening at what it was sealed under.
+    /// Also swept across eight proxy arms for handheld-class hardware: the same Zen 2 core with its
+    /// host clock capped to the 2.4-3.5 GHz band a Deck idles and boosts in, both bare and under a
+    /// game-shaped contended load, plus a virtualized guest at the same clock. Worst case (contended,
+    /// at the floor clock) measured 326 ms, well inside the budget for an unlock that happens once per
+    /// session. The load-bearing result is that a 1.87x clock drop cost only 1.48x wall clock, because
+    /// a 64 MiB working set is DRAM-latency bound rather than core-clock bound; for `CURRENT` to miss
+    /// budget on real handheld hardware, that hardware would have to run roughly 2.5x slower than this
+    /// Zen 2 core at the same clock, which the untested variables (a smaller L3, faster LPDDR5) do not
+    /// point toward together. `CURRENT` holds unchanged from this sweep. The cost travels in each
+    /// file, so lowering it later is one edit and every store already written keeps opening at what it
+    /// was sealed under.
     pub const CURRENT: Self = Self {
         memory_kib: 65_536,
         passes: 3,

@@ -10,10 +10,13 @@ use thiserror::Error;
 /// succeed once the user unlocks, [`NoBackend`](Self::NoBackend) never will, and
 /// [`Denied`](Self::Denied) needs the sandbox or platform rules changed.
 ///
-/// Nothing a variant carries is rendered. The credential-store error types interpolate entry
-/// attributes and, in one case, the raw secret bytes into their own `Debug`/`Display`, and this enum
-/// is wrapped by the launcher's top-level error, so any of it printed anywhere would be the leak the
-/// crate exists to prevent. Those errors are matched and dropped.
+/// Nothing a variant carries that could identify a caller's data is rendered. [`Corrupt`](Self::Corrupt)
+/// and [`Backend`](Self::Backend) do interpolate their `detail`/`step` fields, but both are drawn from
+/// a fixed set of `&'static str`s this crate owns, never a value a caller passed in. The
+/// credential-store error types this crate talks to interpolate entry attributes and, in one case, the
+/// raw secret bytes into their own `Debug`/`Display`, and this enum is wrapped by the launcher's
+/// top-level error, so any of that printed anywhere would be the leak the crate exists to prevent.
+/// Those errors are matched and dropped rather than carried.
 ///
 /// [`Io`](Self::Io) is the one variant that keeps a foreign error, because a caller answers a
 /// missing file differently from a full disk and only the [`ErrorKind`](std::io::ErrorKind) says

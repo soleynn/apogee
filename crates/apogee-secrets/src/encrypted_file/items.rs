@@ -112,6 +112,10 @@ pub(crate) fn encode(table: &Table) -> Result<Zeroizing<Vec<u8>>, SecretsError> 
 /// runs on plaintext the seal already authenticated; what they buy is that the encoder above has
 /// exactly one legal output for a given store, which is what makes an unchanged store rewrite to
 /// identical bytes.
+///
+/// # Errors
+/// [`SecretsError::Corrupt`] with detail `"record table"` if the length, key ordering, or tail does
+/// not hold up.
 pub(crate) fn decode(bytes: &[u8]) -> Result<Table, SecretsError> {
     // A function rather than a value: the condition is not `Clone`, deliberately, and every rejection
     // below is the same one.

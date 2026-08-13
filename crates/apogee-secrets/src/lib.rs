@@ -9,13 +9,27 @@
 //!
 //! One [`SecretStore`] seam over the platform credential stores: the freedesktop Secret Service on
 //! Linux (GNOME Keyring, KWallet, KeePassXC), the Credential Manager on Windows, the Keychain on
-//! macOS. Secrets are addressed by account UUID and [`SecretKind`], so they are shared by every
-//! profile that signs in as that account, and they travel in a [`Secret`] that zeroizes on drop and
-//! implements no trait that could print or serialize it.
+//! macOS and iOS. Secrets are addressed by account UUID and [`SecretKind`], so they are shared by
+//! every profile that signs in as that account, and they travel in a [`Secret`] that zeroizes on
+//! drop and implements no trait that could print or serialize it.
 //!
-//! [`SecretStore::probe`] reports which store answered and what condition it is in without reading,
-//! writing, or raising an unlock prompt, so a caller can tell a locked keyring from a sandbox that
-//! cannot reach one, and say something useful instead of failing blind.
+//! [`SecretStore::probe`] reports which store answered and what condition it is in without reading a
+//! stored secret, writing, or raising an unlock prompt, so a caller can tell a locked keyring from a
+//! sandbox that cannot reach one, and say something useful instead of failing blind.
+//!
+//! # Layout
+//!
+//! - [`SecretStore`] is the trait every backend implements; [`Secrets`] is the handle a composition
+//!   root holds, wrapping whichever backend it was given.
+//! - [`OsKeyring`] is the default backend, dispatching to the Secret Service, Credential Manager, or
+//!   Keychain for the host platform.
+//! - [`EncryptedFile`] is the opt-in passphrase-sealed fallback for a session with no platform
+//!   keyring, gated by a [`Passphrase`] and a [`Consent`] token.
+//! - [`Null`] is the backend for an account whose secrets are never written down.
+//! - [`BackendReport`] is what [`SecretStore::probe`] returns: a [`Backend`], a [`BackendState`],
+//!   and an optional [`Sandbox`].
+//! - [`Import`] reads another launcher's stored credential so a user does not have to retype it.
+//! - [`SecretsError`] is the shared error taxonomy every backend answers through.
 //!
 //! # What the platform store does and does not buy
 //!
@@ -30,6 +44,24 @@
 //! Every [`SecretStore`] call blocks and may raise the platform's unlock prompt. On Linux the D-Bus
 //! client panics when it is driven from inside an async runtime's worker, so a caller on a runtime
 //! must wrap these calls in `tokio::task::spawn_blocking`.
+//!
+//! # Examples
+//!
+//! [`Null`] never touches a real keyring, so it is safe to run here: a caller wires up
+//! [`Secrets`] around whichever backend the composition root chose, and every subsystem downstream
+//! reads it through the same [`SecretStore`] trait object.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use apogee_secrets::{Null, SecretKind, SecretStore, Secrets};
+//! use uuid::Uuid;
+//!
+//! let secrets = Secrets::with_backend(Arc::new(Null::new()));
+//! assert!(!secrets.store().probe().is_usable());
+//! assert!(secrets.store().get(Uuid::nil(), SecretKind::Password)?.is_none());
+//! # Ok::<(), apogee_secrets::SecretsError>(())
+//! ```
 
 // The Secret Service session has to negotiate the Diffie-Hellman-agreed AES transport, or secret
 // payloads cross the session bus in the clear. Cargo does not surface a dependency's features as a
@@ -71,10 +103,12 @@ mod probe;
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))]
 mod probe_native;
 
-// The Keychain status table and the reader for it. Compiled wherever a build can reach a Keychain,
-// and additionally under `cfg(test)` everywhere else, so the table runs in the ordinary test job: no
-// job in this repository has Apple hardware, and a table only Apple could execute is a table nothing
-// holds.
+// The Keychain status table and the reader for it. Compiled on macOS/iOS because the Keychain
+// backend needs it, on Windows because `keyring_store.rs`'s Credential Manager arm calls
+// `apple::locked` too (a permanent no-op there, since the Credential Manager raises no status of
+// this shape), and additionally under `cfg(test)` on Linux/BSD, so the table runs in the ordinary
+// test job: no job in this repository has Apple hardware, and a table only Apple could execute is a
+// table nothing holds.
 #[cfg(any(
     test,
     not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))

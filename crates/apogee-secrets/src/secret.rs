@@ -15,22 +15,27 @@ use zeroize::Zeroizing;
 pub struct Secret(Zeroizing<Vec<u8>>);
 
 impl Secret {
-    /// Wrap raw secret bytes. Takes the `Vec` by value, so no un-erased copy stays behind at the
-    /// call site.
+    /// Wrap raw secret bytes.
+    ///
+    /// Takes the `Vec` by value, so no un-erased copy stays behind at the call site.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(Zeroizing::new(bytes))
     }
 
-    /// Wrap a secret held as text. `String::into_bytes` moves the heap buffer rather than copying
-    /// it, so the text is not duplicated on the way in.
+    /// Wrap a secret held as text.
+    ///
+    /// `String::into_bytes` moves the heap buffer rather than copying it, so the text is not
+    /// duplicated on the way in.
     #[must_use]
     pub fn from_string(text: String) -> Self {
         Self::new(text.into_bytes())
     }
 
-    /// Borrow the raw bytes. Callers use them and drop them: they must not be logged, persisted, or
-    /// copied into a longer-lived buffer.
+    /// Borrow the raw bytes.
+    ///
+    /// Callers use them and drop them: they must not be logged, persisted, or copied into a
+    /// longer-lived buffer.
     #[must_use]
     pub fn expose(&self) -> &[u8] {
         &self.0
@@ -94,6 +99,7 @@ mod tests {
         assert_send_static::<Secret>();
     };
 
+    /// The round trip through `from_string` preserves the exact bytes, length, and emptiness.
     #[test]
     fn text_survives_the_round_trip() {
         let secret = Secret::from_string("correct horse".to_owned());
@@ -121,6 +127,7 @@ mod tests {
         );
     }
 
+    /// A `Secret` built from no bytes reports `is_empty()` and a zero length.
     #[test]
     fn an_empty_secret_reports_itself_empty() {
         let secret = Secret::new(Vec::new());

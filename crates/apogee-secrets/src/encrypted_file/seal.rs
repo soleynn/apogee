@@ -42,6 +42,9 @@ pub(crate) fn draw<const N: usize>() -> Result<[u8; N], SecretsError> {
 }
 
 /// Close the check envelope over `aad`, producing the tag the file carries.
+///
+/// # Errors
+/// [`SecretsError::Backend`] if the underlying cipher call fails.
 pub(crate) fn seal_check(
     key: &[u8; KEY_LEN],
     nonce: &[u8; NONCE_LEN],
@@ -80,6 +83,9 @@ pub(crate) fn open_check(
 }
 
 /// Encrypt `buf` in place and hand back its tag.
+///
+/// # Errors
+/// [`SecretsError::Backend`] if the underlying cipher call fails.
 pub(crate) fn seal_body(
     key: &[u8; KEY_LEN],
     nonce: &[u8; NONCE_LEN],
@@ -94,9 +100,13 @@ pub(crate) fn seal_body(
 
 /// Decrypt `buf` in place, having checked its tag first.
 ///
+/// Called two ways: once the check envelope has proved the key, where a failure here is damage to
+/// the file; and as the tiebreak when the check envelope has *failed*, where success proves the key
+/// was right and the damage is confined to the check envelope, and failure means the key really is
+/// wrong. The caller, not this function, knows which case it is in.
+///
 /// # Errors
-/// [`SecretsError::Corrupt`]. Only reached once the check envelope has already proved the key, so a
-/// failure here is damage to the file rather than a wrong passphrase.
+/// [`SecretsError::Corrupt`] if the tag does not verify.
 pub(crate) fn open_body(
     key: &[u8; KEY_LEN],
     nonce: &[u8; NONCE_LEN],
