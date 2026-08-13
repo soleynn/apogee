@@ -97,7 +97,7 @@ async fn launch_sleeper(
         String::new(),
         BTreeMap::new(),
     )
-    .prefix(&prefix);
+    .in_prefix(&prefix);
     let session = runtime
         .launch(plan, &CancellationToken::new(), &Progress::none())
         .await?;

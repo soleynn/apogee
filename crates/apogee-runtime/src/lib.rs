@@ -450,7 +450,7 @@ impl Runtime {
         cancel: &tokio_util::sync::CancellationToken,
         progress: &Progress,
     ) -> Result<GameSession, RuntimeError> {
-        let prefix = plan.prefix_ref().ok_or(RuntimeError::InvalidLaunchPlan {
+        let prefix = plan.prefix().ok_or(RuntimeError::InvalidLaunchPlan {
             reason: "launch plan has no prefix",
         })?;
         let runner_name = prefix.runner().name().to_owned();
@@ -901,7 +901,7 @@ mod non_linux {
 
         /// The prefix this companion runs in.
         #[must_use]
-        pub fn prefix_ref(&self) -> Option<&crate::Prefix> {
+        pub fn prefix(&self) -> Option<&crate::Prefix> {
             None
         }
     }

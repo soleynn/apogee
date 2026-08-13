@@ -81,7 +81,7 @@ impl CompanionSpec {
 
     /// The prefix this companion runs in, if it is not a host tool.
     #[must_use]
-    pub fn prefix_ref(&self) -> Option<&Prefix> {
+    pub fn prefix(&self) -> Option<&Prefix> {
         self.prefix.as_ref()
     }
 }
