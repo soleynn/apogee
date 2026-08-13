@@ -77,6 +77,7 @@ is tagged with its change type. Versioning aims to follow
 - Run host tools outside a Flatpak sandbox (#221) _(added)_
 - Close out the pre-freeze API review (#222) _(changed)_
 - Bring rustdoc to publication grade (#223) _(documentation)_
+- Confine link targets against the tree, not a count (#224) _(fixed)_
 
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
