@@ -82,6 +82,55 @@ pub struct BackendReport {
 }
 
 impl BackendReport {
+    /// Report `backend` in `state`, reached from outside any sandbox.
+    ///
+    /// The struct is `#[non_exhaustive]`, so this is the only way to build one from another crate,
+    /// and without it [`SecretStore`](crate::SecretStore) could not be implemented outside this one
+    /// at all: every method but the probe can be written by anybody, and the probe has to return a
+    /// value only this module could make. The two implementations in this workspace that live
+    /// elsewhere both had to hold a backend of this crate's and forward to its probe, which is a
+    /// workaround for the gap rather than a use of the seam.
+    ///
+    /// Sandbox detection is left out rather than defaulted to a guess: this crate reads
+    /// `/.flatpak-info` for its own backends, and a store somebody else wrote knows its own answer
+    /// or has none. [`BackendReport::in_sandbox`] is how it says so.
+    ///
+    /// # Examples
+    /// ```
+    /// use apogee_secrets::{Backend, BackendReport, BackendState};
+    ///
+    /// let report = BackendReport::new(Backend::Null, BackendState::NotStoring);
+    /// assert!(!report.is_usable());
+    /// assert!(report.sandbox.is_none());
+    /// ```
+    #[must_use]
+    pub fn new(backend: Backend, state: BackendState) -> Self {
+        Self {
+            backend,
+            state,
+            sandbox: None,
+        }
+    }
+
+    /// The same report, taken from inside `sandbox`.
+    ///
+    /// # Examples
+    /// ```
+    /// use apogee_secrets::{Backend, BackendReport, BackendState, Sandbox};
+    ///
+    /// let report = BackendReport::new(Backend::SecretService, BackendState::SandboxDenied)
+    ///     .in_sandbox(Sandbox::Flatpak {
+    ///         app_id: Some("dev.apogee.Launcher".to_owned()),
+    ///         bus_filtered: true,
+    ///     });
+    /// assert!(report.sandbox.is_some());
+    /// ```
+    #[must_use]
+    pub fn in_sandbox(mut self, sandbox: Sandbox) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
     /// Whether the store is locked.
     #[must_use]
     pub fn locked(&self) -> bool {
@@ -100,11 +149,24 @@ mod tests {
     use super::*;
 
     fn report(state: BackendState) -> BackendReport {
-        BackendReport {
-            backend: Backend::SecretService,
-            state,
-            sandbox: None,
-        }
+        BackendReport::new(Backend::SecretService, state)
+    }
+
+    /// The constructor is the only way another crate can answer
+    /// [`SecretStore::probe`](crate::SecretStore::probe), so what it leaves out matters as much as
+    /// what it takes: a report that arrived carrying a sandbox nobody named would be this crate's
+    /// guess standing in for a caller's fact.
+    #[test]
+    fn a_built_report_carries_what_it_was_given_and_nothing_else() {
+        let plain = BackendReport::new(Backend::WindowsCredentialManager, BackendState::Ready);
+        assert_eq!(plain.backend, Backend::WindowsCredentialManager);
+        assert_eq!(plain.state, BackendState::Ready);
+        assert!(plain.sandbox.is_none());
+
+        let sandboxed = BackendReport::new(Backend::SecretService, BackendState::SandboxDenied)
+            .in_sandbox(Sandbox::Container);
+        assert_eq!(sandboxed.sandbox, Some(Sandbox::Container));
+        assert_eq!(sandboxed.state, BackendState::SandboxDenied);
     }
 
     /// Both accessors are answered for every state, so a state added later cannot silently inherit

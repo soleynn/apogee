@@ -40,11 +40,7 @@ impl SecretStore for Null {
     }
 
     fn probe(&self) -> BackendReport {
-        BackendReport {
-            backend: Backend::Null,
-            state: BackendState::NotStoring,
-            sandbox: None,
-        }
+        BackendReport::new(Backend::Null, BackendState::NotStoring)
     }
 }
 

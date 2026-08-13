@@ -273,11 +273,7 @@ impl SecretStore for MemoryStore {
 
     fn probe(&self) -> BackendReport {
         self.locked(&self.calls).push(Call::Probe);
-        BackendReport {
-            backend: self.backend,
-            state: self.state,
-            sandbox: None,
-        }
+        BackendReport::new(self.backend, self.state)
     }
 }
 
