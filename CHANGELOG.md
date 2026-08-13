@@ -72,6 +72,7 @@ is tagged with its change type. Versioning aims to follow
 ### apogee-runtime
 - Report the exit status of a redirected launch's program (#165) _(fixed)_
 - Report the nvapi companion a profile wants, and make turning it off mean something (#204) _(added)_
+- Accept a list of runner-catalog signing keys (#219) _(added)_
 
 ### apogee-secrets
 - Store account secrets in the platform credential store (#99) _(added)_
