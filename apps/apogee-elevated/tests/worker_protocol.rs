@@ -1,9 +1,10 @@
 //! The worker driven as a real process over the protocol.
 //!
 //! Everything the privileged side promises is asserted here against the shipping binary rather than
-//! an in-process stand-in: it re-proves the bytes it is handed, it refuses a path that would leave
-//! the tree it was bound to, it advances a version file only after a clean apply, and it can be
-//! killed part way through without taking the process driving it with it.
+//! an in-process stand-in: it re-proves the bytes it is handed, whether they arrive as a patch to
+//! apply or as a repair's staged spans; it refuses a path that would leave the tree it was bound to;
+//! it advances a version file only after clean work; and it can be killed part way through either
+//! without taking the process driving it with it.
 //!
 //! The transport is the worker's standard streams, which is the one thing here that is not what
 //! Windows uses (there the same worker connects back over a named pipe, because the call that raises
@@ -15,11 +16,13 @@ mod support;
 use std::error::Error;
 use std::path::Path;
 
-use apogee_elevate::{Error as ElevateError, VersionWrite, WorkerErrorKind};
+use apogee_elevate::{Error as ElevateError, StagedOp, StagedWrite, VersionWrite, WorkerErrorKind};
 use apogee_zipatch::fixtures;
 use tokio_util::sync::CancellationToken;
 
-use support::{BLOCK_SIZE, block_sha1, chunk_crc, place, start, wide_expected, wide_patch};
+use support::{
+    BLOCK_SIZE, block_sha1, chunk_crc, filler, place, stage, start, wide_expected, wide_patch,
+};
 
 /// The version file the fixtures advance, relative to the bound tree.
 const VER: &str = "ffxivgame.ver";
@@ -28,6 +31,13 @@ const VER: &str = "ffxivgame.ver";
 /// four megabytes of writes out of a patch file measured in kilobytes.
 const WIDE_CHUNKS: usize = 64;
 const WIDE_CHUNK_LEN: usize = 1 << 20;
+
+/// The same idea for a repair, at a third the size. A repair reports every eight megabytes written,
+/// so the kill lands with two thirds of the batch outstanding; that is hundreds of milliseconds of
+/// writing against a kill delivered in well under one, and the whole fixture is staged on disk twice
+/// (once by the test, once read back by the worker) so its size is what the test costs.
+const REPAIR_SPANS: usize = 24;
+const REPAIR_SPAN_LEN: usize = 1 << 20;
 
 fn version(contents: &str) -> Option<VersionWrite> {
     Some(VersionWrite {
@@ -478,6 +488,363 @@ async fn killing_the_worker_mid_apply_is_a_typed_failure_the_parent_survives()
         std::fs::read(root.path().join("big.bin"))?,
         wide_expected(WIDE_CHUNKS, WIDE_CHUNK_LEN),
         "the re-run did not converge on the tree the patch describes",
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(VER))?,
+        "2024.01.01.0000.0000"
+    );
+    Ok(())
+}
+
+/// The repair happy path: a batch of staged writes rebuilds one file, resizes another and rewrites a
+/// span of a third, and only then does the version file advance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_of_staged_writes_heals_a_tree_and_advances_the_version()
+-> Result<(), Box<dyn Error>> {
+    let store = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("long.bin"), vec![0xAAu8; 64])?;
+    std::fs::write(root.path().join("broken.bin"), vec![0xAAu8; 32])?;
+
+    let staging = store.path().join("staged.bin");
+    let mut writes = vec![
+        StagedWrite {
+            path: "sub/fresh.bin".to_owned(),
+            op: StagedOp::Create { len: 24 },
+        },
+        StagedWrite {
+            path: "long.bin".to_owned(),
+            op: StagedOp::Resize { len: 16 },
+        },
+        StagedWrite {
+            path: "broken.bin".to_owned(),
+            op: StagedOp::Zeros { off: 16, len: 16 },
+        },
+    ];
+    writes.extend(stage(
+        &staging,
+        &[
+            ("sub/fresh.bin", 0, vec![0x11u8; 8]),
+            ("broken.bin", 0, vec![0x22u8; 8]),
+        ],
+    )?);
+
+    let mut harness = start().await?;
+    harness.session.bind(root.path()).await?;
+    harness
+        .session
+        .repair(
+            Some(&staging),
+            writes,
+            version("2024.01.01.0000.0000"),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await?;
+
+    // A created file is sized and holds the staged bytes over a zeroed remainder.
+    let fresh = std::fs::read(root.path().join("sub/fresh.bin"))?;
+    assert_eq!(fresh.len(), 24);
+    assert_eq!(&fresh[..8], &[0x11u8; 8]);
+    assert_eq!(&fresh[8..], &[0u8; 16]);
+    assert_eq!(std::fs::metadata(root.path().join("long.bin"))?.len(), 16);
+    let broken = std::fs::read(root.path().join("broken.bin"))?;
+    assert_eq!(&broken[..8], &[0x22u8; 8]);
+    assert_eq!(&broken[8..16], &[0xAAu8; 8]);
+    assert_eq!(
+        &broken[16..],
+        &[0u8; 16],
+        "the zero run was not overwritten"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(VER))?,
+        "2024.01.01.0000.0000"
+    );
+    Ok(())
+}
+
+/// A staging file rewritten after the parent measured it is refused, and nothing from that batch is
+/// written.
+///
+/// This is why a staged write carries a digest at all. The parent proved these bytes against the
+/// block index, but that proof is a value in the parent and the staging file it took it over lives
+/// in a store the unprivileged user can write. The substitute here is not corruption: it is
+/// well-formed bytes of exactly the right length, which is what someone who can write that file
+/// would put there. Only the digest separates the two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_bytes_rewritten_after_the_parent_measured_them_are_refused()
+-> Result<(), Box<dyn Error>> {
+    let store = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("data.bin");
+    std::fs::write(&target, vec![0xAAu8; 32])?;
+
+    let staging = store.path().join("staged.bin");
+    let writes = stage(&staging, &[("data.bin", 0, vec![0x11u8; 16])])?;
+    // Same length, same shape, different bytes: the file the worker will read is not the file the
+    // parent hashed.
+    std::fs::write(&staging, vec![0x99u8; 16])?;
+
+    let mut harness = start().await?;
+    harness.session.bind(root.path()).await?;
+    let err = harness
+        .session
+        .repair(
+            Some(&staging),
+            writes.clone(),
+            version("2024.01.01.0000.0000"),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect_err("staged bytes that do not match their digest must not be written");
+
+    let ElevateError::Worker {
+        kind: WorkerErrorKind::Verify,
+        failed_file: Some(named),
+        ..
+    } = &err
+    else {
+        panic!("expected a typed verification refusal naming the staging file, got {err:?}");
+    };
+    assert_eq!(named, &staging);
+    assert_eq!(
+        std::fs::read(&target)?,
+        vec![0xAAu8; 32],
+        "a refused batch still reached the tree",
+    );
+    assert!(
+        !root.path().join(VER).exists(),
+        "the version advanced over a refused batch"
+    );
+
+    // The session survives the refusal: restoring the bytes the digests describe writes them.
+    stage(&staging, &[("data.bin", 0, vec![0x11u8; 16])])?;
+    harness
+        .session
+        .repair(
+            Some(&staging),
+            writes,
+            version("2024.01.01.0000.0000"),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await?;
+    assert_eq!(&std::fs::read(&target)?[..16], &[0x11u8; 16]);
+    Ok(())
+}
+
+/// A staged write is refused when its path would leave the bound tree, when its span runs past the
+/// staging file, and when no staging file was named at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_staged_write_the_session_forbids_is_refused() -> Result<(), Box<dyn Error>> {
+    let store = tempfile::tempdir()?;
+    let base = tempfile::tempdir()?;
+    let root = base.path().join("game");
+    std::fs::create_dir_all(&root)?;
+    let staging = store.path().join("staged.bin");
+    let good = stage(&staging, &[("data.bin", 0, vec![0x11u8; 16])])?;
+
+    let mut harness = start().await?;
+    harness.session.bind(&root).await?;
+
+    let escaping = stage(&staging, &[("../escaped.bin", 0, vec![0x11u8; 16])])?;
+    let err = harness
+        .session
+        .repair(
+            Some(&staging),
+            escaping,
+            None,
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect_err("a staged write climbing out of the tree must be refused");
+    assert!(
+        matches!(
+            err,
+            ElevateError::Worker {
+                kind: WorkerErrorKind::Protocol,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+    assert!(!base.path().join("escaped.bin").exists());
+
+    // A span the staging file cannot satisfy is a refusal, not a short write.
+    std::fs::write(&staging, vec![0x11u8; 4])?;
+    let err = harness
+        .session
+        .repair(
+            Some(&staging),
+            good.clone(),
+            None,
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .expect_err("a span past the end of the staging file must be refused");
+    assert!(
+        matches!(
+            err,
+            ElevateError::Worker {
+                kind: WorkerErrorKind::Verify,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+
+    // And bytes with nowhere to have come from are a protocol fault rather than a panic.
+    let err = harness
+        .session
+        .repair(None, good, None, &CancellationToken::new(), |_| {})
+        .await
+        .expect_err("a byte-carrying write with no staging file must be refused");
+    assert!(
+        matches!(
+            err,
+            ElevateError::Worker {
+                kind: WorkerErrorKind::Protocol,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+    Ok(())
+}
+
+/// A stray moves into the recycler and is never deleted, and a move that would leave the tree at
+/// either end is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stray_moves_within_the_tree_and_never_out_of_it() -> Result<(), Box<dyn Error>> {
+    let base = tempfile::tempdir()?;
+    let root = base.path().join("install");
+    std::fs::create_dir_all(root.join("game/mods"))?;
+    std::fs::write(root.join("game/mods/extra.dat"), b"user data")?;
+
+    let mut harness = start().await?;
+    harness.session.bind(&root).await?;
+    harness
+        .session
+        .move_within(
+            "game/mods/extra.dat",
+            "apogee_repair_recycler/20240101_000000/game/mods/extra.dat",
+        )
+        .await?;
+
+    assert!(!root.join("game/mods/extra.dat").exists());
+    assert_eq!(
+        std::fs::read(root.join("apogee_repair_recycler/20240101_000000/game/mods/extra.dat"))?,
+        b"user data",
+        "the bytes must survive the move",
+    );
+
+    std::fs::write(root.join("game/mods/other.dat"), b"more")?;
+    for (from, to) in [
+        ("game/mods/other.dat", "../escaped.dat"),
+        ("../outside.dat", "game/mods/landed.dat"),
+    ] {
+        let err = harness
+            .session
+            .move_within(from, to)
+            .await
+            .expect_err("a move leaving the tree must be refused");
+        assert!(
+            matches!(
+                err,
+                ElevateError::Worker {
+                    kind: WorkerErrorKind::Protocol,
+                    ..
+                }
+            ),
+            "{from} -> {to}: got {err:?}"
+        );
+    }
+    assert!(!base.path().join("escaped.dat").exists());
+    assert_eq!(std::fs::read(root.join("game/mods/other.dat"))?, b"more");
+    Ok(())
+}
+
+/// Killing the worker part way through a repair is a typed failure, the parent carries on, the
+/// version does not advance, and a re-run over a fresh worker converges.
+///
+/// The mirror of the mid-apply kill, and the claims are the same four. What differs is what a torn
+/// repair leaves: a batch is many small positioned writes rather than one long stream, so some have
+/// landed and some have not, and the re-run has to be indifferent to which.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn killing_the_worker_mid_repair_is_a_typed_failure_a_re_run_converges()
+-> Result<(), Box<dyn Error>> {
+    let store = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("big.bin");
+    let healed = wide_expected(REPAIR_SPANS, REPAIR_SPAN_LEN);
+    std::fs::write(&target, vec![0xAAu8; healed.len()])?;
+
+    // One span per run, so the kill on the first progress frame lands with most of them unwritten.
+    let spans: Vec<(&str, u64, Vec<u8>)> = (0..REPAIR_SPANS)
+        .map(|chunk| {
+            let off = (chunk * REPAIR_SPAN_LEN) as u64;
+            ("big.bin", off, vec![filler(chunk); REPAIR_SPAN_LEN])
+        })
+        .collect();
+    let staging = store.path().join("staged.bin");
+    let writes = stage(&staging, &spans)?;
+
+    let mut harness = start().await?;
+    harness.session.bind(root.path()).await?;
+    let mut child = harness.child;
+    let mut killed = false;
+    let err = harness
+        .session
+        .repair(
+            Some(&staging),
+            writes.clone(),
+            version("2024.01.01.0000.0000"),
+            &CancellationToken::new(),
+            |frame| {
+                if !killed && matches!(frame, apogee_elevate::WorkerProgress::Applying { .. }) {
+                    killed = true;
+                    let _ = child.start_kill();
+                }
+            },
+        )
+        .await
+        .expect_err("a worker killed mid-repair must not report success");
+
+    assert!(killed, "the repair finished before it could be interrupted");
+    assert!(
+        matches!(err, ElevateError::Gone),
+        "a dead worker must arrive as a typed value, got {err:?}"
+    );
+    // This assertion running at all is the anti-crash claim.
+    assert!(
+        !root.path().join(VER).exists(),
+        "the version advanced over a torn repair"
+    );
+    assert_ne!(
+        std::fs::read(&target)?,
+        healed,
+        "the repair was not actually interrupted"
+    );
+
+    let mut second = start().await?;
+    second.session.bind(root.path()).await?;
+    second
+        .session
+        .repair(
+            Some(&staging),
+            writes,
+            version("2024.01.01.0000.0000"),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await?;
+    assert_eq!(
+        std::fs::read(&target)?,
+        healed,
+        "the re-run did not converge on the healed file",
     );
     assert_eq!(
         std::fs::read_to_string(root.path().join(VER))?,

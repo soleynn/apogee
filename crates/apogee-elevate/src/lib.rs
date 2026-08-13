@@ -17,12 +17,14 @@
 //!
 //! # Layout
 //!
-//! - [`Session`] drives a worker: [`Session::bind`], then [`Session::apply`] per patch, then
-//!   [`Session::copy_within`].
+//! - [`Session`] drives a worker: [`Session::bind`], then either [`Session::apply`] per patch and
+//!   [`Session::copy_within`] (an install), or [`Session::move_within`] per stray and
+//!   [`Session::repair`] per batch of writes (a repair).
 //! - [`serve`] is the worker's whole main loop.
 //! - [`spawn::direct`] starts a worker with this process's privileges; on Windows
 //!   `spawn::elevated` raises them first.
-//! - [`WorkerRequest`], [`WorkerResponse`], [`WorkerProgress`] and [`Admission`] are the wire.
+//! - [`WorkerRequest`], [`WorkerResponse`], [`WorkerProgress`], [`Admission`] and [`StagedWrite`]
+//!   are the wire.
 //! - [`Error`] is what a caller sees, including [`Error::Gone`] for a worker that died mid-request.
 //!
 //! # Examples
@@ -61,8 +63,9 @@ mod worker;
 pub use client::Session;
 pub use error::{Error, Result};
 pub use proto::{
-    Admission, FrameError, MAX_FRAME, MAX_VERSION_LEN, PROTOCOL_VERSION, VersionWrite,
-    WorkerErrorKind, WorkerProgress, WorkerRequest, WorkerResponse,
+    Admission, FrameError, MAX_FRAME, MAX_STAGED_SPAN, MAX_VERSION_LEN, MAX_ZERO_RUN,
+    PROTOCOL_VERSION, StagedOp, StagedWrite, VersionWrite, WorkerErrorKind, WorkerProgress,
+    WorkerRequest, WorkerResponse,
 };
 pub use spawn::Worker;
 pub use worker::serve;

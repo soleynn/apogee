@@ -11,7 +11,9 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use apogee_test_support::tree_manifest;
-use apogee_zipatch::{Error, Index, LocalPatchSource, VerifyOptions};
+use apogee_zipatch::{
+    DiskRepairSink, Error, Index, LocalPatchSource, RepairSink, RepairWrite, VerifyOptions,
+};
 use support::{
     CountingSource, DAT0, DAT0_PATH, PatchBuilder, TamperSource, WIN32, apply_chain, build_from,
     chain, splitmix64,
@@ -459,6 +461,218 @@ fn local_patch_source_errors_propagate_as_hard_faults() {
         index.repair(applied.path(), &report, &mut truncated),
         Err(Error::Truncated { .. })
     ));
+}
+
+/// One write a repair asked for, kept rather than made.
+#[derive(Debug)]
+enum Recorded {
+    Create(u64),
+    Resize(u64),
+    Bytes(u64, Vec<u8>),
+    Zeros(u64, u64),
+}
+
+/// A sink that records the writes instead of making them, so a test can replay them somewhere else.
+/// This is the shape a caller marshaling writes to another process sees: these calls and nothing
+/// else.
+#[derive(Default)]
+struct RecordingSink {
+    writes: Vec<(PathBuf, Recorded)>,
+    flushes: usize,
+}
+
+impl RepairSink for RecordingSink {
+    fn write(&mut self, target: &Path, write: RepairWrite<'_>) -> Result<(), Error> {
+        let recorded = match write {
+            RepairWrite::Create { len } => Recorded::Create(len),
+            RepairWrite::Resize { len } => Recorded::Resize(len),
+            RepairWrite::Bytes { off, bytes } => Recorded::Bytes(off, bytes.to_vec()),
+            RepairWrite::Zeros { off, len } => Recorded::Zeros(off, len),
+            _ => {
+                return Err(Error::Unsupported {
+                    what: "repair write",
+                });
+            }
+        };
+        self.writes.push((target.to_path_buf(), recorded));
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.flushes += 1;
+        Ok(())
+    }
+}
+
+impl RecordingSink {
+    /// Replay everything recorded into the tree at `root`, through the ordinary disk sink.
+    fn replay(&self, root: &Path) -> Result<(), Error> {
+        let mut sink = DiskRepairSink::new(root);
+        for (target, write) in &self.writes {
+            let write = match write {
+                Recorded::Create(len) => RepairWrite::Create { len: *len },
+                Recorded::Resize(len) => RepairWrite::Resize { len: *len },
+                Recorded::Bytes(off, bytes) => RepairWrite::Bytes {
+                    off: *off,
+                    bytes: bytes.as_slice(),
+                },
+                Recorded::Zeros(off, len) => RepairWrite::Zeros {
+                    off: *off,
+                    len: *len,
+                },
+            };
+            sink.write(target, write)?;
+        }
+        sink.flush()
+    }
+
+    /// Which of the four write shapes were recorded, in `Create`/`Resize`/`Bytes`/`Zeros` order.
+    fn shapes(&self) -> [bool; 4] {
+        let mut seen = [false; 4];
+        for (_, write) in &self.writes {
+            let slot = match write {
+                Recorded::Create(_) => 0,
+                Recorded::Resize(_) => 1,
+                Recorded::Bytes(..) => 2,
+                Recorded::Zeros(..) => 3,
+            };
+            seen[slot] = true;
+        }
+        seen
+    }
+}
+
+/// Break one tree four ways at once: a flipped byte in a stored part, a missing file, a corrupted
+/// empty block, and an over-long file. Between them they draw every write a repair can make.
+fn damage_every_way(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    overwrite(&root.join("ffxivboot.exe"), 0, &[0xFF])?;
+    std::fs::remove_file(root.join("data.bin"))?;
+    let dat = root.join(DAT0_PATH);
+    overwrite(&dat, 1024, &[0xFFu8; 8])?;
+    let mut grown = std::fs::read(&dat)?;
+    grown.extend_from_slice(&[0xEEu8; 512]);
+    std::fs::write(&dat, grown)?;
+    Ok(())
+}
+
+/// A repair whose writes are recorded and replayed elsewhere heals that tree exactly as one writing
+/// straight to disk does.
+///
+/// This is what a caller that cannot write the tree from its own process rests on: the plan, the CRC
+/// gate and the bytes are all decided here, and the sink carries nothing but the writes. Were a
+/// repair ever to reach past the sink and touch the tree itself, the replayed tree would come out
+/// short and this would say so.
+#[test]
+fn a_recorded_repair_replays_into_the_same_tree_a_disk_one_produces() {
+    let chain = chain();
+    let (direct, index, baseline) = setup(&chain).expect("setup");
+    let (marshaled, _, _) = setup(&chain).expect("setup");
+    damage_every_way(direct.path()).expect("damage");
+    damage_every_way(marshaled.path()).expect("damage");
+
+    let report = index
+        .verify(direct.path(), &VerifyOptions::default())
+        .expect("verify");
+    let mut source = CountingSource::new(chain.clone());
+    let outcome = index
+        .repair(direct.path(), &report, &mut source)
+        .expect("repair");
+    assert!(
+        outcome.is_complete(),
+        "still broken: {:?}",
+        outcome.still_broken
+    );
+
+    let report = index
+        .verify(marshaled.path(), &VerifyOptions::default())
+        .expect("verify");
+    let mut recording = RecordingSink::default();
+    let mut source = CountingSource::new(chain.clone());
+    index
+        .repair_into(marshaled.path(), &report, &mut source, &mut recording)
+        .expect("repair");
+    assert!(
+        recording.flushes >= 1,
+        "the pass must flush before it re-reads the tree"
+    );
+    assert_eq!(
+        recording.shapes(),
+        [true; 4],
+        "recorded: {:?}",
+        recording.writes
+    );
+
+    recording.replay(marshaled.path()).expect("replay");
+    assert_eq!(
+        tree_manifest::author(marshaled.path())
+            .expect("author")
+            .files,
+        baseline.files,
+        "a replayed repair must land the same tree a direct one does",
+    );
+    assert_eq!(
+        tree_manifest::author(direct.path()).expect("author").files,
+        baseline.files,
+    );
+}
+
+/// A repair of a subtree that is gone entirely rebuilds it, root directory and all.
+///
+/// The rebuild is the one write that creates anything, and the root is the one directory the
+/// component descent beneath it cannot make: it starts from a directory it assumes is there. A tree
+/// wiped rather than corrupted is exactly the case that lands on it.
+#[test]
+fn a_repair_rebuilds_a_subtree_that_is_gone_entirely() {
+    let chain = chain();
+    let (applied, index, baseline) = setup(&chain).expect("setup");
+    let root = applied.path().join("wiped");
+
+    let report = index
+        .verify(&root, &VerifyOptions::default())
+        .expect("verify");
+    assert!(!report.missing_files.is_empty(), "nothing reported missing");
+
+    let mut source = CountingSource::new(chain.clone());
+    let outcome = index.repair(&root, &report, &mut source).expect("repair");
+    assert!(
+        outcome.is_complete(),
+        "still broken: {:?}",
+        outcome.still_broken
+    );
+    assert_eq!(
+        tree_manifest::author(&root).expect("author").files,
+        baseline.files,
+        "a wiped subtree must rebuild into the tree the index describes",
+    );
+}
+
+/// An in-place repair refuses a target that is a symbolic link rather than writing through it.
+///
+/// The lexical confinement above cannot see this: every component of the path is ordinary. It
+/// matters most where the writer holds rights the tree's owner did not grant it, so the refusal is
+/// the sink's rather than any one caller's.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_target_is_refused_rather_than_written_through() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let root = base.path().join("game");
+    let outside = base.path().join("outside.bin");
+    std::fs::create_dir_all(&root).expect("root");
+    std::fs::write(&outside, b"untouched").expect("outside");
+    std::os::unix::fs::symlink(&outside, root.join("linked.bin")).expect("symlink");
+
+    let mut sink = DiskRepairSink::new(&root);
+    let err = sink
+        .write(
+            Path::new("linked.bin"),
+            RepairWrite::Bytes {
+                off: 0,
+                bytes: b"overwritten",
+            },
+        )
+        .expect_err("a write through a symlinked target must be refused");
+    assert!(matches!(err, Error::PathEscape { .. }), "got {err:?}");
+    assert_eq!(std::fs::read(&outside).expect("read"), b"untouched");
 }
 
 /// Write each patch to `dir` as `p{i}.patch`, returning the paths in chain order (so `paths[i]` backs
