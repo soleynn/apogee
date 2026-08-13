@@ -104,6 +104,9 @@ is tagged with its change type. Versioning aims to follow
 - Bring rustdoc to publication grade (#227) _(documentation)_
 - Freeze the crate at 1.0.0 (#228) _(miscellaneous)_
 
+### apogee-sqpack
+- Pre-freeze API review and hardening (#229) _(changed)_
+
 ### apogee-test-support
 - Stop a corpus gate passing when it cannot run (#189) _(fixed)_
 - Pin the boot corpus on the chain the source keeps serving (#190) _(testing)_
