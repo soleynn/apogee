@@ -121,8 +121,9 @@ pub fn parse_header(bytes_in: &[u8; 16]) -> Result<BlockHeader> {
 /// # Errors
 /// - [`Error::Truncated`] if `src` ends before a full block is read.
 /// - [`Error::LimitExceeded`] if the declared `decompressed_size` exceeds `limits.max_decompressed`.
-/// - [`Error::BlockCorrupt`] on a malformed header, an out-of-range compressed size, or a DEFLATE
-///   stream that does not decode to exactly `decompressed_size` bytes.
+/// - [`Error::BlockCorrupt`] on a malformed header, an out-of-range compressed size, a block length
+///   that overflows a `u32`, or a DEFLATE stream that does not decode to exactly `decompressed_size`
+///   bytes.
 /// - [`Error::Io`] if `out` fails to accept the decoded bytes.
 pub fn read_block(src: &mut impl Read, out: &mut impl Write, limits: &Limits) -> Result<BlockMeta> {
     let mut header_bytes = [0u8; BLOCK_HEADER_LEN as usize];

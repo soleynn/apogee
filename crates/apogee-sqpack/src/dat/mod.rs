@@ -8,8 +8,10 @@
 //!
 //! **The common header is not always there.** Nineteen of the eighty-six dat files in a full retail
 //! install carry no `SqPack` magic at all: their first twenty-four bytes are the same blob in every
-//! one of them (`128, 0, 0, 15, 0, 2` as little-endian words, the shape a patcher's empty-block
-//! marker has), the rest of the 1024 bytes is an ordinary header, and the SHA-1 the header carries
+//! one of them (`128, 0, 0, 15, 0, 2` as little-endian words: an empty-block marker's shape except for
+//! the trailing word, which a real marker always zeroes and this blob leaves at `2`, so
+//! [`empty_block_count`] does not recognize it), the rest of the 1024 bytes is an ordinary header, and
+//! the SHA-1 the header carries
 //! at `0x3C0` matches those bytes rather than a magic that was overwritten. Every one is a spanned
 //! file (`dat1` and up, never `dat0`), each declares a data header and a data region that match its
 //! length exactly, and their entries read like any other. So a missing common header is recorded and
@@ -185,7 +187,8 @@ impl<S: DatSource> Dat<S> {
     ///
     /// # Errors
     /// - [`Error::UnsupportedPlatform`] if a common header names a platform outside the known set.
-    /// - [`Error::Truncated`] if the container ends inside the data header.
+    /// - [`Error::Truncated`] if the container is too short for the common header's identifying prefix
+    ///   or for the data header.
     /// - [`Error::EntryCorrupt`] if a common header declares something other than a dat file.
     pub fn from_source(source: S, limits: &DatLimits) -> Result<Self> {
         let mut head = [0u8; COMMON_HEADER_LEN];

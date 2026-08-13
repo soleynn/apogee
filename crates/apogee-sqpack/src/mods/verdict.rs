@@ -290,8 +290,8 @@ mod tests {
     /// Every variant of an enum, as a list the compiler will not let go stale.
     ///
     /// The `match` has no wildcard, so a variant added to the enum stops this compiling until it is
-    /// named here too. Written as a bare array instead, the list would quietly stay one short —
-    /// which is what it was: `ContainerStanding::Missing` had no entry, so nothing checked its slug.
+    /// named here too. Written as a bare array instead, the list would quietly stay one short. That is
+    /// what happened: `ContainerStanding::Missing` had no entry, so nothing checked its slug.
     macro_rules! all_of {
         ($ty:ty, [$($variant:path),+ $(,)?]) => {{
             #[allow(dead_code)]

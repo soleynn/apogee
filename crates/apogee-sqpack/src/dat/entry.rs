@@ -113,7 +113,7 @@ impl ContentType {
 /// `allocated_units` and `occupied_units` count 128-byte units of the data region: the first is the
 /// slot the archive reserved (never smaller than the second, and matched by the distance to the next
 /// entry in all but a few percent of a real install, where the surplus is free space), the second
-/// the bytes actually stored, rounded up. Both are meaningless on an [`ContentType::Empty`] entry.
+/// the bytes actually stored, rounded up. Both are meaningless on a [`ContentType::Empty`] entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryHeader {
     /// The declared header length, and so the offset of the data region from the entry.
@@ -277,7 +277,7 @@ impl Entry {
     /// positions are measured against.
     ///
     /// # Errors
-    /// - [`Error::Truncated`] if `buf` is shorter than the header declares, or than its table needs.
+    /// - [`Error::Truncated`] if `buf` is shorter than the header declares.
     /// - [`Error::LimitExceeded`] if the header or the declared file size exceeds `limits`.
     /// - [`Error::EntryCorrupt`] if the table does not fit inside the declared header.
     pub fn parse(buf: &[u8], offset: u64, limits: &DatLimits) -> Result<Self> {
@@ -345,7 +345,7 @@ impl Entry {
     /// `None` twice, for opposite reasons: a model's table records only on-disk block sizes, so its
     /// extracted length is known once its blocks are decoded (and is always the declared one), while
     /// a content type this crate does not read will never extract at all. For everything else this is
-    /// the declared length, except for a handful of volume textures whose declared length counts
+    /// the declared length, except for a few hundred volume textures whose declared length counts
     /// padding between mip surfaces that the archive does not store (see [`super::Dat::read_into`]).
     #[must_use]
     pub fn stored_len(&self) -> Option<u64> {
