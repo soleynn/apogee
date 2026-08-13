@@ -12,11 +12,10 @@ serde = { workspace = true }
 # compiled-in key before any sha256 pin inside is trusted.
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
-# Async orchestration: the spawned install task, the progress channels, and the cancel token/stream.
+# Async orchestration: the spawned install task, the progress channels, and the cancel token.
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-tokio-stream.workspace = true
 # Parse a patchlist URL into the fetch request and mirror its path under the patch store.
 url.workspace = true
 apogee-fetch = { path = "../apogee-fetch" }
@@ -49,7 +48,6 @@ apogee-sqpack = { path = "../apogee-sqpack", features = ["test-fixtures"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util.workspace = true
-tokio-stream.workspace = true
 url.workspace = true
 # Compute per-block SHA1 over the synthetic patches to stand in for a game patchlist's hashes.
 sha1.workspace = true

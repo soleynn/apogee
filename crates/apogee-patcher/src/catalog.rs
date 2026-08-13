@@ -21,14 +21,22 @@ use crate::Repo;
 use crate::request::IndexSource;
 
 /// The manifest schema version this build understands.
-pub const INDEX_CATALOG_MANIFEST_VERSION: u32 = 1;
+///
+/// Not public: a caller learns the version this build wanted from
+/// [`IndexCatalogError::UnsupportedVersion`], which carries it, and a constant beside that is a
+/// second way to ask a question only the error can answer usefully.
+const INDEX_CATALOG_MANIFEST_VERSION: u32 = 1;
 
 /// The compiled-in public key index catalogs are authenticated against.
 ///
 /// Separate from the runner catalog's key: this is the patcher's own signed manifest. The matching
 /// private seed is held offline by the maintainer; it signs the hosted `manifest.json` and only these
 /// public bytes are committed. Rotating the key is a change to this constant plus a re-sign.
-pub const INDEX_CATALOG_PUBLIC_KEY: [u8; 32] = [
+///
+/// Not public, and neither is the verification that takes a key. [`IndexCatalog::verify_default`] is
+/// the whole API: it is the arm that uses `verify_strict`, and handing out the raw bytes invites a
+/// caller to build its own check that does not.
+const INDEX_CATALOG_PUBLIC_KEY: [u8; 32] = [
     0xb0, 0x60, 0x39, 0xaa, 0x1a, 0x8b, 0x96, 0x54, 0x1d, 0x8c, 0xd7, 0x5a, 0x23, 0x68, 0xec, 0x94,
     0x38, 0x2c, 0x1e, 0x97, 0xfd, 0x32, 0xed, 0x43, 0xd4, 0x33, 0x11, 0x25, 0x88, 0xb5, 0xe1, 0x37,
 ];
@@ -92,10 +100,14 @@ impl IndexCatalog {
     /// signature that is not exactly 64 bytes, or does not verify, is
     /// [`IndexCatalogError::BadSignature`].
     ///
+    /// Private, so `ed25519_dalek::VerifyingKey` stays out of this crate's public API and the crypto
+    /// crate can be upgraded without it being a breaking change here. The key that matters is
+    /// compiled in; [`verify_default`](Self::verify_default) is what callers get.
+    ///
     /// # Errors
     /// [`IndexCatalogError::BadSignature`] if the signature is absent, malformed, or does not verify;
     /// otherwise any parse error from [`from_json_bytes`](Self::from_json_bytes).
-    pub fn parse_and_verify(
+    fn parse_and_verify(
         manifest_json: &[u8],
         signature: &[u8],
         key: &VerifyingKey,

@@ -10,13 +10,16 @@ use crate::Repo;
 
 /// The per-download SE request headers. Every patch request carries the `FFXIV PATCH CLIENT`
 /// user-agent; a game patch additionally carries the session's `X-Patch-Unique-Id` credential, while
-/// a boot patch (fetched before login) carries none. `#[non_exhaustive]` so later phases can add
-/// header inputs without a breaking change.
+/// a boot patch (fetched before login) carries none.
+///
+/// Opaque from outside: built by [`new`](Self::new) or [`boot`](Self::boot) and read only where this
+/// crate turns it into a request header. The credential inside is session-scoped and belongs in that
+/// header, not in a field a caller can read back and log, which is why there is no accessor either.
+/// A later header input is an added constructor, and that breaks nobody.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct SePatch {
     /// The `X-Patch-Unique-Id` credential from session registration, absent for boot patches.
-    pub unique_id: Option<String>,
+    pub(crate) unique_id: Option<String>,
 }
 
 impl SePatch {

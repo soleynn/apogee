@@ -44,10 +44,7 @@ mod request;
 mod staging;
 mod store;
 
-pub use catalog::{
-    INDEX_CATALOG_MANIFEST_VERSION, INDEX_CATALOG_PUBLIC_KEY, IndexCatalog, IndexCatalogError,
-    IndexEntry,
-};
+pub use catalog::{IndexCatalog, IndexCatalogError, IndexEntry};
 pub use elevated::{Elevation, probe_writable};
 pub use job::Job;
 pub use preflight::GameProbe;
@@ -274,7 +271,10 @@ pub struct PatcherConfig {
 }
 
 /// The reference launcher's reattempt budget, adopted as the default repair pass count.
-pub const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
+///
+/// Not public: [`PatcherConfig::new`] applies it, which is how every caller has ever obtained it, and
+/// a public constant is a number the crate would owe callers forever for tuning that belongs here.
+const DEFAULT_REPAIR_REATTEMPTS: usize = 5;
 
 impl PatcherConfig {
     /// A config over `game_probe` with no patch store set (the caller must fill

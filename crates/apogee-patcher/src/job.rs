@@ -5,7 +5,6 @@ use std::pin::Pin;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::PatchError;
@@ -13,7 +12,7 @@ use crate::progress::PatchProgress;
 
 /// A running patch operation, returned by [`Patcher::install`](crate::Patcher::install) (`T =
 /// Installed`) or [`Patcher::repair`](crate::Patcher::repair) (`T = RepairOutcome`). Take its
-/// [`progress`](Self::progress) stream, [`cancel`](Self::cancel) it, and await its result
+/// [`progress`](Self::progress) receiver, [`cancel`](Self::cancel) it, and await its result
 /// (`job.await` or [`wait`](Self::wait)).
 pub struct Job<T> {
     handle: JoinHandle<Result<T, PatchError>>,
@@ -22,14 +21,17 @@ pub struct Job<T> {
 }
 
 impl<T> Job<T> {
-    /// The stream of progress frames. Consumable once; a second call yields an already-closed
-    /// stream, since an operation has a single progress channel.
-    pub fn progress(&mut self) -> UnboundedReceiverStream<PatchProgress> {
-        let rx = self.progress.take().unwrap_or_else(|| {
+    /// The receiver of progress frames. Consumable once; a second call yields an already-closed
+    /// receiver, since an operation has a single progress channel.
+    ///
+    /// A plain `tokio` receiver, as [`apogee_fetch::Job::progress`] hands back: wrapping it in a
+    /// stream type here put `tokio-stream` in the signature and made every caller take that
+    /// dependency to name the return. A caller that wants a stream still wraps it in one line.
+    pub fn progress(&mut self) -> mpsc::UnboundedReceiver<PatchProgress> {
+        self.progress.take().unwrap_or_else(|| {
             let (_closed, rx) = mpsc::unbounded_channel();
             rx
-        });
-        UnboundedReceiverStream::new(rx)
+        })
     }
 
     /// Request cancellation. In-flight downloads leave their partial file and journal for a later

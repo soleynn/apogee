@@ -20,7 +20,6 @@ use apogee_patcher::{
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -204,7 +203,7 @@ async fn drive_job<T: Send + 'static>(
     let mut progress = job.progress();
     let sink = events.clone();
     let relay = tokio::spawn(async move {
-        while let Some(frame) = progress.next().await {
+        while let Some(frame) = progress.recv().await {
             let _ = sink.send(Event::Patch(frame));
         }
     });
