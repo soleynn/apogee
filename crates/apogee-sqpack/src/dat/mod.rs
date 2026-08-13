@@ -402,8 +402,14 @@ impl<S: DatSource> Dat<S> {
         codec::read_block(&mut window, out, &self.limits.block).map_err(|err| rebase(err, at))
     }
 
-    /// Decode one block, holding it to the on-disk size its entry declares (which is what the next
-    /// block's position is measured from) and to what is left of the entry's budget.
+    /// Decode one block, holding it inside the on-disk size its entry declares (which is what the
+    /// next block's position is measured from) and to what is left of the entry's budget.
+    ///
+    /// Fitting rather than filling is what the size is held to. A block ending short of its row
+    /// leaves padding nothing reads, and a writer that rounds a block already on a unit boundary up
+    /// by another whole unit leaves one unit of it; a block ending past its row is the one that
+    /// matters, since the next block is read from where this row says this one ends and the two
+    /// would overlap.
     fn decode_sized(
         &self,
         at: u64,
@@ -412,10 +418,10 @@ impl<S: DatSource> Dat<S> {
         run: &mut Extraction,
     ) -> Result<u64> {
         let meta = self.decode_block(at, run.end, out)?;
-        if meta.block_len != on_disk {
+        if meta.block_len > on_disk {
             return Err(Error::EntryCorrupt {
                 offset: at,
-                detail: "block does not occupy the space its entry declares",
+                detail: "block does not fit the space its entry declares",
             });
         }
         run.spend(u64::from(meta.decompressed_size))
@@ -852,16 +858,31 @@ mod tests {
     }
 
     #[test]
-    fn a_block_that_does_not_occupy_the_space_its_table_reserves_is_corrupt() {
+    fn a_block_running_past_the_space_its_table_reserves_is_corrupt() {
+        // The next block is read from where this row says this one ends, so a block overrunning its
+        // row overlaps the block after it.
         let (mut bytes, offset, _) =
             one(EntrySpec::standard(vec![b"the quick brown fox".to_vec()]));
         let at = usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN + 4 + 4;
-        bytes[at..at + 2].copy_from_slice(&bytes::write_u16_le(256));
+        bytes[at..at + 2].copy_from_slice(&bytes::write_u16_le(64));
         assert!(matches!(
             extract(&bytes, offset),
             Err(Error::EntryCorrupt { detail, .. })
-                if detail == "block does not occupy the space its entry declares"
+                if detail == "block does not fit the space its entry declares"
         ));
+    }
+
+    #[test]
+    fn a_block_padded_past_its_content_is_read_from_where_its_row_puts_it() {
+        // A row is space reserved, not space filled: a writer rounding a block that already ends on a
+        // unit boundary up by another whole unit leaves one unit no block occupies. Nothing reads the
+        // padding, and the row is still what the next block's position is measured from.
+        let content = b"the quick brown fox".to_vec();
+        let (mut bytes, offset, _) = one(EntrySpec::standard(vec![content.clone()]));
+        let at = usize::try_from(offset).unwrap() + ENTRY_HEADER_LEN + 4 + 4;
+        let declared = bytes::u16_le([bytes[at], bytes[at + 1]]);
+        bytes[at..at + 2].copy_from_slice(&bytes::write_u16_le(declared + DATA_UNIT as u16));
+        assert_eq!(extract(&bytes, offset).unwrap(), content);
     }
 
     #[test]
