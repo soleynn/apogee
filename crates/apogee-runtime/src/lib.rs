@@ -8,6 +8,10 @@
 //! downloaded and extracted through the injected [`apogee_fetch::Fetcher`] seam, then launched and
 //! supervised. Runner management is Linux-first: on other targets the async methods return
 //! [`RuntimeError::Unsupported`].
+//!
+//! On Windows there is nothing to manage: [`Runtime::launch`] spawns the game itself and supervises
+//! the child handle, and every prefix and runner method stays [`RuntimeError::Unsupported`] because
+//! neither exists there.
 
 mod bench;
 mod catalog;
@@ -43,8 +47,13 @@ mod spawn;
 mod steam;
 #[cfg(target_os = "linux")]
 mod supervise;
+#[cfg(target_os = "windows")]
+mod windows;
 
-use std::path::{Path, PathBuf};
+// The one consumer of `Path` here is the `/proc` guard, which no other target has.
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use apogee_fetch::Fetcher;
@@ -76,8 +85,10 @@ pub use metadata::{
 };
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{Companion, CompanionExit, CompanionSpec};
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+pub use non_linux::{GameExit, GameSession};
 #[cfg(not(target_os = "linux"))]
-pub use non_linux::{GameExit, GameSession, game_running, prefix_processes};
+pub use non_linux::{game_running, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{ProgramStatus, Progress, RuntimeEvent};
 pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
@@ -88,6 +99,8 @@ pub use steam::{
     CompatTool, CompatToolInstall, SteamInstall, installed_compat_tool, remove_compat_tool,
     steam_installs,
 };
+#[cfg(target_os = "windows")]
+pub use windows::{GameExit, GameSession};
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
 ///
@@ -744,7 +757,34 @@ impl Runtime {
         })
     }
 
+    /// Spawn the game and supervise the process that was started.
+    ///
+    /// The near-no-op arm: there is no prefix to launch into and no runner to launch through, so the
+    /// program in the plan is spawned as itself, with the plan's arguments and environment plus the
+    /// compatibility layers every launch runs under (`RunAsInvoker` so the game stays on the launcher's
+    /// token, and the DPI layer [`LaunchPlan::dpi_aware`] selects). The returned session tracks the
+    /// child handle, which here is the game itself.
+    ///
+    /// The cancellation token is unused: nothing is waited for. The Linux path takes one because it
+    /// watches the process table for the game to appear, and on this one the process exists the moment
+    /// the spawn returns.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Spawn`] if the process could not be started, or
+    /// [`RuntimeError::InvalidLaunchPlan`] for a plan this arm cannot honour (see
+    /// [`LaunchPlan::with_wrappers`] and [`LaunchPlan::set_supervised`]).
+    #[cfg(target_os = "windows")]
+    pub async fn launch(
+        &self,
+        plan: LaunchPlan,
+        _cancel: &tokio_util::sync::CancellationToken,
+        progress: &Progress,
+    ) -> Result<GameSession, RuntimeError> {
+        windows::launch(&plan, progress)
+    }
+
     /// Runner management is Linux-only at this phase.
+    #[cfg(not(target_os = "windows"))]
     pub async fn launch(
         &self,
         _plan: LaunchPlan,
@@ -882,14 +922,19 @@ mod non_linux {
     }
 
     /// An opaque game-exit marker (see the Linux implementation).
+    #[cfg(not(target_os = "windows"))]
     #[derive(Debug, Clone)]
     #[non_exhaustive]
     pub struct GameExit {}
 
     /// A supervised game process. Constructed only by the Linux launch path; here it is uninhabited
     /// (`launch` returns `Unsupported`), so it exists solely to satisfy cross-platform consumers.
+    /// Windows has a real one of its own ([`crate::GameSession`]), so this stands in for the targets
+    /// that have neither.
+    #[cfg(not(target_os = "windows"))]
     pub struct GameSession(std::convert::Infallible);
 
+    #[cfg(not(target_os = "windows"))]
     impl GameSession {
         /// The unix PID of the game process.
         #[must_use]
@@ -914,6 +959,7 @@ mod non_linux {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     impl std::fmt::Debug for GameSession {
         fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self.0 {}
