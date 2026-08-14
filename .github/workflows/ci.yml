@@ -350,6 +350,70 @@ jobs:
             exit "$status"
           '
 
+  # The desktop shell, which is a workspace of its own and so is reached by none of the jobs above:
+  # `cargo fmt --all`, `cargo clippy --all-targets` and the workspace test run all stop at the root
+  # workspace's members, and this is not one of them. That separation is the point rather than an
+  # accident. It keeps the window framework out of `build-windows-cross`, where it does not build at
+  # all, and it keeps the three development packages installed below out of every other job here.
+  #
+  # Step order is load-bearing: the frontend bundle has to exist on disk before anything Rust is
+  # compiled, because the macro that builds the window's context embeds that directory and fails the
+  # build when it is missing. So `npm run build` comes before `cargo fmt`, not after it.
+  #
+  # No display and no window is opened. What this proves is that the shell compiles, that its lint
+  # table holds, that its unit tests and the frontend's pass, and that its dependency graph clears
+  # the licence and advisory policy beside it. Driving a real window needs a display server and is a
+  # separate job.
+  shell:
+    name: shell
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: apps/apogee/src-tauri
+          key: shell
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The webview, its JavaScript engine and the HTTP library that framework links against. Named
+      # by their development packages rather than pulled in by a helper action, so what the build
+      # links is visible here.
+      - name: Install the webview development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+      - name: Install the frontend's dependencies
+        run: npm ci
+        working-directory: apps/apogee
+      - name: Frontend type check
+        run: npm run check
+        working-directory: apps/apogee
+      - name: Frontend tests
+        run: npm run test
+        working-directory: apps/apogee
+      # Before the Rust steps: they embed this directory.
+      - name: Frontend build
+        run: npm run build
+        working-directory: apps/apogee
+      - run: cargo fmt --manifest-path apps/apogee/src-tauri/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path apps/apogee/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path apps/apogee/src-tauri/Cargo.toml
+      # The shell resolves its own graph, so the policy beside its manifest is the one that applies;
+      # the `deny` job above reads the root workspace's and never sees this one.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: apps/apogee/src-tauri/Cargo.toml
+
   build-windows-cross:
     name: build-windows-cross
     runs-on: ubuntu-latest

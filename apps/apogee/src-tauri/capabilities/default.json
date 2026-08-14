@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the main window may reach. The shell's own commands are not listed: a command this crate defines needs no permission, and the set below is the built-in one nothing has narrowed yet.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

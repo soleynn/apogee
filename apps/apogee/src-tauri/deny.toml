@@ -1,0 +1,84 @@
+# cargo-deny policy for the shell, which is a separate workspace and so resolves a separate graph.
+# Same rules as the one at the repository root; what differs is written down here, and each
+# difference is scoped to the crates that made it necessary rather than widening a category.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Every entry below is an "unmaintained" notice, not a vulnerability, and every one of them arrives
+# through the desktop framework rather than through anything this repository chose. Vulnerability
+# advisories are not ignored anywhere and still fail this check.
+#
+# The GTK3 bindings the Linux window is built on, which upstream declared unmaintained when it moved
+# to GTK4. The framework has no GTK4 line, so there is no version of this dependency that clears the
+# notice; it goes away when the framework moves, not when this file changes.
+ignore = [
+    "RUSTSEC-2024-0411", # atk
+    "RUSTSEC-2024-0412", # atk-sys
+    "RUSTSEC-2024-0413", # gdk
+    "RUSTSEC-2024-0414", # gdk-sys
+    "RUSTSEC-2024-0415", # gtk
+    "RUSTSEC-2024-0416", # gdkwayland-sys
+    "RUSTSEC-2024-0417", # gdkx11
+    "RUSTSEC-2024-0418", # gdkx11-sys
+    "RUSTSEC-2024-0419", # gtk3-macros
+    "RUSTSEC-2024-0420", # gtk-sys
+    # A procedural-macro helper the GTK3 bindings' own macros are written against.
+    "RUSTSEC-2024-0370", # proc-macro-error
+    # The Unicode identifier tables the configuration parser reaches through its JSON5 reader.
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+]
+
+[bans]
+# Home-built domain code only: no third-party FFXIV crates in the graph.
+deny = [
+    { name = "physis" },
+    { name = "ironworks" },
+    # rustls is the only TLS stack; keep OpenSSL out.
+    { name = "openssl-sys" },
+]
+
+[licenses]
+version = 2
+# Our own license (GPL-3.0-or-later) plus GPL-compatible permissive licenses for dependencies.
+allow = [
+    "GPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+# Everything below is scoped to one crate, so a second crate arriving under the same licence still
+# trips the gate and gets read rather than waved through.
+exceptions = [
+    # webpki-roots ships the Mozilla CA bundle (via rustls) under a data license.
+    { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+    # MPL-2.0 is file-level copyleft and compatible with this project's license: the obligation is to
+    # publish changes to these files, which nothing here makes. Four of the five are the CSS parser
+    # the desktop framework's configuration reader uses to rewrite a page's content policy; the fifth
+    # is a directory lookup two levels below it.
+    { name = "cssparser", allow = ["MPL-2.0"] },
+    { name = "cssparser-macros", allow = ["MPL-2.0"] },
+    { name = "dtoa-short", allow = ["MPL-2.0"] },
+    { name = "selectors", allow = ["MPL-2.0"] },
+    { name = "option-ext", allow = ["MPL-2.0"] },
+    # The GTK bindings' build helper reads target triples through this. The exception is the LLVM
+    # one attached to Apache-2.0, which the allow list above cannot express on its own.
+    { name = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
+private = { ignore = true }
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
