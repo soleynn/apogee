@@ -72,7 +72,9 @@ pub fn apply<R: Read, S: PatchSink>(
             return Err(Error::Cancelled);
         }
         match chunk {
-            // Metadata: parsed for the model, with no sink call of its own.
+            // Metadata: parsed for the model, with no sink call of its own. `APLY`'s two flags are
+            // deliberately not read here; see `ApplyOptionKind` for why honoring them could only
+            // make an apply stricter than the reference's.
             Chunk::FileHeader(_) | Chunk::ApplyOption(_) | Chunk::ApplyFreeSpace(_) => {}
             Chunk::AddDirectory(d) => sink.make_dir_tree(&SafePath::confine(&d.path)?)?,
             Chunk::DeleteDirectory(d) => sink.remove_dir(&SafePath::confine(&d.path)?)?,
@@ -86,12 +88,17 @@ pub fn apply<R: Read, S: PatchSink>(
 }
 
 /// Scan a patch to `EOF_`, verifying every chunk CRC, without applying anything. This is how a boot
-/// patch (which has no block-SHA1 list) earns admission: the chunk CRC is its integrity proof. Open
-/// the reader with `.verify_crc(true)` before calling.
+/// patch (which has no block-SHA1 list) earns admission: the chunk CRC is its integrity proof.
+///
+/// Verification is switched on here rather than trusted to the caller. The reader defaults to on, so
+/// this changes nothing for a caller that never touched it; what it removes is the case where a
+/// reader opened `.verify_crc(false)` for some earlier purpose is handed to the one pass whose entire
+/// output is the checksum, and admits the patch having checked nothing.
 ///
 /// # Errors
 /// The first parse or CRC fault; carries the patch-file offset.
 pub fn scan_crc<R: Read>(reader: &mut PatchReader<R>) -> Result<()> {
+    reader.force_verify_crc();
     while reader.next_chunk()?.is_some() {}
     Ok(())
 }

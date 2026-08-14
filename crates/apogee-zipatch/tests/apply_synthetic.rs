@@ -208,6 +208,26 @@ fn scan_crc_accepts_a_clean_patch_and_rejects_a_corrupt_one() {
 }
 
 #[test]
+fn scan_crc_verifies_a_reader_that_was_opened_with_verification_off() {
+    // The admission hazard: a reader configured off elsewhere, handed to the pass whose only output
+    // is the checksum. The scan turns verification back on itself, so the corrupt patch is refused
+    // rather than admitted having checked nothing.
+    let patch = boot_patch(|b| {
+        b.file_op(b'A', 0, 4, "data.bin", &block_stored(b"WXYZ"));
+    });
+    let mut corrupt = patch.clone();
+    corrupt[20] ^= 0xFF;
+
+    let mut reader = PatchReader::open(&corrupt[..])
+        .expect("open")
+        .verify_crc(false);
+    assert!(matches!(
+        scan_crc(&mut reader),
+        Err(Error::ChunkCrcMismatch { .. })
+    ));
+}
+
+#[test]
 fn scan_crc_reports_a_truncated_patch() {
     let patch = boot_patch(|b| {
         b.file_op(b'A', 0, 4, "data.bin", &block_stored(b"WXYZ"));
