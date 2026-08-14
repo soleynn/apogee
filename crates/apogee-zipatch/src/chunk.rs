@@ -159,8 +159,15 @@ pub struct FileHeaderV3 {
     pub sqpk_file: u32,
 }
 
-/// The apply-config flag an `APLY` chunk carries. Both flags are observed always-false in real
-/// patches; the parser records what is written and lets the applier decide.
+/// The apply-config flag an `APLY` chunk carries.
+///
+/// Recorded, and read by no part of the applier. Both flags govern whether a fault is fatal, and the
+/// applier is already at the permissive end of both without consulting them: a delete of a target
+/// that was never created is a no-op, and no pre-image is compared at all, so there is nothing for
+/// [`IgnoreOldMismatch`](Self::IgnoreOldMismatch) to relax. Honoring them could therefore only make
+/// an apply *stricter* than it is now, and both are observed false in every real patch, so it would
+/// be a refusal nothing asked for. A patch that ever ships one true is what would change that, and
+/// this type is how a caller sees it happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyOptionKind {
     /// A missing target file is not an error.

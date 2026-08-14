@@ -63,13 +63,25 @@ pub struct VerifyReport {
 }
 
 impl VerifyReport {
-    /// Whether the install matches the index with nothing to repair.
+    /// Whether the install matches the index in every respect, strays included.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.broken.is_empty()
-            && self.size_mismatches.is_empty()
-            && self.missing_files.is_empty()
-            && self.stray_files.is_empty()
+        !self.needs_repair() && self.stray_files.is_empty()
+    }
+
+    /// Whether anything here is [`Index::repair`](crate::Index::repair)'s to heal: a broken part, a
+    /// missing file, or a wrong length.
+    ///
+    /// Strays are excluded, because repair never touches one; quarantining them is the caller's, on
+    /// its own path. That split is why this is not [`is_clean`](Self::is_clean): a caller driving the
+    /// repair loop wants "is there work for the next pass", and a tree whose only fault is a stray
+    /// would loop forever on that question. Answered here rather than by each caller re-oring the
+    /// fields, so a report that grows a fifth list cannot silently fall out of the loop's condition.
+    #[must_use]
+    pub fn needs_repair(&self) -> bool {
+        !self.broken.is_empty()
+            || !self.missing_files.is_empty()
+            || !self.size_mismatches.is_empty()
     }
 }
 

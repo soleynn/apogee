@@ -207,14 +207,6 @@ impl RepairSink for StagingSink<'_> {
             RepairWrite::Resize { len } => self.push(path, StagedOp::Resize { len }),
             RepairWrite::Zeros { off, len } => self.push(path, StagedOp::Zeros { off, len }),
             RepairWrite::Bytes { off, bytes } => self.stage(&path, off, bytes)?,
-            // The set is closed by the crate that defines it; a shape this build does not know is a
-            // write it cannot marshal, and silently dropping it would report a heal that never
-            // happened.
-            _ => {
-                return Err(ZipError::Unsupported {
-                    what: "repair write",
-                });
-            }
         }
         if self.staged >= FLUSH_BYTES || self.writes.len() >= FLUSH_WRITES {
             return self.send();

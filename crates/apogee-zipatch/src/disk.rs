@@ -14,10 +14,15 @@
 //! Writes are positioned (seek + write), so re-running an interrupted apply converges. Boot patches
 //! touch the same handful of files repeatedly, so open handles are held in a small LRU store rather
 //! than reopened per command. Handles carry no application-level buffer, so eviction is a plain close.
+//!
+//! Every open here is retried for a moment while something else is holding the file ([`BUSY_CODES`]),
+//! because the alternative is a patch that dies part-applied over a scanner that touched a dat for
+//! fifty milliseconds.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use apogee_sqpack::codec;
 
@@ -52,6 +57,27 @@ const MAX_WIPE_BYTES: u64 = 8 << 30;
 /// The reused buffer size for a zero-fill: written once, reused across the run, so a large wipe is a
 /// handful of large writes rather than a syscall per few kilobytes.
 const WIPE_CHUNK: usize = 1 << 16;
+
+/// The OS error codes that mean an open failed because something else is holding the file, so it is
+/// worth waiting out rather than failing the run.
+///
+/// Windows raises `ERROR_SHARING_VIOLATION` (32) or `ERROR_LOCK_VIOLATION` (33) when the game, a
+/// backup agent, or a virus scanner has a target open for the moment the applier wants it. The list
+/// is empty everywhere else: no code refuses an open here for that reason, and 32 and 33 are `EPIPE`
+/// and `EDOM`, so reading them as a hold would retry faults that are not one. That per-platform split
+/// is why this is a table and not a match on a number.
+#[cfg(windows)]
+const BUSY_CODES: &[i32] = &[32, 33];
+#[cfg(not(windows))]
+const BUSY_CODES: &[i32] = &[];
+
+/// How many attempts past the first an open gets while a hold refuses it.
+const OPEN_RETRIES: u32 = 5;
+
+/// The wait before the first retry; each attempt after doubles it. Five retries from 20 ms span
+/// 620 ms in total, which covers the brief hold a scanner takes on a file the applier just wrote
+/// without making a genuinely locked target stall the run for long.
+const OPEN_BACKOFF: Duration = Duration::from_millis(20);
 
 /// Applies a patch to a game tree rooted at a directory. Construct with [`DiskSink::new`], hand it to
 /// [`crate::apply`].
@@ -114,9 +140,14 @@ impl PatchSink for DiskSink {
         let rel = target.as_path();
         let wipe_len = u64::from(blocks) << 7;
         check_wipe(wipe_len, MAX_WIPE_BYTES)?;
-        // `off` is a `u32 << 7` (≤ 2^39) and `wipe_len` a `u32 << 7` (≤ 2^39), so the span cannot
-        // overflow a `u64`.
-        let end = off + wipe_len;
+        // The interpreter only ever passes a `u32 << 7` (≤ 2^39) here, so this cannot overflow on
+        // any real patch. Checked anyway because this is a public trait method: a sink outside the
+        // crate holds a `TargetPath` and can hand it to this one with an offset of its own choosing,
+        // and a wrapping span is how "no panics" would stop being true through a seam.
+        let end = off.checked_add(wipe_len).ok_or(Error::Corrupt {
+            offset: off,
+            detail: "empty-block span overflows the address space",
+        })?;
         let file = self.store.get(&self.root, rel)?;
         let cur = file
             .metadata()
@@ -334,10 +365,7 @@ fn open_existing(root: &Path, rel: &Path) -> Result<File> {
     ensure_dirs(root, parent_of(rel), false)?;
     let abs = root.join(rel);
     refuse_symlink(&abs)?;
-    OpenOptions::new()
-        .write(true)
-        .open(&abs)
-        .map_err(|e| io(e, abs, Op::Open))
+    open_waiting(OpenOptions::new().write(true), &abs)
 }
 
 /// Open `root/rel` for a rebuild: parents created, a link at the final component stripped, and the
@@ -352,12 +380,48 @@ fn open_rebuilt(root: &Path, rel: &Path) -> Result<File> {
     ensure_dirs(root, parent_of(rel), true)?;
     let abs = root.join(rel);
     unlink_if_symlink(&abs)?;
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&abs)
-        .map_err(|e| io(e, abs, Op::Open))
+    open_waiting(
+        OpenOptions::new().write(true).create(true).truncate(true),
+        &abs,
+    )
+}
+
+/// Whether `raw` is one of the codes in `busy`. Takes the table rather than reading [`BUSY_CODES`],
+/// so the rule can be exercised against both platforms' tables wherever the tests run.
+fn is_busy(busy: &[i32], raw: Option<i32>) -> bool {
+    raw.is_some_and(|code| busy.contains(&code))
+}
+
+/// Run `attempt` until it stops failing with a hold, up to [`OPEN_RETRIES`] extra tries, waiting
+/// `backoff` before the first retry and doubling it after each.
+///
+/// Anything that is not a hold returns on the first try, so on a platform whose `busy` table is empty
+/// this is exactly one call to `attempt` and the behavior is unchanged. `backoff` is a parameter
+/// rather than the constant so the tests can drive the loop without sleeping through it.
+fn retry_while_busy<T>(
+    busy: &[i32],
+    backoff: Duration,
+    mut attempt: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut wait = backoff;
+    for _ in 0..OPEN_RETRIES {
+        match attempt() {
+            Err(e) if is_busy(busy, e.raw_os_error()) => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            settled => return settled,
+        }
+    }
+    // The last try's fault is the one the caller sees, hold or not.
+    attempt()
+}
+
+/// Open `abs` with `opts`, waiting out a hold. The shared tail of every open in this module, so the
+/// apply store and both repair opens agree about what is worth retrying.
+fn open_waiting(opts: &OpenOptions, abs: &Path) -> Result<File> {
+    retry_while_busy(BUSY_CODES, OPEN_BACKOFF, || opts.open(abs))
+        .map_err(|e| io(e, abs.to_path_buf(), Op::Open))
 }
 
 /// Refuse `path` if it is a symlink, so an in-place write never lands through one.
@@ -460,15 +524,17 @@ fn open_target(root: &Path, rel: &Path) -> Result<File> {
     ensure_dirs(root, parent_of(rel), true)?;
     let abs = root.join(rel);
     unlink_if_symlink(&abs)?;
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        // Never truncate on open: a continuation `F:A` (offset > 0) or a re-opened evicted handle
-        // must keep the bytes an earlier command wrote. Only the explicit `truncate` op clears a file.
-        .truncate(false)
-        .open(&abs)
-        .map_err(|e| io(e, abs, Op::Open))
+    open_waiting(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            // Never truncate on open: a continuation `F:A` (offset > 0) or a re-opened evicted handle
+            // must keep the bytes an earlier command wrote. Only the explicit `truncate` op clears a
+            // file.
+            .truncate(false),
+        &abs,
+    )
 }
 
 /// Walk each directory component of `dirs` under `root`, refusing any that is a symlink or a
@@ -532,5 +598,100 @@ fn io(source: io::Error, target: PathBuf, during: Op) -> Error {
         source,
         target: Some(target),
         during,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    /// Both platforms' tables run here whichever platform the tests run on, which is the point of
+    /// passing the table in: CI never executes a Windows binary, so a rule that read the constant
+    /// directly would only ever be checked on the arm where it does nothing.
+    #[test]
+    fn a_hold_is_a_hold_only_under_the_table_that_names_its_code() {
+        let windows: &[i32] = &[32, 33];
+        for code in [32, 33] {
+            assert!(is_busy(windows, Some(code)));
+            assert!(!is_busy(&[], Some(code)));
+        }
+        // 32 and 33 are `EPIPE` and `EDOM` off Windows, and this module opens paths that can be
+        // pipes, so the same numbers must not read as a hold under an empty table. Permission denied
+        // and a failure with no OS code behind it are never holds under either.
+        for raw in [Some(5), Some(13), None] {
+            assert!(!is_busy(windows, raw));
+            assert!(!is_busy(&[], raw));
+        }
+    }
+
+    /// The table this module actually compiles with, which is the one thing the rule above cannot
+    /// check about itself.
+    #[test]
+    fn the_table_holds_the_codes_this_platform_refuses_an_open_with() {
+        if cfg!(windows) {
+            assert_eq!(BUSY_CODES, [32, 33]);
+        } else {
+            assert!(
+                BUSY_CODES.is_empty(),
+                "no code refuses an open here for a hold, and 32 and 33 are EPIPE and EDOM"
+            );
+        }
+    }
+
+    /// An attempt that fails `holds` times with a busy code and then succeeds, counting the calls.
+    fn holding(holds: &Cell<u32>) -> impl FnMut() -> io::Result<&'static str> + '_ {
+        move || match holds.get() {
+            0 => Ok("open"),
+            n => {
+                holds.set(n - 1);
+                Err(io::Error::from_raw_os_error(32))
+            }
+        }
+    }
+
+    #[test]
+    fn an_open_a_hold_refuses_is_retried_until_it_lands() {
+        let holds = Cell::new(3);
+        let got = retry_while_busy(&[32], Duration::ZERO, holding(&holds));
+        assert_eq!(got.expect("the fourth try opens"), "open");
+        assert_eq!(holds.get(), 0, "every hold was waited out");
+    }
+
+    #[test]
+    fn a_hold_that_outlives_the_budget_surfaces_as_itself() {
+        let calls = Cell::new(0u32);
+        let got: io::Result<()> = retry_while_busy(&[32], Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from_raw_os_error(32))
+        });
+        assert_eq!(got.expect_err("still held").raw_os_error(), Some(32));
+        // The retries plus the last try, and nothing swallowed the fault into a different one.
+        assert_eq!(calls.get(), OPEN_RETRIES + 1);
+    }
+
+    #[test]
+    fn a_fault_that_is_not_a_hold_is_not_retried() {
+        let calls = Cell::new(0u32);
+        let got: io::Result<()> = retry_while_busy(&[32], Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from_raw_os_error(13)) // permission denied
+        });
+        assert_eq!(got.expect_err("denied").raw_os_error(), Some(13));
+        assert_eq!(calls.get(), 1, "a denial is not something to wait out");
+    }
+
+    #[test]
+    fn an_empty_table_makes_the_loop_one_call() {
+        // The arm every non-Windows build takes: the retry is compiled in but never engages, so an
+        // open costs exactly what it did before.
+        let calls = Cell::new(0u32);
+        let got: io::Result<()> = retry_while_busy(&[], Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from_raw_os_error(32))
+        });
+        assert!(got.is_err());
+        assert_eq!(calls.get(), 1);
     }
 }
