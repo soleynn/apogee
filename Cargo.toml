@@ -89,7 +89,7 @@ security-framework = { version = "3", default-features = false }
 # RFC 6238 code generation. The `otpauth` feature is deliberately never enabled by any member: its
 # URI parser unwraps the host of an authority-less URI, so a pasted `otpauth:totp/x` takes the whole
 # process down, and the crate that needs URIs parses them itself.
-totp-rs          = "5"
+totp-rs          = "6"
 # The transport encoding a shared one-time-password secret arrives in. Taken directly rather than
 # through totp-rs's own wrapper, whose equality operator unwraps a decode and whose `Display` renders
 # the key.
