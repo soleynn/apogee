@@ -121,6 +121,7 @@ is tagged with its change type. Versioning aims to follow
 - Share the block constants instead of restating them (#230) _(changed)_
 - Pre-freeze API review and hardening audit (#235) _(changed)_
 - Bring rustdoc to publication grade (#236) _(documentation)_
+- Freeze the crate at 1.0.0 (#237) _(miscellaneous)_
 
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
