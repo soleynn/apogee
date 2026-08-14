@@ -2,6 +2,12 @@
 /target
 # The dev tools under tools/ are separate workspaces with their own build dirs
 tools/*/target/
+# The desktop shell is a separate workspace too, and its frontend brings a package manager and a
+# bundler of its own. `gen/` holds the capability schemas its build script rewrites on every build.
+apps/apogee/src-tauri/target/
+apps/apogee/src-tauri/gen/
+apps/apogee/node_modules/
+apps/apogee/dist/
 
 # rustfmt backups
 **/*.rs.bk
