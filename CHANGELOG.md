@@ -6,6 +6,9 @@ is tagged with its change type. Versioning aims to follow
 
 ## [Unreleased]
 
+### apogee
+- Scaffold the desktop shell as its own workspace (#238) _(added)_
+
 ### apogee-addons
 - Check a registry verb's effect, not only its stated paths (#164) _(fixed)_
 - Refuse a second companion redirecting the same launch (#166) _(fixed)_
