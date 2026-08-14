@@ -4,8 +4,8 @@
 //! apply/index/repair integration tests and, across the workspace, `apogee-fetch`'s
 //! repair-over-HTTP e2e (which serves these bytes through a range source). Keeping the builders here
 //! rather than in each crate's `tests/` means the framing has a single owner and cannot drift from
-//! the parser it feeds. Every byte-order conversion routes through the crate's [`bytes`](crate::bytes)
-//! home, so the endianness audit gate covers the fixtures too.
+//! the parser it feeds. Every byte-order conversion routes through the crate's `bytes` home, so the
+//! endianness audit gate covers the fixtures too.
 //!
 //! The builders operate on in-memory buffers that cannot fail in practice, so they assert their
 //! construction invariants rather than threading a `Result` through every chained call.
@@ -28,11 +28,13 @@ pub struct PatchBuilder {
 }
 
 impl PatchBuilder {
+    /// An empty builder (just the magic once [`bytes`](Self::bytes) is called).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Append one raw chunk: `[size][fourcc][payload][crc32]`, CRC computed over `fourcc + payload`.
     pub fn chunk(&mut self, fourcc: &[u8; 4], payload: &[u8]) -> &mut Self {
         self.body
             .extend_from_slice(&write_u32_be(payload.len() as u32));
@@ -55,6 +57,7 @@ impl PatchBuilder {
         self.chunk(b"SQPK", &payload)
     }
 
+    /// An `FHDR` v2 chunk (version dword fixed at `0x0002_0000`; no `v3` tail).
     pub fn fhdr(&mut self, patch_type: &[u8; 4], entry_files: u32) -> &mut Self {
         let mut v = Vec::new();
         v.extend_from_slice(&write_u32_le(0x0002_0000)); // version dword (LE): v2
@@ -64,6 +67,7 @@ impl PatchBuilder {
         self.chunk(b"FHDR", &v)
     }
 
+    /// A `SQPK T` (TargetInfo) command for `platform`, region global, debug off, version 0.
     pub fn target_info(&mut self, platform: u16) -> &mut Self {
         let mut v = Vec::new();
         v.extend_from_slice(&[0, 0, 0]); // reserved / alignment
@@ -172,10 +176,12 @@ impl PatchBuilder {
         self.sqpk(b'F', &v)
     }
 
+    /// An `ADIR` chunk creating `path`.
     pub fn add_directory(&mut self, path: &str) -> &mut Self {
         self.directory_chunk(b"ADIR", path)
     }
 
+    /// A `DELD` chunk removing `path`.
     pub fn delete_directory(&mut self, path: &str) -> &mut Self {
         self.directory_chunk(b"DELD", path)
     }
@@ -188,10 +194,12 @@ impl PatchBuilder {
         self.chunk(fourcc, &v)
     }
 
+    /// An `EOF_` chunk, the stream terminator.
     pub fn eof(&mut self) -> &mut Self {
         self.chunk(b"EOF_", &[])
     }
 
+    /// The full patch: magic, then every chunk appended so far.
     #[must_use]
     pub fn bytes(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();

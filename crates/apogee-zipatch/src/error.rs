@@ -11,18 +11,24 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Crate result over [`Error`].
+/// Crate result over [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The I/O operation in flight when an [`Error::Io`] occurred.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Op {
+    /// Opening a file.
     Open,
+    /// Reading from a file or stream.
     Read,
+    /// Writing to a file.
     Write,
+    /// Setting a file's length.
     Truncate,
+    /// Deleting a file.
     Remove,
+    /// Creating a directory.
     MakeDir,
 }
 
@@ -75,41 +81,96 @@ pub enum Limit {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// An I/O fault, tagged with the operation in flight and the target path when known.
     #[error("io error during {during:?}")]
     Io {
+        /// The underlying I/O fault.
         #[source]
         source: std::io::Error,
+        /// The file the operation was on, when known.
         target: Option<PathBuf>,
+        /// The operation in flight.
         during: Op,
     },
+    /// The stream did not begin with the ZiPatch magic.
     #[error("bad patch magic")]
     BadMagic,
+    /// A chunk's four-character type is outside the known set.
     #[error("unknown chunk {fourcc:?} at offset {offset}")]
-    UnknownChunk { fourcc: [u8; 4], offset: u64 },
+    UnknownChunk {
+        /// The unrecognized four-character type.
+        fourcc: [u8; 4],
+        /// The chunk's absolute file offset.
+        offset: u64,
+    },
+    /// A `SQPK` sub-command byte is outside the known set.
     #[error("unknown command {cmd:#x} at offset {offset}")]
-    UnknownCommand { cmd: u8, offset: u64 },
+    UnknownCommand {
+        /// The unrecognized command byte.
+        cmd: u8,
+        /// The command's absolute file offset.
+        offset: u64,
+    },
+    /// A chunk's stored CRC32 disagrees with the one computed over its bytes.
     #[error("chunk crc mismatch at offset {offset}: stored {stored}, computed {computed}")]
     ChunkCrcMismatch {
+        /// The chunk's absolute file offset.
         offset: u64,
+        /// The CRC32 the chunk claims.
         stored: u32,
+        /// The CRC32 actually computed.
         computed: u32,
     },
+    /// The stream ended before a declared field or chunk finished.
     #[error("truncated at offset {offset}: needed {needed} more byte(s)")]
-    Truncated { offset: u64, needed: u64 },
+    Truncated {
+        /// The absolute offset the read ran off the end at.
+        offset: u64,
+        /// How many more bytes the field or chunk needed.
+        needed: u64,
+    },
+    /// A patch-supplied path failed confinement: absolute, containing `..`, naming a drive, or empty.
     #[error("path escape: {raw}")]
-    PathEscape { raw: String },
+    PathEscape {
+        /// The offending path, as the patch supplied it.
+        raw: String,
+    },
+    /// A bounded resource's declared value exceeds its cap.
     #[error("limit exceeded: {what:?} value {value} exceeds max {max}")]
-    LimitExceeded { what: Limit, value: u64, max: u64 },
+    LimitExceeded {
+        /// Which resource was bounded.
+        what: Limit,
+        /// The value that exceeded the cap.
+        value: u64,
+        /// The cap.
+        max: u64,
+    },
+    /// A structural fault with no more specific variant: a value the format does not allow at all.
     #[error("corrupt at offset {offset}: {detail}")]
-    Corrupt { offset: u64, detail: &'static str },
+    Corrupt {
+        /// The absolute file offset the fault was found at.
+        offset: u64,
+        /// What was wrong, as a short fixed string.
+        detail: &'static str,
+    },
+    /// A structurally valid input this crate does not implement, e.g. a non-Win32 apply target.
     #[error("unsupported: {what}")]
-    Unsupported { what: &'static str },
+    Unsupported {
+        /// What is unsupported, as a short fixed string.
+        what: &'static str,
+    },
+    /// [`ApplyOptions::cancel`](crate::ApplyOptions::cancel) was set between commands.
     #[error("apply cancelled")]
     Cancelled,
+    /// An `.apzi` stream did not begin with the index magic.
     #[error("bad index magic")]
     BadIndexMagic,
+    /// An `.apzi` stream declared a format version this crate does not read.
     #[error("unsupported index version {version}")]
-    UnsupportedIndexVersion { version: u16 },
+    UnsupportedIndexVersion {
+        /// The declared version.
+        version: u16,
+    },
 }
 
 impl Error {
