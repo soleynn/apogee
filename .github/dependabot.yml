@@ -15,6 +15,38 @@ updates:
           - "minor"
           - "patch"
 
+  # The desktop shell resolves its own dependency graph from a manifest and a lockfile of its own,
+  # outside the root workspace, so the entry above never sees it. Its frontend is a third graph.
+  - package-ecosystem: cargo
+    directory: "/apps/apogee/src-tauri"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: npm
+    directory: "/apps/apogee"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm:
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
