@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 //! ZiPatch (`.patch`) parsing, and the seams for applying, indexing, and repairing FFXIV installs.
 //!
 //! [`PatchReader`] streams a patch into the typed [`Chunk`] model (every chunk and SQPK command),
@@ -9,7 +10,7 @@
 //! filled in by later phases.
 //!
 //! Endianness is the format's foot-gun: the chunk frame and most fields are big-endian, a few are
-//! little-endian. Every conversion routes through one [`bytes`] module (the audit gate enforces it),
+//! little-endian. Every conversion routes through one `bytes` module (the audit gate enforces it),
 //! and a per-field byte golden pins the layout. The compressed-block payloads inside `SQPK F:A` are
 //! SqPack's native block format; when the applier decodes them it shares `apogee-sqpack`'s codec, so
 //! the writer and the eventual reader cannot drift.
