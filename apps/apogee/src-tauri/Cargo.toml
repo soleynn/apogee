@@ -1,0 +1,51 @@
+# The desktop shell, and its own workspace rather than a member of the one at the repository root.
+#
+# Three things force the split, and none of them is stylistic. `scripts/audit.sh` fails the build on
+# a build script anywhere under `crates apps tools fuzz`, and Tauri cannot build without one, so the
+# root's rule and this crate's requirement cannot both hold in the same tree without an exemption
+# that is asserted rather than assumed. The root workspace is cross-compiled for the MinGW ABI,
+# where this does not build at all. And every job that compiles the root workspace would need
+# WebKitGTK's development headers installed to compile a crate none of them care about.
+#
+# The root `members` list names its apps one at a time rather than globbing `apps/*`, so nothing here
+# is picked up by it; the `[workspace]` key below is what makes this directory a root of its own,
+# with its own lockfile. Same shape the dev tools under `tools/` already use.
+[workspace]
+
+# The root workspace's denies, copied rather than inherited: a separate workspace cannot inherit
+# them, and the shell is held to the same rules as everything it drives. There is no carve-out here
+# for `unsafe_code`, unlike the root, so the crate root forbids it outright.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic       = "deny"
+exit        = "deny"
+
+[package]
+name         = "apogee"
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.89"
+license      = "GPL-3.0-or-later"
+publish      = false
+
+[lints]
+workspace = true
+
+[build-dependencies]
+# Reads `tauri.conf.json`, emits the capability schemas and the platform metadata the macros in
+# `src/main.rs` expand against. The whole content of `build.rs`, and the reason `scripts/audit.sh`
+# carries one asserted exemption.
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The launcher. A path dependency for the same reason the CLI takes one: the shell is a front end
+# over the one command/event surface, and it holds no rules of its own.
+apogee-core = { path = "../../../crates/apogee-core" }
+tauri = { version = "2", features = [] }
+# The shell owns the wire shape the frontend binds to, so the types that cross the boundary are
+# declared here and derive their serialization here. Nothing is added to the domain model for it.
+serde = { version = "1", features = ["derive"] }

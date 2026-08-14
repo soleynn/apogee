@@ -89,17 +89,22 @@ hits=$(libs '\b(print|println|eprint|eprintln)!|\b(write|writeln)![[:space:]]*\(
 #    in the signed catalog rather than a value in this binary. Each of those is one edit away from being
 #    untrue and none of them would fail a test, so they are checked here.
 
-# Source only, never build output: `tools/*/target` and `fuzz/target` hold generated code, and a
-# dependency that emits an `extern "C"` line into OUT_DIR would otherwise fail this on build state.
-src_grep() { grep -rn --exclude-dir=target "$@" crates apps tools fuzz; }
+# Source only, never build output and never a package manager's downloads. `tools/*/target`,
+# `fuzz/target` and the shell's `apps/apogee/src-tauri/target` hold generated code, and a dependency
+# that emits an `extern "C"` line into OUT_DIR would otherwise fail this on build state;
+# `apps/apogee/node_modules` holds whatever npm resolved for the shell's frontend, which ships Rust
+# manifests often enough to matter, and `apps/apogee/dist` is that frontend's bundled output.
+src_grep() { grep -rn --exclude-dir=target --exclude-dir=node_modules --exclude-dir=dist "$@" crates apps tools fuzz; }
+# The same exclusions for the walks that go through `find` rather than `grep`.
+find_src() { find "$@" -not -path '*/target/*' -not -path '*/node_modules/*' -not -path '*/dist/*'; }
 
 # 6a. No package named for Dalamud or FFXIV-domain code, in a resolved graph or in a manifest. Both,
 #     because neither alone covers the repo: a lockfile carries transitive pulls (which bind a crate
-#     just as thoroughly as a declared one) but only two of the five workspaces here keep a tracked
+#     just as thoroughly as a declared one) but only three of the six workspaces here keep a tracked
 #     one, and a manifest is tracked everywhere but names only direct dependencies. deny.toml names the
 #     two crates this project was actually tempted by; this is the pattern sweep behind it.
-locks=$(find . -name Cargo.lock -not -path '*/target/*' -not -path './References/*' | sort)
-manifests=$(find . -name Cargo.toml -not -path '*/target/*' -not -path './References/*' | sort)
+locks=$(find_src . -name Cargo.lock -not -path './References/*' | sort)
+manifests=$(find_src . -name Cargo.toml -not -path './References/*' | sort)
 bad=$(
   {
     [ -z "$locks" ] || grep -hE '^name = ' $locks | sed 's/^name = "//; s/"$//'
@@ -110,13 +115,32 @@ bad=$(
 )
 [ -z "$bad" ] || report "an FFXIV-domain package is declared or resolved somewhere in this repo" "$bad"
 
-# 6b. No foreign-function linkage and no build script anywhere: both are ways to bind a native artifact
-#     into this binary, and neither has ever been needed.
+# 6b. No foreign-function linkage anywhere, and exactly one build script: both are ways to bind a
+#     native artifact into this binary. The one build script belongs to the desktop shell, which is a
+#     separate workspace and cannot be compiled without handing its manifest to the window
+#     framework's build helper; that helper is what emits the capability schemas and the platform
+#     metadata the macros in the shell's `main.rs` expand against.
+#
+#     Asserted rather than listed. A path on an allowed list stops being a boundary the moment
+#     someone adds a second line to the file it names, so the file's entire contents are pinned here
+#     and anything else in it fails this check. If the shell ever stops needing it, the file goes and
+#     so does this block, which is why its absence is reported too.
+shell_build='apps/apogee/src-tauri/build.rs'
+shell_build_body='fn main() {
+    tauri_build::build()
+}'
 hits=$(src_grep -E '#\[link|extern[[:space:]]+"C"|^[[:space:]]*links[[:space:]]*=' \
   --include='*.rs' --include='Cargo.toml' || true)
 [ -z "$hits" ] || report "foreign-function linkage" "$hits"
-hits=$(find crates apps tools fuzz -name build.rs -not -path '*/target/*' || true)
+hits=$(find_src crates apps tools fuzz -name build.rs | grep -vFx "$shell_build" || true)
 [ -z "$hits" ] || report "a build script can link or generate against a foreign artifact" "$hits"
+if [ -f "$shell_build" ]; then
+  [ "$(cat "$shell_build")" = "$shell_build_body" ] || report \
+    "the exempted build script is no longer the one call it was exempted for" \
+    "$shell_build"
+else
+  report "the exempted build script is gone; the exemption can go with it" "$shell_build"
+fi
 
 # 6c. No dynamic loading: the other way to reach a native artifact without declaring a dependency.
 hits=$(src_grep -E '\b(libloading|dlopen|dlsym|LoadLibraryW?|GetProcAddress)\b' \
@@ -154,7 +178,7 @@ scan_source() {
     { print FILENAME ":" FNR ":" $0 }
   ' "$1"
 }
-hits=$(find crates apps -path '*/src/*' -name '*.rs' -not -name 'tests.rs' -not -path '*/target/*' \
+hits=$(find_src crates apps -path '*/src/*' -name '*.rs' -not -name 'tests.rs' \
   | sort \
   | while read -r f; do scan_source "$f"; done \
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
@@ -202,7 +226,7 @@ hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^c
 #    the alternative is a rule that dictates which file a crate's tests live in. `tests.rs` siblings are
 #    dropped for the same reason. The crate that defines the token is exempt, and `apps/` is not
 #    scanned at all, because that is where the layers that can actually ask a user live.
-hits=$(find crates -path '*/src/*' -name '*.rs' -not -name 'tests.rs' -not -path '*/target/*' \
+hits=$(find_src crates -path '*/src/*' -name '*.rs' -not -name 'tests.rs' \
   -not -path 'crates/apogee-otp/src/*' \
   | sort \
   | while read -r f; do scan_source "$f"; done \
@@ -351,8 +375,12 @@ unsafe_home='crates/apogee-secrets/src/encrypted_file/disk.rs'
 # the sources left the half of the relaxation this check was written to cover unguarded. A pattern
 # matching no directory is dropped instead of passed on: bash leaves it unexpanded and `grep` would
 # take the literal glob for a path and fail on it.
+# The shell's Rust half sits one level deeper than every other app's, under `src-tauri`, so it needs
+# its own patterns or the crate this repository added most recently is the one the check stops
+# covering.
 scan=()
-for d in crates/*/src apps/*/src crates/*/tests apps/*/tests \
+for d in crates/*/src apps/*/src apps/*/src-tauri/src \
+         crates/*/tests apps/*/tests apps/*/src-tauri/tests \
          crates/*/examples apps/*/examples crates/*/benches apps/*/benches; do
   if [ -d "$d" ]; then scan+=("$d"); fi
 done
