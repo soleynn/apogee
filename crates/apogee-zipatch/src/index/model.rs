@@ -279,7 +279,7 @@ pub(crate) struct SourcePatch {
 }
 
 /// A built block index: the repo version and platform it describes, the source patches its parts
-/// reference, and one [`TargetFile`] per file in the final tree (sorted by path for a deterministic
+/// reference, and one `TargetFile` per file in the final tree (sorted by path for a deterministic
 /// on-disk `.apzi`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index {

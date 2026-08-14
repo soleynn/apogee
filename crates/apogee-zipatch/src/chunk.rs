@@ -18,8 +18,11 @@ pub const MAGIC: [u8; 12] = [
 /// [`Platform::Win32`] is ever applied; the console variants parse but are refused at apply time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
+    /// The only platform ever applied; console targets parse but are refused at apply time.
     Win32,
+    /// Parses; refused if a `T` command ever selects it for apply.
     Ps3,
+    /// Parses; refused if a `T` command ever selects it for apply.
     Ps4,
 }
 
@@ -56,8 +59,12 @@ impl fmt::Display for Platform {
 /// to a game-root-relative path once a [`Platform`] is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileTarget {
+    /// The SqPack category byte (widened to `u16`), e.g. `0x0a` for `exd`.
     pub main_id: u16,
+    /// The expansion (high byte) and repository chunk (low byte) within the category.
     pub sub_id: u16,
+    /// Which dat/index file within the category/expansion pair (`dat0`, `dat1`, .. or the base
+    /// `.index`/numbered `.index{n}`).
     pub file_id: u32,
 }
 
@@ -146,16 +153,27 @@ impl FileHeader {
 /// no field counts `SQPK I` (which all 109 carry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileHeaderV3 {
+    /// Declared `ADIR` chunk count.
     pub add_directories: u32,
+    /// Declared `DELD` chunk count.
     pub delete_directories: u32,
+    /// Declared total bytes freed by delete/expand commands.
     pub delete_data_size: u64,
+    /// The patch's minor version.
     pub minor_version: u32,
+    /// The target repository, encoded as the patcher does.
     pub repository_name: u32,
+    /// Declared total SQPK command count.
     pub commands: u32,
+    /// Declared `SQPK A` (AddData) count.
     pub sqpk_add: u32,
+    /// Declared `SQPK D` (DeleteData) count.
     pub sqpk_delete: u32,
+    /// Declared `SQPK E` (ExpandData) count.
     pub sqpk_expand: u32,
+    /// Declared `SQPK H` (Header) count.
     pub sqpk_header: u32,
+    /// Declared `SQPK F` (FileOp) count.
     pub sqpk_file: u32,
 }
 
@@ -191,7 +209,9 @@ impl ApplyOptionKind {
 /// An `APLY` chunk: one apply-config flag and its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApplyOption {
+    /// Which flag this is.
     pub kind: ApplyOptionKind,
+    /// The flag's value, observed false in every real patch (see [`ApplyOptionKind`]).
     pub value: bool,
 }
 
@@ -208,32 +228,44 @@ impl ApplyOption {
 /// An `APFS` (apply free space) chunk. Legacy: absent from modern patches, parsed for completeness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApplyFreeSpace {
+    /// Recorded as read; meaning unknown, absent from every patch in the held corpus.
     pub field_a: i64,
+    /// Recorded as read; meaning unknown, absent from every patch in the held corpus.
     pub field_b: i64,
 }
 
 /// An `ADIR`/`DELD` chunk: a directory to create or remove under the game root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Directory {
+    /// The directory's game-root-relative path, as the patch spells it (not yet confined).
     pub path: String,
 }
 
 /// The `SQPK` `T` (TargetInfo) command: sets the platform for later path resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetInfo {
+    /// The platform later dat/index path resolution uses.
     pub platform: Platform,
+    /// The target region; `-1` is global.
     pub region: i16,
+    /// Whether this is a debug build target.
     pub is_debug: bool,
+    /// The target version word.
     pub version: u16,
+    /// Declared bytes freed by delete/expand commands so far (little-endian, unlike the fields above).
     pub deleted_data_size: u64,
+    /// Declared seek count (little-endian). Recorded, read by nothing in this crate.
     pub seek_count: u64,
 }
 
 /// The `SQPK` `X` (PatchInfo) command: metadata, a NOP on apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchInfo {
+    /// The patch status byte.
     pub status: u8,
+    /// The patch format version.
     pub version: u8,
+    /// The declared install size in bytes.
     pub install_size: u64,
 }
 
@@ -242,6 +274,7 @@ pub struct PatchInfo {
 /// values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddData<'a> {
+    /// The dat file this write targets.
     pub target: FileTarget,
     /// Byte offset in the dat to write at.
     pub block_offset: u64,
@@ -249,6 +282,7 @@ pub struct AddData<'a> {
     pub block_size: u64,
     /// Byte count to zero-wipe immediately after `data` (a plain wipe, no empty-block header).
     pub block_delete_size: u64,
+    /// The raw bytes to write, `block_size` long.
     pub data: &'a [u8],
     /// Absolute patch-file offset of `data[0]`, so an index sink can record where these bytes came
     /// from and an error can report a patch-file offset.
@@ -261,6 +295,7 @@ pub struct AddData<'a> {
 /// header is 24 bytes, not 20 (`crate::datfile`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyBlock {
+    /// The dat file this write targets.
     pub target: FileTarget,
     /// Byte offset in the dat (the `<<7`-expanded value).
     pub block_offset: u64,
@@ -279,17 +314,24 @@ impl EmptyBlock {
 /// Which file a `SQPK` `H` header targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderFileKind {
+    /// A `.dat{n}` file.
     Dat,
+    /// A `.index`/`.index{n}` file.
     Index,
+    /// A file-kind byte outside the known set, carried verbatim.
     Other(u8),
 }
 
 /// Which header of the target file a `SQPK` `H` command writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderTargetKind {
+    /// The version header, written at offset 0.
     Version,
+    /// The index header, written at offset 1024.
     Index,
+    /// The data header, written at offset 1024.
     Data,
+    /// A target-kind byte outside the known set, carried verbatim (written at offset 1024).
     Other(u8),
 }
 
@@ -335,9 +377,13 @@ impl HeaderTargetKind {
 /// patch buffer and is always [`Header::HEADER_LEN`] bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header<'a> {
+    /// Whether the target is a dat or an index file.
     pub file_kind: HeaderFileKind,
+    /// Which of the target's two header slots this writes.
     pub header_kind: HeaderTargetKind,
+    /// The dat or index file this write targets.
     pub target: FileTarget,
+    /// The 1024-byte header blob, borrowed from the patch buffer.
     pub data: &'a [u8],
     /// Absolute patch-file offset of `data[0]`, for index provenance and offset-carrying errors.
     pub data_off: u64,
@@ -380,11 +426,19 @@ impl FileOperation {
 /// decoding is deferred to the apply engine (the shared SqPack codec), so this stays a byte view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOp<'a> {
+    /// Which `SQPK F` operation this is.
     pub operation: FileOperation,
+    /// Write offset for [`FileOperation::AddFile`]; `0` starts a fresh file, ignored by every other
+    /// operation.
     pub file_offset: i64,
+    /// Declared final file size for [`FileOperation::AddFile`]; used only as a preallocation hint.
     pub file_size: i64,
+    /// The expansion this operation targets, for [`FileOperation::RemoveAll`].
     pub expansion_id: u16,
+    /// The target's game-root-relative path (not yet confined), for every operation but `RemoveAll`.
     pub path: String,
+    /// The raw compressed-block stream for [`FileOperation::AddFile`]; empty for every other
+    /// operation.
     pub blocks: &'a [u8],
     /// Absolute patch-file offset of `blocks[0]`. The apply engine frames the block stream from here,
     /// so a decode fault reports a patch-file offset, not a block-relative one.
@@ -394,8 +448,11 @@ pub struct FileOp<'a> {
 /// Whether a `SQPK` `I` index command adds or deletes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexOp {
+    /// Add or update an index entry.
     Add,
+    /// Delete an index entry.
     Delete,
+    /// An operation byte outside the known set, carried verbatim.
     Other(u8),
 }
 
@@ -412,24 +469,38 @@ impl IndexOp {
 /// The `SQPK` `I` (Index) command: a NOP on modern patchers (index files are rewritten via `H`/`F`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexCommand {
+    /// Whether this adds or deletes an index entry.
     pub command: IndexOp,
+    /// Whether the entry is a synonym (a second key mapping to the same data).
     pub is_synonym: bool,
+    /// The index file this command targets.
     pub target: FileTarget,
+    /// The indexed file's hash key.
     pub file_hash: u64,
+    /// The indexed entry's block offset.
     pub block_offset: u32,
+    /// The indexed entry's block count.
     pub block_number: u32,
 }
 
 /// One `SQPK` sub-command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sqpk<'a> {
+    /// `SQPK A`.
     AddData(AddData<'a>),
+    /// `SQPK D`.
     DeleteData(EmptyBlock),
+    /// `SQPK E`.
     ExpandData(EmptyBlock),
+    /// `SQPK H`.
     Header(Header<'a>),
+    /// `SQPK T`.
     TargetInfo(TargetInfo),
+    /// `SQPK X`.
     PatchInfo(PatchInfo),
+    /// `SQPK F`.
     File(FileOp<'a>),
+    /// `SQPK I`.
     Index(IndexCommand),
 }
 
@@ -437,12 +508,19 @@ pub enum Sqpk<'a> {
 /// lifetime to the parser's internal buffer, so a chunk is used before the next is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Chunk<'a> {
+    /// `FHDR`.
     FileHeader(FileHeader),
+    /// `APLY`.
     ApplyOption(ApplyOption),
+    /// `APFS`.
     ApplyFreeSpace(ApplyFreeSpace),
+    /// `ADIR`.
     AddDirectory(Directory),
+    /// `DELD`.
     DeleteDirectory(Directory),
+    /// `SQPK`, further dispatched to a [`Sqpk`] command.
     Sqpk(Sqpk<'a>),
+    /// `EOF_`, the stream terminator.
     EndOfFile,
     /// An `XXXX` padding chunk.
     Padding,

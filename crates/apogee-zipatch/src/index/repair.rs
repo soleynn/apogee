@@ -43,8 +43,11 @@ const GAP_MERGE: u64 = 4 << 10;
 /// expected length, so a caller can build a [`RangeSource`] keyed by id.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceRef<'a> {
+    /// This patch's position in the chain, the key a [`RangeSource`] reads by.
     pub id: PatchId,
+    /// The patch's file name, as the index build recorded it.
     pub name: &'a str,
+    /// The patch file's length when the index was built, for a caller to sanity-check its own copy.
     pub expected_len: u64,
 }
 

@@ -23,8 +23,11 @@ const STRAY_IGNORE_SUFFIXES: &[&str] = &[".ver", ".bck", ".bk2", ".dxvk-cache"];
 /// Identifies one indexed part, for reporting a break or driving a `refine` re-check.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PartRef {
+    /// The target file's game-root-relative path.
     pub path: PathBuf,
+    /// The part's start offset in the target file.
     pub target_off: u64,
+    /// The part's length in the target file.
     pub target_len: u64,
 }
 
@@ -42,23 +45,31 @@ impl PartRef {
 /// A file whose on-disk length disagrees with the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SizeMismatch {
+    /// The target file's game-root-relative path.
     pub path: PathBuf,
+    /// The length the index declares.
     pub expected: u64,
+    /// The length found on disk.
     pub actual: u64,
 }
 
 /// A file present in the tree that no indexed target explains and no ignore rule excuses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrayFile {
+    /// The stray's game-root-relative path.
     pub path: PathBuf,
 }
 
 /// The outcome of a verify pass. A clean install yields every field empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyReport {
+    /// Parts whose on-disk bytes disagree with the index.
     pub broken: Vec<PartRef>,
+    /// Files whose on-disk length disagrees with the index.
     pub size_mismatches: Vec<SizeMismatch>,
+    /// Files the index describes that are absent from the tree.
     pub missing_files: Vec<PathBuf>,
+    /// Files on disk that no indexed target explains.
     pub stray_files: Vec<StrayFile>,
 }
 

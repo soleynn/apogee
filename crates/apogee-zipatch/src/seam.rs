@@ -15,7 +15,7 @@ use crate::error::{Error, Limit, Result};
 const MAX_PATH_DEPTH: usize = 64;
 
 /// A game-root-relative directory path that has passed confinement; sinks accept nothing else.
-/// Unconstructable outside this crate: minted only by [`SafePath::confine`].
+/// Unconstructable outside this crate: minted only by `SafePath::confine`.
 pub struct SafePath(PathBuf);
 
 impl SafePath {
@@ -36,7 +36,7 @@ impl SafePath {
 }
 
 /// A concrete file a patch writes to: a game-root-relative path that has passed confinement.
-/// Unconstructable outside this crate: minted only by [`TargetPath::confine`].
+/// Unconstructable outside this crate: minted only by `TargetPath::confine`.
 pub struct TargetPath(PathBuf);
 
 impl TargetPath {
@@ -145,13 +145,20 @@ pub struct PatchId(pub u32);
 /// Where written bytes come from: carries provenance for free.
 #[derive(Debug)]
 pub enum DataSource<'a> {
+    /// Bytes to write verbatim, already decoded.
     Raw {
+        /// Absolute patch-file offset of `bytes[0]`, for provenance and offset-carrying errors.
         patch_off: u64,
+        /// The bytes to write.
         bytes: &'a [u8],
     },
+    /// A compressed SqPack block; decoding is the sink's job.
     Deflate {
+        /// Absolute patch-file offset of `bytes[0]`, for provenance and offset-carrying errors.
         patch_off: u64,
+        /// The compressed payload's length in the patch.
         compressed_len: u32,
+        /// The block's decompressed length.
         decompressed_len: u32,
         /// The raw DEFLATE payload (no 16-byte block header), `compressed_len` bytes. A sink that
         /// records rather than applies (index, trace) ignores it; [`DiskSink`] decodes it.
@@ -159,7 +166,9 @@ pub enum DataSource<'a> {
         /// [`DiskSink`]: crate::DiskSink
         bytes: &'a [u8],
     },
+    /// A run of zero bytes with no patch-file source (an `A` command's plain delete-tail wipe).
     Zeros {
+        /// How many zero bytes to write.
         len: u64,
     },
 }
@@ -167,12 +176,31 @@ pub enum DataSource<'a> {
 /// The apply target: every mutation a ZiPatch can make, expressed as typed calls so a sink can
 /// journal, verify, or marshal them (the elevated worker is one such sink).
 pub trait PatchSink {
+    /// Write `src` at `off` in `target`.
     fn write(&mut self, target: &TargetPath, off: u64, src: DataSource<'_>) -> Result<()>;
+
+    /// Zero `blocks` 128-byte blocks at `off` in `target` and stamp the 24-byte empty-block header
+    /// over the run's start (`SQPK D`/`E`).
     fn write_empty_block(&mut self, target: &TargetPath, off: u64, blocks: u32) -> Result<()>;
+
+    /// Set `target`'s length.
     fn truncate(&mut self, target: &TargetPath, len: u64) -> Result<()>;
+
+    /// Delete `target`. A target that was never created is a no-op, as `File.Delete` is.
     fn remove_file(&mut self, target: &TargetPath) -> Result<()>;
+
+    /// Delete every immediate file of `expansion` not spared by `keep` (`SQPK F:R`).
+    ///
+    /// A deliberate reference divergence: the reference launcher's `F:R` is an effective no-op (a
+    /// doubled base-path bug always makes its existence check false), so a real patch never exercises
+    /// it in the wild. This crate implements the documented delete instead, so the seam does real
+    /// work; a patch that does carry a live `F:R` is a known, accepted divergence from the reference.
     fn remove_expansion(&mut self, expansion: u16, keep: &KeepFilter) -> Result<()>;
+
+    /// Create `rel` and any missing parent directories (`ADIR`).
     fn make_dir_tree(&mut self, rel: &SafePath) -> Result<()>;
+
+    /// Remove `rel` and everything under it, if present (`DELD`).
     fn remove_dir(&mut self, rel: &SafePath) -> Result<()>;
 
     /// Hint that `target` is about to be filled to `len` bytes, so a sink may preallocate. Advisory:
@@ -268,6 +296,12 @@ pub trait RepairSink {
 /// impl's signature cannot move without breaking it, so this method's shape (and the error variants
 /// an implementor can build, noted in `error.rs`) hold until both crates take a major together.
 pub trait RangeSource {
+    /// Read every range of `patch`, calling `out(range_start, bytes)` once per range in the order
+    /// given.
+    ///
+    /// # Errors
+    /// Whatever fetching or opening the source raises; a caller that cannot resolve `patch` reports
+    /// [`Error::Corrupt`](crate::Error::Corrupt).
     fn read_ranges(
         &mut self,
         patch: PatchId,
