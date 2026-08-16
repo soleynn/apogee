@@ -1,0 +1,34 @@
+{
+  "note": "Recorded-fact capture of a public FFXIV frontier display endpoint. These endpoints are unauthenticated and carry only display data: no credentials, session ids, account ids, or game bytes are present, so nothing needs redacting; image and short-link URLs are kept verbatim as URLs and no artwork bytes are stored. The request header set mirrors the frontier requests this crate already sends (the SQEXAuthor launcher user agent embedding a synthetic per-install computer id, here the same synthetic id the committed identity golden uses, so no host fact is on the wire). `request.url` is the exact URL fetched; the `_` query value is a volatile unix-millis cache-buster. `body` is the server's JSON verbatim, re-indented only. Captured live once; re-record wholesale when the schema drifts.",
+  "endpoint": "v2/notice/{lang}/message.json",
+  "request": {
+    "method": "GET",
+    "url": "https://frontier.ffxiv.com/v2/notice/en-us/message.json?_=1786720405000",
+    "query": {
+      "_": "1786720405000 (volatile unix-millis cache-buster)"
+    },
+    "headers": {
+      "user-agent": "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)",
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate",
+      "accept-language": "ja",
+      "origin": "https://launcher.finalfantasyxiv.com",
+      "referer": "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us&time=2026-08-14-15-13",
+      "connection": "Keep-Alive"
+    }
+  },
+  "response": {
+    "captured": "2026-08-14T15:13:23Z",
+    "status": 200,
+    "headers": {
+      "server": "nginx",
+      "date": "Fri, 14 Aug 2026 15:13:26 GMT",
+      "content-type": "application/json",
+      "content-length": "15",
+      "access-control-allow-origin": "https://launcher.finalfantasyxiv.com"
+    }
+  },
+  "body": {
+    "contents": []
+  }
+}

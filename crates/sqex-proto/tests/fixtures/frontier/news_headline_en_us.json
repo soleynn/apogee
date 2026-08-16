@@ -1,0 +1,135 @@
+{
+  "note": "Recorded-fact capture of a public FFXIV frontier display endpoint. These endpoints are unauthenticated and carry only display data: no credentials, session ids, account ids, or game bytes are present, so nothing needs redacting; image and short-link URLs are kept verbatim as URLs and no artwork bytes are stored. The request header set mirrors the frontier requests this crate already sends (the SQEXAuthor launcher user agent embedding a synthetic per-install computer id, here the same synthetic id the committed identity golden uses, so no host fact is on the wire). `request.url` is the exact URL fetched; the `_` query value is a volatile unix-millis cache-buster. `body` is the server's JSON verbatim, re-indented only. Captured live once; re-record wholesale when the schema drifts.",
+  "endpoint": "news/headline.json",
+  "request": {
+    "method": "GET",
+    "url": "https://frontier.ffxiv.com/news/headline.json?lang=en-us&media=pcapp&_=1786720402000",
+    "query": {
+      "lang": "en-us",
+      "media": "pcapp",
+      "_": "1786720402000 (volatile unix-millis cache-buster)"
+    },
+    "headers": {
+      "user-agent": "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)",
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate",
+      "accept-language": "ja",
+      "origin": "https://launcher.finalfantasyxiv.com",
+      "referer": "https://launcher.finalfantasyxiv.com/v700/?rc_lang=en_us&time=2026-08-14-15-13",
+      "connection": "Keep-Alive"
+    }
+  },
+  "response": {
+    "captured": "2026-08-14T15:13:23Z",
+    "status": 200,
+    "headers": {
+      "server": "nginx",
+      "date": "Fri, 14 Aug 2026 15:13:23 GMT",
+      "content-type": "application/json;charset=UTF-8",
+      "content-length": "2845",
+      "access-control-allow-origin": "https://launcher.finalfantasyxiv.com"
+    }
+  },
+  "body": {
+    "news": [
+      {
+        "date": "2026-08-14T08:40:00Z",
+        "title": "All Worlds Emergency Maintenance (Aug. 13): Follow-up",
+        "url": "",
+        "id": "21c8f8b7bc350888dfddb0c2d7658cbaac116b4a",
+        "tag": "Follow-up"
+      },
+      {
+        "date": "2026-08-14T07:25:00Z",
+        "title": "FINAL FANTASY XIV Updated (Aug. 14)",
+        "url": "",
+        "id": "110b136428c23f1287ed2b0c05c69bd8c6a0ad82",
+        "tag": ""
+      },
+      {
+        "date": "2026-08-13T07:00:00Z",
+        "title": "Actions Taken Against In-Game RMT & Other Illicit Activities (Aug. 13)",
+        "url": "",
+        "id": "7646af779d19d4c8edf9d50e505a2644569e4c87",
+        "tag": ""
+      },
+      {
+        "date": "2026-08-13T06:00:00Z",
+        "title": "All Worlds Emergency Maintenance (Aug. 13)",
+        "url": "",
+        "id": "499ae10a3167b988b19e1885d361e8b669898532",
+        "tag": "Maintenance"
+      },
+      {
+        "date": "2026-08-10T07:00:00Z",
+        "title": "Online Store / Mog Station Maintenance (Aug. 12)",
+        "url": "",
+        "id": "f2acc66dbe0f866922d37363867182db1c7f75b4",
+        "tag": "Maintenance"
+      }
+    ],
+    "topics": [
+      {
+        "date": "2026-08-13T17:00:00Z",
+        "title": "Fan Festival 2026 Merchandise Round 3 Pre-orders Now Available!",
+        "url": "https://na.finalfantasyxiv.com/lodestone/topics/detail/010146f88eea93a50de8f0a2c62d1ba4d07fd462",
+        "id": "010146f88eea93a50de8f0a2c62d1ba4d07fd462"
+      },
+      {
+        "date": "2026-08-13T08:00:00Z",
+        "title": "Crystalline Conflict Regional Championship 2026 (Japan) Powered by Logicool G™ Quarterfinals Streaming Details",
+        "url": "https://na.finalfantasyxiv.com/lodestone/topics/detail/71062b232a59f4af1d208b5e0fbab84ba1c64624",
+        "id": "71062b232a59f4af1d208b5e0fbab84ba1c64624"
+      },
+      {
+        "date": "2026-08-12T07:00:00Z",
+        "title": "New Optional Items Available!",
+        "url": "https://na.finalfantasyxiv.com/lodestone/topics/detail/211732b6128f51a4d4dec40461de3b1706e52fbd",
+        "id": "211732b6128f51a4d4dec40461de3b1706e52fbd"
+      },
+      {
+        "date": "2026-08-05T08:00:00Z",
+        "title": "The Moonfire Faire Begins August 12!",
+        "url": "https://na.finalfantasyxiv.com/lodestone/topics/detail/3817357c7556773cf1a07db2646a6d92245ada43",
+        "id": "3817357c7556773cf1a07db2646a6d92245ada43"
+      },
+      {
+        "date": "2026-08-04T08:00:00Z",
+        "title": "FINAL FANTASY XIV for Nintendo Switch 2 Launches August 4!",
+        "url": "https://na.finalfantasyxiv.com/lodestone/topics/detail/58ad66d20503b1387fe14f88c6b9df605549daa5",
+        "id": "58ad66d20503b1387fe14f88c6b9df605549daa5"
+      }
+    ],
+    "pinned": [
+      {
+        "date": "2026-08-14T09:10:00Z",
+        "title": "Ceremony of Eternal Bonding Reservation Restrictions",
+        "url": "",
+        "id": "d969ac04b0e575d8099775da448c8d4b1d07e380",
+        "tag": ""
+      },
+      {
+        "date": "2025-09-17T03:00:00Z",
+        "title": "Important Notice about Software Tokens and Software Authenticators (Sep. 16) ",
+        "url": "",
+        "id": "ecce613f701f1c2e3a71919f9714aa900edbdb63",
+        "tag": "Important"
+      },
+      {
+        "date": "2024-06-06T06:55:00Z",
+        "title": "Be Wary of Phishing Attempts via In-game Messages",
+        "url": "",
+        "id": "3086e92af4c4b8322d4725dbf51dc1b33478ad24",
+        "tag": "Important"
+      },
+      {
+        "date": "2022-10-06T19:00:00Z",
+        "title": "Precautions for Guarding Against Unauthorized Account Access",
+        "url": "",
+        "id": "2ff694b6ba8ef60084d28ca1e0819f9200fcb0a7",
+        "tag": "Important"
+      }
+    ],
+    "banner": []
+  }
+}

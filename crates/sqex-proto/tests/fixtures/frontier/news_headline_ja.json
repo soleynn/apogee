@@ -1,0 +1,135 @@
+{
+  "note": "Recorded-fact capture of a public FFXIV frontier display endpoint. These endpoints are unauthenticated and carry only display data: no credentials, session ids, account ids, or game bytes are present, so nothing needs redacting; image and short-link URLs are kept verbatim as URLs and no artwork bytes are stored. The request header set mirrors the frontier requests this crate already sends (the SQEXAuthor launcher user agent embedding a synthetic per-install computer id, here the same synthetic id the committed identity golden uses, so no host fact is on the wire). `request.url` is the exact URL fetched; the `_` query value is a volatile unix-millis cache-buster. `body` is the server's JSON verbatim, re-indented only. Captured live once; re-record wholesale when the schema drifts.",
+  "endpoint": "news/headline.json",
+  "request": {
+    "method": "GET",
+    "url": "https://frontier.ffxiv.com/news/headline.json?lang=ja&media=pcapp&_=1786720403000",
+    "query": {
+      "lang": "ja",
+      "media": "pcapp",
+      "_": "1786720403000 (volatile unix-millis cache-buster)"
+    },
+    "headers": {
+      "user-agent": "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; 1588d5721c)",
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate",
+      "accept-language": "ja",
+      "origin": "https://launcher.finalfantasyxiv.com",
+      "referer": "https://launcher.finalfantasyxiv.com/v700/?rc_lang=ja&time=2026-08-14-15-13",
+      "connection": "Keep-Alive"
+    }
+  },
+  "response": {
+    "captured": "2026-08-14T15:13:23Z",
+    "status": 200,
+    "headers": {
+      "server": "nginx",
+      "date": "Fri, 14 Aug 2026 15:13:24 GMT",
+      "content-type": "application/json;charset=UTF-8",
+      "content-length": "4382",
+      "access-control-allow-origin": "https://launcher.finalfantasyxiv.com"
+    }
+  },
+  "body": {
+    "news": [
+      {
+        "date": "2026-08-14T08:30:00Z",
+        "title": "全ワールド 緊急メンテナンス作業 終了時間変更のお知らせ(8/14)",
+        "url": "",
+        "id": "1711a3b2809c42b04bcd2570b92d5e11f0796c90",
+        "tag": "Follow-up"
+      },
+      {
+        "date": "2026-08-14T07:20:00Z",
+        "title": "更新のお知らせ(8/14)",
+        "url": "",
+        "id": "965ed4ed1640326daceff475ddb9833aa33b27e5",
+        "tag": ""
+      },
+      {
+        "date": "2026-08-13T07:00:00Z",
+        "title": "ゲーム内でのRMTおよび不正行為への対応について(8/13)",
+        "url": "",
+        "id": "9f6dff3fe53250a806b6d156743e4b4dce6a694d",
+        "tag": ""
+      },
+      {
+        "date": "2026-08-13T06:00:00Z",
+        "title": "全ワールド 緊急メンテナンス作業のお知らせ(8/14)",
+        "url": "",
+        "id": "2d34d11e7f189a1dc7a5837766a88a827e72eaea",
+        "tag": "Maintenance"
+      },
+      {
+        "date": "2026-08-11T07:00:00Z",
+        "title": "モグステーション メンテナンス作業のお知らせ(8/13)",
+        "url": "",
+        "id": "3a947a7feba2d304c450692a893d6d35a75ca66a",
+        "tag": "Maintenance"
+      }
+    ],
+    "topics": [
+      {
+        "date": "2026-08-13T08:00:00Z",
+        "title": "「クリスタルコンフリクト リージョンチャンピオンシップ 2026 Japan Powered by Logicool G™」予選トーナメント 放送決定！",
+        "url": "https://jp.finalfantasyxiv.com/lodestone/topics/detail/a1d80f4df73dedb2c9b617362299ee5c7a245920",
+        "id": "a1d80f4df73dedb2c9b617362299ee5c7a245920"
+      },
+      {
+        "date": "2026-08-13T03:00:00Z",
+        "title": "「第46回 FFXIVコミュニティ放送」8月21日（金）放送決定！",
+        "url": "https://jp.finalfantasyxiv.com/lodestone/topics/detail/4d3a47202f6349ed103ab5b1a1cc78bf5969b0a2",
+        "id": "4d3a47202f6349ed103ab5b1a1cc78bf5969b0a2"
+      },
+      {
+        "date": "2026-08-13T02:00:00Z",
+        "title": "「ファンフェスティバル 2026」オフィシャルグッズ 第3弾予約開始！",
+        "url": "https://jp.finalfantasyxiv.com/lodestone/topics/detail/21f666a7f97d2c5552dc30e3952078cfb1c010e6",
+        "id": "21f666a7f97d2c5552dc30e3952078cfb1c010e6"
+      },
+      {
+        "date": "2026-08-12T07:00:00Z",
+        "title": "オプションアイテム追加＆期間限定セール スタート！",
+        "url": "https://jp.finalfantasyxiv.com/lodestone/topics/detail/1ec49ede8f5e8e82c1740a67a7ffe4d2fff58591",
+        "id": "1ec49ede8f5e8e82c1740a67a7ffe4d2fff58591"
+      },
+      {
+        "date": "2026-08-07T08:01:00Z",
+        "title": "リアル＆ゲームのファッションショー！ 「ミラプリコレクション（インゲーム部門）」応募受付スタート",
+        "url": "https://jp.finalfantasyxiv.com/lodestone/topics/detail/43fb490a561a5005293da62f2b4ca3d1b2f421ad",
+        "id": "43fb490a561a5005293da62f2b4ca3d1b2f421ad"
+      }
+    ],
+    "pinned": [
+      {
+        "date": "2026-08-14T09:10:00Z",
+        "title": "エターナルセレモニーの予約／実施ができない時間について",
+        "url": "",
+        "id": "f5b6b0d6f2bd9efdeb4dbd6b2ba90383b136673f",
+        "tag": ""
+      },
+      {
+        "date": "2025-09-17T03:00:00Z",
+        "title": "ソフトウェアトークン／各種認証アプリのアプリ削除や機種変更を行う際のご注意(9/17)",
+        "url": "",
+        "id": "4259847f986f8050876df53fd14f2906d95b04af",
+        "tag": "Important"
+      },
+      {
+        "date": "2024-06-05T10:25:00Z",
+        "title": "フィッシング詐欺サイトへ誘導するメッセージにご注意ください",
+        "url": "",
+        "id": "320f3cc351972c741353e1b6178e81e136465f6a",
+        "tag": "Important"
+      },
+      {
+        "date": "2022-10-06T14:15:00Z",
+        "title": "不正アクセスとアカウント管理に関するご注意",
+        "url": "",
+        "id": "dbe2d8006c7907ab18e7b4335e9110c1e29309be",
+        "tag": "Important"
+      }
+    ],
+    "banner": []
+  }
+}
