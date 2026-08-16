@@ -40,7 +40,7 @@ use sqex_proto::{
     Credentials, InstallPaths, LauncherTime, LoginKind, OauthContext, ProtoError, ProtoRequest,
     ProtoResponse, Registration, Transport, TransportError, VersionReport, NEGOTIATED_HEADERS,
 };
-use totp_rs::{Algorithm, Secret, TOTP};
+use totp_rs::{Algorithm, Builder, Secret};
 
 const CAPTURE_ROOT: &str = "target/capture";
 
@@ -168,8 +168,15 @@ async fn run_login(
                     local
                 }
             };
-            let totp = TOTP::new_unchecked(Algorithm::SHA1, 6, 1, 30, secret.clone());
-            let generated = totp.generate(base);
+            let generated = Builder::new()
+                .with_algorithm(Algorithm::SHA1)
+                .with_digits(6)
+                .with_skew(1)
+                .with_step_duration(30)
+                .with_secret(secret.clone())
+                .build_noncompliant()
+                .generate(base)
+                .to_string();
             println!(
                 "[{scenario}] otp code generated (redacted, {} digits)",
                 generated.len()
@@ -249,8 +256,8 @@ async fn run_register(
 fn resolve_otp_plan() -> OtpPlan {
     if let Some(raw) = env_opt("SQEX_TOTP_SECRET") {
         let base32 = extract_base32_secret(&raw);
-        match Secret::Encoded(base32).to_bytes() {
-            Ok(bytes) => return OtpPlan::Totp(bytes),
+        match Secret::try_from_base32(base32) {
+            Ok(secret) => return OtpPlan::Totp(secret.as_bytes().to_vec()),
             Err(err) => {
                 eprintln!("SQEX_TOTP_SECRET is not a valid base32 secret: {err:?}");
                 std::process::exit(2);

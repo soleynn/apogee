@@ -364,17 +364,19 @@ impl TotpParams {
     pub(crate) fn code_for_counter(&self, counter: u64) -> Result<Code, OtpError> {
         let start = window::window_start(counter, self.period)?;
         // Built per call rather than held: the generator wants the key by value, and a field would
-        // be a second copy of it living as long as this profile does. `new_unchecked` skips the
+        // be a second copy of it living as long as this profile does. `build_noncompliant` skips the
         // dependency's own digit and key-length checks, which `assemble` has already made
         // invariants of this type, and in exchange the call cannot fail.
-        let generator = totp_rs::TOTP::new_unchecked(
-            self.algorithm.generator(),
-            usize::from(self.digits),
-            1,
-            u64::from(self.period),
-            self.key.to_vec(),
-        );
-        Ok(Code::new(Zeroizing::new(generator.generate(start))))
+        let generator = totp_rs::Builder::new()
+            .with_algorithm(self.algorithm.generator())
+            .with_digits(self.digits)
+            .with_skew(1)
+            .with_step_duration(u64::from(self.period))
+            .with_secret(self.key.to_vec())
+            .build_noncompliant();
+        Ok(Code::new(Zeroizing::new(
+            generator.generate(start).to_string(),
+        )))
     }
 
     /// Build a profile from parts the grammar has already separated, applying every range rule in
