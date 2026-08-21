@@ -328,10 +328,10 @@ impl Drop for AddonSession {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
         for held in &self.held {
-            if !held.keep_after_close {
-                if let Some(pid) = rustix::process::Pid::from_raw(held.companion.pid()) {
-                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
-                }
+            if !held.keep_after_close
+                && let Some(pid) = rustix::process::Pid::from_raw(held.companion.pid())
+            {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
             }
         }
     }
