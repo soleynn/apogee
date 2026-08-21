@@ -105,7 +105,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: nextest
       - run: cargo nextest run --profile ci --workspace --no-tests=pass
@@ -684,7 +684,7 @@ jobs:
           path: fuzz/corpus/launch_args
           key: fuzz-corpus-launch_args-
           restore-keys: fuzz-corpus-launch_args-
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-fuzz
       # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
@@ -772,7 +772,7 @@ jobs:
           path: fuzz/corpus/component_manifest
           key: fuzz-corpus-component_manifest-
           restore-keys: fuzz-corpus-component_manifest-
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-fuzz
       # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
@@ -855,7 +855,7 @@ jobs:
           path: fuzz/corpus/sqpack_mods
           key: fuzz-corpus-sqpack_mods-
           restore-keys: fuzz-corpus-sqpack_mods-
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-fuzz
       # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
@@ -939,7 +939,7 @@ jobs:
           path: fuzz/corpus/index_manifest
           key: fuzz-corpus-index_manifest-
           restore-keys: fuzz-corpus-index_manifest-
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-fuzz
       # Build, then a short timed run: every parser fed hostile SE input must stay panic- and
