@@ -140,12 +140,14 @@ pub use hive::RegistryEffect;
 pub use metadata::{
     DxvkRef, InstalledComponent, PREFIX_JSON, PrefixMetadata, RunnerRef, SetupRecord,
 };
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+pub use non_linux::game_running;
+#[cfg(not(target_os = "linux"))]
+pub use non_linux::prefix_processes;
 #[cfg(not(target_os = "linux"))]
 pub use non_linux::{Companion, CompanionExit, CompanionSpec};
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 pub use non_linux::{GameExit, GameSession};
-#[cfg(not(target_os = "linux"))]
-pub use non_linux::{game_running, prefix_processes};
 pub use plan::{LaunchPlan, Prefix, RunnerHandle};
 pub use progress::{ProgramStatus, Progress, RuntimeEvent};
 pub use registry::{RegistryDelete, RegistryEdit, RegistryValue};
@@ -157,7 +159,7 @@ pub use steam::{
     steam_installs,
 };
 #[cfg(target_os = "windows")]
-pub use windows::{GameExit, GameSession};
+pub use windows::{GameExit, GameSession, game_running};
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
 ///

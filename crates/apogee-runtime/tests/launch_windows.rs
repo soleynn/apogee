@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apogee_fetch::Fetcher;
-use apogee_runtime::{LaunchPlan, Progress, Runtime, RuntimePaths};
+use apogee_runtime::{LaunchPlan, Progress, Runtime, RuntimeError, RuntimePaths};
 use tokio_util::sync::CancellationToken;
 
 /// The name of the ignored test this binary re-enters as the game.
@@ -82,8 +82,7 @@ fn runtime_over(root: &Path) -> Result<Runtime, Box<dyn Error>> {
 
 /// A plan that launches this binary as the game: it writes its report to `out` and then stays up for
 /// `hold` seconds.
-fn stub_plan(out: &Path, hold: u64) -> Result<LaunchPlan, Box<dyn Error>> {
-    let exe = std::env::current_exe()?;
+fn stub_plan_at(exe: &Path, out: &Path, hold: u64) -> LaunchPlan {
     let mut env = BTreeMap::new();
     env.insert(OUT.to_owned(), out.display().to_string());
     env.insert(HOLD.to_owned(), hold.to_string());
@@ -97,7 +96,11 @@ fn stub_plan(out: &Path, hold: u64) -> Result<LaunchPlan, Box<dyn Error>> {
         "--exact".to_owned(),
         STUB.to_owned(),
     ]);
-    Ok(plan)
+    plan
+}
+
+fn stub_plan(out: &Path, hold: u64) -> Result<LaunchPlan, Box<dyn Error>> {
+    Ok(stub_plan_at(&std::env::current_exe()?, out, hold))
 }
 
 /// The stub's report, once it has written one.
@@ -254,5 +257,55 @@ async fn a_game_that_exits_ends_the_session() -> Result<(), Box<dyn Error>> {
         !still_running(session.game_pid())?,
         "the session resolved while the game was still running"
     );
+    Ok(())
+}
+
+/// The patch guard finds the client by both its executable name and the install it runs from. A
+/// client in one install must block that install without blocking another one beside it.
+#[tokio::test]
+async fn a_running_native_game_is_found_in_its_own_install() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let other = tempfile::tempdir()?;
+    let game = root.path().join("game");
+    std::fs::create_dir_all(&game)?;
+    let exe = game.join("ffxiv_dx11.exe");
+    std::fs::copy(std::env::current_exe()?, &exe)?;
+    let out = root.path().join("seen.txt");
+    let runtime = runtime_over(root.path())?;
+
+    let session = runtime
+        .launch(
+            stub_plan_at(&exe, &out, 600),
+            &CancellationToken::new(),
+            &Progress::none(),
+        )
+        .await?;
+    report_from(&out).await?;
+
+    assert!(
+        apogee_runtime::game_running(root.path())?,
+        "the live client was not found in its install"
+    );
+    match apogee_runtime::game_running(other.path()) {
+        Ok(false) => {}
+        // A developer may already have a separately launched client whose process ACL prevents this
+        // test token from reading its image path. The production guard fails closed in that case;
+        // this test has already proved its own inspectable client is found above.
+        Err(RuntimeError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::PermissionDenied => {}
+        other => panic!("a client in another install produced {other:?}"),
+    }
+
+    let pid = session.game_pid();
+    session.kill().await?;
+    assert!(!still_running(pid)?, "the test client did not exit");
+    match apogee_runtime::game_running(root.path()) {
+        Ok(false) => {}
+        // As above, an unrelated protected client can make a negative answer unknowable. The
+        // independent PID probe has already established that this test's client is gone.
+        Err(RuntimeError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::PermissionDenied => {}
+        other => panic!("the exited client produced {other:?}"),
+    }
     Ok(())
 }

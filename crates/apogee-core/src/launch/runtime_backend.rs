@@ -107,6 +107,7 @@ fn activates_nvapi(recorded: Option<&DxvkRef>, nvapi: bool) -> NvapiOverride {
 /// The real launch backend over `apogee-runtime`.
 pub(crate) struct RuntimeLauncher {
     runtime: Runtime,
+    #[cfg(not(target_os = "windows"))]
     runners_dir: PathBuf,
 }
 
@@ -114,8 +115,11 @@ impl RuntimeLauncher {
     /// Construct over an already-built runtime and the runners directory (where the system-wine
     /// wrapper is synthesized).
     pub(crate) fn new(runtime: Runtime, runners_dir: PathBuf) -> Self {
+        #[cfg(target_os = "windows")]
+        let _ = runners_dir;
         Self {
             runtime,
+            #[cfg(not(target_os = "windows"))]
             runners_dir,
         }
     }
@@ -242,32 +246,49 @@ impl RuntimeLauncher {
         let host = HostCaps::detect();
         match &request.runner {
             RunnerSelection::SystemWine => {
-                let dir = synthesize_system_wine(&self.runners_dir)?;
-                let prefix = self
-                    .runtime
-                    .prepare_custom(
-                        &dir,
-                        RunnerKind::Wine,
-                        "system-wine",
-                        prefix_dir,
-                        cancel,
-                        progress,
-                    )
-                    .await?;
-                // The host's own wine is not a catalog row, so nothing declares what it supports.
-                // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
-                // setting no variable, so believing in it wrongly leaves the prefix with no
-                // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
-                let dxvk = self.recorded_dxvk(&prefix, request.nvapi);
-                Ok(Prepared {
-                    prefix: Some(prefix),
-                    caps: HostCaps {
-                        ntsync: false,
-                        ..host
-                    },
-                    dxvk,
-                    catalog: None,
-                })
+                #[cfg(target_os = "windows")]
+                {
+                    // The system runner on Windows is the operating system itself. There is no Wine
+                    // build to install and no prefix to initialize; leaving the prefix absent is what
+                    // makes the runtime's native arm spawn the game executable directly.
+                    let _ = (prefix_dir, cancel, progress);
+                    Ok(Prepared {
+                        prefix: None,
+                        caps: host,
+                        dxvk: None,
+                        catalog: None,
+                    })
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let dir = synthesize_system_wine(&self.runners_dir)?;
+                    let prefix = self
+                        .runtime
+                        .prepare_custom(
+                            &dir,
+                            RunnerKind::Wine,
+                            "system-wine",
+                            prefix_dir,
+                            cancel,
+                            progress,
+                        )
+                        .await?;
+                    // The host's own wine is not a catalog row, so nothing declares what it supports.
+                    // Unstated reads as no for the same reason a row's silence does: ntsync is chosen by
+                    // setting no variable, so believing in it wrongly leaves the prefix with no
+                    // accelerated synchronization at all, while disbelieving it wrongly costs fsync.
+                    let dxvk = self.recorded_dxvk(&prefix, request.nvapi);
+                    Ok(Prepared {
+                        prefix: Some(prefix),
+                        caps: HostCaps {
+                            ntsync: false,
+                            ..host
+                        },
+                        dxvk,
+                        catalog: None,
+                    })
+                }
             }
             RunnerSelection::Managed { name, version } => {
                 let (manifest, signature) = catalog_urls()?;
@@ -554,6 +575,7 @@ fn parse_url(raw: &str) -> Result<Url, CoreError> {
 
 /// Create (idempotently) a thin runner directory whose `wine`/`wineserver` shim to the host tools,
 /// so the system wine can be adopted as a custom runner. Returns the runner directory.
+#[cfg(not(target_os = "windows"))]
 fn synthesize_system_wine(runners_dir: &Path) -> Result<PathBuf, CoreError> {
     let dir = runners_dir.join("system-wine");
     let bin = dir.join("bin");
@@ -564,6 +586,7 @@ fn synthesize_system_wine(runners_dir: &Path) -> Result<PathBuf, CoreError> {
 }
 
 /// Write an executable `#!/bin/sh` shim that execs the host `tool`.
+#[cfg(not(target_os = "windows"))]
 fn write_shim(path: &Path, tool: &str) -> Result<(), CoreError> {
     let script = format!("#!/bin/sh\nexec {tool} \"$@\"\n");
     std::fs::write(path, script).map_err(launch_io(path))?;
@@ -576,6 +599,7 @@ fn write_shim(path: &Path, tool: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn launch_io(path: &Path) -> impl Fn(std::io::Error) -> CoreError + '_ {
     move |source| CoreError::Launch {
         detail: format!("{}: {source}", path.display()),
@@ -585,6 +609,51 @@ fn launch_io(path: &Path) -> impl Fn(std::io::Error) -> CoreError + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A system-runner profile on Windows crosses the core/runtime seam without constructing any of
+    /// the Linux runner artifacts, then reaches the native direct-spawn arm. The short-lived inbox
+    /// command is only a process fixture; no game data or user configuration is involved.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn a_system_runner_prepares_nothing_and_launches_directly_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let runners = root.path().join("runners");
+        let prefixes = root.path().join("prefixes");
+        let runtime = Runtime::new(
+            apogee_fetch::Fetcher::builder().build().unwrap(),
+            apogee_runtime::RuntimePaths {
+                runners: runners.clone(),
+                prefixes: prefixes.clone(),
+            },
+        );
+        let launcher = RuntimeLauncher::new(runtime, runners.clone());
+        let request = PrefixRequest {
+            runner: RunnerSelection::SystemWine,
+            nvapi: false,
+        };
+        let prefix_dir = prefixes.join("native-launch");
+        let cancel = CancellationToken::new();
+        let (events, _rx) = mpsc::unbounded_channel();
+
+        let prepared = launcher
+            .prepare(&request, &prefix_dir, &cancel, &events)
+            .await
+            .unwrap();
+        assert!(prepared.prefix.is_none());
+        assert!(
+            !runners.exists(),
+            "no runner is installed for native launch"
+        );
+        assert!(!prefix_dir.exists(), "no Wine prefix is initialized");
+
+        let mut plan = LaunchPlan::new("cmd.exe", "", std::collections::BTreeMap::new());
+        plan.set_inserted_args(vec!["/C".to_owned(), "exit".to_owned(), "0".to_owned()]);
+        let game = launcher
+            .launch(plan, &cancel, &events)
+            .await
+            .expect("the native process starts");
+        game.wait().await.expect("the native process exits");
+    }
 
     /// A download's recovery tally survives the seam into the core event stream.
     ///
@@ -754,6 +823,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn synthesize_system_wine_writes_executable_shims() {
         let tmp = tempfile::tempdir().unwrap();
