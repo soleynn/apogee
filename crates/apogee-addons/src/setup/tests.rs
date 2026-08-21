@@ -142,6 +142,10 @@ async fn served() -> (ChaosServer, String) {
 }
 
 /// A verb lands what it promises, is recorded, and says why it ran while it was running.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn applying_a_verb_lands_its_files_and_records_it() {
     let (server, pin) = served().await;
@@ -172,6 +176,10 @@ async fn applying_a_verb_lands_its_files_and_records_it() {
 }
 
 /// The whole point of recording an apply: the second pass does nothing and fetches nothing.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn a_second_pass_applies_nothing_and_downloads_nothing() {
     let (server, pin) = served().await;
@@ -201,6 +209,10 @@ async fn a_second_pass_applies_nothing_and_downloads_nothing() {
 
 /// A verb whose ops "succeeded" without producing what it names is a failure, and an unrecorded one,
 /// so the next pass tries again instead of remembering a half-finished apply as done.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn a_verb_that_did_not_produce_what_it_names_fails_and_is_not_recorded() {
     let (server, pin) = served().await;
@@ -229,6 +241,10 @@ async fn a_verb_that_did_not_produce_what_it_names_fails_and_is_not_recorded() {
 /// A verb the record claims but whose effect has been removed from the prefix comes back. This is
 /// what a runner upgrade does to prefix state a verb wrote, so it is simulated by deleting what the
 /// verb produced.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
     let (server, pin) = served().await;
@@ -276,6 +292,10 @@ async fn a_recorded_verb_whose_effect_was_removed_is_applied_again() {
 /// Asking what a prefix is missing is answerable without setting it up, and the answer is the one
 /// the apply then acts on. Two readings of the same prefix that could disagree would let a report
 /// name setup a fix does not apply, or a fix apply setup no report named.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn what_a_prefix_is_missing_is_what_a_pass_then_applies() {
     let (server, pin) = served().await;
@@ -320,6 +340,10 @@ async fn what_a_prefix_is_missing_is_what_a_pass_then_applies() {
 
 /// The record is not the evidence. A verb whose effect has gone is missing again, which is what
 /// makes a report of what a prefix needs survive a runner upgrade undoing what a verb wrote.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn a_verb_whose_effect_was_removed_is_missing_again() {
     let (server, pin) = served().await;
@@ -342,6 +366,10 @@ async fn a_verb_whose_effect_was_removed_is_missing_again() {
 
 /// One verb failing costs the prefix that verb. A launch that is otherwise fine should not be
 /// stopped by one piece of hygiene, and the rest of the setup still has to happen.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "placing a verb's files through a prefix runner is Linux-only"
+)]
 #[tokio::test]
 async fn one_failing_verb_does_not_stop_the_others() {
     let (server, pin) = served().await;

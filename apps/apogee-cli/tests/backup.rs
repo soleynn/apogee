@@ -18,6 +18,11 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+#[cfg(not(unix))]
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 type Fallible = Box<dyn std::error::Error>;
 
 /// A profile, plus the config tree the game would have written inside its prefix.
@@ -58,9 +63,9 @@ fn setup(home: &Path) -> Result<PathBuf, Fallible> {
     Ok(config)
 }
 
-/// The whole round trip through the shell: capture, list, change the live tree, put it back.
+/// Capture and list through the shell, then either restore or report the platform boundary.
 #[test]
-fn a_backup_is_created_listed_and_restored() -> Result<(), Fallible> {
+fn a_backup_is_created_listed_and_restore_respects_the_platform_boundary() -> Result<(), Fallible> {
     let home = tempdir()?;
     let config = setup(home.path())?;
 
@@ -93,18 +98,41 @@ fn a_backup_is_created_listed_and_restored() -> Result<(), Fallible> {
             &archive,
         ],
     )?;
-    let text = stdout(&restored);
-    assert!(restored.status.success(), "restore failed: {text}");
-    assert_eq!(std::fs::read_to_string(config.join("FFXIV.cfg"))?, "cfg");
-    assert!(
-        !config.join("stray.txt").exists(),
-        "restore merged rather than replaced"
-    );
-    // The tree that was there is kept, so the restore is reversible.
-    assert!(
-        text.contains("the tree that was there is at"),
-        "not reported: {text}"
-    );
+
+    #[cfg(unix)]
+    {
+        let text = stdout(&restored);
+        assert!(restored.status.success(), "restore failed: {text}");
+        assert_eq!(std::fs::read_to_string(config.join("FFXIV.cfg"))?, "cfg");
+        assert!(
+            !config.join("stray.txt").exists(),
+            "restore merged rather than replaced"
+        );
+        // The tree that was there is kept, so the restore is reversible.
+        assert!(
+            text.contains("the tree that was there is at"),
+            "not reported: {text}"
+        );
+    }
+
+    #[cfg(not(unix))]
+    {
+        let text = stderr(&restored);
+        assert!(!restored.status.success(), "restore unexpectedly succeeded");
+        assert!(
+            text.contains("restoring a backup is not supported on this platform"),
+            "typed unsupported error was not reported: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config.join("FFXIV.cfg"))?,
+            "changed",
+            "a refused restore changed the live configuration"
+        );
+        assert!(
+            config.join("stray.txt").exists(),
+            "a refused restore replaced the live tree"
+        );
+    }
     Ok(())
 }
 

@@ -156,7 +156,12 @@ fn only_our_archives_are_candidates() -> Result<(), Fallible> {
     write(&dest.path().join("notes.txt"), "unrelated")?;
     std::fs::create_dir(dest.path().join("adirectory.apbk"))?;
     // A symlink named like an archive, pointing at a real one.
+    // Creating one is privilege- or developer-mode-dependent on Windows, so that single candidate
+    // is Unix-only; every other refusal and the actual prune remain covered on both platforms.
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&ours, dest.path().join("alink.apbk"))?;
+    #[cfg(not(unix))]
+    assert!(ours.is_file());
 
     let plan = plan_prune(dest.path(), keep(1))?;
     assert_eq!(plan.ours.len(), 1, "only the real archive is ours");
@@ -181,6 +186,7 @@ fn only_our_archives_are_candidates() -> Result<(), Fallible> {
     );
     assert_eq!(by_name["notes.txt"], ForeignReason::WrongExtension);
     assert_eq!(by_name["adirectory.apbk"], ForeignReason::NotARegularFile);
+    #[cfg(unix)]
     assert_eq!(by_name["alink.apbk"], ForeignReason::NotARegularFile);
 
     // And a real prune leaves every one of them in place.
@@ -193,7 +199,7 @@ fn only_our_archives_are_candidates() -> Result<(), Fallible> {
     let report = prune(dest.path(), keep(1))?;
     // Reporting what it left alone, with the check that rejected each one. A prune that answered with
     // a count would leave the user counting files they can already see, which is the question rather
-    // than the answer: these nine are here for nine different reasons.
+    // than the answer: each candidate is here for a different reason.
     // By path, because both come from their own directory listing and the order of one is not the
     // order of the other.
     let mut reported = report.foreign;

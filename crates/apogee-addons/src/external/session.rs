@@ -326,13 +326,12 @@ impl Drop for AddonSession {
     /// case into "stopped" rather than "leaked with nobody watching". No queued after-game tool runs
     /// from here.
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
         for held in &self.held {
-            if held.keep_after_close {
-                continue;
-            }
-            #[cfg(target_os = "linux")]
-            if let Some(pid) = rustix::process::Pid::from_raw(held.companion.pid()) {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
+            if !held.keep_after_close {
+                if let Some(pid) = rustix::process::Pid::from_raw(held.companion.pid()) {
+                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
+                }
             }
         }
     }

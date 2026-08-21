@@ -84,8 +84,10 @@ impl CoreConfig {
         }
     }
 
-    /// A config resolved from the XDG base-directory environment: configuration under the config
-    /// home, runners and prefixes under the data home, staged patches under the cache home.
+    /// A config resolved from the platform's base-directory environment: configuration under the
+    /// config home, runners and prefixes under the data home, staged patches under the cache home.
+    /// Explicit XDG variables take precedence everywhere. Without them, Windows uses `APPDATA` for
+    /// configuration and `LOCALAPPDATA` for data and cache; other platforms fall back to `HOME`.
     ///
     /// # Errors
     /// [`CoreError::Config`] if a base directory cannot be resolved to an absolute path. The store
@@ -94,12 +96,15 @@ impl CoreConfig {
     /// was started from. That is reachable in ordinary setups with no home set: a systemd unit, a
     /// cron entry, `env -i`, or a stripped container.
     pub fn try_from_env() -> Result<Self, CoreError> {
-        let data = xdg_dir("XDG_DATA_HOME", ".local/share")?;
+        let windows_config = cfg!(windows).then_some("APPDATA");
+        let windows_local = cfg!(windows).then_some("LOCALAPPDATA");
+        let data = base_dir("XDG_DATA_HOME", ".local/share", windows_local)?;
         Ok(Self {
-            store_dir: xdg_dir("XDG_CONFIG_HOME", ".config")?.join("apogee"),
+            store_dir: base_dir("XDG_CONFIG_HOME", ".config", windows_config)?.join("apogee"),
             runners_dir: data.join("apogee/runners"),
             prefixes_dir: data.join("apogee/prefixes"),
-            patch_store: xdg_dir("XDG_CACHE_HOME", ".cache")?.join("apogee/patches"),
+            patch_store: base_dir("XDG_CACHE_HOME", ".cache", windows_local)?
+                .join("apogee/patches"),
             // Data, not cache: a backup that a cache cleaner may delete is not a backup.
             backups_dir: data.join("apogee/backups"),
             // Data too: what a launch loads into the game is tens of megabytes and is fetched from a
@@ -143,14 +148,24 @@ pub(crate) fn http_transport() -> Result<Arc<dyn Transport>, CoreError> {
     Ok(Arc::new(HttpTransport::new(client)))
 }
 
-/// Resolve an XDG base directory from `var`, falling back to `$HOME/<fallback>`.
+/// Resolve a base directory from an XDG override, a native Windows variable, or
+/// `$HOME/<home_fallback>`, in that order.
 ///
 /// Refuses anything that is not absolute rather than falling back to a bare relative name.
-fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf, CoreError> {
+fn base_dir(
+    var: &str,
+    home_fallback: &str,
+    windows_var: Option<&str>,
+) -> Result<PathBuf, CoreError> {
     let resolved = if let Some(dir) = std::env::var_os(var).filter(|v| !v.is_empty()) {
         PathBuf::from(dir)
+    } else if let Some(dir) = windows_var
+        .and_then(std::env::var_os)
+        .filter(|v| !v.is_empty())
+    {
+        PathBuf::from(dir)
     } else if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        PathBuf::from(home).join(fallback)
+        PathBuf::from(home).join(home_fallback)
     } else {
         return Err(CoreError::Config {
             reason: "neither the base directory nor a home directory is set",

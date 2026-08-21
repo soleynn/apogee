@@ -1140,6 +1140,12 @@ impl Sink {
 mod tests {
     use super::*;
 
+    fn native_path(parts: &[&str]) -> String {
+        let mut path = PathBuf::new();
+        path.extend(parts);
+        path.display().to_string()
+    }
+
     /// One of every variant, in declaration order. The compiler makes [`Defect::slug`]'s match
     /// exhaustive; this list plus [`DEFECT_SLUGS`] is what makes a new variant impossible to land
     /// without naming it in both.
@@ -1548,7 +1554,10 @@ mod tests {
             .to_string();
             assert_eq!(
                 rendered,
-                format!("sqpack/ffxiv/0a0000.win32.dat0: the container will not parse: {label}")
+                format!(
+                    "{}: the container will not parse: {label}",
+                    native_path(&["sqpack", "ffxiv", "0a0000.win32.dat0"])
+                )
             );
         }
     }
@@ -1569,8 +1578,10 @@ mod tests {
         };
         assert_eq!(
             finding.to_string(),
-            "sqpack/ffxiv/0a0000.win32.index +0x000804 key=0x04e9a5974cd3cdef: \
-             two entries carry this key"
+            format!(
+                "{} +0x000804 key=0x04e9a5974cd3cdef: two entries carry this key",
+                native_path(&["sqpack", "ffxiv", "0a0000.win32.index"])
+            )
         );
         // An archive-wide fault names the stem, since no one file is at fault.
         let archive = Finding {
@@ -1583,7 +1594,10 @@ mod tests {
         };
         assert_eq!(
             archive.to_string(),
-            "sqpack/ffxiv/0a0000: dat3 is named but not on disk"
+            format!(
+                "{}: dat3 is named but not on disk",
+                native_path(&["sqpack", "ffxiv", "0a0000"])
+            )
         );
     }
 

@@ -317,11 +317,22 @@ mod tests {
     #[test]
     fn accepts_and_normalizes_relative_paths() {
         let c = |raw: &str| confine(raw).unwrap().to_string_lossy().into_owned();
-        assert_eq!(c("ffxivboot.exe"), "ffxivboot.exe");
-        assert_eq!(c("locales/fileinfo.fiin"), "locales/fileinfo.fiin");
+        let native = |components: &[&str]| {
+            components
+                .iter()
+                .collect::<PathBuf>()
+                .to_string_lossy()
+                .into_owned()
+        };
+
+        assert_eq!(c("ffxivboot.exe"), native(&["ffxivboot.exe"]));
+        assert_eq!(
+            c("locales/fileinfo.fiin"),
+            native(&["locales", "fileinfo.fiin"])
+        );
         // Backslashes fold to the platform separator, and a leading `./` is transparent.
-        assert_eq!(c("sub\\dir\\file"), "sub/dir/file");
-        assert_eq!(c("./a/b"), "a/b");
+        assert_eq!(c("sub\\dir\\file"), native(&["sub", "dir", "file"]));
+        assert_eq!(c("./a/b"), native(&["a", "b"]));
     }
 
     #[test]

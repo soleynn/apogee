@@ -38,6 +38,26 @@ fn write(path: &Path, body: &str) -> io::Result<()> {
     std::fs::write(path, body)
 }
 
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    // Directory junctions exercise the same reparse-point and canonicalization boundaries without
+    // requiring the symbolic-link privilege or Windows Developer Mode.
+    let status = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/j"])
+        .arg(link)
+        .arg(target)
+        .status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| io::Error::other(format!("mklink exited with {status}")))
+}
+
 /// A game config tree: the root config, one character directory with its settings, its chat logs and
 /// rotation shadows, the config-copy directory, the game's restore blob, and screenshots.
 fn game_tree(root: &Path) -> io::Result<()> {
@@ -236,8 +256,11 @@ fn launcher_identity_files_are_withheld_in_any_casing() -> Result<(), BackupErro
 fn a_symlink_is_skipped_and_counted() -> Result<(), BackupError> {
     let tmp = tempfile::tempdir().unwrap();
     game_tree(tmp.path()).unwrap();
-    std::os::unix::fs::symlink(tmp.path().join(CHARACTER_DIR), tmp.path().join("My Chars"))
-        .unwrap();
+    link_dir(
+        &tmp.path().join(CHARACTER_DIR),
+        &tmp.path().join("My Chars"),
+    )
+    .unwrap();
 
     let selected = resolve_game(tmp.path(), GameConfigOpts::default())?;
     assert_eq!(selected.roots()[0].links_skipped(), 1);
@@ -250,7 +273,7 @@ fn a_symlink_is_skipped_and_counted() -> Result<(), BackupError> {
 fn two_roots_that_reach_the_same_tree_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
     game_tree(tmp.path()).unwrap();
-    std::os::unix::fs::symlink(tmp.path(), tmp.path().join("pfx")).unwrap();
+    link_dir(tmp.path(), &tmp.path().join("pfx")).unwrap();
 
     let err = Selection::new()
         .with_root(SelectionRoot::game_config(

@@ -126,12 +126,26 @@ fn reported(report: &str, key: &str) -> Option<String> {
 /// Whether a process with `pid` is still in the process table, asked of the system rather than of the
 /// session that is under test.
 fn still_running(pid: i32) -> Result<bool, Box<dyn Error>> {
-    let listed = std::process::Command::new("tasklist")
-        .args(["/NH", "/FI", &format!("PID eq {pid}")])
-        .output()?;
-    // The filter matches at most one row, and the "no tasks" notice carries no digits, so the pid
-    // appearing at all is the process being there.
-    Ok(String::from_utf8_lossy(&listed.stdout).contains(&pid.to_string()))
+    // `tasklist` is denied under a restricted token even for a process this test owns. `Get-Process`
+    // can query that child without elevation, and its exit code keeps "not found" distinct from a
+    // probe that failed to run.
+    let probe = format!(
+        "$found = Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($null -eq $found) {{ exit 1 }} else {{ exit 0 }}"
+    );
+    let status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &probe,
+        ])
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(format!("the process probe failed with exit code {code:?}").into()),
+    }
 }
 
 /// The one thing this arm adds to the environment has to arrive, both layers of it, and the prefix

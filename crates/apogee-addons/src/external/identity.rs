@@ -122,7 +122,7 @@ pub(crate) fn find_host(program: &Path) -> Option<Running> {
 /// Separators and case are folded, since the Windows form uses backslashes and is case-insensitive.
 #[cfg_attr(
     not(target_os = "linux"),
-    expect(dead_code, reason = "only the process probe calls this")
+    allow(dead_code, reason = "only the Linux process probe calls this")
 )]
 pub(crate) fn prefix_argv_matches(argv0: &str, program: &Path, windows: Option<&str>) -> bool {
     let normalize = |s: &str| s.replace('\\', "/").to_lowercase();
@@ -163,13 +163,13 @@ pub(crate) fn find_in_prefix(
 /// Nothing off Linux: every probe here reads `/proc`, so the check fails open and the companion
 /// starts.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn find_host(_program: &Path) -> Option<Running> {
+pub(crate) const fn find_host(_program: &Path) -> Option<Running> {
     None
 }
 
 /// Nothing off Linux, as [`find_host`].
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn find_in_prefix(
+pub(crate) const fn find_in_prefix(
     _candidates: &[i32],
     _program: &Path,
     _prefix: &Prefix,

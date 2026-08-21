@@ -1629,8 +1629,8 @@ fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), Cli
     Ok((profile.id, password, otp))
 }
 
-/// Build the core against the real network transport and XDG-resolved storage. Under the `fixtures`
-/// feature a scripted transport may be substituted (the launch backend stays real).
+/// Build the core against the real network transport and platform-resolved storage. Under the
+/// `fixtures` feature a scripted transport may be substituted (the launch backend stays real).
 fn build_core() -> Result<Core, CliError> {
     let config = CoreConfig::try_from_env()?;
     let passphrase = std::sync::Arc::new(TerminalPassphrase);

@@ -1,7 +1,10 @@
 //! The companion lifecycle over real processes: what starts, what stops, and what is never touched.
 
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::time::Duration;
 
 use apogee_addons::external::{
@@ -25,6 +28,7 @@ fn runtime(dir: &Path) -> Result<Runtime, Fallible> {
 }
 
 /// A script that touches `marker` every 50ms until it is stopped.
+#[cfg(target_os = "linux")]
 fn ticker(dir: &Path, name: &str, marker: &Path) -> Result<PathBuf, Fallible> {
     let path = dir.join(name);
     std::fs::write(
@@ -39,6 +43,7 @@ fn ticker(dir: &Path, name: &str, marker: &Path) -> Result<PathBuf, Fallible> {
 }
 
 /// A script that writes `marker` once and exits.
+#[cfg(target_os = "linux")]
 fn one_shot(dir: &Path, name: &str, marker: &Path) -> Result<PathBuf, Fallible> {
     let path = dir.join(name);
     std::fs::write(
@@ -61,6 +66,7 @@ fn with_game(program: &Path, keep: bool) -> Result<ExternalAddon, Fallible> {
 }
 
 /// Whether the marker keeps being refreshed, which is how a still-running ticker is detected.
+#[cfg(target_os = "linux")]
 fn still_running(marker: &Path) -> bool {
     let _ = std::fs::remove_file(marker);
     std::thread::sleep(Duration::from_millis(250));
@@ -68,6 +74,7 @@ fn still_running(marker: &Path) -> bool {
 }
 
 /// The core of it: a tool starts with the game and is stopped when the game exits.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_companion_starts_with_the_game_and_stops_with_it() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -100,6 +107,7 @@ async fn a_companion_starts_with_the_game_and_stops_with_it() -> Result<(), Fall
 
 /// The stop reaches what a launcher script backgrounded, rather than orphaning it. This is the shape
 /// that leaks when only the direct child is signalled.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn stopping_reaches_a_process_the_tool_backgrounded() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -138,6 +146,7 @@ async fn stopping_reaches_a_process_the_tool_backgrounded() -> Result<(), Fallib
 
 /// A tool asked to stay is not touched, and one asked to stop beside it still is. This is the pair
 /// that proves the stop is targeted rather than a sweep.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_companion_asked_to_stay_is_left_running_while_its_sibling_stops() -> Result<(), Fallible>
 {
@@ -177,6 +186,7 @@ async fn a_companion_asked_to_stay_is_left_running_while_its_sibling_stops() -> 
 }
 
 /// An after-game tool runs exactly once, after the game, and is waited on.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_after_game_tool_runs_once_after_the_game() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -206,6 +216,7 @@ async fn an_after_game_tool_runs_once_after_the_game() -> Result<(), Fallible> {
 
 /// A tool that is already running is recognized and not started a second time. Whoever started it
 /// owns it, so this launch never stops it either.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_already_running_tool_is_recognized_and_left_alone() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -248,6 +259,7 @@ async fn an_already_running_tool_is_recognized_and_left_alone() -> Result<(), Fa
 
 /// Two tools with the same file name in different directories are different tools. Matching on the
 /// bare name collapses them into one.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn two_tools_sharing_a_file_name_both_start() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -287,6 +299,7 @@ async fn two_tools_sharing_a_file_name_both_start() -> Result<(), Fallible> {
 }
 
 /// One bad entry costs the user that entry, not the launch and not its siblings.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_broken_entry_does_not_stop_the_others() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -333,7 +346,9 @@ async fn a_broken_entry_does_not_stop_the_others() -> Result<(), Fallible> {
 async fn a_disabled_entry_is_skipped() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
     let marker = dir.path().join("alive");
-    let tool = ticker(dir.path(), "act.sh", &marker)?;
+    let tool = dir
+        .path()
+        .join(if cfg!(windows) { "act.exe" } else { "act" });
     let mut addon = with_game(&tool, false)?;
     addon.set_enabled(false);
 
@@ -350,9 +365,55 @@ async fn a_disabled_entry_is_skipped() -> Result<(), Fallible> {
     Ok(())
 }
 
+/// An empty session owes no teardown work on any host, including one with no companion runner.
+#[tokio::test]
+async fn an_empty_session_reports_no_work() -> Result<(), Fallible> {
+    let dir = tempfile::tempdir()?;
+    let runtime = runtime(dir.path())?;
+    let game = GameContext::new(std::process::id().cast_signed())?;
+
+    let session = start(&runtime, &[], &game, &AddonEvents::none()).await;
+    assert!(!session.has_work());
+    let report = session
+        .game_closed(&CancellationToken::new(), &AddonEvents::none())
+        .await;
+    assert!(report.outcomes.is_empty());
+    Ok(())
+}
+
+/// Windows validates a real native executable path and reports the current unsupported companion
+/// runner as one add-on failure, without turning it into session work or a launch-wide failure.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_windows_host_tool_reports_the_companion_runtime_gap() -> Result<(), Fallible> {
+    let dir = tempfile::tempdir()?;
+    let runtime = runtime(dir.path())?;
+    let game = GameContext::new(std::process::id().cast_signed())?;
+    let program = std::env::current_exe()?;
+
+    let session = start(
+        &runtime,
+        &[with_game(&program, false)?],
+        &game,
+        &AddonEvents::none(),
+    )
+    .await;
+
+    assert!(!session.has_work());
+    let Outcome::Failed { reason, .. } = &session.report().outcomes[0].outcome else {
+        panic!("an unsupported companion run must be reported as one failed add-on");
+    };
+    assert!(
+        reason.contains("unsupported: running a companion program"),
+        "the platform gap was not preserved in the cause chain: {reason}"
+    );
+    Ok(())
+}
+
 /// The backstop. Consuming the session makes the teardown happen at most once; nothing makes it
 /// happen at all, because an error on the launch path drops the session instead. Dropping must not
 /// leave companions running with nothing left that knows about them.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dropping_the_session_still_stops_what_it_started() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -382,6 +443,7 @@ async fn dropping_the_session_still_stops_what_it_started() -> Result<(), Fallib
 }
 
 /// Giving up on a launch stops what was started and runs nothing that expects a played session.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn abandoning_a_launch_stops_tools_and_skips_the_after_game_ones() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -415,6 +477,7 @@ async fn abandoning_a_launch_stops_tools_and_skips_the_after_game_ones() -> Resu
 
 /// A launcher that would otherwise detach after starting the game has to know whether anything is
 /// still owed at exit.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_session_reports_whether_it_still_has_work() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -467,6 +530,7 @@ async fn a_session_reports_whether_it_still_has_work() -> Result<(), Fallible> {
 
 /// A tool running alongside the game is told where the game is, so a wrapper does not need a
 /// substitution language in its argument vector to find it.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_companion_is_told_the_game_process_id() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -501,6 +565,7 @@ async fn a_companion_is_told_the_game_process_id() -> Result<(), Fallible> {
 
 /// An after-game tool is not handed the game's process id. By the time it runs that names a process
 /// that has exited, and the number can already belong to something else.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_after_game_tool_is_not_told_a_process_id_that_is_gone() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -536,6 +601,7 @@ fn a_game_context_refuses_a_pid_that_is_not_one() {
 }
 
 /// Arguments reach the child verbatim, so a path with spaces stays one argument.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn arguments_reach_the_child_unsplit() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -571,6 +637,7 @@ async fn arguments_reach_the_child_unsplit() -> Result<(), Fallible> {
 /// launcher had nothing left to do, and the only way out was to kill it. The token is what bounds that
 /// wait, and the tool is stopped on the way out rather than left running with nothing that knows it is
 /// there.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_cancelled_teardown_stops_waiting_on_a_tool_that_never_exits() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -617,7 +684,9 @@ async fn a_cancelled_teardown_stops_waiting_on_a_tool_that_never_exits() -> Resu
 async fn a_teardown_cancelled_first_never_starts_the_tools_it_has_left() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
     let marker = dir.path().join("ran");
-    let tool = one_shot(dir.path(), "sync.sh", &marker)?;
+    let tool = dir
+        .path()
+        .join(if cfg!(windows) { "sync.exe" } else { "sync" });
     let addon = ExternalAddon::new(&tool, vec![], RunIn::Host, Trigger::OnClose)?;
 
     let runtime = runtime(dir.path())?;
@@ -641,6 +710,7 @@ async fn a_teardown_cancelled_first_never_starts_the_tools_it_has_left() -> Resu
 /// is still editing it rather than at the moment the game starts.
 #[test]
 fn an_entry_says_why_it_cannot_be_run_before_a_launch_asks() -> Result<(), Fallible> {
+    let dir = tempfile::tempdir()?;
     let relative = ExternalAddon::new(Path::new("tool.sh"), vec![], RunIn::Host, Trigger::OnClose);
     assert!(
         relative.is_err(),
@@ -648,7 +718,7 @@ fn an_entry_says_why_it_cannot_be_run_before_a_launch_asks() -> Result<(), Falli
     );
 
     let in_prefix = ExternalAddon::new(
-        Path::new("/opt/tool.exe"),
+        dir.path().join("tool.exe"),
         vec![],
         RunIn::Prefix,
         Trigger::OnClose,

@@ -108,6 +108,7 @@ fn hostile_archive(
 }
 
 /// The round trip: what comes back is what went in, byte for byte.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn a_restored_tree_matches_what_was_backed_up() -> Result<(), Fallible> {
     let source = tempfile::tempdir()?;
@@ -147,6 +148,7 @@ fn a_restored_tree_matches_what_was_backed_up() -> Result<(), Fallible> {
 
 /// Restoring over a live tree replaces it, and the tree that was there is set aside rather than
 /// deleted, so the restore can be undone with one rename.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn the_previous_tree_is_set_aside_not_deleted() -> Result<(), Fallible> {
     let source = tempfile::tempdir()?;
@@ -181,6 +183,7 @@ fn the_previous_tree_is_set_aside_not_deleted() -> Result<(), Fallible> {
 }
 
 /// A root the plan does not name is left where it is.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn a_root_the_plan_does_not_name_is_untouched() -> Result<(), Fallible> {
     let source = tempfile::tempdir()?;
@@ -201,6 +204,7 @@ fn a_root_the_plan_does_not_name_is_untouched() -> Result<(), Fallible> {
 }
 
 /// The escape attempts, each of which must abort the whole restore rather than skip the entry.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn an_entry_that_would_escape_aborts_the_restore() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -239,6 +243,7 @@ fn an_entry_that_would_escape_aborts_the_restore() -> Result<(), Fallible> {
 
 /// A symlink entry is refused outright. A real config tree contains none, so allowing them would buy
 /// nothing and admit aliasing into a directory the game writes to afterwards.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn a_symlink_entry_is_refused() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -264,6 +269,7 @@ fn a_symlink_entry_is_refused() -> Result<(), Fallible> {
 
 /// Two entries differing only in case land on one file where the destination folds case, so the pair
 /// is refused rather than silently collapsed.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn two_entries_that_differ_only_in_case_are_refused() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -292,6 +298,7 @@ fn two_entries_that_differ_only_in_case_are_refused() -> Result<(), Fallible> {
 
 /// Content is checked against the archive's own record as it is written, so a file altered after the
 /// backup was taken cannot be restored as if it were genuine.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn a_tampered_entry_is_caught_by_its_recorded_hash() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -328,6 +335,7 @@ fn a_tampered_entry_is_caught_by_its_recorded_hash() -> Result<(), Fallible> {
 
 /// An entry present in the container but absent from the record is refused, so an archive cannot be
 /// grown after the fact by appending to it.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn an_entry_missing_from_the_record_is_refused() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -363,6 +371,7 @@ fn an_entry_missing_from_the_record_is_refused() -> Result<(), Fallible> {
 }
 
 /// A refused restore leaves nothing behind, so a second attempt starts clean.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn a_refused_restore_leaves_no_staging_directory() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -393,6 +402,7 @@ fn a_refused_restore_leaves_no_staging_directory() -> Result<(), Fallible> {
 }
 
 /// A restore can be run twice; the second sets the first aside under its own name.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn restoring_twice_keeps_both_previous_trees() -> Result<(), Fallible> {
     let source = tempfile::tempdir()?;
@@ -438,21 +448,26 @@ fn a_plan_derived_from_the_archive_targets_what_the_archive_holds() -> Result<()
             .collect::<Vec<_>>(),
         "every root the archive records has somewhere to land"
     );
-    let report = restore(&derived, &CancellationToken::new())?;
-    assert_eq!(report.restored.len(), derived.targets.len());
-    assert!(report.absent.is_empty(), "{:?}", report.absent);
+    #[cfg(unix)]
+    {
+        let report = restore(&derived, &CancellationToken::new())?;
+        assert_eq!(report.restored.len(), derived.targets.len());
+        assert!(report.absent.is_empty(), "{:?}", report.absent);
 
-    // And it puts back exactly what a caller writing the map by hand would, which is the whole claim:
-    // the derivation is not a different restore, it is the same one with nothing left to get wrong.
-    let stated = live.path().join("stated");
-    restore(&plan(&archive, &stated), &CancellationToken::new())?;
-    assert_eq!(snapshot(&target)?, snapshot(&stated)?);
+        // And it puts back exactly what a caller writing the map by hand would, which is the whole
+        // claim: the derivation is not a different restore, it is the same one with nothing left to
+        // get wrong.
+        let stated = live.path().join("stated");
+        restore(&plan(&archive, &stated), &CancellationToken::new())?;
+        assert_eq!(snapshot(&target)?, snapshot(&stated)?);
+    }
     Ok(())
 }
 
 /// A restore that put nothing back says so. Without it the report reads exactly like one that put
 /// everything back: the label lands in neither list, the call returns `Ok`, and the person on the end
 /// of it is recovering settings they cannot otherwise get back.
+#[cfg_attr(not(unix), ignore = "secure restore into a live tree is Unix-only")]
 #[test]
 fn a_targeted_root_the_archive_holds_nothing_for_is_reported_absent() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
@@ -474,5 +489,29 @@ fn a_targeted_root_the_archive_holds_nothing_for_is_reported_absent() -> Result<
         !target.exists(),
         "and nothing was written where it would go"
     );
+    Ok(())
+}
+
+/// Windows exposes the operation and refuses it explicitly rather than omitting it or attempting an
+/// unsafe path-based fallback.
+#[cfg(not(unix))]
+#[test]
+fn restore_reports_its_typed_unsupported_boundary() -> Result<(), Fallible> {
+    let source = tempfile::tempdir()?;
+    let dest = tempfile::tempdir()?;
+    game_tree(source.path())?;
+    let archive = back_up(source.path(), dest.path())?;
+    let target = dest.path().join("restored");
+
+    let outcome = restore(&plan(&archive, &target), &CancellationToken::new());
+
+    assert!(matches!(
+        outcome,
+        Err(BackupError::Unsupported {
+            what: "restoring a backup",
+            ..
+        })
+    ));
+    assert!(!target.exists(), "a refused restore wrote a live tree");
     Ok(())
 }

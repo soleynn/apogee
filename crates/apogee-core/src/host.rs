@@ -61,9 +61,10 @@ pub fn computer_id(store: &Store) -> ComputerId {
 
 /// The monotonic tick the game will re-derive its launch-argument key from.
 ///
-/// The game runs under Wine, which maps `GetTickCount` onto the host `CLOCK_MONOTONIC_RAW`, so the
-/// launcher reads that same clock. Mirrors the reference launcher's Linux tick source: read
-/// `CLOCK_MONOTONIC_RAW`, then `tv_sec * 1000 + tv_nsec / 1_000_000` truncated to 32 bits.
+/// Under Wine, `GetTickCount` maps onto the host `CLOCK_MONOTONIC_RAW`, so the Linux launcher reads
+/// that clock directly. On native Windows, PowerShell exposes the same signed 32-bit
+/// `Environment.TickCount` value the reference launcher casts to `u32`; reading it out of process
+/// keeps this crate's host boundary free of unsafe Win32 calls.
 ///
 /// Read this as late as possible. The game masks the tick to its high 16 bits and retries exactly one
 /// 65536 ms step down, so a reading more than two of those steps old cannot be recovered and the
@@ -71,8 +72,8 @@ pub fn computer_id(store: &Store) -> ComputerId {
 ///
 /// # Errors
 ///
-/// [`CoreError::NoTickSource`] where the host exposes no such clock, which is every non-Linux target:
-/// there the game is not a Wine process and this mapping does not hold.
+/// [`CoreError::NoTickSource`] when the platform has no matching source, or when Windows cannot run
+/// or decode its system PowerShell tick query.
 #[cfg(target_os = "linux")]
 pub fn game_tick() -> Result<TickCount, CoreError> {
     use rustix::time::{ClockId, clock_gettime};
@@ -80,10 +81,51 @@ pub fn game_tick() -> Result<TickCount, CoreError> {
     Ok(TickCount::from_raw(timespec_to_tick(ts.tv_sec, ts.tv_nsec)))
 }
 
-/// Off Linux the game is not a Wine process, so no host clock is known to match what it reads.
-#[cfg(not(target_os = "linux"))]
+/// Read the native Windows tick through the system's managed runtime. The signed decimal form is
+/// intentional: `Environment.TickCount` is an `i32`, and casting that bit pattern to `u32` matches
+/// the reference launcher's unchecked cast across the 24.9-day sign boundary.
+#[cfg(target_os = "windows")]
+pub fn game_tick() -> Result<TickCount, CoreError> {
+    use std::os::windows::process::CommandExt as _;
+    use std::process::Command;
+
+    // PowerShell is slower and more fallible than an in-process call, but it is built into the
+    // supported Windows hosts and keeps the unsafe FFI needed for `GetTickCount` out of this crate.
+    // `CREATE_NO_WINDOW` also prevents this short query from flashing a console in GUI launches.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Environment]::TickCount",
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().map_err(|_| CoreError::NoTickSource)?;
+    if !output.status.success() {
+        return Err(CoreError::NoTickSource);
+    }
+
+    let tick = parse_windows_tick(&output.stdout).ok_or(CoreError::NoTickSource)?;
+    Ok(TickCount::from_raw(tick))
+}
+
+/// No host clock is yet known to match a native game on the remaining platforms.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn game_tick() -> Result<TickCount, CoreError> {
     Err(CoreError::NoTickSource)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_tick(stdout: &[u8]) -> Option<u32> {
+    let signed = std::str::from_utf8(stdout)
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
+    Some(signed as u32)
 }
 
 /// The pure fold from a `CLOCK_MONOTONIC_RAW` timespec to the launcher's 32-bit tick.
@@ -129,6 +171,7 @@ fn launcher_time_from_epoch(secs: u64, millis: u64) -> LauncherTime {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs;
 
     use tempfile::TempDir;
@@ -241,6 +284,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn game_tick_reads_the_host_clock() {
+        assert!(game_tick().is_ok());
+    }
+
+    /// Windows reports the clock as a signed integer even though the launch protocol consumes its
+    /// 32-bit bit pattern. Pin both sides of the sign boundary and reject anything but one integer.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_tick_preserves_the_signed_bit_pattern() {
+        assert_eq!(parse_windows_tick(b"2147483647\r\n"), Some(0x7fff_ffff));
+        assert_eq!(parse_windows_tick(b"-2147483648\r\n"), Some(0x8000_0000));
+        assert_eq!(parse_windows_tick(b"-1\n"), Some(u32::MAX));
+        assert_eq!(parse_windows_tick(b"12 trailing\n"), None);
+        assert_eq!(parse_windows_tick(b"4294967295\n"), None);
+    }
+
+    /// Exercise the actual native source, including process startup and output decoding.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn game_tick_reads_the_native_windows_clock() {
         assert!(game_tick().is_ok());
     }
 }

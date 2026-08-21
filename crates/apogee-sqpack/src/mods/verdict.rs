@@ -217,6 +217,12 @@ mod tests {
     use crate::game::Repo;
     use crate::integrity::ContainerId;
 
+    fn native_path(parts: &[&str]) -> String {
+        let mut path = std::path::PathBuf::new();
+        path.extend(parts);
+        path.display().to_string()
+    }
+
     fn at(file: ContainerId) -> ContainerRef {
         ContainerRef::new(Repo::Ex(1), ArchiveId::new(0x02, 1, 1), file)
     }
@@ -244,7 +250,10 @@ mod tests {
         };
         assert_eq!(
             file.to_string(),
-            "sqpack/ex1/020101.win32.dat1 key=0x0123456789abcdef +0x1000..0x1280: foreign"
+            format!(
+                "{} key=0x0123456789abcdef +0x1000..0x1280: foreign",
+                native_path(&["sqpack", "ex1", "020101.win32.dat1"])
+            )
         );
         // A verdict that cannot separate this file from its neighbours has to say so on the line
         // itself, not only in a field a renderer may drop.
@@ -270,21 +279,36 @@ mod tests {
         };
         assert_eq!(
             grown.to_string(),
-            "sqpack/ex1/020101.win32.dat0: grown (8192 bytes, should be 4096)"
+            format!(
+                "{}: grown (8192 bytes, should be 4096)",
+                native_path(&["sqpack", "ex1", "020101.win32.dat0"])
+            )
         );
         let same = ContainerVerdict {
             standing: ContainerStanding::Rewritten,
             actual_len: Some(4096),
             ..grown
         };
-        assert_eq!(same.to_string(), "sqpack/ex1/020101.win32.dat0: rewritten");
+        assert_eq!(
+            same.to_string(),
+            format!(
+                "{}: rewritten",
+                native_path(&["sqpack", "ex1", "020101.win32.dat0"])
+            )
+        );
         let unknown = ContainerVerdict {
             standing: ContainerStanding::Unknown,
             pristine_len: None,
             actual_len: None,
             ..grown
         };
-        assert_eq!(unknown.to_string(), "sqpack/ex1/020101.win32.dat0: unknown");
+        assert_eq!(
+            unknown.to_string(),
+            format!(
+                "{}: unknown",
+                native_path(&["sqpack", "ex1", "020101.win32.dat0"])
+            )
+        );
     }
 
     /// Every variant of an enum, as a list the compiler will not let go stale.

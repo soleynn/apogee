@@ -40,6 +40,37 @@ fn version() -> Option<VersionWrite> {
     })
 }
 
+/// Whether this host rejects `RunAs` before even an inbox Windows executable can initialize.
+///
+/// A worker-specific startup failure must stay a failure. The test yields only when the same status
+/// comes back from `cmd.exe`, proving the host's elevation boundary itself is unavailable (as it is
+/// inside the desktop app's restricted Windows token).
+async fn host_rejects_runas_like(worker_detail: &str) -> bool {
+    const DLL_INIT_FAILED: &str = "0xc0000142";
+    if !worker_detail.contains(DLL_INIT_FAILED) {
+        return false;
+    }
+    let script = "$ErrorActionPreference='Stop'; \
+                  $p = Start-Process -FilePath 'cmd.exe' \
+                    -ArgumentList '/d','/c','exit','0' -Verb RunAs -WindowStyle Hidden \
+                    -PassThru -Wait; \
+                  exit $p.ExitCode";
+    let Ok(output) = tokio::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-NoLogo",
+            "-Command",
+            script,
+        ])
+        .output()
+        .await
+    else {
+        return false;
+    };
+    !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(DLL_INIT_FAILED)
+}
+
 /// Apply one fixture patch over an already-open session and check the tree it left.
 async fn apply_and_check<R, W>(
     session: &mut Session<R, W>,
@@ -124,7 +155,19 @@ async fn the_elevation_request_reaches_a_working_worker() -> Result<(), Box<dyn 
     let root = tempfile::tempdir()?;
     let path = place(store.path(), "p.patch", &patch)?;
 
-    let mut worker = apogee_elevate::spawn::elevated(&worker()).await?;
+    let mut worker = match apogee_elevate::spawn::elevated(&worker()).await {
+        Ok(worker) => worker,
+        Err(apogee_elevate::Error::Spawn { detail, .. })
+            if host_rejects_runas_like(&detail).await =>
+        {
+            eprintln!(
+                "skipping elevation hop: this host rejects RunAs for both the worker and cmd.exe: \
+                 {detail}"
+            );
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
     apply_and_check(worker.session(), root.path(), &path, &patch).await?;
     assert_eq!(
         worker.finish().await,
