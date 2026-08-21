@@ -90,7 +90,7 @@ fn extract(
 /// # Errors
 /// Always [`AddonError::Unsupported`].
 #[cfg(not(target_os = "linux"))]
-fn extract(
+const fn extract(
     _archive: &Path,
     _layout: &apogee_runtime::ArchiveLayout,
     _dest: &Path,

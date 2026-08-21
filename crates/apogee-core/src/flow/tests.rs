@@ -2,7 +2,7 @@
 //! backend, plus the session-cache fast path. No network, no real process.
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -41,6 +41,15 @@ use fx::{BOOT_VERSION, GAME_VERSION, SESSION_ID, STEAM_LINKED_ID, UNIQUE_ID};
 const REGION: u16 = 3;
 const MAX_EXPANSION: u8 = 4;
 const NOW: u64 = 1_000;
+
+/// Build an absolute fixture path using the host's path syntax.
+fn absolute_fixture_path(relative: &str) -> PathBuf {
+    let path = std::env::temp_dir()
+        .join("apogee-flow-test-fixtures")
+        .join(relative);
+    assert!(path.is_absolute(), "test fixture path must be absolute");
+    path
+}
 
 /// A game install whose expansion count matches the fixtures' `maxex`, so `from_install` succeeds.
 fn game_install() -> TempDir {
@@ -983,7 +992,7 @@ async fn a_current_game_launches_straight_through() {
         ]
     );
     let plan = launch.last_plan().unwrap();
-    assert!(plan.program().ends_with("/game/ffxiv_dx11.exe"));
+    assert!(Path::new(plan.program()).ends_with(PathBuf::from("game").join("ffxiv_dx11.exe")));
     assert!(plan.working_dir().is_some_and(|dir| dir.ends_with("game")));
     assert!(plan.args().starts_with("//**sqex0003"));
 }
@@ -1220,7 +1229,7 @@ async fn checking_a_prefix_reports_its_drift_and_changes_nothing() {
     let h = harness(false);
     let drift = apogee_runtime::PrefixHealth {
         issues: vec![apogee_runtime::HealthIssue::MissingSkeleton {
-            path: std::path::PathBuf::from("/prefix/system.reg"),
+            path: absolute_fixture_path("prefix/system.reg"),
         }],
     };
     let launch = Arc::new(
@@ -1292,7 +1301,7 @@ async fn fixing_a_prefix_reports_what_is_left_and_never_recreates() {
     let before = apogee_runtime::PrefixHealth {
         issues: vec![
             apogee_runtime::HealthIssue::MissingSkeleton {
-                path: std::path::PathBuf::from("/prefix/system.reg"),
+                path: absolute_fixture_path("prefix/system.reg"),
             },
             apogee_runtime::HealthIssue::RunnerMismatch {
                 recorded: apogee_runtime::RunnerRef {
@@ -1589,9 +1598,10 @@ async fn fixing_a_prefix_applies_the_setup_the_check_reports_missing() {
 async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
     let h = harness(false);
     let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let state_cache = absolute_fixture_path("prefix/dxvk_cache");
     let launch = Arc::new(
         FakeLaunchBackend::exiting().with_dxvk(apogee_runtime::DxvkEnv {
-            state_cache: Some(std::path::PathBuf::from("/prefix/dxvk_cache")),
+            state_cache: Some(state_cache.clone()),
             nvapi: apogee_runtime::NvapiOverride::Unset,
         }),
     );
@@ -1607,7 +1617,7 @@ async fn a_prefix_with_graphics_translation_launches_with_it_activated() {
     );
     assert_eq!(
         plan.env().get("DXVK_STATE_CACHE_PATH").map(String::as_str),
-        Some("/prefix/dxvk_cache")
+        state_cache.to_str()
     );
 }
 
@@ -1939,10 +1949,11 @@ async fn a_prefix_with_no_settings_yet_neither_captures_nor_complains() {
 #[tokio::test]
 async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
     let h = harness(false);
+    let program = absolute_fixture_path("tools/act/act.sh");
     let mut profile = h.store.load_profile(h.profile).unwrap();
     profile.external.push(
         ExternalAddon::new(
-            "/opt/act/act.sh",
+            program.clone(),
             vec![],
             RunIn::Host,
             Trigger::WithGame {
@@ -1996,10 +2007,7 @@ async fn companions_start_after_the_game_and_are_torn_down_when_it_exits() {
             FlowState::Exited
         ]
     );
-    assert_eq!(
-        addons.started_programs(),
-        [std::path::PathBuf::from("/opt/act/act.sh")]
-    );
+    assert_eq!(addons.started_programs(), [program]);
 }
 
 /// A cancelled launch stops what was started but never runs the tools that expect a session which
@@ -2594,7 +2602,7 @@ async fn a_local_index_override_rides_the_plan_for_its_repo_alone() {
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let ctx = context_with(&h, transport, patch.clone(), launch, NOW);
 
-    let apzi = PathBuf::from("/somewhere/game.apzi");
+    let apzi = absolute_fixture_path("indexes/game.apzi");
     let events = run(
         ctx,
         Command::Repair {
@@ -2629,7 +2637,10 @@ async fn a_local_index_for_an_uninstalled_repo_is_refused_before_any_repair() {
         ctx,
         Command::Repair {
             profile: h.profile,
-            local_indexes: vec![(Repo::Expansion(5), PathBuf::from("/somewhere/ex5.apzi"))],
+            local_indexes: vec![(
+                Repo::Expansion(5),
+                absolute_fixture_path("indexes/ex5.apzi"),
+            )],
         },
     )
     .await;

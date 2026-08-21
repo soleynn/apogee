@@ -226,10 +226,13 @@ pub fn create(
             entry: MANIFEST_ENTRY.to_owned(),
             source: Box::new(source),
         })?;
-    writer.finish().map_err(|source| BackupError::Archive {
+    let finished = writer.finish().map_err(|source| BackupError::Archive {
         entry: MANIFEST_ENTRY.to_owned(),
         source: Box::new(source),
     })?;
+    // `ZipWriter::finish` returns its reopened file handle. Make its closure explicit before the
+    // persistence boundary: Windows requires every archive handle closed before the move.
+    drop(finished);
 
     let archive = persist(temp, &spec.dest_dir, manifest.created_at)?;
     let archive_bytes = std::fs::metadata(&archive)
@@ -396,9 +399,12 @@ fn persist(
             .create_new(true)
             .open(&candidate)
         {
-            Ok(_) => {
+            Ok(reservation) => {
                 // Reserved, then replaced by the rename: same filesystem, so the final name appears
-                // whole or not at all.
+                // whole or not at all. Close the reservation before replacing it: this open
+                // destination handle is the Windows `AccessDenied` that Linux's rename semantics
+                // had masked.
+                drop(reservation);
                 return temp
                     .persist(&candidate)
                     .map(|_| candidate.clone())

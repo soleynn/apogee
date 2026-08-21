@@ -7,6 +7,7 @@
 //! hands back: nothing is scanned for and nothing is resolved, because the process that was spawned
 //! *is* the game.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::process::{Child, Command};
@@ -37,6 +38,71 @@ const HIGH_DPI_AWARE: &str = "HighDPIAware";
 // Named explicitly rather than left out, because with no DPI layer at all the executable's manifest
 // decides, which is a third behaviour and not what asking for an unaware launch means.
 const DPI_UNAWARE: &str = "DPIUnaware";
+
+/// Hide the short PowerShell process query in GUI launches.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The client executable the patch guard narrows to inside an install.
+const GAME_EXE: &str = "ffxiv_dx11.exe";
+
+/// Query a client's executable path without parsing localized command output. The script's exit code
+/// is the whole interface: found, absent, or unable to inspect a candidate safely.
+const GAME_RUNNING_QUERY: &str = r#"
+$expected = [IO.Path]::GetFullPath($env:APOGEE_GAME_EXE)
+foreach ($attempt in 1..3) {
+    $inspectionFailed = $false
+    $candidates = @(Get-Process -Name 'ffxiv_dx11' -ErrorAction SilentlyContinue)
+    foreach ($candidate in $candidates) {
+        try { $actual = $candidate.Path } catch { $inspectionFailed = $true; continue }
+        if ([string]::IsNullOrEmpty($actual)) { $inspectionFailed = $true; continue }
+        if ([IO.Path]::GetFullPath($actual) -ieq $expected) { exit 0 }
+    }
+    if (-not $inspectionFailed) { exit 1 }
+    if ($attempt -lt 3) { Start-Sleep -Milliseconds 25 }
+}
+exit 2
+"#;
+
+/// Whether the native game client is running from `game_root`.
+///
+/// The process name first bounds the candidate set, then each candidate's executable path is
+/// compared case-insensitively with this install's `game/ffxiv_dx11.exe`. That keeps another install
+/// from blocking this one. PowerShell supplies the safe system-process API already used by the core
+/// clock boundary, avoiding an unsafe Win32 call in this crate.
+///
+/// # Errors
+/// [`RuntimeError::Io`] when PowerShell cannot be started or cannot inspect a candidate process.
+pub fn game_running(game_root: &Path) -> Result<bool, RuntimeError> {
+    use std::os::windows::process::CommandExt as _;
+
+    let expected = game_root.join("game").join(GAME_EXE);
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            GAME_RUNNING_QUERY,
+        ])
+        .env("APOGEE_GAME_EXE", &expected)
+        .creation_flags(CREATE_NO_WINDOW);
+    let status = command.status().map_err(|source| RuntimeError::Io {
+        path: PathBuf::from("powershell.exe"),
+        source,
+    })?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(RuntimeError::Io {
+            path: expected,
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("the Windows process query failed with exit code {code:?}"),
+            ),
+        }),
+    }
+}
 
 /// The compatibility layers a launch runs under: the privilege one always, then the DPI one
 /// `dpi_aware` selects.

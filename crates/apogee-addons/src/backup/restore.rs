@@ -51,7 +51,7 @@ use super::manifest::{EntryRecord, MANIFEST_ENTRY};
 /// # Errors
 /// Always [`BackupError::Unsupported`].
 #[cfg(not(unix))]
-pub fn restore(
+pub const fn restore(
     plan: &RestorePlan,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<RestoreReport, BackupError> {

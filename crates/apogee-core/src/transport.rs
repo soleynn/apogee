@@ -180,6 +180,22 @@ mod tests {
             .map_err(|_| std::io::Error::other("the listener's address is not a url"))?;
         tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
+                // Drain the request head before closing the socket. Windows resets a TCP connection
+                // that is closed with unread inbound data, which can discard the response the test
+                // server just wrote even though the same fixture happens to work on Unix.
+                let mut request = Vec::with_capacity(1024);
+                while request.len() < 8192 && !request.ends_with(b"\r\n\r\n") {
+                    let mut chunk = [0u8; 1024];
+                    let remaining = 8192 - request.len();
+                    let to_read = remaining.min(chunk.len());
+                    let Ok(read) = socket.read(&mut chunk[..to_read]).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
                 let body = "ok";
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n{headers}\r\n{body}",

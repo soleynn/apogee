@@ -1,10 +1,6 @@
 //! Throwaway on-disk sandboxes: a temp settings store, a temp game root, and a minimal wine prefix,
 //! each auto-removed when the returned handle drops.
 
-// Only the wine-prefix helpers take a path, and both are Unix-only: ungated, a Windows build of this
-// crate warns on an unused import, which every Windows job reaching this dev dependency then has to
-// look past.
-#[cfg(unix)]
 use std::path::Path;
 
 use tempfile::{Builder, TempDir};
@@ -19,10 +15,11 @@ pub fn temp_game_root() -> std::io::Result<TempDir> {
     Builder::new().prefix("apogee-game-").tempdir()
 }
 
-/// Lay down a minimal healthy wine prefix under a fresh temp dir: `drive_c/windows`, a `dosdevices/`
-/// with `c:` → `../drive_c` and `z:` → `/`, and a placeholder `system.reg`. Enough for the drive-map
-/// and health-check paths without a real `wineboot`. Tests that need drift mutate the returned tree.
-#[cfg(unix)]
+/// Lay down a minimal wine-prefix fixture under a fresh temp dir: `drive_c/windows`, `dosdevices/`,
+/// and a placeholder `system.reg`. On Unix the drive directory also carries Wine's `c:` and `z:`
+/// symlinks. Windows cannot create those names and does not reliably permit symlinks, so its fixture
+/// keeps the directory empty; consumers there still get the prefix files that do not require Wine
+/// drive translation. Tests that need drift mutate the returned tree.
 pub fn build_minimal_prefix() -> std::io::Result<TempDir> {
     let dir = Builder::new().prefix("apogee-prefix-").tempdir()?;
     write_prefix_skeleton(dir.path())?;
@@ -31,15 +28,18 @@ pub fn build_minimal_prefix() -> std::io::Result<TempDir> {
 
 /// Write the minimal wine skeleton into an existing prefix directory (used by [`build_minimal_prefix`]
 /// and by tests that own the directory's lifetime).
-#[cfg(unix)]
 pub fn write_prefix_skeleton(root: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     std::fs::create_dir_all(root.join("drive_c/windows"))?;
     let dosdevices = root.join("dosdevices");
     std::fs::create_dir_all(&dosdevices)?;
-    symlink("../drive_c", dosdevices.join("c:"))?;
-    symlink("/", dosdevices.join("z:"))?;
+    #[cfg(unix)]
+    {
+        symlink("../drive_c", dosdevices.join("c:"))?;
+        symlink("/", dosdevices.join("z:"))?;
+    }
     std::fs::write(root.join("system.reg"), b"WINE REGISTRY Version 2\n")?;
     Ok(())
 }
@@ -102,20 +102,31 @@ mod tests {
         assert_ne!(store.path(), game.path());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn minimal_prefix_has_a_drive_map_and_skeleton() {
+    fn minimal_prefix_has_the_platform_skeleton() {
         let prefix = build_minimal_prefix().expect("prefix");
         let root = prefix.path();
         assert!(root.join("drive_c/windows").is_dir());
+        assert!(root.join("dosdevices").is_dir());
         assert!(root.join("system.reg").is_file());
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read_link(root.join("dosdevices/z:")).expect("z:"),
+                std::path::PathBuf::from("/")
+            );
+            assert_eq!(
+                std::fs::read_link(root.join("dosdevices/c:")).expect("c:"),
+                std::path::PathBuf::from("../drive_c")
+            );
+        }
+        #[cfg(windows)]
         assert_eq!(
-            std::fs::read_link(root.join("dosdevices/z:")).expect("z:"),
-            std::path::PathBuf::from("/")
-        );
-        assert_eq!(
-            std::fs::read_link(root.join("dosdevices/c:")).expect("c:"),
-            std::path::PathBuf::from("../drive_c")
+            std::fs::read_dir(root.join("dosdevices"))
+                .expect("dosdevices")
+                .count(),
+            0,
+            "Windows fixture must not require symlink privilege"
         );
     }
 

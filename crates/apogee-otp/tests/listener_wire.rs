@@ -380,13 +380,18 @@ async fn a_source_off_the_allowlist_gets_no_answer() -> Fallible {
     let outcome = listener.wait_for_code(Duration::from_millis(400)).await;
     assert!(matches!(outcome, Err(OtpError::Timeout)));
 
-    // Either shape is the same fact: nothing was answered. A source off the list is closed before its
-    // request is read, so the request is still queued and the close makes the kernel send a reset,
-    // which the client sees instead of a clean end of file. Not answering at all is the point; which
-    // way the operating system spells it is not ours to choose.
+    // Every accepted shape is the same fact: nothing was answered. A source off the list is closed
+    // before its request is read, so the queued request makes the close non-graceful. Unix reports
+    // that as a reset; Windows may report its local endpoint aborting the connection instead. A clean
+    // empty EOF is valid too. Data or any unrelated socket error still fails.
     match probe.await? {
         Ok(answer) => assert!(answer.is_empty(), "a refused source was answered"),
-        Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset, "{err}"),
+        Err(err) => match err.kind() {
+            io::ErrorKind::ConnectionReset => {}
+            #[cfg(windows)]
+            io::ErrorKind::ConnectionAborted => {}
+            unexpected => panic!("a refused source failed with {unexpected:?}: {err}"),
+        },
     }
     Ok(())
 }

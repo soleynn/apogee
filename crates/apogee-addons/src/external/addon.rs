@@ -59,8 +59,9 @@ pub enum Trigger {
 /// # fn main() -> apogee_addons::Result<()> {
 /// use apogee_addons::{ExternalAddon, RunIn, Trigger};
 ///
+/// let program = std::env::temp_dir().join("Advanced Combat Tracker.exe");
 /// let tool = ExternalAddon::new(
-///     "/home/u/tools/ACT/Advanced Combat Tracker.exe",
+///     program,
 ///     vec!["-noicon".to_owned()],
 ///     RunIn::Prefix,
 ///     Trigger::WithGame {
@@ -103,7 +104,8 @@ impl ExternalAddon {
     /// let relative = ExternalAddon::new("tools/act.sh", vec![], RunIn::Host, Trigger::OnClose);
     /// assert!(matches!(relative, Err(AddonError::InvalidAddon { .. })));
     ///
-    /// let absolute = ExternalAddon::new("/opt/act/act.sh", vec![], RunIn::Host, Trigger::OnClose);
+    /// let program = std::env::temp_dir().join("apogee-act");
+    /// let absolute = ExternalAddon::new(program, vec![], RunIn::Host, Trigger::OnClose);
     /// assert!(absolute.is_ok());
     /// ```
     pub fn new(
@@ -283,7 +285,16 @@ impl From<RawExternalAddon> for ExternalAddon {
 mod tests {
     use super::*;
 
-    fn host(program: &str) -> Result<ExternalAddon> {
+    /// Build a fixture path that is absolute in the syntax of the host running the test.
+    fn absolute(program: &str) -> PathBuf {
+        let path = std::env::temp_dir()
+            .join("apogee-external-addon-tests")
+            .join(program);
+        assert!(path.is_absolute(), "test fixture path must be absolute");
+        path
+    }
+
+    fn host(program: impl Into<PathBuf>) -> Result<ExternalAddon> {
         ExternalAddon::new(
             program,
             vec![],
@@ -303,16 +314,18 @@ mod tests {
             Err(AddonError::InvalidAddon { .. })
         ));
         assert!(matches!(host(""), Err(AddonError::InvalidAddon { .. })));
-        assert!(host("/opt/act/act.sh").is_ok());
+        assert!(host(absolute("act/act")).is_ok());
     }
 
     /// The absent-field default has to be the policy that stops, because the cost of the two wrong
     /// defaults is not symmetric.
     #[test]
     fn a_record_without_a_stop_policy_stops_with_the_game() {
-        let addon: ExternalAddon = serde_json::from_str(
-            r#"{"program":"/opt/act/act.sh","run_in":"host","trigger":{"with_game":{}}}"#,
-        )
+        let addon: ExternalAddon = serde_json::from_value(serde_json::json!({
+            "program": absolute("act/act"),
+            "run_in": "host",
+            "trigger": {"with_game": {}}
+        }))
         .expect("parse");
         assert!(!addon.keeps_running());
         assert!(addon.enabled(), "an entry is considered unless disabled");
@@ -321,17 +334,21 @@ mod tests {
     /// The combination that starts a process and then immediately kills it has no spelling.
     #[test]
     fn an_on_close_entry_cannot_also_carry_a_stop_policy() {
-        let addon: ExternalAddon = serde_json::from_str(
-            r#"{"program":"/opt/sync/sync.sh","run_in":"host","trigger":"on_close"}"#,
-        )
+        let addon: ExternalAddon = serde_json::from_value(serde_json::json!({
+            "program": absolute("sync/sync"),
+            "run_in": "host",
+            "trigger": "on_close"
+        }))
         .expect("parse");
         assert_eq!(addon.trigger(), Trigger::OnClose);
         assert!(!addon.keeps_running());
         // The only way to ask for a stop policy is on the arm that has something to stop.
         assert!(
-            serde_json::from_str::<ExternalAddon>(
-                r#"{"program":"/x","run_in":"host","trigger":{"on_close":{"keep_after_close":true}}}"#
-            )
+            serde_json::from_value::<ExternalAddon>(serde_json::json!({
+                "program": absolute("sync/invalid"),
+                "run_in": "host",
+                "trigger": {"on_close": {"keep_after_close": true}}
+            }))
             .is_err()
         );
     }
@@ -340,9 +357,12 @@ mod tests {
     /// point of execution rather than silently dropped.
     #[test]
     fn an_unknown_key_is_refused_rather_than_ignored() {
-        let addon: ExternalAddon = serde_json::from_str(
-            r#"{"program":"/opt/act/act.sh","run_in":"host","trigger":"on_close","run_as_admin":true}"#,
-        )
+        let addon: ExternalAddon = serde_json::from_value(serde_json::json!({
+            "program": absolute("act/act"),
+            "run_in": "host",
+            "trigger": "on_close",
+            "run_as_admin": true
+        }))
         .expect("an unknown key parses, so the rest of the configuration still loads");
 
         match addon.validate(0, true) {
@@ -355,8 +375,13 @@ mod tests {
     /// destroyed by opening the launcher once.
     #[test]
     fn an_unknown_key_survives_a_round_trip() {
-        let raw = r#"{"program":"/opt/act/act.sh","run_in":"host","trigger":"on_close","future_field":{"a":1}}"#;
-        let addon: ExternalAddon = serde_json::from_str(raw).expect("parse");
+        let raw = serde_json::json!({
+            "program": absolute("act/act"),
+            "run_in": "host",
+            "trigger": "on_close",
+            "future_field": {"a": 1}
+        });
+        let addon: ExternalAddon = serde_json::from_value(raw).expect("parse");
         let back = serde_json::to_value(&addon).expect("serialize");
         assert_eq!(back["future_field"], serde_json::json!({"a": 1}));
     }
@@ -365,7 +390,7 @@ mod tests {
     #[test]
     fn a_prefix_tool_without_a_prefix_is_refused() -> Result<()> {
         let addon = ExternalAddon::new(
-            "/opt/act/Advanced Combat Tracker.exe",
+            absolute("act/Advanced Combat Tracker.exe"),
             vec![],
             RunIn::Prefix,
             Trigger::WithGame {
@@ -385,12 +410,12 @@ mod tests {
     #[test]
     fn arguments_are_a_vector_not_a_command_line() -> Result<()> {
         let addon = ExternalAddon::new(
-            "/opt/tool/run",
-            vec!["--path".into(), "/home/a b/c".into()],
+            absolute("tool/run"),
+            vec!["--path".into(), "a path with spaces".into()],
             RunIn::Host,
             Trigger::OnClose,
         )?;
-        assert_eq!(addon.args(), ["--path", "/home/a b/c"]);
+        assert_eq!(addon.args(), ["--path", "a path with spaces"]);
         Ok(())
     }
 }

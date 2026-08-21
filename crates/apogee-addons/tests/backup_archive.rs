@@ -3,6 +3,7 @@
 mod common;
 
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,7 +13,9 @@ use apogee_addons::backup::{
     Selection, SelectionRoot, create, inspect,
 };
 
-use common::{CHARACTER_DIR, CHARACTER_FILES, game_tree, game_tree_reversed, hex, write};
+#[cfg(unix)]
+use common::CHARACTER_FILES;
+use common::{CHARACTER_DIR, game_tree, game_tree_reversed, hex, write};
 use tokio_util::sync::CancellationToken;
 
 /// A fixed instant, so an archive is a function of its contents alone.
@@ -52,10 +55,10 @@ fn listing(archive: &Path) -> Result<Vec<Stored>, Fallible> {
     Ok(out)
 }
 
-/// The product requirement. The same tree rebuilt in the opposite order, with every file's mode and
-/// timestamp skewed, must produce the same bytes: creation order, mtime, and mode are all incidental
-/// and none may reach the archive. The source path is held fixed because it is provenance the archive
-/// records on purpose, not an incidental difference.
+/// The product requirement. The same tree rebuilt in the opposite order, with its timestamp skewed
+/// (and, on Unix, every file's mode skewed), must produce the same bytes: creation order and source
+/// metadata are incidental and none may reach the archive. The source path is held fixed because it
+/// is provenance the archive records on purpose, not an incidental difference.
 #[test]
 fn rebuilding_a_tree_differently_does_not_change_the_archive() -> Result<(), BackupError> {
     let source = tempfile::tempdir().unwrap();
@@ -79,6 +82,7 @@ fn rebuilding_a_tree_differently_does_not_change_the_archive() -> Result<(), Bac
         }
     }
     game_tree_reversed(source.path()).unwrap();
+    #[cfg(unix)]
     for name in CHARACTER_FILES {
         let path = source.path().join(CHARACTER_DIR).join(name);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -136,6 +140,7 @@ fn a_different_instant_gives_a_different_archive() -> Result<(), BackupError> {
 fn entries_carry_fixed_metadata_not_the_sources() -> Result<(), BackupError> {
     let source = tempfile::tempdir().unwrap();
     game_tree(source.path()).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(
         source.path().join("FFXIV.cfg"),
         std::fs::Permissions::from_mode(0o777),

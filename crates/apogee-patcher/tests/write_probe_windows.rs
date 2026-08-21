@@ -15,13 +15,26 @@ use std::process::Command;
 
 use apogee_patcher::probe_writable;
 
-/// The account to write the access-control entry for, in the form `icacls` expects.
+/// The account in the current process token, in the form `icacls` expects.
+///
+/// Environment variables describe the interactive desktop account, which need not own this token:
+/// sandboxed test runners are a concrete counterexample. Ask Windows through `whoami` instead.
 fn current_account() -> Result<String, Box<dyn Error>> {
-    let user = std::env::var("USERNAME")?;
-    Ok(match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
-        _ => user,
-    })
+    let out = Command::new("whoami").output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "whoami failed with {}: {}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        )
+        .into());
+    }
+    let account = String::from_utf8(out.stdout)?.trim().to_owned();
+    if account.is_empty() {
+        return Err("whoami returned an empty account".into());
+    }
+    Ok(account)
 }
 
 /// Run `icacls` and fail loudly with its own output, since a silently unapplied entry would leave

@@ -964,7 +964,11 @@ impl Dalamud {
     ///
     /// Always returns [`AddonError::Unsupported`].
     #[cfg(not(target_os = "linux"))]
-    fn wrap(
+    #[allow(
+        clippy::unused_self,
+        reason = "the stub mirrors the Linux method so the call site stays target-independent"
+    )]
+    const fn wrap(
         &self,
         _prefix: &Prefix,
         _installed: &Installed,
@@ -994,7 +998,7 @@ fn extract(archive: &Path, dest: &Path, what: &str) -> Result<u64> {
 
 /// The stub off Linux, which always returns [`AddonError::Unsupported`].
 #[cfg(not(target_os = "linux"))]
-fn extract(_archive: &Path, _dest: &Path, _what: &str) -> Result<u64> {
+const fn extract(_archive: &Path, _dest: &Path, _what: &str) -> Result<u64> {
     Err(AddonError::Unsupported {
         what: "unpacking an injectable goes through a prefix runner, which is Linux-only",
     })

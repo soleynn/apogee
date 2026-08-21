@@ -66,9 +66,9 @@ pub(crate) trait GameHandle: Send + Sync {
 /// [`apogee_runtime::HostCaps::for_runner`]).
 #[derive(Debug, Clone)]
 pub(crate) struct Prepared {
-    /// The initialized prefix. `None` means the backend has no real prefix to hand back, which only
-    /// the test double does. A caller that needs one treats that as nothing to do rather than as a
-    /// failure, so the flows around a prefix stay drivable without a wine.
+    /// The initialized prefix. `None` means the backend has no real prefix to hand back: the test
+    /// double has no Wine, and native Windows launches directly through the operating system. A
+    /// caller that needs one treats that as nothing to do rather than as a failure.
     pub(crate) prefix: Option<apogee_runtime::Prefix>,
     /// What the host supports as seen through the runner that was just prepared.
     pub(crate) caps: apogee_runtime::HostCaps,

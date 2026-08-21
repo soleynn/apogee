@@ -78,6 +78,7 @@ fn plan(prefix: &Prefix) -> LaunchPlan {
 ///
 /// A decline leaves the plan as it was built, so a test that expects an edit catches one through the
 /// assertions it was going to make anyway.
+#[cfg(target_os = "linux")]
 fn applied(dalamud: &Dalamud, prefix: &Prefix, events: &SetupEvents) -> LaunchPlan {
     let mut plan = plan(prefix);
     if let Contribution::Edit(edit) = dalamud.prepare_launch(&plan, events).expect("prepare") {
@@ -106,6 +107,7 @@ fn notes(events: &[SetupEvent]) -> Vec<&str> {
 
 /// A launch that Dalamud takes over still waits on the game. The injector starts the game and exits, so
 /// a launcher tracking the injector would report the session as over seconds after it began.
+#[cfg(target_os = "linux")]
 #[test]
 fn wrapping_a_launch_keeps_the_game_as_the_supervised_process() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -149,6 +151,7 @@ fn wrapping_a_launch_keeps_the_game_as_the_supervised_process() {
 
 /// The injector reads one variable and the runtime it starts reads the other, and both are read by
 /// Windows code, so a Unix path in either is a runtime that does not resolve.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_runtime_reaches_the_child_as_a_windows_path_in_both_variables() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -424,8 +427,11 @@ fn a_file_the_map_names_and_the_tree_lacks_is_a_filesystem_failure() {
         panic!("a file that cannot be read is a filesystem failure, not: {fault:?}");
     };
     assert!(path.ends_with("absent.dll"), "{path:?}");
-    assert!(
-        source.to_string().to_lowercase().contains("no such file"),
+    assert_eq!(
+        source
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::NotFound),
         "the error the filesystem raised is the one carried: {source}"
     );
 }

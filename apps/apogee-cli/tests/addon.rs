@@ -20,8 +20,16 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Build a UTF-8 command-line path that is absolute on the host running the test.
+fn absolute_arg(base: &Path, relative: &str) -> String {
+    let path = base.join(relative);
+    assert!(path.is_absolute(), "test fixture path must be absolute");
+    path.to_string_lossy().into_owned()
+}
+
 /// Create a profile to hang tools off.
 fn profile(home: &Path) -> std::io::Result<()> {
+    let game_path = absolute_arg(home, "game");
     let out = run(
         home,
         &[
@@ -32,7 +40,7 @@ fn profile(home: &Path) -> std::io::Result<()> {
             "--user",
             "someone",
             "--game-path",
-            "/tmp/ffxiv",
+            &game_path,
         ],
     )?;
     assert!(out.status.success(), "profile add failed: {}", stdout(&out));
@@ -45,6 +53,8 @@ fn profile(home: &Path) -> std::io::Result<()> {
 fn a_tool_is_added_listed_and_persisted() -> std::io::Result<()> {
     let home = tempdir()?;
     profile(home.path())?;
+    let program = absolute_arg(home.path(), "tools/act/act.sh");
+    let config = absolute_arg(home.path(), "config/act.json");
 
     let out = run(
         home.path(),
@@ -54,11 +64,11 @@ fn a_tool_is_added_listed_and_persisted() -> std::io::Result<()> {
             "--profile",
             "main",
             "--program",
-            "/opt/act/act.sh",
+            &program,
             "--arg",
             "--config",
             "--arg",
-            "/home/u/act.json",
+            &config,
             "--trigger",
             "with-game",
         ],
@@ -68,7 +78,7 @@ fn a_tool_is_added_listed_and_persisted() -> std::io::Result<()> {
     let listed = run(home.path(), &["addon", "list", "--profile", "main"])?;
     let text = stdout(&listed);
     assert!(listed.status.success(), "list failed: {text}");
-    assert!(text.contains("/opt/act/act.sh"), "missing tool:\n{text}");
+    assert!(text.contains(&program), "missing tool:\n{text}");
     assert!(text.contains("with-game"), "missing trigger:\n{text}");
     assert!(text.contains("host"), "missing location:\n{text}");
     Ok(())
@@ -104,6 +114,7 @@ fn a_relative_program_is_refused() -> std::io::Result<()> {
 fn the_trigger_values_cover_the_library_and_nothing_else() -> std::io::Result<()> {
     let home = tempdir()?;
     profile(home.path())?;
+    let program = absolute_arg(home.path(), "tools/tool.sh");
 
     for trigger in ["with-game", "with-game-keep-running", "on-close"] {
         let out = run(
@@ -114,7 +125,7 @@ fn the_trigger_values_cover_the_library_and_nothing_else() -> std::io::Result<()
                 "--profile",
                 "main",
                 "--program",
-                "/opt/t/tool.sh",
+                &program,
                 "--trigger",
                 trigger,
             ],
@@ -130,7 +141,7 @@ fn the_trigger_values_cover_the_library_and_nothing_else() -> std::io::Result<()
             "--profile",
             "main",
             "--program",
-            "/opt/t/tool.sh",
+            &program,
             "--trigger",
             "kill-after-close",
         ],
@@ -148,16 +159,10 @@ fn the_trigger_values_cover_the_library_and_nothing_else() -> std::io::Result<()
 fn disabling_keeps_the_entry_and_enabling_restores_it() -> std::io::Result<()> {
     let home = tempdir()?;
     profile(home.path())?;
+    let program = absolute_arg(home.path(), "tools/act/act.sh");
     run(
         home.path(),
-        &[
-            "addon",
-            "add",
-            "--profile",
-            "main",
-            "--program",
-            "/opt/act/act.sh",
-        ],
+        &["addon", "add", "--profile", "main", "--program", &program],
     )?;
 
     let out = run(
@@ -167,7 +172,7 @@ fn disabling_keeps_the_entry_and_enabling_restores_it() -> std::io::Result<()> {
     assert!(out.status.success(), "disable failed: {}", stdout(&out));
     let listed = stdout(&run(home.path(), &["addon", "list", "--profile", "main"])?);
     assert!(listed.contains("(disabled)"), "not marked:\n{listed}");
-    assert!(listed.contains("/opt/act/act.sh"), "entry lost:\n{listed}");
+    assert!(listed.contains(&program), "entry lost:\n{listed}");
 
     run(
         home.path(),
@@ -183,10 +188,14 @@ fn disabling_keeps_the_entry_and_enabling_restores_it() -> std::io::Result<()> {
 fn removing_takes_only_the_named_entry() -> std::io::Result<()> {
     let home = tempdir()?;
     profile(home.path())?;
-    for program in ["/opt/a/one.sh", "/opt/b/two.sh", "/opt/c/three.sh"] {
+    for program in [
+        absolute_arg(home.path(), "tools/one.sh"),
+        absolute_arg(home.path(), "tools/two.sh"),
+        absolute_arg(home.path(), "tools/three.sh"),
+    ] {
         run(
             home.path(),
-            &["addon", "add", "--profile", "main", "--program", program],
+            &["addon", "add", "--profile", "main", "--program", &program],
         )?;
     }
 
@@ -230,6 +239,7 @@ fn an_index_out_of_range_is_an_error() -> std::io::Result<()> {
 fn a_profile_from_before_companion_tools_still_loads() -> std::io::Result<()> {
     let home = tempdir()?;
     profile(home.path())?;
+    let program = absolute_arg(home.path(), "tools/act/act.sh");
 
     // Rewrite the stored profile as the older schema: version 1, and no `external` key at all.
     let dir = home.path().join("config/apogee/profiles");
@@ -257,14 +267,7 @@ fn a_profile_from_before_companion_tools_still_loads() -> std::io::Result<()> {
     // And it is usable afterwards, so the migration wrote a real list rather than a stopgap.
     let out = run(
         home.path(),
-        &[
-            "addon",
-            "add",
-            "--profile",
-            "main",
-            "--program",
-            "/opt/act/act.sh",
-        ],
+        &["addon", "add", "--profile", "main", "--program", &program],
     )?;
     assert!(
         out.status.success(),
@@ -291,6 +294,8 @@ fn a_launcher_with_no_home_refuses_rather_than_using_the_working_directory() -> 
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CACHE_HOME")
+        .env_remove("APPDATA")
+        .env_remove("LOCALAPPDATA")
         .args(["addon", "list", "--profile", "main"])
         .output()?;
 
@@ -299,6 +304,38 @@ fn a_launcher_with_no_home_refuses_rather_than_using_the_working_directory() -> 
     assert!(
         stderr.contains("XDG_CONFIG_HOME") || stderr.contains("home directory"),
         "unhelpful message: {stderr}"
+    );
+    Ok(())
+}
+
+/// A normal Windows process has native application-data directories but no `HOME` or XDG
+/// variables. That environment must be sufficient to start the CLI, and explicit test paths keep
+/// this check out of the developer's real profile.
+#[cfg(windows)]
+#[test]
+fn windows_application_data_resolves_without_xdg_or_home() -> std::io::Result<()> {
+    let root = tempdir()?;
+    let roaming = root.path().join("roaming");
+    let local = root.path().join("local");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_apogee-cli"))
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env("APPDATA", &roaming)
+        .env("LOCALAPPDATA", &local)
+        .args(["profile", "list"])
+        .output()?;
+
+    assert!(
+        out.status.success(),
+        "native Windows directories were refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        roaming.join("apogee").is_dir(),
+        "the profile store did not use APPDATA"
     );
     Ok(())
 }
