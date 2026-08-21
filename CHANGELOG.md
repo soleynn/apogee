@@ -177,6 +177,7 @@ is tagged with its change type. Versioning aims to follow
 - Let a profile opt into the dxvk-nvapi companion (#203) _(added)_
 - Shard the fuzz smoke and split the wine e2e to cut wall time (#210) _(ci)_
 - Repair from a local block index when the catalog is unreachable (#214) _(added)_
+- Make native Windows workflows reliable (#249) _(fixed)_
 ## [0.4.0] - 2026-07-31
 
 ### apogee-addons
