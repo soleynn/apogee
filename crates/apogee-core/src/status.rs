@@ -56,9 +56,10 @@ pub struct NextAction {
     pub patching_available: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StoredDisposition {
+    #[default]
     Unknown,
     Current,
     NeedsPassword,
@@ -70,13 +71,9 @@ pub(crate) enum StoredDisposition {
     PatchesPending,
     VersionNotServiced,
     Cancelled,
-    Failed { code: String },
-}
-
-impl Default for StoredDisposition {
-    fn default() -> Self {
-        Self::Unknown
-    }
+    Failed {
+        code: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

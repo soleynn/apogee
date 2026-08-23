@@ -2600,9 +2600,11 @@ fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliE
     if args.dry_run {
         return Ok(ExitCode::SUCCESS);
     }
-    let accepted = scan.findings.iter().filter_map(|finding| {
-        matches!(finding.result, ImportFindingResult::Candidate(_)).then(|| finding.id.clone())
-    });
+    let accepted = scan
+        .findings
+        .iter()
+        .filter(|finding| matches!(finding.result, ImportFindingResult::Candidate(_)))
+        .map(|finding| finding.id.clone());
     let plan = scan.plan(accepted)?;
     let report = core.apply_xivlauncher(&plan)?;
     println!("applied\t{}", report.applied.len());
