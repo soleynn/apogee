@@ -50,6 +50,8 @@ fn signatures() {
     let _: fn(&DownloadSpec) -> Option<&HeaderPolicy> = DownloadSpec::header_policy;
     let _: fn(&DownloadSpec) -> &Path = DownloadSpec::dest;
     let _: fn(&DownloadSpec) -> Option<u64> = DownloadSpec::expected_len;
+    let _: fn(&DownloadSpec) -> Option<u64> = DownloadSpec::max_len;
+    let _: fn(&DownloadSpec) -> &[String] = DownloadSpec::allowed_content_types;
     let _: fn(&DownloadSpec) -> &Validator = DownloadSpec::validator;
     let _: fn(&DownloadSpec) -> bool = DownloadSpec::resume;
     let _: fn(&DownloadSpec) -> bool = DownloadSpec::overwrite;
@@ -57,6 +59,15 @@ fn signatures() {
 
     // DownloadSpecBuilder
     let _: fn(DownloadSpecBuilder, u64) -> DownloadSpecBuilder = DownloadSpecBuilder::expected_len;
+    let _: fn(DownloadSpecBuilder, u64) -> DownloadSpecBuilder = DownloadSpecBuilder::max_len;
+    fn allowed_content_type(b: DownloadSpecBuilder, value: String) -> DownloadSpecBuilder {
+        b.allowed_content_type(value)
+    }
+    let _: fn(DownloadSpecBuilder, String) -> DownloadSpecBuilder = allowed_content_type;
+    fn allowed_content_types(b: DownloadSpecBuilder, values: Vec<String>) -> DownloadSpecBuilder {
+        b.allowed_content_types(values)
+    }
+    let _: fn(DownloadSpecBuilder, Vec<String>) -> DownloadSpecBuilder = allowed_content_types;
     let _: fn(DownloadSpecBuilder, bool) -> DownloadSpecBuilder = DownloadSpecBuilder::resume;
     let _: fn(DownloadSpecBuilder, Priority) -> DownloadSpecBuilder = DownloadSpecBuilder::priority;
     let _: fn(DownloadSpecBuilder, Url) -> DownloadSpecBuilder = DownloadSpecBuilder::mirror;

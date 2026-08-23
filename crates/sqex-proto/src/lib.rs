@@ -7,7 +7,7 @@
 //!
 //! The crate is transport-free: every request goes through an injected [`Transport`], and the
 //! crate names neither `reqwest` nor `tokio`. It implements the unauthenticated surfaces (client
-//! identities, the boot-version check, the patchlist parser, the frontier gate/login status
+//! identities, the boot-version check, the patchlist parser, and the frontier status and display
 //! endpoints), the OAuth login flow, and session registration (the version report and the UID
 //! handshake). Reading an install's `.ver` files for the version report
 //! ([`VersionReport::from_install`]) is the crate's only filesystem access. `gen_token` (behind the
@@ -24,7 +24,8 @@
 //!   [`Credentials`] or a Steam [`ObfuscatedTicket`] via [`LoginKind`] and yielding an
 //!   [`Authenticated`] session.
 //! - [`check_gate_status`] and [`check_login_status`] fetch the frontier's world-gate and
-//!   login-server status ([`GateStatus`]) ahead of a login attempt.
+//!   login-server status ([`GateStatus`]) ahead of a login attempt. [`fetch_news`],
+//!   [`fetch_banners`], [`fetch_notices`], and [`fetch_world_status`] fetch display data.
 //! - [`ComputerId`], [`launcher_user_agent`], and [`frontier_referer`] reproduce the identity
 //!   strings SE fingerprints; [`LauncherTime`] is the injected clock every timestamp is rendered
 //!   from.
@@ -107,7 +108,11 @@ mod version;
 
 pub use bootver::check_boot_version;
 pub use error::{ProtoError, Step};
-pub use frontier::{FrontierContext, GateStatus, check_gate_status, check_login_status};
+pub use frontier::{
+    Banner, Banners, DataCenter, FrontierContext, GateStatus, Headline, Headlines, Notices, World,
+    WorldRegion, WorldStatus, check_gate_status, check_login_status, fetch_banners, fetch_news,
+    fetch_notices, fetch_world_status,
+};
 #[cfg(feature = "gen-token")]
 pub use gen_token::gen_token;
 pub use http_date::parse_http_date;

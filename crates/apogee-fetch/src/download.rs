@@ -79,8 +79,15 @@ pub(crate) async fn run(
     let apdl = sidecar(dest, ".apdl");
 
     if !spec.overwrite()
-        && let Some(verified) =
-            check_existing_dest(dest, &verify, spec.expected_len(), &progress, &cancel).await?
+        && let Some(verified) = check_existing_dest(
+            dest,
+            &verify,
+            spec.expected_len(),
+            spec.max_len(),
+            &progress,
+            &cancel,
+        )
+        .await?
     {
         return Ok(verified);
     }
@@ -243,6 +250,7 @@ pub(crate) async fn run(
         match stream_body(
             resp,
             url,
+            spec,
             &part,
             &mut part_file,
             &mut hasher,
@@ -436,6 +444,7 @@ enum Outcome {
 async fn stream_body(
     resp: reqwest::Response,
     url: &Url,
+    spec: &DownloadSpec,
     part: &Path,
     part_file: &mut tokio::fs::File,
     hasher: &mut Option<FileHasher>,
@@ -475,6 +484,7 @@ async fn stream_body(
                 None => break,
                 Some(Ok(chunk)) => {
                     let bytes: &[u8] = chunk.as_ref();
+                    spec.validate_stream_len(url, written.saturating_add(bytes.len() as u64))?;
                     // Throttle on the bytes just read off the socket, before consuming more. Raced
                     // against the cancel token: at a low rate this wait is chunk-size over rate long,
                     // and inside this handler the select's own cancel arm is not being polled, so an
@@ -609,12 +619,22 @@ async fn obtain_response(
                     if *partial.start > 0 {
                         reset_to_zero(&mut partial).await?;
                     }
+                    let total = resp
+                        .content_length()
+                        .map(|length| length.saturating_add(*partial.start))
+                        .or(spec.expected_len());
+                    spec.validate_response(&resp, url, total)?;
                     return Ok(Attempt { resp, source });
                 }
                 if status == 206
                     && *partial.start > 0
                     && content_range_ok(&resp, *partial.start, spec.expected_len())
                 {
+                    let total = resp
+                        .content_length()
+                        .map(|length| length.saturating_add(*partial.start))
+                        .or(spec.expected_len());
+                    spec.validate_response(&resp, url, total)?;
                     return Ok(Attempt { resp, source });
                 }
                 if (status == 206 || status == 416) && *partial.start > 0 && !restarted {
@@ -787,7 +807,7 @@ pub(crate) fn base_identity(spec: &DownloadSpec, expected_len: Option<u64>) -> I
     Identity {
         url: spec.url().as_str().to_owned(),
         expected_len,
-        validator_digest: spec.validator().config_digest(),
+        validator_digest: spec.resume_identity_digest(),
         etag: None,
         last_modified: None,
     }
@@ -878,11 +898,13 @@ pub(crate) async fn check_existing_dest(
     dest: &Path,
     verify: &Verify,
     expected_len: Option<u64>,
+    max_len: Option<u64>,
     progress: &Reporter,
     cancel: &CancellationToken,
 ) -> Result<Option<VerifiedFile>, FetchError> {
     if let Ok(meta) = tokio::fs::metadata(dest).await
         && meta.is_file()
+        && max_len.is_none_or(|max| meta.len() <= max)
         && dest_satisfies(dest, meta.len(), verify, expected_len, cancel).await?
     {
         progress.emit(meta.len(), expected_len, Phase::Complete);

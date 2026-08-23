@@ -156,6 +156,7 @@ async fn install_all(
         fetcher,
         &dxvk.url,
         dxvk.pin,
+        Some(dxvk.size),
         dxvk.format,
         "dxvk",
         system32,
@@ -172,6 +173,7 @@ async fn install_all(
                 fetcher,
                 &nv.url,
                 nv.pin,
+                None,
                 nv.format,
                 "dxvk-nvapi",
                 system32,
@@ -199,6 +201,7 @@ async fn install_dlls(
     fetcher: &Fetcher,
     url: &Url,
     pin: DigestPin,
+    expected_len: Option<u64>,
     format: ArchiveFormat,
     name: &str,
     system32: &Path,
@@ -208,7 +211,8 @@ async fn install_dlls(
     progress: &Progress,
 ) -> Result<(), RuntimeError> {
     let cache = work.join(format!("{name}.archive"));
-    let verified = download_verified(fetcher, url, pin, &cache, cancel, progress).await?;
+    let verified =
+        download_verified(fetcher, url, pin, expected_len, &cache, cancel, progress).await?;
 
     let staging = work.join(format!("{name}.stage"));
     let _ = tokio::fs::remove_dir_all(&staging).await; // clear any partial prior extraction

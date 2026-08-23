@@ -10,17 +10,12 @@ use apogee_fetch::{DigestPin, DownloadSpec, FetchError, Fetcher, Validator, Veri
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::catalog::{ArchiveLayout, Catalog, Runner, ToolEntry};
+use crate::catalog::{
+    ArchiveLayout, Catalog, Runner, ToolEntry, runner_marker_bytes, runner_marker_path,
+};
 use crate::error::RuntimeError;
 use crate::extract::extract_archive;
 use crate::progress::{Progress, RuntimeEvent};
-
-/// Where the marker for a finished install is written.
-///
-/// A re-run skips a completed install and retries an interrupted one. The markers are siblings of the
-/// extracted directories rather than files inside them, so an archive entry cannot plant one and a
-/// partial extraction cannot leave a stale one.
-const INSTALLED_DIR: &str = ".installed";
 
 /// How many attempts a download gets in total: one initial and three restarts.
 ///
@@ -50,6 +45,7 @@ pub(crate) async fn install_runner(
         &runner.version,
         &runner.url,
         runner.pin,
+        Some(runner.size),
         &runner.archive,
         runners_root,
         cancel,
@@ -81,6 +77,7 @@ pub(crate) async fn install_tool(
         &tool.version,
         &tool.url,
         tool.pin,
+        None,
         &tool.archive,
         tools_root,
         cancel,
@@ -111,19 +108,21 @@ async fn install_artifact(
     version: &str,
     url: &Url,
     pin: DigestPin,
+    expected_len: Option<u64>,
     layout: &ArchiveLayout,
     root: &Path,
     cancel: &CancellationToken,
     progress: &Progress,
 ) -> Result<PathBuf, RuntimeError> {
     let dir = root.join(format!("{name}-{version}"));
-    let installed_dir = root.join(INSTALLED_DIR);
-    let marker = installed_dir.join(format!("{name}-{version}"));
+    let installed_dir = root.join(crate::catalog::INSTALLED_DIR);
+    let marker = runner_marker_path(root, name, version);
     if marker.is_file() {
         return Ok(dir);
     }
     let cache = root.join(".cache").join(format!("{name}-{version}.tar"));
-    let verified = download_verified(fetcher, url, pin, &cache, cancel, progress).await?;
+    let verified =
+        download_verified(fetcher, url, pin, expected_len, &cache, cancel, progress).await?;
 
     progress.emit(RuntimeEvent::Extracting {
         name: name.to_owned(),
@@ -151,7 +150,11 @@ async fn install_artifact(
     tokio::fs::create_dir_all(&installed_dir)
         .await
         .map_err(|e| io_err(&installed_dir, e))?;
-    tokio::fs::write(&marker, b"")
+    let marker_bytes = runner_marker_bytes(name, version).map_err(|source| RuntimeError::Io {
+        path: marker.clone(),
+        source: std::io::Error::other(source),
+    })?;
+    tokio::fs::write(&marker, marker_bytes)
         .await
         .map_err(|e| io_err(&marker, e))?;
     let _ = tokio::fs::remove_file(&cache).await;
@@ -174,6 +177,7 @@ pub(crate) async fn download_verified(
     fetcher: &Fetcher,
     url: &Url,
     pin: DigestPin,
+    expected_len: Option<u64>,
     dest: &Path,
     cancel: &CancellationToken,
     progress: &Progress,
@@ -183,7 +187,11 @@ pub(crate) async fn download_verified(
             .await
             .map_err(|e| io_err(parent, e))?;
     }
-    let spec = DownloadSpec::builder(url.clone(), dest, Validator::from(pin)).build()?;
+    let mut spec = DownloadSpec::builder(url.clone(), dest, Validator::from(pin));
+    if let Some(expected_len) = expected_len {
+        spec = spec.expected_len(expected_len);
+    }
+    let spec = spec.build()?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();
     let sink = progress.clone();
@@ -389,6 +397,8 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("runner-1.0".to_owned()),
             },
+            size: len,
+            recommended: true,
             ntsync: None,
         };
 
@@ -426,6 +436,7 @@ mod tests {
         let payload = generated_vec(7, 0, 8 * 1024);
         let tar = runner_targz("r-2", &payload).expect("build archive");
         let pin = DigestPin::Blake3(blake3_of(&tar));
+        let len = tar.len() as u64;
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -441,6 +452,8 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("r-2".to_owned()),
             },
+            size: len,
+            recommended: true,
             ntsync: None,
         };
 
@@ -484,6 +497,7 @@ mod tests {
     async fn a_download_the_token_stopped_reads_as_a_cancellation() {
         let tar = runner_targz("stopped-1", b"payload").expect("build archive");
         let pin = DigestPin::Blake3(blake3_of(&tar));
+        let len = tar.len() as u64;
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -499,6 +513,8 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("stopped-1".to_owned()),
             },
+            size: len,
+            recommended: true,
             ntsync: None,
         };
 
@@ -532,6 +548,7 @@ mod tests {
         let payload = generated_vec(11, 0, 16 * 1024);
         let tar = runner_targz("throttled-1", &payload).expect("build archive");
         let pin = DigestPin::Blake3(blake3_of(&tar));
+        let len = tar.len() as u64;
         let server = ChaosServer::serving(tar)
             .service_unavailable(2, RetryAfter::Seconds(0))
             .start()
@@ -554,6 +571,8 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("throttled-1".to_owned()),
             },
+            size: len,
+            recommended: true,
             ntsync: None,
         };
 

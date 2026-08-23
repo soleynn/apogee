@@ -2,10 +2,10 @@
 //!
 //! These payloads gate whether a login is even attempted, so they are typed as [`GateStatus`]; they
 //! parse leniently (unknown fields ignored) because SE adds fields additively, and a strict-parse
-//! canary test over a committed fixture surfaces such additions as a visible-but-green diff rather
-//! than a silent one. The frontier also serves display data (news, banners, notices, world status);
-//! those endpoints are deliberately unimplemented here, added once their payloads are captured, so
-//! their lenient schemas can be pinned from fact rather than guessed.
+//! canary test over committed fixtures makes additions visible rather than silent. The same module
+//! serves the captured display endpoints: news, banners, notices, and world status. Their production
+//! parsers ignore additive fields and default missing ones, while the fixture suite parses the
+//! recorded envelopes strictly so schema drift fails a check.
 //!
 //! Leniency is bounded by the reference launcher's own deserializer rather than pushed as far as it
 //! will go, because these two endpoints decide whether the launcher believes the servers are up and
@@ -31,6 +31,114 @@ use crate::transport::{
 const FRONTIER_ORIGIN: &str = "https://launcher.finalfantasyxiv.com";
 const GATE_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/gate_status.json";
 const LOGIN_STATUS_URL: &str = "https://frontier.ffxiv.com/worldStatus/login_status.json";
+const NEWS_URL: &str = "https://frontier.ffxiv.com/news/headline.json";
+const BANNERS_BASE: &str = "https://frontier.ffxiv.com/v2/topics/";
+const NOTICES_BASE: &str = "https://frontier.ffxiv.com/v2/notice/";
+const WORLD_STATUS_URL: &str = "https://frontier.ffxiv.com/v2/world/status.json";
+const DISPLAY_BODY_MAX: usize = 4 * 1024 * 1024;
+
+/// Headlines grouped as news, topics, pinned items, and any inline banners.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Headlines {
+    /// Service news and maintenance rows.
+    pub news: Vec<Headline>,
+    /// Editorial topic rows.
+    pub topics: Vec<Headline>,
+    /// Rows the service keeps pinned.
+    pub pinned: Vec<Headline>,
+    /// Inline banner rows, empty in the recorded display captures.
+    pub banner: Vec<Headline>,
+}
+
+/// One headline row.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Headline {
+    /// The service's UTC timestamp text.
+    pub date: String,
+    /// Display title.
+    pub title: String,
+    /// Destination URL, sometimes empty for service news.
+    pub url: String,
+    /// Stable upstream row identifier.
+    pub id: String,
+    /// Optional upstream classification such as maintenance or important.
+    pub tag: String,
+}
+
+/// The current promotional banners.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Banners {
+    /// Banner rows in the order returned by the service.
+    pub banner: Vec<Banner>,
+}
+
+/// One promotional banner.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Banner {
+    /// Remote artwork URL. Consumers must treat it as hostile input.
+    pub lsb_banner: String,
+    /// Remote click-through URL. Consumers must validate it before opening.
+    pub link: String,
+    /// Upstream ordering class, represented as text on the wire.
+    pub order_priority: String,
+    /// Optional fixed-order position, represented as text on the wire.
+    pub fix_order: Option<String>,
+}
+
+/// Notice-message rows.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Notices {
+    /// Untyped rows. Both recorded locales returned an empty list, so assigning fields before a
+    /// populated capture exists would invent a schema.
+    pub contents: Vec<serde_json::Value>,
+}
+
+/// Region and data-center world status.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WorldStatus {
+    /// Regional groups.
+    pub data: Vec<WorldRegion>,
+}
+
+/// A service region containing data centers.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WorldRegion {
+    /// Region name.
+    pub name: String,
+    /// Data centers in this region.
+    pub dc: Vec<DataCenter>,
+}
+
+/// A data center containing worlds.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DataCenter {
+    /// Data-center name.
+    pub name: String,
+    /// Worlds in this data center.
+    pub world: Vec<World>,
+}
+
+/// One world reading.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct World {
+    /// World name.
+    pub name: String,
+    /// Numeric upstream availability reading.
+    pub status: i64,
+    /// Numeric upstream congestion category.
+    pub category: i64,
+    /// Whether new characters may be created.
+    pub create: bool,
+}
 
 /// A world-gate or login-server status: whether the service is open, plus any display strings.
 ///
@@ -322,6 +430,83 @@ pub async fn check_login_status(
 
     let response = transport.execute(build_request(url, context, now)?).await?;
     parse_status(&response, Step::LoginStatus)
+}
+
+/// Fetch the localized headline feed.
+pub async fn fetch_news(
+    transport: &dyn Transport,
+    context: &FrontierContext<'_>,
+    now: &LauncherTime,
+) -> Result<Headlines, ProtoError> {
+    let mut url = parse_base(NEWS_URL, "invalid news URL")?;
+    url.query_pairs_mut()
+        .append_pair("lang", context.client.language)
+        .append_pair("media", "pcapp")
+        .append_pair("_", &now.cache_buster().to_string());
+    fetch_display(transport, context, now, url, Step::News).await
+}
+
+/// Fetch the localized promotional-banner feed.
+pub async fn fetch_banners(
+    transport: &dyn Transport,
+    context: &FrontierContext<'_>,
+    now: &LauncherTime,
+) -> Result<Banners, ProtoError> {
+    let mut url = localized_url(BANNERS_BASE, context.client.language, "banner.json")?;
+    url.query_pairs_mut()
+        .append_pair("lang", context.client.language)
+        .append_pair("media", "pcapp")
+        .append_pair("_", &now.cache_buster().to_string());
+    fetch_display(transport, context, now, url, Step::Banners).await
+}
+
+/// Fetch the localized notice-message feed.
+pub async fn fetch_notices(
+    transport: &dyn Transport,
+    context: &FrontierContext<'_>,
+    now: &LauncherTime,
+) -> Result<Notices, ProtoError> {
+    let mut url = localized_url(NOTICES_BASE, context.client.language, "message.json")?;
+    url.query_pairs_mut()
+        .append_pair("_", &now.cache_buster().to_string());
+    fetch_display(transport, context, now, url, Step::Notices).await
+}
+
+/// Fetch the global world-status tree.
+pub async fn fetch_world_status(
+    transport: &dyn Transport,
+    context: &FrontierContext<'_>,
+    now: &LauncherTime,
+) -> Result<WorldStatus, ProtoError> {
+    let mut url = parse_base(WORLD_STATUS_URL, "invalid world-status URL")?;
+    url.query_pairs_mut()
+        .append_pair("_", &now.cache_buster().to_string());
+    fetch_display(transport, context, now, url, Step::WorldStatus).await
+}
+
+fn localized_url(base: &str, language: &str, leaf: &str) -> Result<Url, TransportError> {
+    let mut url = parse_base(base, "invalid localized frontier URL")?;
+    url.path_segments_mut()
+        .map_err(|_| TransportError::new("localized frontier URL cannot carry path segments"))?
+        .pop_if_empty()
+        .push(language)
+        .push(leaf);
+    Ok(url)
+}
+
+async fn fetch_display<T: for<'de> Deserialize<'de>>(
+    transport: &dyn Transport,
+    context: &FrontierContext<'_>,
+    now: &LauncherTime,
+    url: Url,
+    step: Step,
+) -> Result<T, ProtoError> {
+    let response = transport.execute(build_request(url, context, now)?).await?;
+    if !response.is_ok() || response.body.len() > DISPLAY_BODY_MAX {
+        return Err(ProtoError::invalid_response(step, &response, &[]));
+    }
+    serde_json::from_slice(&response.body)
+        .map_err(|_| ProtoError::invalid_response(step, &response, &[]))
 }
 
 // `accept` is declared even though the reference launcher sends neither it nor Accept-Encoding on

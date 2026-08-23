@@ -25,6 +25,7 @@ tarball this site serves itself; every other row points at an upstream release a
   "runners": [
     { "name": "…", "version": "…", "kind": "proton_umu" | "wine" | "custom",
       "url": "https://…", "blake3": "<64 hex>", "sha256": "<64 hex>",
+      "size": 123456789, "recommended": true | false,
       "archive": { "format": "tar.gz" | "tar.xz" | "tar.zst" | "zip",
                    "strip_prefix": "<the archive's own top directory>" },
       // Whether this build uses ntsync, which is a property of the build and not of the kernel.
@@ -38,6 +39,7 @@ tarball this site serves itself; every other row points at an upstream release a
   ],
   "dxvk": [
     { "version": "…", "url": "https://…", "blake3": "<64 hex>", "sha256": "<64 hex>",
+      "size": 12345678, "recommended": true | false,
       "format": "tar.gz",
       // The dxvk-nvapi companion, all-or-nothing: both its URL and a pin, or neither.
       "nvapi_url": "https://…", "nvapi_blake3": "<64 hex>", "nvapi_sha256": "<64 hex>",
@@ -47,8 +49,9 @@ tarball this site serves itself; every other row points at an upstream release a
 ```
 
 A runner is resolved by `name` and `version` together, so two versions of one build are two rows. The
-**first** `dxvk` row is what a launch installs when nothing names a particular one, which keeps that
-choice a matter of ordering this file rather than of changing a caller.
+`size` is the exact compressed artifact length in bytes. Every non-empty runner and DXVK list has
+exactly one `recommended` row; the recommended DXVK row is what a launch installs when nothing names
+a particular one. This keeps both default choices in signed data rather than in a caller.
 
 `strip_prefix` is the archive's own top directory, which is not always the file name: `wine-xiv`'s
 tarball is built per distribution and its directory says only the build flavour.

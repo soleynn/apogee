@@ -29,6 +29,14 @@ pub enum Step {
     GateStatus,
     /// The frontier login-status fetch.
     LoginStatus,
+    /// The frontier headline fetch.
+    News,
+    /// The frontier banner fetch.
+    Banners,
+    /// The frontier notice-message fetch.
+    Notices,
+    /// The frontier world-status fetch.
+    WorldStatus,
     /// The OAuth login top page.
     OauthTop,
     /// The OAuth credential submission.

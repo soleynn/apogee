@@ -55,7 +55,7 @@ foreach ($attempt in 1..3) {
     foreach ($candidate in $candidates) {
         try { $actual = $candidate.Path } catch { $inspectionFailed = $true; continue }
         if ([string]::IsNullOrEmpty($actual)) { $inspectionFailed = $true; continue }
-        if ([IO.Path]::GetFullPath($actual) -ieq $expected) { exit 0 }
+        if ([IO.Path]::GetFullPath($actual) -ieq $expected) { Write-Output $candidate.Id; exit 0 }
     }
     if (-not $inspectionFailed) { exit 1 }
     if ($attempt -lt 3) { Start-Sleep -Milliseconds 25 }
@@ -73,6 +73,11 @@ exit 2
 /// # Errors
 /// [`RuntimeError::Io`] when PowerShell cannot be started or cannot inspect a candidate process.
 pub fn game_running(game_root: &Path) -> Result<bool, RuntimeError> {
+    Ok(running_game(game_root)?.is_some())
+}
+
+/// Resolve the native game process currently reading from `game_root`.
+pub fn running_game(game_root: &Path) -> Result<Option<crate::RunningGame>, RuntimeError> {
     use std::os::windows::process::CommandExt as _;
 
     let expected = game_root.join("game").join(GAME_EXE);
@@ -87,13 +92,26 @@ pub fn game_running(game_root: &Path) -> Result<bool, RuntimeError> {
         ])
         .env("APOGEE_GAME_EXE", &expected)
         .creation_flags(CREATE_NO_WINDOW);
-    let status = command.status().map_err(|source| RuntimeError::Io {
+    let output = command.output().map_err(|source| RuntimeError::Io {
         path: PathBuf::from("powershell.exe"),
         source,
     })?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
+    match output.status.code() {
+        Some(0) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let pid = text
+                .trim()
+                .parse::<u32>()
+                .map_err(|source| RuntimeError::Io {
+                    path: expected,
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            Ok(Some(crate::RunningGame {
+                executable: GAME_EXE.to_owned(),
+                pid,
+            }))
+        }
+        Some(1) => Ok(None),
         code => Err(RuntimeError::Io {
             path: expected,
             source: std::io::Error::new(

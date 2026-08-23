@@ -103,9 +103,15 @@ pub(crate) async fn dispatch(
 
     // Skip a satisfied destination before spending a probe request.
     if !spec.overwrite()
-        && let Some(verified) =
-            download::check_existing_dest(spec.dest(), &verify, Some(len), &progress, &cancel)
-                .await?
+        && let Some(verified) = download::check_existing_dest(
+            spec.dest(),
+            &verify,
+            Some(len),
+            spec.max_len(),
+            &progress,
+            &cancel,
+        )
+        .await?
     {
         return Ok(verified);
     }
@@ -240,6 +246,7 @@ async fn probe(
             }
             Ok(Ok(resp)) => match resp.status().as_u16() {
                 200 | 206 => {
+                    spec.validate_response(&resp, url, spec.expected_len())?;
                     return Ok(Probe {
                         etag: download::header_bytes(&resp, &ETAG),
                         last_modified: download::header_bytes(&resp, &LAST_MODIFIED),
@@ -306,6 +313,8 @@ struct TransferState {
     len: u64,
     stall_timeout: Duration,
     header_policy: Option<HeaderPolicy>,
+    /// Response-size and MIME policy, retained for every segment response.
+    response_spec: DownloadSpec,
     /// The `If-Range` value (ETag or Last-Modified) sent on resume, or `None` on a fresh transfer.
     if_range: Option<Vec<u8>>,
     limiter: crate::limiter::LimitHandle,
@@ -573,6 +582,7 @@ async fn transfer(
             len,
             stall_timeout: shared.stall_timeout,
             header_policy: spec.header_policy().cloned(),
+            response_spec: spec.clone(),
             if_range,
             limiter: shared.limiter.clone(),
             scheduler: shared.scheduler.clone(),
@@ -1071,6 +1081,12 @@ async fn stream_segment(
                 url: url.clone(),
             });
         }
+    }
+    if let Err(err) = state
+        .response_spec
+        .validate_response(&resp, url, Some(state.len))
+    {
+        return SegmentResult::Fatal(err);
     }
     match content_range(&resp) {
         // The range must start where we asked, and the server's total (when concrete) must match the

@@ -92,7 +92,7 @@ fn the_cost_is_stated_before_the_question() -> std::io::Result<()> {
     let question = text.find("type the profile name").expect("the question");
     assert!(warning < question, "{text}");
     assert!(
-        text.contains("backup create"),
+        text.contains("--backup-config"),
         "the way to keep them is named: {text}"
     );
     Ok(())

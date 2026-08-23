@@ -20,7 +20,7 @@ use sqex_crypto::{ArgKey, ArgumentBuilder, ObfuscatedTicket, ServerTime};
 use sqex_proto::{
     Authenticated, ClientContext, ComputerId, Credentials, FrontierContext, InstallPaths,
     LoginKind, OauthContext, PatchListEntry, Registration, Transport, VersionReport, begin_login,
-    check_boot_version, check_login_status, register_session,
+    check_boot_version, check_gate_status, check_login_status, fetch_news, register_session,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -29,7 +29,9 @@ use uuid::Uuid;
 
 use crate::addons::AddonBackend;
 use crate::command::{
-    Command, Event, FlowState, Notice, PasswordSource, PrefixAction, PrefixReport, RunOutcome,
+    Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, GateData, ImportData,
+    ImportXivLauncher, NewsData, NewsRow, Notice, PasswordSource, PrefixAction, PrefixReport,
+    RunOutcome, SupportBundleData,
 };
 use crate::error::CoreError;
 use crate::host::{self, Clock};
@@ -39,6 +41,7 @@ use crate::model::{
     STEAM_FREE_TRIAL_APP_ID, Settings,
 };
 use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo_ver_path};
+use crate::status::{PendingPatch, PendingRepo, StatusRecord, StoredDisposition, StoredPending};
 use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
 
@@ -80,6 +83,7 @@ pub(crate) struct FlowContext {
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
     pub(crate) backups_dir: std::path::PathBuf,
+    pub(crate) frontier: crate::frontier::FrontierAssets,
 }
 
 /// Run `cmd` to completion, emitting its events on `tx`. A failure becomes an [`Event::Error`]; a run
@@ -90,6 +94,8 @@ pub(crate) async fn drive(
     outward: UnboundedSender<Event>,
     cancel: CancellationToken,
 ) {
+    let status_profile = command_profile(&cmd);
+    let status_store = ctx.store.clone();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let running = run_command(ctx, cmd, tx.clone(), cancel.clone());
     tokio::pin!(running);
@@ -102,13 +108,27 @@ pub(crate) async fn drive(
             result = &mut running => finished = Some(result),
             event = rx.recv() => {
                 let Some(event) = event else { break };
-                observe_and_forward(event, &outward, &mut saw_error, &mut saw_cancelled);
+                observe_and_forward(
+                    event,
+                    &outward,
+                    &status_store,
+                    status_profile,
+                    &mut saw_error,
+                    &mut saw_cancelled,
+                );
             }
         }
     }
     drop(tx);
     while let Ok(event) = rx.try_recv() {
-        observe_and_forward(event, &outward, &mut saw_error, &mut saw_cancelled);
+        observe_and_forward(
+            event,
+            &outward,
+            &status_store,
+            status_profile,
+            &mut saw_error,
+            &mut saw_cancelled,
+        );
     }
 
     let terminal = if saw_error {
@@ -119,6 +139,22 @@ pub(crate) async fn drive(
         RunOutcome::Succeeded
     };
     let _ = outward.send(Event::Outcome(terminal));
+}
+
+fn command_profile(command: &Command) -> Option<Uuid> {
+    match command {
+        Command::Login { profile, .. }
+        | Command::Launch { profile }
+        | Command::PatchAndPlay { profile, .. }
+        | Command::Patch { profile, .. }
+        | Command::Install { profile, .. }
+        | Command::Repair { profile, .. }
+        | Command::Prefix { profile, .. } => Some(*profile),
+        Command::FirstRun(_)
+        | Command::ImportXivLauncher(_)
+        | Command::Frontier(_)
+        | Command::SupportBundle { .. } => None,
+    }
 }
 
 /// Execute one command and normalize its top-level result onto the same event stream its nested
@@ -192,18 +228,10 @@ async fn run_command(
             local_indexes,
         } => repair(&ctx, profile, local_indexes, &tx, &cancel).await,
         Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
-        Command::FirstRun(_) => Err(CoreError::Unavailable {
-            command: "first-run",
-        }),
-        Command::ImportXivLauncher(_) => Err(CoreError::Unavailable {
-            command: "configuration import",
-        }),
-        Command::Frontier(_) => Err(CoreError::Unavailable {
-            command: "frontier data",
-        }),
-        Command::SupportBundle => Err(CoreError::Unavailable {
-            command: "support bundle",
-        }),
+        Command::FirstRun(request) => first_run(&ctx, request, &tx),
+        Command::ImportXivLauncher(command) => import_xivlauncher(&ctx, command, &tx),
+        Command::Frontier(query) => frontier(&ctx, query, &tx, &cancel).await,
+        Command::SupportBundle { facts } => support_bundle(&ctx, facts, &tx),
     };
     match result {
         Ok(()) => {}
@@ -218,9 +246,191 @@ async fn run_command(
     }
 }
 
+fn first_run(
+    ctx: &FlowContext,
+    request: FirstRunRequest,
+    tx: &UnboundedSender<Event>,
+) -> Result<(), CoreError> {
+    let mut checkpoint = ctx.store.load_first_run()?;
+    match request {
+        FirstRunRequest::Read => {
+            if matches!(
+                crate::first_incomplete(&checkpoint),
+                crate::FirstRunPosition::WaitingForImportDiscovery
+            ) {
+                let candidates = crate::xiv_import::candidate_roots()
+                    .into_iter()
+                    .filter(|path| crate::xiv_import::scan(path).is_ok())
+                    .map(|path| crate::FirstRunImportCandidate {
+                        source: if path.to_string_lossy().contains(".var/app/") {
+                            crate::FirstRunImportSource::Flatpak
+                        } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore")
+                        {
+                            crate::FirstRunImportSource::Core
+                        } else {
+                            crate::FirstRunImportSource::Native
+                        },
+                        path,
+                    })
+                    .collect();
+                checkpoint = crate::first_run::transition(
+                    &checkpoint,
+                    crate::FirstRunTransition::RecordImportDiscovery(candidates),
+                )?;
+                ctx.store.save_first_run(&checkpoint)?;
+            }
+        }
+        FirstRunRequest::Advance(change) => {
+            checkpoint = crate::first_run::transition(&checkpoint, change)?;
+            ctx.store.save_first_run(&checkpoint)?;
+        }
+    }
+    let _ = tx.send(Event::FirstRun(Box::new(checkpoint)));
+    Ok(())
+}
+
+fn import_xivlauncher(
+    ctx: &FlowContext,
+    command: ImportXivLauncher,
+    tx: &UnboundedSender<Event>,
+) -> Result<(), CoreError> {
+    let data = match command {
+        ImportXivLauncher::Scan(path) => ImportData::Scan(crate::xiv_import::scan(path)?),
+        ImportXivLauncher::Apply(plan) => {
+            ImportData::Applied(crate::xiv_import::apply(&ctx.store, &plan)?)
+        }
+    };
+    let _ = tx.send(Event::Import(data));
+    Ok(())
+}
+
+fn support_bundle(
+    ctx: &FlowContext,
+    facts: Vec<(String, String)>,
+    tx: &UnboundedSender<Event>,
+) -> Result<(), CoreError> {
+    let profiles = ctx.store.list_profiles()?;
+    let settings = ctx.store.load_settings()?;
+    let system = crate::SystemReportInput {
+        application_version: env!("CARGO_PKG_VERSION").to_owned(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
+        operating_system: Some(std::env::consts::OS.to_owned()),
+        kernel: None,
+        architecture: Some(std::env::consts::ARCH.to_owned()),
+        gpu: None,
+        driver: None,
+        runner: None,
+        prefix_state: None,
+    };
+    let caller_facts = crate::ValidatedCallerFacts::new(facts);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let archive = crate::assemble_support_archive(&crate::support::SupportBundleInput {
+        profiles: &profiles,
+        settings: &settings,
+        system: &system,
+        logs: &[],
+        caller_facts: &caller_facts,
+        home: home.as_deref(),
+    })?;
+    let bytes = crate::encode_support_bundle(&archive)?;
+    let _ = tx.send(Event::SupportBundle(SupportBundleData::new(bytes)));
+    Ok(())
+}
+
+/// Fetch display-only launcher data. Waiting on a closed gate is core-owned so every shell gets the
+/// same cadence and cancellation behavior.
+async fn frontier(
+    ctx: &FlowContext,
+    query: FrontierQuery,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<(), CoreError> {
+    let settings = ctx.store.load_settings()?;
+    let language = frontier_language(&settings.language);
+    let context = FrontierContext {
+        client: ClientContext {
+            computer_id: &ctx.computer_id,
+            language,
+            accept_language: "ja",
+            referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        },
+    };
+    match query {
+        FrontierQuery::News => {
+            let rows = fetch_news(&*ctx.transport, &context, &host::launcher_time_now()).await?;
+            let data = NewsData {
+                news: rows
+                    .news
+                    .into_iter()
+                    .map(|row| news_row(&ctx.frontier, row))
+                    .collect(),
+                topics: rows
+                    .topics
+                    .into_iter()
+                    .map(|row| news_row(&ctx.frontier, row))
+                    .collect(),
+                pinned: rows
+                    .pinned
+                    .into_iter()
+                    .map(|row| news_row(&ctx.frontier, row))
+                    .collect(),
+            };
+            let _ = tx.send(Event::Frontier(FrontierData::News(data)));
+        }
+        FrontierQuery::Gate { wait } => loop {
+            let status =
+                check_gate_status(&*ctx.transport, &context, &host::launcher_time_now()).await?;
+            let open = status.status;
+            let _ = tx.send(Event::Frontier(FrontierData::Gate(GateData {
+                open,
+                messages: status.message,
+                news: status.news,
+            })));
+            if open || !wait {
+                break;
+            }
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_secs(settings.frontier_poll_seconds.max(1))) => {}
+            }
+        },
+        FrontierQuery::Banners => {
+            let rows =
+                sqex_proto::fetch_banners(&*ctx.transport, &context, &host::launcher_time_now())
+                    .await?;
+            let rows = ctx.frontier.cache_banners(rows.banner, cancel).await;
+            let _ = tx.send(Event::Frontier(FrontierData::Banners(rows)));
+        }
+    }
+    Ok(())
+}
+
+fn news_row(frontier: &crate::frontier::FrontierAssets, row: sqex_proto::Headline) -> NewsRow {
+    NewsRow {
+        id: frontier.register_link(&row.url).unwrap_or_default(),
+        date: row.date,
+        title: row.title,
+        tag: row.tag,
+    }
+}
+
+fn frontier_language(language: &str) -> &str {
+    match language {
+        "en" => "en-us",
+        "ja" => "ja",
+        "de" => "de",
+        "fr" => "fr",
+        other => other,
+    }
+}
+
 fn observe_and_forward(
     event: Event,
     outward: &UnboundedSender<Event>,
+    store: &Store,
+    profile: Option<Uuid>,
     saw_error: &mut bool,
     saw_cancelled: &mut bool,
 ) {
@@ -229,7 +439,69 @@ fn observe_and_forward(
         Event::State(FlowState::Cancelled) => *saw_cancelled = true,
         _ => {}
     }
+    if let Some(profile) = profile
+        && let Err(error) = observe_status(store, profile, &event)
+    {
+        *saw_error = true;
+        let _ = outward.send(Event::Error(error.into()));
+    }
     let _ = outward.send(event);
+}
+
+fn observe_status(store: &Store, profile: Uuid, event: &Event) -> Result<(), StoreError> {
+    use FlowState as State;
+
+    let disposition = match event {
+        Event::State(State::NeedsPassword) => Some(StoredDisposition::NeedsPassword),
+        Event::State(State::NeedsOtp) => Some(StoredDisposition::NeedsOtp),
+        Event::State(State::NeedsTerms) => Some(StoredDisposition::NeedsTerms),
+        Event::State(State::NoService) => Some(StoredDisposition::NoService),
+        Event::State(State::NeedsLogin) => Some(StoredDisposition::NeedsLogin),
+        Event::State(State::NeedsBootPatch) => Some(StoredDisposition::NeedsBootPatch),
+        Event::State(State::PatchesPending { .. }) => Some(StoredDisposition::PatchesPending),
+        Event::State(State::VersionNotServiced) => Some(StoredDisposition::VersionNotServiced),
+        Event::State(State::Cancelled) => Some(StoredDisposition::Cancelled),
+        Event::State(State::Running | State::Exited) => Some(StoredDisposition::Current),
+        Event::Error(error) => Some(StoredDisposition::Failed {
+            code: crate::StableCode::code(error).to_owned(),
+        }),
+        Event::State(
+            State::WaitingForOtpWindow { .. }
+            | State::WaitingForPushedCode { .. }
+            | State::PushedCodeReceived { .. }
+            | State::BackingUp
+            | State::PreparingPrefix
+            | State::Patching
+            | State::Repairing
+            | State::CheckingPrefix
+            | State::NoPrefix
+            | State::FixingPrefix
+            | State::RecreatingPrefix
+            | State::Launching
+            | State::SupervisingAddons,
+        )
+        | Event::Progress(_)
+        | Event::Patch(_)
+        | Event::Addon(_)
+        | Event::Setup(_)
+        | Event::Frontier(_)
+        | Event::FirstRun(_)
+        | Event::Import(_)
+        | Event::SupportBundle(_)
+        | Event::Prefix(_)
+        | Event::Notice(_)
+        | Event::LaunchProgramExited(_)
+        | Event::Outcome(_) => None,
+    };
+    let Some(disposition) = disposition else {
+        return Ok(());
+    };
+    let mut status = store.load_status(profile)?.unwrap_or_default();
+    status.disposition = disposition;
+    if matches!(status.disposition, StoredDisposition::Current) {
+        status.pending = None;
+    }
+    store.save_status(profile, &status)
 }
 
 /// Whether `error` is the run stopping because it was asked to, rather than something going wrong.
@@ -251,7 +523,11 @@ fn observe_and_forward(
 /// before there is a command to stop.
 fn is_cancellation(error: &CoreError) -> bool {
     match error {
-        CoreError::Patch(apogee_patcher::PatchError::Cancelled) => true,
+        CoreError::Patch(error)
+            if matches!(error.as_ref(), apogee_patcher::PatchError::Cancelled) =>
+        {
+            true
+        }
         CoreError::Runtime(error) => error.is_cancellation(),
         CoreError::Addons(error) => error.is_cancellation(),
         _ => false,
@@ -287,7 +563,9 @@ async fn login(
             if pending_patches.is_empty() {
                 let session = build_session(ctx, &auth, &report, unique_id.expose());
                 ctx.store.save_uid_cache(profile.account, &session)?;
+                record_current(ctx, profile.id)?;
             } else {
+                record_pending(ctx, profile.id, &pending_patches, None)?;
                 let (count, bytes) = summarize(&pending_patches);
                 emit(tx, FlowState::PatchesPending { count, bytes });
             }
@@ -841,10 +1119,6 @@ async fn patch_to_current(
 ) -> Result<Option<UidCacheEntry>, CoreError> {
     let mut patching_announced = false;
 
-    if mode == InstallMode::FromNothing {
-        announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
-    }
-
     // Boot is brought current before the first registration rather than in reaction to one. A
     // registration carrying an out-of-date boot is answered 410, which is terminal, so the
     // `NeedsBootPatch` arm below never sees an ordinary stale boot; it stays as the tamper case the
@@ -878,8 +1152,12 @@ async fn patch_to_current(
                 if pending_patches.is_empty() {
                     let session = build_session(ctx, auth, &report, unique_id.expose());
                     ctx.store.save_uid_cache(profile.account, &session)?;
+                    record_current(ctx, profile.id)?;
                     return Ok(Some(session));
                 }
+                record_pending(ctx, profile.id, &pending_patches, None)?;
+                let (count, bytes) = summarize(&pending_patches);
+                emit(tx, FlowState::PatchesPending { count, bytes });
                 announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
                 install_game_patches(
                     ctx,
@@ -925,6 +1203,9 @@ async fn ensure_boot_current(
     if patches.is_empty() {
         return Ok(false);
     }
+    record_pending(ctx, profile.id, &patches, Some(Repo::Boot))?;
+    let (count, bytes) = summarize(&patches);
+    emit(tx, FlowState::PatchesPending { count, bytes });
     announce_patching(ctx, profile, tx, cancel, announced);
     let request = InstallRequest {
         repo: Repo::Boot,
@@ -1046,6 +1327,66 @@ fn summarize(patches: &[PatchListEntry]) -> (u32, u64) {
     let bytes = patches.iter().map(|p| p.length).sum();
     let count = u32::try_from(patches.len()).unwrap_or(u32::MAX);
     (count, bytes)
+}
+
+fn record_current(ctx: &FlowContext, profile: Uuid) -> Result<(), CoreError> {
+    ctx.store.save_status(
+        profile,
+        &StatusRecord {
+            disposition: StoredDisposition::Current,
+            pending: None,
+        },
+    )?;
+    Ok(())
+}
+
+fn record_pending(
+    ctx: &FlowContext,
+    profile: Uuid,
+    patches: &[PatchListEntry],
+    fixed_repo: Option<Repo>,
+) -> Result<(), CoreError> {
+    let patches = patches
+        .iter()
+        .map(|patch| {
+            let repo = fixed_repo.unwrap_or_else(|| {
+                Url::parse(&patch.url)
+                    .ok()
+                    .and_then(|url| {
+                        url.path_segments()
+                            .map(|segments| classify_repo(segments.collect::<Vec<_>>()))
+                    })
+                    .unwrap_or(Repo::Game)
+            });
+            PendingPatch {
+                repo: match repo {
+                    Repo::Boot => PendingRepo::Boot,
+                    Repo::Game => PendingRepo::Game,
+                    Repo::Expansion(number) => PendingRepo::Expansion(number),
+                },
+                length: patch.length,
+                version_id: patch.version_id.clone(),
+                url: patch.url.clone(),
+                block_size: patch.hashes.as_ref().map(|hashes| hashes.block_size),
+                hashes: patch
+                    .hashes
+                    .as_ref()
+                    .map(|hashes| hashes.hashes.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    ctx.store.save_status(
+        profile,
+        &StatusRecord {
+            disposition: StoredDisposition::PatchesPending,
+            pending: Some(StoredPending {
+                as_of: (ctx.clock)(),
+                patches,
+            }),
+        },
+    )?;
+    Ok(())
 }
 
 /// Split a game patchlist into per-repo ordered sets, base game first then expansions ascending. SE
@@ -1386,7 +1727,20 @@ async fn prefix(
                 }));
             }
         }
-        PrefixAction::Recreate => {
+        PrefixAction::Recreate { backup_config } => {
+            if backup_config {
+                emit(tx, FlowState::BackingUp);
+                let settings = ctx.store.load_settings()?;
+                crate::backup::create(
+                    &ctx.prefixes_dir,
+                    &ctx.backups_dir,
+                    &profile,
+                    settings.backups_kept,
+                    (ctx.clock)(),
+                    Some("before recreating the prefix".to_owned()),
+                    cancel,
+                )?;
+            }
             emit(tx, FlowState::RecreatingPrefix);
             let fresh = ctx
                 .launch

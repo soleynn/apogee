@@ -211,10 +211,10 @@ fn in_prefix(pid: i32, expected: &Path) -> bool {
 ///
 /// # Errors
 /// Propagates the I/O error of opening or reading `/proc` itself.
-pub(crate) fn running_in_install(game_root: &Path) -> std::io::Result<bool> {
+pub(crate) fn running_in_install(game_root: &Path) -> std::io::Result<Option<i32>> {
     let roots = install_roots(game_root);
     let live = scan_comm(&comm_target(GAME_EXE), |pid| in_install(pid, &roots))?;
-    Ok(!live.is_empty())
+    Ok(live.into_iter().next())
 }
 
 /// The forms of `game_root` a process path can be written in: the one the caller passed and, when
@@ -605,7 +605,7 @@ mod tests {
         // The spawn returns before the child has exec'd, so its name in `/proc` is still the parent's
         // for a moment.
         let seen = (0..RUNNING_POLLS).any(|_| {
-            if running_in_install(&other).expect("scan /proc") {
+            if running_in_install(&other).expect("scan /proc").is_some() {
                 return true;
             }
             std::thread::sleep(RUNNING_POLL_INTERVAL);
@@ -613,14 +613,14 @@ mod tests {
         });
         assert!(seen, "a client running in the install was not seen");
         assert!(
-            !running_in_install(&install).expect("scan /proc"),
+            running_in_install(&install).expect("scan /proc").is_none(),
             "a client running in another install was taken for this one",
         );
 
         let _ = child.kill();
         let _ = child.wait();
         assert!(
-            !running_in_install(&other).expect("scan /proc"),
+            running_in_install(&other).expect("scan /proc").is_none(),
             "the install still reads as running after the client exited",
         );
     }

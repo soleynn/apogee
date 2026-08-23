@@ -7,10 +7,17 @@
 
 use apogee_fetch::{DigestPin, HexPins};
 use ed25519_dalek::{Signature, VerifyingKey};
-use serde::Deserialize;
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::CatalogError;
+use crate::{PREFIX_JSON, PrefixMetadata, RuntimeError};
+
+/// The marker directory shared by installation and the read-only catalog view.
+pub(crate) const INSTALLED_DIR: &str = ".installed";
 
 /// The manifest schema version this build understands.
 ///
@@ -171,6 +178,10 @@ pub struct Runner {
     pub pin: DigestPin,
     /// How to unpack the downloaded archive.
     pub archive: ArchiveLayout,
+    /// The exact archive length in bytes, published for download estimates.
+    pub size: u64,
+    /// Whether this is the publisher's recommended runner.
+    pub recommended: bool,
     /// Whether this build uses ntsync, which is a property of the build rather than of the kernel:
     /// a row omits it when nobody has said. Read [`Runner::uses_ntsync`] rather than this field,
     /// which keeps "nobody said" distinguishable from "no" for a later row that wants to say so.
@@ -216,6 +227,10 @@ pub struct DxvkEntry {
     pub pin: DigestPin,
     /// The container format (`tar.gz` by default); data-driven like a runner's, not hardcoded.
     pub format: ArchiveFormat,
+    /// The exact archive length in bytes, published for download estimates.
+    pub size: u64,
+    /// Whether this is the publisher's recommended DXVK build.
+    pub recommended: bool,
     /// `dxvk-nvapi`, present only when both its URL and its pin are in the manifest.
     pub nvapi: Option<NvapiRef>,
 }
@@ -241,10 +256,31 @@ pub struct Catalog {
     pub version: u32,
     /// The runner rows, in manifest order.
     pub runners: Vec<Runner>,
-    /// The DXVK rows, in manifest order; the first is the default (see [`Catalog::default_dxvk`]).
+    /// The DXVK rows, in manifest order; exactly one non-empty list row is recommended.
     pub dxvk: Vec<DxvkEntry>,
     /// The supporting-tool rows, in manifest order.
     pub tools: Vec<ToolEntry>,
+}
+
+/// One selectable artifact in a read-only runner or DXVK catalog view.
+///
+/// Available rows came from the signed catalog and therefore carry an exact size. An installed row
+/// retained after its catalog entry was withdrawn has no size or recommendation to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CatalogViewEntry {
+    /// The artifact family or runner name.
+    pub name: String,
+    /// The published or recorded version.
+    pub version: String,
+    /// Whether this exact identity is installed in the runtime path or selected prefix.
+    pub installed: bool,
+    /// Whether this exact identity is present in the supplied signed catalog.
+    pub available: bool,
+    /// The exact compressed artifact length, absent for a withdrawn installed row.
+    pub size: Option<u64>,
+    /// Whether the signed catalog recommends this row.
+    pub recommended: bool,
 }
 
 impl Catalog {
@@ -265,6 +301,8 @@ impl Catalog {
     /// refused even beside a well-formed `sha256`), including a row carrying neither, and for a
     /// `dxvk-nvapi` companion that gives a URL without a pin or the reverse; and
     /// [`CatalogError::BadUrl`] for a URL that does not parse.
+    /// [`CatalogError::RecommendationCount`] if a non-empty runner or DXVK list does not contain
+    /// exactly one recommended row.
     ///
     /// # Examples
     ///
@@ -278,6 +316,7 @@ impl Catalog {
     ///     { "name": "GE-Proton", "version": "11-1", "kind": "proton_umu",
     ///       "url": "https://example.invalid/GE-Proton11-1.tar.gz",
     ///       "blake3": "0000000000000000000000000000000000000000000000000000000000000000",
+    ///       "size": 1024, "recommended": true,
     ///       "archive": { "format": "tar.gz", "strip_prefix": "GE-Proton11-1" } }
     ///   ]
     /// }"#;
@@ -378,15 +417,160 @@ impl Catalog {
         self.tools.iter().find(|t| t.name == name)
     }
 
+    /// The runner the publisher recommends when a profile has not selected one.
+    ///
+    /// A non-empty parsed catalog always has exactly one such row. `None` means the manifest
+    /// publishes no managed runners.
+    #[must_use]
+    pub fn recommended_runner(&self) -> Option<&Runner> {
+        self.runners.iter().find(|runner| runner.recommended)
+    }
+
     /// The DXVK build to install when nothing names a particular one.
     ///
-    /// The first row, so which build that is stays the publisher's decision and moves by re-ordering
-    /// the manifest rather than by changing a caller. `None` is a catalog that publishes none, which
-    /// a caller reads as nothing to install rather than as a failure.
+    /// The row carrying the signed recommendation, so which build that is stays the publisher's
+    /// decision and moves by editing the manifest rather than by changing a caller. `None` is a
+    /// catalog that publishes none, which a caller reads as nothing to install rather than a failure.
     #[must_use]
     pub fn default_dxvk(&self) -> Option<&DxvkEntry> {
-        self.dxvk.first()
+        self.dxvk.iter().find(|entry| entry.recommended)
     }
+}
+
+/// The structured contents written into new runner installation markers.
+///
+/// Older markers were empty and remain readable when their filename can be matched exactly against
+/// a current catalog row. The contents make a withdrawn row recoverable without guessing where a
+/// hyphenated name ends and a hyphenated version begins.
+#[derive(Serialize, Deserialize)]
+struct RunnerMarker {
+    name: String,
+    version: String,
+}
+
+pub(crate) fn runner_marker_path(root: &Path, name: &str, version: &str) -> std::path::PathBuf {
+    root.join(INSTALLED_DIR).join(format!("{name}-{version}"))
+}
+
+pub(crate) fn runner_marker_bytes(name: &str, version: &str) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&RunnerMarker {
+        name: name.to_owned(),
+        version: version.to_owned(),
+    })
+}
+
+/// Build the runner view from signed rows plus any structured markers whose rows were withdrawn.
+pub(crate) fn runner_catalog_view(
+    catalog: &Catalog,
+    runners_root: &Path,
+) -> Result<Vec<CatalogViewEntry>, RuntimeError> {
+    let mut identities = BTreeSet::new();
+    let mut rows = catalog
+        .runners
+        .iter()
+        .map(|runner| {
+            identities.insert((runner.name.clone(), runner.version.clone()));
+            CatalogViewEntry {
+                name: runner.name.clone(),
+                version: runner.version.clone(),
+                installed: runner_marker_path(runners_root, &runner.name, &runner.version)
+                    .is_file(),
+                available: true,
+                size: Some(runner.size),
+                recommended: runner.recommended,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let marker_dir = runners_root.join(INSTALLED_DIR);
+    let markers = match std::fs::read_dir(&marker_dir) {
+        Ok(markers) => markers,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(rows),
+        Err(source) => {
+            return Err(RuntimeError::Io {
+                path: marker_dir,
+                source,
+            });
+        }
+    };
+    let mut withdrawn = Vec::new();
+    for marker in markers {
+        let marker = marker.map_err(|source| RuntimeError::Io {
+            path: marker_dir.clone(),
+            source,
+        })?;
+        let path = marker.path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|source| RuntimeError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if bytes.is_empty() {
+            continue;
+        }
+        let identity: RunnerMarker = match serde_json::from_slice(&bytes) {
+            Ok(identity) => identity,
+            Err(source) => {
+                tracing::warn!(path = %path.display(), %source, "ignoring an unreadable runner marker");
+                continue;
+            }
+        };
+        if identities.insert((identity.name.clone(), identity.version.clone())) {
+            withdrawn.push(CatalogViewEntry {
+                name: identity.name,
+                version: identity.version,
+                installed: true,
+                available: false,
+                size: None,
+                recommended: false,
+            });
+        }
+    }
+    withdrawn.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
+    rows.extend(withdrawn);
+    Ok(rows)
+}
+
+/// Build the DXVK view for a prefix path without constructing or preparing a prefix handle.
+pub(crate) fn dxvk_catalog_view(
+    catalog: &Catalog,
+    prefix_root: Option<&Path>,
+) -> Result<Vec<CatalogViewEntry>, RuntimeError> {
+    let installed_version = prefix_root
+        .map(|root| PrefixMetadata::load(&root.join(PREFIX_JSON)))
+        .transpose()?
+        .flatten()
+        .and_then(|metadata| metadata.dxvk.map(|dxvk| dxvk.version));
+    let mut installed_in_catalog = false;
+    let mut rows = catalog
+        .dxvk
+        .iter()
+        .map(|entry| {
+            let installed = installed_version.as_deref() == Some(entry.version.as_str());
+            installed_in_catalog |= installed;
+            CatalogViewEntry {
+                name: "DXVK".to_owned(),
+                version: entry.version.clone(),
+                installed,
+                available: true,
+                size: Some(entry.size),
+                recommended: entry.recommended,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !installed_in_catalog && let Some(version) = installed_version {
+        rows.push(CatalogViewEntry {
+            name: "DXVK".to_owned(),
+            version,
+            installed: true,
+            available: false,
+            size: None,
+            recommended: false,
+        });
+    }
+    Ok(rows)
 }
 
 // ---- raw deserialization + validation -------------------------------------------------------
@@ -416,6 +600,8 @@ struct RawRunner {
     #[serde(default)]
     sha256: Option<String>,
     archive: RawArchive,
+    size: u64,
+    recommended: bool,
     /// Absent in a row written before the key existed, and absent is meaningful (see
     /// [`Runner::uses_ntsync`]), so it stays an `Option` rather than defaulting to a bool.
     #[serde(default)]
@@ -446,6 +632,8 @@ struct RawDxvk {
     blake3: Option<String>,
     #[serde(default)]
     sha256: Option<String>,
+    size: u64,
+    recommended: bool,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
@@ -475,7 +663,7 @@ impl TryFrom<RawCatalog> for Catalog {
     ///
     /// [`CatalogError::UnsupportedVersion`] before any row is looked at, then whatever the row
     /// builders raise: [`CatalogError::UnknownRunnerKind`], [`CatalogError::UnknownArchiveFormat`],
-    /// [`CatalogError::BadPin`], [`CatalogError::BadUrl`].
+    /// [`CatalogError::BadPin`], [`CatalogError::BadUrl`], [`CatalogError::RecommendationCount`].
     fn try_from(raw: RawCatalog) -> Result<Self, CatalogError> {
         if raw.version != CATALOG_MANIFEST_VERSION {
             return Err(CatalogError::UnsupportedVersion {
@@ -498,6 +686,16 @@ impl TryFrom<RawCatalog> for Catalog {
             .into_iter()
             .map(build_dxvk)
             .collect::<Result<Vec<_>, _>>()?;
+        validate_recommendation(
+            "runner",
+            runners.iter().filter(|row| row.recommended).count(),
+            runners.len(),
+        )?;
+        validate_recommendation(
+            "dxvk",
+            dxvk.iter().filter(|row| row.recommended).count(),
+            dxvk.len(),
+        )?;
         Ok(Self {
             version: raw.version,
             runners,
@@ -540,6 +738,8 @@ fn build_runner(r: RawRunner) -> Result<Runner, CatalogError> {
         url,
         pin,
         archive,
+        size: r.size,
+        recommended: r.recommended,
         ntsync: r.ntsync,
     })
 }
@@ -624,8 +824,26 @@ fn build_dxvk(d: RawDxvk) -> Result<DxvkEntry, CatalogError> {
         url,
         pin,
         format,
+        size: d.size,
+        recommended: d.recommended,
         nvapi,
     })
+}
+
+/// Require one signed recommendation for every non-empty selectable list.
+fn validate_recommendation(
+    kind: &'static str,
+    recommended: usize,
+    rows: usize,
+) -> Result<(), CatalogError> {
+    if rows == 0 || recommended == 1 {
+        Ok(())
+    } else {
+        Err(CatalogError::RecommendationCount {
+            kind,
+            found: recommended,
+        })
+    }
 }
 
 /// Validate an archive object. Unlike a DXVK row, `format` is required here.
@@ -688,6 +906,7 @@ mod tests {
               "runners": [
                 {{ "name": "UMU-Proton", "version": "9-20", "kind": "proton_umu",
                    "url": "https://example.invalid/UMU-Proton-9-20.tar.gz", "sha256": "{pin}",
+                   "size": 1024, "recommended": true,
                    "archive": {{ "format": "tar.gz", "strip_prefix": "UMU-Proton-9-20" }} }}
               ],
               "tools": [
@@ -871,7 +1090,7 @@ mod tests {
         format!(
             r#"{{ "version": 1, "dxvk": [
                 {{ "version": "2.4.1", "url": "https://example.invalid/dxvk-2.4.1.tar.gz",
-                   "sha256": "{GOOD_PIN}"{extra} }} ] }}"#
+                   "sha256": "{GOOD_PIN}", "size": 1024, "recommended": true{extra} }} ] }}"#
         )
     }
 
@@ -998,6 +1217,7 @@ mod tests {
             .runner("GE-Proton", "11-1")
             .expect("proton runner present");
         assert_eq!(runner.kind, RunnerKind::ProtonUmu);
+        assert_eq!(runner.size, 528882426);
         // Every hosted row publishes both spellings, so a build that predates BLAKE3 keeps reading
         // this file; what a build that understands both takes is the newer one.
         assert!(
@@ -1005,6 +1225,14 @@ mod tests {
             "the hosted rows resolve to the preferred function"
         );
         assert!(runner.uses_ntsync(), "the proton row declares ntsync");
+        let recommended = catalog
+            .recommended_runner()
+            .expect("a runner recommendation is published");
+        assert_eq!(
+            (recommended.name.as_str(), recommended.version.as_str()),
+            ("GE-Proton", "11-2")
+        );
+        assert_eq!(recommended.size, 532485412);
         assert!(catalog.tool("umu-launcher").is_some());
 
         // The wine build the injection path steers to. It predates ntsync, and saying so in the row
@@ -1013,6 +1241,7 @@ mod tests {
             .runner("wine-xiv", "10.8.r0.a2ca9e4")
             .expect("wine runner present");
         assert_eq!(wine.kind, RunnerKind::Wine);
+        assert_eq!(wine.size, 66368636);
         assert_eq!(wine.archive.format, ArchiveFormat::TarXz);
         assert!(!wine.uses_ntsync());
         // The archive's own top directory carries the build flavour but not the distribution the
@@ -1026,26 +1255,63 @@ mod tests {
         // so turning that on later is a setting rather than another manifest edit.
         let dxvk = catalog.default_dxvk().expect("a dxvk row is published");
         assert_eq!(dxvk.version, "3.0.2");
+        assert_eq!(dxvk.size, 17999049);
+        assert!(dxvk.recommended);
         assert!(dxvk.nvapi.is_some(), "the companion is pinned too");
     }
 
-    /// Which build a launch installs is the publisher's ordering, so the resolver is that rule and
-    /// not a search. A catalog that publishes none is nothing to install rather than an error.
+    /// Which build a launch installs is the signed recommendation, independent of row ordering. A
+    /// catalog that publishes none is nothing to install rather than an error.
     #[test]
-    fn the_first_dxvk_row_is_the_one_a_launch_installs() {
+    fn the_recommended_dxvk_row_is_the_one_a_launch_installs() {
         let empty = Catalog::from_json_bytes(br#"{ "version": 1 }"#).expect("parses");
         assert!(empty.default_dxvk().is_none());
 
         let two = format!(
             r#"{{ "version": 1, "dxvk": [
-                {{ "version": "first", "url": "https://example.invalid/a.tar.gz", "sha256": "{GOOD_PIN}" }},
-                {{ "version": "second", "url": "https://example.invalid/b.tar.gz", "sha256": "{GOOD_PIN}" }} ] }}"#
+                {{ "version": "first", "url": "https://example.invalid/a.tar.gz", "sha256": "{GOOD_PIN}",
+                   "size": 100, "recommended": false }},
+                {{ "version": "second", "url": "https://example.invalid/b.tar.gz", "sha256": "{GOOD_PIN}",
+                   "size": 200, "recommended": true }} ] }}"#
         );
         let cat = Catalog::from_json_bytes(two.as_bytes()).expect("parses");
         assert_eq!(
             cat.default_dxvk().map(|d| d.version.as_str()),
-            Some("first")
+            Some("second")
         );
+    }
+
+    /// A selectable list without one clear publisher choice would make every consumer invent a
+    /// different default. Both no recommendation and competing recommendations are refused.
+    #[test]
+    fn each_nonempty_selectable_list_has_exactly_one_recommendation() {
+        let missing = manifest(GOOD_PIN).replace("\"recommended\": true", "\"recommended\": false");
+        assert!(matches!(
+            Catalog::from_json_bytes(missing.as_bytes()),
+            Err(CatalogError::RecommendationCount {
+                kind: "runner",
+                found: 0
+            })
+        ));
+
+        let duplicate = format!(
+            r#"{{ "version": 1, "runners": [
+                {{ "name": "GE-Proton", "version": "11-2", "kind": "proton_umu",
+                   "url": "https://example.invalid/new.tar.gz", "sha256": "{GOOD_PIN}",
+                   "size": 2048, "recommended": true,
+                   "archive": {{ "format": "tar.gz" }} }},
+                {{ "name": "GE-Proton", "version": "11-1", "kind": "proton_umu",
+                   "url": "https://example.invalid/old.tar.gz", "sha256": "{GOOD_PIN}",
+                   "size": 1024, "recommended": true,
+                   "archive": {{ "format": "tar.gz" }} }} ] }}"#
+        );
+        assert!(matches!(
+            Catalog::from_json_bytes(duplicate.as_bytes()),
+            Err(CatalogError::RecommendationCount {
+                kind: "runner",
+                found: 2
+            })
+        ));
     }
 
     /// A row written before the key existed still parses, and reads as no rather than as absent

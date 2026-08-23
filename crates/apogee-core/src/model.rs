@@ -230,6 +230,8 @@ pub struct Settings {
     /// Capture the game's settings before applying patches. On by default: a capture is tens of
     /// kilobytes, and a patch is the moment settings are most likely to be rewritten.
     pub backup_before_patch: bool,
+    /// Seconds between world-gate checks while a caller asks to wait for maintenance to end.
+    pub frontier_poll_seconds: u64,
     /// Where a companion pushes a one-time code, for the accounts set to receive one that way.
     pub otp_listener: ListenerSettings,
 }
@@ -305,6 +307,7 @@ impl Default for Settings {
             keep_patches: true,
             backups_kept: 5,
             backup_before_patch: true,
+            frontier_poll_seconds: 30,
             // Tuning only. Nothing here opens a port: the listener binds when an account set to
             // receive pushed codes begins a login, and no account is set that way by default.
             otp_listener: ListenerSettings::default(),

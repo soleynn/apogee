@@ -23,8 +23,8 @@ use crate::CoreError;
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
 use crate::command::{
-    Command, Event, FirstRunStep, FlowState, FrontierQuery, Notice, PasswordSource, PrefixAction,
-    RunOutcome,
+    Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, ImportData,
+    ImportXivLauncher, Notice, PasswordSource, PrefixAction, RunOutcome,
 };
 use crate::host;
 use crate::launch::LaunchBackend;
@@ -77,6 +77,7 @@ struct Harness {
     _store_dir: TempDir,
     prefixes: TempDir,
     backups: TempDir,
+    frontier: TempDir,
     store: Store,
     secrets: Arc<MemoryStore>,
     profile: Uuid,
@@ -103,6 +104,7 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
     let store_dir = TempDir::new().unwrap();
     let prefixes = TempDir::new().unwrap();
     let backups = TempDir::new().unwrap();
+    let frontier = TempDir::new().unwrap();
     let store = Store::new(store_dir.path().to_path_buf());
     let secrets = Arc::new(MemoryStore::new());
 
@@ -120,6 +122,7 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
         _store_dir: store_dir,
         prefixes,
         backups,
+        frontier,
         store,
         secrets,
         profile: profile.id,
@@ -216,6 +219,10 @@ fn context_with_otp(
         computer_id: host::computer_id(&h.store),
         prefixes_dir: h.prefixes.path().to_path_buf(),
         backups_dir: h.backups.path().to_path_buf(),
+        frontier: crate::frontier::FrontierAssets::new(
+            apogee_fetch::Fetcher::builder().build().unwrap(),
+            h.frontier.path().to_path_buf(),
+        ),
     }
 }
 
@@ -231,37 +238,46 @@ async fn run(ctx: FlowContext, cmd: Command) -> Vec<Event> {
 }
 
 #[tokio::test]
-async fn reserved_commands_fail_as_typed_streams_with_a_terminal_outcome() {
+async fn first_run_import_and_support_are_real_successful_streams() {
     let h = harness(false);
-    let cases = [
-        (Command::FirstRun(FirstRunStep::Start), "first-run"),
-        (
-            Command::ImportXivLauncher(PathBuf::from("fixture")),
-            "configuration import",
-        ),
-        (Command::Frontier(FrontierQuery::Gate), "frontier data"),
-        (Command::SupportBundle, "support bundle"),
-    ];
+    let transport = || Arc::new(FixtureTransport::new([]));
+    let launch = || Arc::new(FakeLaunchBackend::exiting());
 
-    for (command, expected) in cases {
-        let events = run(
-            context(
-                &h,
-                Arc::new(FixtureTransport::new([])),
-                Arc::new(FakeLaunchBackend::exiting()),
-                NOW,
-            ),
-            command,
-        )
-        .await;
-        assert!(matches!(
-            events.as_slice(),
-            [
-                Event::Error(CoreError::Unavailable { command }),
-                Event::Outcome(RunOutcome::Failed)
-            ] if *command == expected
-        ));
-    }
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::FirstRun(FirstRunRequest::Read),
+    )
+    .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Event::FirstRun(_), Event::Outcome(RunOutcome::Succeeded)]
+    ));
+
+    let source = TempDir::new().unwrap();
+    std::fs::write(source.path().join("accountsList.json"), b"[]").unwrap();
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::ImportXivLauncher(ImportXivLauncher::Scan(source.path().to_path_buf())),
+    )
+    .await;
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::Import(ImportData::Scan(_)),
+            Event::Outcome(RunOutcome::Succeeded)
+        ]
+    ));
+
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::SupportBundle { facts: Vec::new() },
+    )
+    .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Event::SupportBundle(data), Event::Outcome(RunOutcome::Succeeded)]
+            if data.bytes().starts_with(b"PK")
+    ));
 }
 
 fn states(events: &[Event]) -> Vec<FlowState> {
@@ -282,6 +298,68 @@ fn errors(events: &[Event]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn frontier_data(events: &[Event]) -> Vec<&FrontierData> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Frontier(data) => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn frontier_news_returns_display_safe_rows() {
+    let h = harness(false);
+    let response = ProtoResponse::new(
+        200,
+        br#"{
+            "news":[{"id":"n1","date":"2026-08-23","title":"Maintenance","url":"https://example.invalid/private","tag":"maintenance"}],
+            "topics":[],"pinned":[],"banner":[]
+        }"#
+        .to_vec(),
+    );
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new([response])),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Frontier(FrontierQuery::News)).await;
+    let [FrontierData::News(data)] = frontier_data(&events).as_slice() else {
+        panic!("expected one news result: {events:?}");
+    };
+    assert!(!data.news[0].id.is_empty());
+    assert_eq!(data.news[0].title, "Maintenance");
+    let rendered = format!("{data:?}");
+    assert!(!rendered.contains("example.invalid"));
+}
+
+#[tokio::test]
+async fn frontier_gate_returns_the_current_reading_without_waiting() {
+    let h = harness(false);
+    let response = ProtoResponse::new(
+        200,
+        br#"{"status":0,"message":["maintenance"],"news":["follow-up"]}"#.to_vec(),
+    );
+    let transport = Arc::new(FixtureTransport::new([response]));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Frontier(FrontierQuery::Gate { wait: false })).await;
+    let [FrontierData::Gate(data)] = frontier_data(&events).as_slice() else {
+        panic!("expected one gate result: {events:?}");
+    };
+    assert!(!data.open);
+    assert_eq!(data.messages, ["maintenance"]);
+    assert_eq!(transport.recorded().len(), 1);
 }
 
 /// The prefix reports a run emitted, in order.
@@ -1647,7 +1725,9 @@ async fn recreating_is_the_only_action_that_destroys_the_prefix() {
         ctx,
         Command::Prefix {
             profile: h.profile,
-            action: PrefixAction::Recreate,
+            action: PrefixAction::Recreate {
+                backup_config: false,
+            },
         },
     )
     .await;
@@ -1655,6 +1735,70 @@ async fn recreating_is_the_only_action_that_destroys_the_prefix() {
     assert!(states(&events).contains(&FlowState::RecreatingPrefix));
     assert!(launch.was_recreated());
     assert!(errors(&events).is_empty());
+}
+
+/// A requested capture is part of the destructive command, so the archive exists before the
+/// backend is allowed to delete anything.
+#[tokio::test]
+async fn recreating_can_capture_config_before_deletion() {
+    let h = harness(false);
+    plant_config(&h);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Recreate {
+                backup_config: true,
+            },
+        },
+    )
+    .await;
+
+    let states = states(&events);
+    assert_eq!(states, [FlowState::BackingUp, FlowState::RecreatingPrefix]);
+    assert!(launch.was_recreated());
+    let archives = std::fs::read_dir(h.backups.path().join(h.profile.to_string()))
+        .expect("the requested backup directory")
+        .filter_map(Result::ok)
+        .count();
+    assert_eq!(archives, 1);
+}
+
+/// When the promised capture cannot be made, deletion never starts. A backup flag that merely
+/// reports an error while continuing would make the destructive command's safety choice untrue.
+#[tokio::test]
+async fn a_failed_recreate_backup_preserves_the_prefix() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Recreate {
+                backup_config: true,
+            },
+        },
+    )
+    .await;
+
+    assert_eq!(states(&events), [FlowState::BackingUp]);
+    assert_eq!(errors(&events).len(), 1);
+    assert!(!launch.was_recreated());
 }
 
 /// Creating one is what a launch does first, reachable on its own so a user can pay that cost before
@@ -1690,7 +1834,7 @@ async fn creating_a_prefix_prepares_it_without_launching() {
 /// the first launch that was supposed to have nothing left to do.
 #[rstest::rstest]
 #[case(PrefixAction::Create)]
-#[case(PrefixAction::Recreate)]
+#[case(PrefixAction::Recreate { backup_config: false })]
 #[tokio::test]
 async fn a_prefix_built_on_its_own_gets_the_setup_a_launch_would_apply(
     #[case] action: PrefixAction,
@@ -1963,7 +2107,7 @@ async fn a_launch_asks_its_prefix_for_the_companion_the_profile_chose(#[case] nv
 #[case(PrefixAction::Create)]
 #[case(PrefixAction::Check)]
 #[case(PrefixAction::Fix)]
-#[case(PrefixAction::Recreate)]
+#[case(PrefixAction::Recreate { backup_config: false })]
 #[tokio::test]
 async fn every_prefix_verb_carries_the_companion_the_profile_chose(#[case] action: PrefixAction) {
     let h = harness_customized(false, |profile| profile.launch.nvapi = true);
@@ -2087,6 +2231,7 @@ async fn close_after_launch_detaches_without_supervising() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
         })
         .unwrap();
@@ -2193,6 +2338,7 @@ async fn a_patch_captures_nothing_when_the_setting_is_off() {
     h.store
         .save_settings(&Settings {
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
             ..Settings::default()
         })
@@ -2342,6 +2488,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
         })
         .unwrap();
@@ -2381,6 +2528,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
         })
         .unwrap();
@@ -2604,6 +2752,10 @@ async fn patches_pending_continue_to_launch() {
     assert_eq!(
         states(&events),
         [
+            FlowState::PatchesPending {
+                count: 2,
+                bytes: 3_000,
+            },
             FlowState::Patching,
             FlowState::PreparingPrefix,
             FlowState::Launching,
@@ -2647,6 +2799,10 @@ async fn a_stale_boot_is_patched_before_registering() {
     assert_eq!(
         states(&events),
         [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 4_096,
+            },
             FlowState::Patching,
             FlowState::PreparingPrefix,
             FlowState::Launching,
@@ -2725,7 +2881,15 @@ async fn install_from_nothing_reaches_launch() {
     assert_eq!(
         states(&events),
         [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 4_096,
+            },
             FlowState::Patching,
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 5_000,
+            },
             FlowState::PreparingPrefix,
             FlowState::Launching,
             FlowState::Running,
@@ -2766,7 +2930,13 @@ async fn patch_applies_pending_without_launching() {
     assert!(errors(&events).is_empty());
     assert_eq!(
         states(&events),
-        [FlowState::Patching],
+        [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 1_000,
+            },
+            FlowState::Patching
+        ],
         "patch applies pending but never launches"
     );
     assert_eq!(patch.installed_repos(), [Repo::Game]);
@@ -2797,7 +2967,17 @@ async fn stopping_a_patch_is_narrated_rather_than_failed() {
         "a patch the user stopped is not a failure: {:?}",
         errors(&events)
     );
-    assert_eq!(states(&events), [FlowState::Patching, FlowState::Cancelled]);
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 1_000,
+            },
+            FlowState::Patching,
+            FlowState::Cancelled
+        ]
+    );
     assert_eq!(launch.launch_count(), 0);
 }
 

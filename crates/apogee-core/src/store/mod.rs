@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::FirstRunCheckpoint;
 use crate::model::{Account, Profile, Settings};
+use crate::status::StatusRecord;
 
 #[cfg(test)]
 mod tests;
@@ -200,6 +202,22 @@ impl Migrate for UidCacheEntry {
     }
 }
 
+impl Migrate for StatusRecord {
+    const CURRENT_VERSION: u32 = 1;
+
+    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err(format!("no migration from schema version {from}"))
+    }
+}
+
+impl Migrate for FirstRunCheckpoint {
+    const CURRENT_VERSION: u32 = 1;
+
+    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
+        Err(format!("no migration from schema version {from}"))
+    }
+}
+
 /// The install id (see [`Store::install_id`]) is a bare identifier with no fields, but it goes
 /// through the same versioned envelope as every other entity so a later format has somewhere to go.
 impl Migrate for Uuid {
@@ -210,7 +228,7 @@ impl Migrate for Uuid {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 7;
+    const CURRENT_VERSION: u32 = 8;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -255,6 +273,12 @@ impl Migrate for Settings {
                     )?,
                 );
             }
+            // Gained the interval for callers that wait on the public world gate. Existing installs
+            // take the same conservative cadence as new ones.
+            7 => {
+                obj.entry("frontier_poll_seconds")
+                    .or_insert(serde_json::Value::from(30));
+            }
             other => return Err(format!("no migration from schema version {other}")),
         }
         Ok(value)
@@ -295,12 +319,20 @@ impl Store {
         self.base.join("uid-cache")
     }
 
+    fn status_dir(&self) -> PathBuf {
+        self.base.join("status")
+    }
+
     fn settings_file(&self) -> PathBuf {
         self.base.join("settings.json")
     }
 
     fn install_id_file(&self) -> PathBuf {
         self.base.join("install-id.json")
+    }
+
+    fn first_run_file(&self) -> PathBuf {
+        self.base.join("first-run.json")
     }
 
     fn profile_path(&self, id: Uuid) -> PathBuf {
@@ -313,6 +345,10 @@ impl Store {
 
     fn uid_cache_path(&self, account: Uuid) -> PathBuf {
         self.uid_cache_dir().join(format!("{account}.json"))
+    }
+
+    fn status_path(&self, profile: Uuid) -> PathBuf {
+        self.status_dir().join(format!("{profile}.json"))
     }
 
     /// Persist `profile`, keyed by its id.
@@ -402,6 +438,18 @@ impl Store {
         match self.load(&self.settings_file()) {
             Ok(settings) => Ok(settings),
             Err(StoreError::NotFound { .. }) => Ok(Settings::default()),
+            Err(other) => Err(other),
+        }
+    }
+
+    pub(crate) fn save_first_run(&self, checkpoint: &FirstRunCheckpoint) -> Result<(), StoreError> {
+        self.save(&self.first_run_file(), checkpoint)
+    }
+
+    pub(crate) fn load_first_run(&self) -> Result<FirstRunCheckpoint, StoreError> {
+        match self.load(&self.first_run_file()) {
+            Ok(checkpoint) => Ok(checkpoint),
+            Err(StoreError::NotFound { .. }) => Ok(FirstRunCheckpoint::default()),
             Err(other) => Err(other),
         }
     }
@@ -571,6 +619,24 @@ impl Store {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
             Err(source) => Err(StoreError::Io { path, source }),
+        }
+    }
+}
+
+impl Store {
+    pub(crate) fn save_status(
+        &self,
+        profile: Uuid,
+        status: &StatusRecord,
+    ) -> Result<(), StoreError> {
+        self.save(&self.status_path(profile), status)
+    }
+
+    pub(crate) fn load_status(&self, profile: Uuid) -> Result<Option<StatusRecord>, StoreError> {
+        match self.load(&self.status_path(profile)) {
+            Ok(status) => Ok(Some(status)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
         }
     }
 }

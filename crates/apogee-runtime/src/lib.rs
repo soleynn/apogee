@@ -106,10 +106,7 @@ mod supervise;
 #[cfg(target_os = "windows")]
 mod windows;
 
-// The one consumer of `Path` here is the `/proc` guard, which no other target has.
-#[cfg(target_os = "linux")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apogee_fetch::Fetcher;
@@ -117,7 +114,7 @@ use apogee_fetch::Fetcher;
 pub use bench::{BenchError, BenchStats, FrameLog};
 pub use catalog::{
     ArchiveFormat, ArchiveLayout, CATALOG_MANIFEST_VERSION, CATALOG_PUBLIC_KEYS, Catalog,
-    DxvkEntry, NvapiRef, Runner, RunnerKind, ToolEntry, TrustedKey,
+    CatalogViewEntry, DxvkEntry, NvapiRef, Runner, RunnerKind, ToolEntry, TrustedKey,
 };
 #[cfg(target_os = "linux")]
 pub use companion::{Companion, CompanionExit, CompanionSpec};
@@ -159,7 +156,16 @@ pub use steam::{
     steam_installs,
 };
 #[cfg(target_os = "windows")]
-pub use windows::{GameExit, GameSession, game_running};
+pub use windows::{GameExit, GameSession, game_running, running_game};
+
+/// A native game process resolved to the install it is running from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningGame {
+    /// The client executable name used to identify the process.
+    pub executable: String,
+    /// The operating-system process identifier.
+    pub pid: u32,
+}
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
 ///
@@ -213,10 +219,23 @@ pub async fn prefix_processes(
 /// [`RuntimeError::Io`] if `/proc` cannot be read.
 #[cfg(target_os = "linux")]
 pub fn game_running(game_root: &Path) -> Result<bool, RuntimeError> {
-    supervise::running_in_install(game_root).map_err(|source| RuntimeError::Io {
-        path: PathBuf::from("/proc"),
-        source,
-    })
+    Ok(running_game(game_root)?.is_some())
+}
+
+/// Resolve the game process currently reading from `game_root`.
+#[cfg(target_os = "linux")]
+pub fn running_game(game_root: &Path) -> Result<Option<RunningGame>, RuntimeError> {
+    supervise::running_in_install(game_root)
+        .map(|pid| {
+            pid.map(|pid| RunningGame {
+                executable: "ffxiv_dx11.exe".to_owned(),
+                pid: pid as u32,
+            })
+        })
+        .map_err(|source| RuntimeError::Io {
+            path: PathBuf::from("/proc"),
+            source,
+        })
 }
 
 /// Reap the spawned program in the background and report its status on `progress`.
@@ -303,6 +322,38 @@ impl Runtime {
     #[must_use]
     pub fn confinement(&self) -> &Confinement {
         &self.inner.confinement
+    }
+
+    /// Read the signed runner rows together with their installation state.
+    ///
+    /// Rows retain manifest order. A structured installation marker for a runner no longer in the
+    /// catalog is appended with `available = false`; an empty marker written by an older build can
+    /// still mark a current row installed but cannot identify a withdrawn row without guessing.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Io`] if the installation marker directory cannot be read.
+    pub fn runner_catalog_view(
+        &self,
+        catalog: &Catalog,
+    ) -> Result<Vec<CatalogViewEntry>, RuntimeError> {
+        catalog::runner_catalog_view(catalog, &self.inner.paths.runners)
+    }
+
+    /// Read the signed DXVK rows together with the version recorded in `prefix_root`.
+    ///
+    /// Takes a path instead of a prepared [`Prefix`], so listing is read-only and works before any
+    /// prefix exists. A recorded version no longer in the catalog is appended with
+    /// `available = false`. Passing `None` reports only available rows.
+    ///
+    /// # Errors
+    /// [`RuntimeError::PrefixJson`] for a malformed prefix record, or [`RuntimeError::Io`] if it
+    /// cannot be read.
+    pub fn dxvk_catalog_view(
+        &self,
+        catalog: &Catalog,
+        prefix_root: Option<&Path>,
+    ) -> Result<Vec<CatalogViewEntry>, RuntimeError> {
+        catalog::dxvk_catalog_view(catalog, prefix_root)
     }
 }
 

@@ -22,7 +22,11 @@ pub enum CoreError {
     #[error("download: {0}")]
     Fetch(#[from] apogee_fetch::FetchError),
     #[error("patch: {0}")]
-    Patch(#[from] apogee_patcher::PatchError),
+    Patch(#[source] Box<apogee_patcher::PatchError>),
+    #[error("game is running{process}", process = running_game_suffix(.process.as_ref()))]
+    GameRunning {
+        process: Option<apogee_runtime::RunningGame>,
+    },
     #[error("runtime: {0}")]
     Runtime(#[from] apogee_runtime::RuntimeError),
     #[error("addons: {0}")]
@@ -56,6 +60,12 @@ pub enum CoreError {
     InvalidCredential,
     #[error("import from {path:?} failed: {detail}")]
     Import { path: PathBuf, detail: String },
+    #[error("configuration import: {0}")]
+    XivImport(#[from] crate::xiv_import::XivImportError),
+    #[error("support bundle: {0}")]
+    Support(#[from] crate::support::SupportError),
+    #[error("first-run setup: {0}")]
+    FirstRun(#[from] crate::FirstRunTransitionError),
     #[error("initialization failed: {detail}")]
     Init { detail: String },
     #[error("preparing the launch failed: {detail}")]
@@ -64,8 +74,42 @@ pub enum CoreError {
     PatchIncomplete { detail: String },
     #[error("preparing the repair failed: {detail}")]
     Repair { detail: String },
+    #[error("no public display link with id {id}")]
+    FrontierLink { id: String },
     /// The command shape is reserved, but this build does not implement its flow yet. Keeping it a
     /// typed failure preserves the stream contract instead of panicking or closing without an outcome.
     #[error("{command} is not available in this build")]
     Unavailable { command: &'static str },
+}
+
+fn running_game_suffix(process: Option<&apogee_runtime::RunningGame>) -> String {
+    process.map_or_else(String::new, |process| {
+        format!(" ({}, pid {})", process.executable, process.pid)
+    })
+}
+
+impl From<apogee_patcher::PatchError> for CoreError {
+    fn from(error: apogee_patcher::PatchError) -> Self {
+        Self::Patch(Box::new(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_game_error_names_the_process_when_it_was_resolved() {
+        let error = CoreError::GameRunning {
+            process: Some(apogee_runtime::RunningGame {
+                executable: "ffxiv_dx11.exe".to_owned(),
+                pid: 41_207,
+            }),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "game is running (ffxiv_dx11.exe, pid 41207)"
+        );
+    }
 }

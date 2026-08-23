@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
-    Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore,
-    ForeignKey, ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome,
-    ImportSource, KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources,
-    Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction,
-    PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
-    SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
+    Core, CoreConfig, Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState,
+    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery,
+    GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource, KdfCost,
+    LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
+    NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
+    PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
+    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
+    SecretSweep, SecretsError, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -91,6 +92,8 @@ enum Commands {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// Print the action core derives from the profile's install and persisted run state.
+    Status(TargetArgs),
     /// Authenticate and register a session (does not launch).
     Login(PlayArgs),
     /// Launch the game from a still-valid cached session.
@@ -101,6 +104,38 @@ enum Commands {
     Patch(PlayArgs),
     /// Install the game from nothing into the profile's (empty) game directory, then launch.
     Install(PlayArgs),
+    /// Print the public launcher headlines.
+    News,
+    /// Cache and print the current promotional banner rows.
+    Banners,
+    /// Print the world-gate status, optionally waiting until it opens.
+    Gate(GateArgs),
+    /// Show the launch setup core resolves for a profile.
+    Setup {
+        #[command(subcommand)]
+        action: SetupCommand,
+    },
+    /// List managed runner builds.
+    Runner {
+        #[command(subcommand)]
+        action: RunnerCommand,
+    },
+    /// List graphics translation builds.
+    Dxvk {
+        #[command(subcommand)]
+        action: DxvkCommand,
+    },
+    /// Preview or apply configuration imports.
+    Import {
+        #[command(subcommand)]
+        action: ImportCommand,
+    },
+    /// Create a redacted diagnostic archive.
+    SupportBundle(SupportBundleArgs),
+    /// Print the core-owned public diagnostic report.
+    SystemReport(OptionalTargetArgs),
+    /// Print the resumable initial-setup checkpoint and its next required step.
+    FirstRun,
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
     Repair(RepairArgs),
     /// Frame-consistency analysis over MangoHud frametime logs.
@@ -154,10 +189,68 @@ enum Commands {
     },
 }
 
+#[derive(Args)]
+struct GateArgs {
+    /// Keep checking at the configured interval until the gate opens or the command is cancelled.
+    #[arg(long)]
+    wait: bool,
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    Show(TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum RunnerCommand {
+    List,
+}
+
+#[derive(Subcommand)]
+enum DxvkCommand {
+    List(TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum ImportCommand {
+    Xivlauncher(XivImportArgs),
+}
+
+#[derive(Args)]
+struct XivImportArgs {
+    /// Data directory containing accountsList.json and launcherConfigV3.json.
+    path: Option<PathBuf>,
+    /// Print the complete finding set without writing accepted rows.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct SupportBundleArgs {
+    /// Refuse to overwrite this output archive if it already exists.
+    #[arg(long, default_value = "apogee-support.zip")]
+    output: PathBuf,
+    /// Optional profile name or id whose runner and prefix should be reported.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Validated shell fact in NAME=VALUE form. Unknown names are omitted.
+    #[arg(long = "fact")]
+    facts: Vec<String>,
+}
+
+#[derive(Args)]
+struct OptionalTargetArgs {
+    /// Profile name or id whose runner and prefix should be reported.
+    #[arg(long)]
+    profile: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum SettingsCommand {
     /// Print the current preferences.
     Show,
+    /// Print the defaults for launcher and profile launch settings.
+    Defaults,
     /// Change a preference. Only the ones named are touched.
     Set(SettingsSetArgs),
 }
@@ -258,6 +351,9 @@ struct SettingsSetArgs {
     /// How many captures to keep per profile.
     #[arg(long)]
     backups_kept: Option<u32>,
+    /// Seconds between checks while `gate --wait` is holding for maintenance to end.
+    #[arg(long)]
+    frontier_poll_seconds: Option<u64>,
     /// Stop supervising once the game is up.
     #[arg(long)]
     close_after_launch: Option<bool>,
@@ -311,6 +407,9 @@ struct PrefixRecreateArgs {
     /// Skip the confirmation. For scripts, which have no one to ask.
     #[arg(long)]
     yes: bool,
+    /// Capture the game's settings before deleting the prefix. If capture fails, nothing is deleted.
+    #[arg(long)]
+    backup_config: bool,
 }
 
 #[cfg(unix)]
@@ -474,9 +573,19 @@ enum ProfileAction {
     /// List stored profiles.
     List,
     /// Remove a profile (and its account, if no other profile references it).
-    Remove(TargetArgs),
+    Remove(ProfileRemoveArgs),
     /// Show or change how a profile's launches are tuned.
     Env(ProfileEnvArgs),
+}
+
+#[derive(Args)]
+struct ProfileRemoveArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Report what would be removed without changing anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -619,6 +728,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             profile(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Status(args) => {
+            let profile = resolve_profile(&core, &args.profile)?.id;
+            print!("{}", render_next_action(&core.next_action(profile).await?));
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Login(args) => {
             let (profile, password, otp) = gather(&core, &args)?;
             Ok(drive(
@@ -670,6 +784,98 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 },
             )
             .await)
+        }
+        Commands::News => Ok(drive(&core, Command::Frontier(FrontierQuery::News)).await),
+        Commands::Banners => Ok(drive(&core, Command::Frontier(FrontierQuery::Banners)).await),
+        Commands::Gate(args) => Ok(drive(
+            &core,
+            Command::Frontier(FrontierQuery::Gate { wait: args.wait }),
+        )
+        .await),
+        Commands::Setup { action } => match action {
+            SetupCommand::Show(args) => {
+                let profile = resolve_profile(&core, &args.profile)?.id;
+                for item in core.resolved_setup(profile).await? {
+                    match item.value {
+                        SetupValue::Runner { name, version } => println!(
+                            "runner\t{name}\t{}\t{:?}",
+                            version.as_deref().unwrap_or("unknown"),
+                            item.source
+                        ),
+                        SetupValue::Sync(sync) => {
+                            println!("sync\t{sync:?}\t{:?}", item.source)
+                        }
+                        SetupValue::Gpu {
+                            selection,
+                            identity,
+                        } => println!(
+                            "gpu\t{selection:?}\t{}\t{:?}",
+                            identity.as_deref().unwrap_or("unknown"),
+                            item.source
+                        ),
+                        SetupValue::Dxvk { version, nvapi } => println!(
+                            "dxvk\t{}\tnvapi={nvapi}\t{:?}",
+                            version.as_deref().unwrap_or("not installed"),
+                            item.source
+                        ),
+                        SetupValue::Dalamud { enabled } => {
+                            println!("dalamud\tenabled={enabled}\t{:?}", item.source)
+                        }
+                        _ => println!("setup\tunknown\t{:?}", item.source),
+                    }
+                }
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Commands::Runner { action } => match action {
+            RunnerCommand::List => {
+                print_catalog_rows(&core.runner_catalog().await?);
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Commands::Dxvk { action } => match action {
+            DxvkCommand::List(args) => {
+                let profile = resolve_profile(&core, &args.profile)?.id;
+                print_catalog_rows(&core.dxvk_catalog(profile).await?);
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Commands::Import { action } => match action {
+            ImportCommand::Xivlauncher(args) => import_xivlauncher(&core, args),
+        },
+        Commands::SupportBundle(args) => {
+            let profile = args
+                .profile
+                .as_deref()
+                .map(|target| resolve_profile(&core, target).map(|profile| profile.id))
+                .transpose()?;
+            let facts = args
+                .facts
+                .iter()
+                .map(|fact| {
+                    fact.split_once('=')
+                        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                        .ok_or_else(|| format!("invalid fact {fact:?}; expected NAME=VALUE"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            core.create_support_bundle(&args.output, profile, facts)?;
+            println!("{}", args.output.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::SystemReport(args) => {
+            let profile = args
+                .profile
+                .as_deref()
+                .map(|target| resolve_profile(&core, target).map(|profile| profile.id))
+                .transpose()?;
+            print!("{}", core.system_report(profile)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::FirstRun => {
+            let checkpoint = core.first_run().await?;
+            println!("next\t{:?}", apogee_core::first_incomplete(&checkpoint));
+            println!("checkpoint\t{checkpoint:#?}");
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Repair(args) => {
             let profile = resolve_profile(&core, &args.profile)?.id;
@@ -981,9 +1187,24 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             println!("keep_patches        {}", s.keep_patches);
             println!("backups_kept        {}", s.backups_kept);
             println!("backup_before_patch {}", s.backup_before_patch);
+            println!("frontier_poll_secs  {}", s.frontier_poll_seconds);
             // Where a user looks for machine-wide state, and where the listener sits is exactly that.
             // Nothing here says whether it is in use: that is per account, and `otp status` says it.
             print_listener_settings(&s.otp_listener);
+            Ok(())
+        }
+        SettingsCommand::Defaults => {
+            let defaults = core.defaults();
+            let s = defaults.settings;
+            println!("language            {}", s.language);
+            println!("secret_backend      {:?}", s.secret_backend);
+            println!("close_after_launch  {}", s.close_after_launch);
+            println!("keep_patches        {}", s.keep_patches);
+            println!("backups_kept        {}", s.backups_kept);
+            println!("backup_before_patch {}", s.backup_before_patch);
+            println!("frontier_poll_secs  {}", s.frontier_poll_seconds);
+            print_listener_settings(&s.otp_listener);
+            println!("launch               {:?}", defaults.launch);
             Ok(())
         }
         SettingsCommand::Set(args) => {
@@ -996,6 +1217,9 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             }
             if let Some(v) = args.backups_kept {
                 s.backups_kept = v;
+            }
+            if let Some(v) = args.frontier_poll_seconds {
+                s.frontier_poll_seconds = v.max(1);
             }
             if let Some(v) = args.close_after_launch {
                 s.close_after_launch = v;
@@ -1112,7 +1336,12 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
         PrefixCommand::Create(args) => (&args.profile, PrefixAction::Create),
         PrefixCommand::Health(args) => (&args.profile, PrefixAction::Check),
         PrefixCommand::Fix(args) => (&args.profile, PrefixAction::Fix),
-        PrefixCommand::Recreate(args) => (&args.profile, PrefixAction::Recreate),
+        PrefixCommand::Recreate(args) => (
+            &args.profile,
+            PrefixAction::Recreate {
+                backup_config: args.backup_config,
+            },
+        ),
     };
     let profile = resolve_profile(core, target)?.id;
 
@@ -1120,7 +1349,11 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
         && !args.yes
     {
         println!("this deletes the prefix and everything installed into it, including the game's");
-        println!("own settings. `backup create` captures those first.");
+        if args.backup_config {
+            println!("own settings. Their backup must complete before deletion begins.");
+        } else {
+            println!("own settings. `--backup-config` captures those first.");
+        }
         let expected = resolve_profile(core, target)?.name;
         let answer = prompt_line("type the profile name to confirm: ")?;
         // An empty answer never confirms, whatever the profile is called. Without this a profile
@@ -1733,6 +1966,16 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
         }
         ProfileAction::Remove(args) => {
             let profile = resolve_profile(core, &args.profile)?;
+            let plan = core.plan_removal(profile.id)?;
+            if args.dry_run {
+                println!("would remove profile {}", profile.id);
+                if let Some(account) = plan.account_removed {
+                    println!("would remove account {account} and its stored secrets");
+                } else {
+                    println!("would keep the shared account and its stored secrets");
+                }
+                return Ok(());
+            }
             let removal = core.remove_profile(profile.id)?;
             println!("removed profile {}", profile.id);
             if let Some(account) = removal.account_removed {
@@ -2220,7 +2463,10 @@ fn render(event: &Event) -> String {
         Event::Patch(patch) => render_patch(patch),
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
-        Event::Frontier(_) => "frontier data received".to_owned(),
+        Event::Frontier(data) => render_frontier(data),
+        Event::FirstRun(checkpoint) => format!("first-run: {checkpoint:#?}"),
+        Event::Import(data) => format!("import: {data:#?}"),
+        Event::SupportBundle(data) => format!("support bundle: {} bytes", data.bytes().len()),
         Event::Prefix(report) => render_health(report),
         Event::Notice(notice) => render_notice(notice),
         Event::LaunchProgramExited(exit) => render_launch_program_exit(exit),
@@ -2228,6 +2474,144 @@ fn render(event: &Event) -> String {
         Event::Outcome(outcome) => format!("outcome: {outcome:?}"),
         _ => "unrecognized event".to_owned(),
     }
+}
+
+fn render_frontier(data: &FrontierData) -> String {
+    match data {
+        FrontierData::News(data) => {
+            let mut lines = Vec::new();
+            for row in data.pinned.iter().chain(&data.news).chain(&data.topics) {
+                lines.push(format!("{}\t{}\t{}", row.date, row.tag, row.title));
+            }
+            lines.join("\n")
+        }
+        FrontierData::Gate(data) => {
+            let state = if data.open { "open" } else { "closed" };
+            let mut lines = vec![format!("gate: {state}")];
+            lines.extend(
+                data.messages
+                    .iter()
+                    .map(|message| format!("message: {message}")),
+            );
+            lines.extend(data.news.iter().map(|news| format!("news: {news}")));
+            lines.join("\n")
+        }
+        FrontierData::Banners(rows) => format!("banners: {}", rows.len()),
+        _ => "unrecognized frontier data".to_owned(),
+    }
+}
+
+fn render_next_action(action: &NextAction) -> String {
+    let verb = match action.verb {
+        NextVerb::Play => "Play",
+        NextVerb::UpdateAndPlay => "Update and play",
+        NextVerb::Install => "Install",
+        NextVerb::Resume => "Resume",
+        NextVerb::Repair => "Repair",
+        NextVerb::SignIn => "Sign in",
+        NextVerb::AcceptTerms => "Accept the terms",
+        NextVerb::WaitForMaintenance => "Wait for maintenance",
+        NextVerb::CloseGameFirst => "Close the game first",
+        _ => "Unknown",
+    };
+    let command = match action.command {
+        NextCommand::Launch => "launch",
+        NextCommand::PatchAndPlay => "play",
+        NextCommand::Install => "install",
+        NextCommand::Repair => "repair",
+        NextCommand::Login => "login",
+        NextCommand::WaitForGate => "gate --wait",
+        _ => "unknown",
+    };
+    let mut output = format!(
+        "verb: {verb}\ncommand: {command}\nresumable: {}\npatching available: {}\n",
+        action.resumable, action.patching_available
+    );
+    if let Some(pending) = action.pending {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "pending: {} patches, {} bytes, observed {}",
+            pending.count, pending.bytes, pending.as_of
+        );
+    }
+    if let Some(blocked) = &action.blocked {
+        use std::fmt::Write as _;
+        let _ = writeln!(output, "blocked: {blocked}");
+    }
+    output
+}
+
+fn print_catalog_rows(rows: &[CatalogViewEntry]) {
+    for row in rows {
+        println!(
+            "{}\t{}\tinstalled={}\tavailable={}\tsize={}\trecommended={}",
+            row.name,
+            row.version,
+            row.installed,
+            row.available,
+            row.size
+                .map_or_else(|| "unknown".to_owned(), |size| size.to_string()),
+            row.recommended
+        );
+    }
+}
+
+fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliError> {
+    let scan = if let Some(path) = args.path {
+        core.scan_xivlauncher(path)?
+    } else {
+        let mut found = None;
+        for path in core.xivlauncher_candidate_roots() {
+            match core.scan_xivlauncher(&path) {
+                Ok(scan) => {
+                    found = Some(scan);
+                    break;
+                }
+                Err(apogee_core::CoreError::XivImport(apogee_core::XivImportError::NoSource {
+                    ..
+                })) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        found.ok_or("no XIVLauncher configuration was found in the known locations")?
+    };
+    println!("source\t{}", scan.source.display());
+    for finding in &scan.findings {
+        match &finding.result {
+            ImportFindingResult::Candidate(candidate) => println!(
+                "candidate\t{}\t{}\t{:?}\totp={}\tnever-store={}\tgame={}",
+                finding.id.as_str(),
+                candidate.sqex_id,
+                candidate.kind,
+                candidate.use_otp,
+                candidate.never_store,
+                candidate
+                    .game_path
+                    .as_deref()
+                    .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
+            ),
+            ImportFindingResult::Skipped(issue) => println!(
+                "skipped\t{}\t{:?}\t{:?}",
+                finding.id.as_str(),
+                finding.location,
+                issue
+            ),
+            _ => println!("skipped\t{}\tunknown", finding.id.as_str()),
+        }
+    }
+    if args.dry_run {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let accepted = scan
+        .findings
+        .iter()
+        .filter(|finding| matches!(finding.result, ImportFindingResult::Candidate(_)))
+        .map(|finding| finding.id.clone());
+    let plan = scan.plan(accepted)?;
+    let report = core.apply_xivlauncher(&plan)?;
+    println!("applied\t{}", report.applied.len());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Render what the loader a launch was redirected through reported on its way out.

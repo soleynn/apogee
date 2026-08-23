@@ -31,7 +31,9 @@ use crate::flow::{self, FlowContext};
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
-use crate::model::{Account, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings};
+use crate::model::{
+    Account, LaunchSettings, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings,
+};
 use crate::patch;
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
@@ -56,6 +58,8 @@ pub struct CoreConfig {
     /// signed catalog, and the trees an injectable unpacks into. Shared across profiles, because none of
     /// it belongs to any one prefix.
     pub addons_dir: PathBuf,
+    /// Where validated public display artwork is cached after normalization.
+    pub frontier_dir: PathBuf,
 }
 
 impl CoreConfig {
@@ -81,6 +85,7 @@ impl CoreConfig {
             patch_store: base.join("patches"),
             backups_dir: base.join("backups"),
             addons_dir: base.join("addons"),
+            frontier_dir: base.join("frontier"),
         }
     }
 
@@ -110,6 +115,7 @@ impl CoreConfig {
             // Data too: what a launch loads into the game is tens of megabytes and is fetched from a
             // third party, so a cache cleaner removing it turns the next launch into a download.
             addons_dir: data.join("apogee/addons"),
+            frontier_dir: data.join("apogee/frontier"),
         })
     }
 }
@@ -220,6 +226,15 @@ pub struct ProfileRemoval {
     pub secret_sweep: Option<SecretSweep>,
 }
 
+/// The persisted defaults a shell may offer without duplicating them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Defaults {
+    /// Launcher-wide defaults.
+    pub settings: Settings,
+    /// Per-profile launch defaults.
+    pub launch: LaunchSettings,
+}
+
 /// What importing another launcher's password did.
 ///
 /// [`Nothing`](Self::Nothing) and [`Unsupported`](Self::Unsupported) both store nothing, and they
@@ -298,6 +313,8 @@ pub struct Core {
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
     backups_dir: PathBuf,
+    patch_store: PathBuf,
+    frontier: crate::frontier::FrontierAssets,
     /// Where the sealed-file secret store's file goes, whether or not that is the backend in use.
     secrets_path: PathBuf,
 }
@@ -402,6 +419,7 @@ impl Core {
             patch_store,
             backups_dir,
             addons_dir,
+            frontier_dir,
         } = config;
         let store = Store::new(store_dir);
         // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
@@ -412,6 +430,7 @@ impl Core {
             .unwrap_or(false);
 
         let fetcher = Fetcher::builder().build()?;
+        let frontier = crate::frontier::FrontierAssets::new(fetcher.clone(), frontier_dir);
         let runtime = Runtime::new(
             fetcher.clone(),
             RuntimePaths {
@@ -435,8 +454,11 @@ impl Core {
         // The signed index catalog for repair rides the same download engine as everything else, so
         // its fetch sits under the engine's redirect floor and stall bounds rather than a second,
         // differently-configured client's.
-        let patch: Arc<dyn PatchBackend> =
-            Arc::new(PatcherBackend::new(patcher, fetcher.clone(), patch_store));
+        let patch: Arc<dyn PatchBackend> = Arc::new(PatcherBackend::new(
+            patcher,
+            fetcher.clone(),
+            patch_store.clone(),
+        ));
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),
@@ -460,6 +482,8 @@ impl Core {
             clock: host::system_clock(),
             prefixes_dir,
             backups_dir,
+            patch_store,
+            frontier,
             secrets_path,
         })
     }
@@ -479,6 +503,348 @@ impl Core {
     /// Returns a [`CoreError::Store`] if the settings file is present but corrupt.
     pub fn settings(&self) -> Result<Settings, CoreError> {
         Ok(self.store.load_settings()?)
+    }
+
+    /// The defaults for launcher-wide and per-profile launch settings.
+    #[must_use]
+    pub fn defaults(&self) -> Defaults {
+        Defaults {
+            settings: Settings::default(),
+            launch: LaunchSettings::default(),
+        }
+    }
+
+    /// Resolve an opaque display-row id against links admitted during this core instance.
+    ///
+    /// # Errors
+    /// [`CoreError::FrontierLink`] when the id was not issued by a successful display query.
+    pub fn resolve_frontier_link(&self, id: &str) -> Result<url::Url, CoreError> {
+        self.frontier
+            .resolve_link(id)
+            .ok_or_else(|| CoreError::FrontierLink { id: id.to_owned() })
+    }
+
+    /// Read the selected profile's persisted readiness and choose its next credential-free action.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] for an unknown profile or [`CoreError::Store`] when its
+    /// persisted state cannot be read.
+    pub async fn next_action(&self, profile: Uuid) -> Result<crate::NextAction, CoreError> {
+        let profile = self.profile(profile)?;
+        let status = self.store.load_status(profile.id)?;
+        let cached = self.store.load_uid_cache(profile.account).ok().flatten();
+        let max_expansion = cached.as_ref().map_or(0, |entry| entry.max_expansion);
+        let report = sqex_proto::VersionReport::from_install(
+            &sqex_proto::InstallPaths::new(&profile.game_path),
+            max_expansion,
+        )
+        .ok();
+        let cache_valid = report.as_ref().is_some_and(|report| {
+            cached
+                .as_ref()
+                .is_some_and(|entry| entry.is_valid((self.clock)(), report.game_version()))
+        });
+        let game_running = match apogee_runtime::game_running(&profile.game_path) {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect the running game while reading status");
+                false
+            }
+        };
+        let resumable =
+            if let Some(pending) = status.as_ref().and_then(|status| status.pending.as_ref()) {
+                crate::status::has_staged_patch(&self.patch_store, pending).await
+            } else {
+                false
+            };
+        Ok(crate::status::derive_next_action(
+            status.as_ref(),
+            report.is_some(),
+            cache_valid,
+            resumable,
+            game_running,
+        ))
+    }
+
+    /// Scan an XIVLauncher data directory without changing either launcher's files.
+    pub fn scan_xivlauncher(
+        &self,
+        source: impl AsRef<std::path::Path>,
+    ) -> Result<crate::ImportScan, CoreError> {
+        Ok(crate::xiv_import::scan(source)?)
+    }
+
+    /// Apply a reviewed import plan after proving its source files have not changed.
+    pub fn apply_xivlauncher(
+        &self,
+        plan: &crate::ImportPlan,
+    ) -> Result<crate::ImportApplyReport, CoreError> {
+        Ok(crate::xiv_import::apply(&self.store, plan)?)
+    }
+
+    /// Common XIVLauncher data directories in stable preference order.
+    #[must_use]
+    pub fn xivlauncher_candidate_roots(&self) -> Vec<PathBuf> {
+        crate::xiv_import::candidate_roots()
+    }
+
+    async fn runtime_catalog(&self) -> Result<apogee_runtime::Catalog, CoreError> {
+        let (manifest, signature) = crate::launch::runtime_backend::catalog_urls()?;
+        Ok(self
+            .runtime
+            .fetch_catalog(
+                &manifest,
+                &signature,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?)
+    }
+
+    /// Read the authenticated runner catalog and local installation state.
+    pub async fn runner_catalog(&self) -> Result<Vec<apogee_runtime::CatalogViewEntry>, CoreError> {
+        let catalog = self.runtime_catalog().await?;
+        Ok(self.runtime.runner_catalog_view(&catalog)?)
+    }
+
+    /// Read the authenticated DXVK catalog and the selected prefix's recorded installation state.
+    pub async fn dxvk_catalog(
+        &self,
+        profile: Uuid,
+    ) -> Result<Vec<apogee_runtime::CatalogViewEntry>, CoreError> {
+        let profile = self.profile(profile)?;
+        let catalog = self.runtime_catalog().await?;
+        let prefix = self.prefixes_dir.join(crate::flow::prefix_name(&profile));
+        Ok(self.runtime.dxvk_catalog_view(&catalog, Some(&prefix))?)
+    }
+
+    /// Resolve the selected profile's runner, synchronization, graphics, prefix, and injection
+    /// choices without installing or changing anything.
+    pub async fn resolved_setup(
+        &self,
+        profile: Uuid,
+    ) -> Result<Vec<crate::ResolvedSetup>, CoreError> {
+        use crate::{Provenance, ResolvedSetup, SetupValue};
+        let profile = self.profile(profile)?;
+        let prefix = self.prefixes_dir.join(crate::flow::prefix_name(&profile));
+        let metadata =
+            apogee_runtime::PrefixMetadata::load(&prefix.join(apogee_runtime::PREFIX_JSON))?;
+        let (runner_name, runner_version, runner_source, host) = match &profile.runner {
+            crate::RunnerSelection::Managed { name, version } => {
+                let catalog = self.runtime_catalog().await?;
+                let runner = catalog
+                    .runner(name, version)
+                    .ok_or_else(|| CoreError::Launch {
+                        detail: format!(
+                            "runner {name} {version} is not in the authenticated catalog"
+                        ),
+                    })?;
+                (
+                    name.clone(),
+                    Some(version.clone()),
+                    Provenance::Catalog,
+                    apogee_runtime::HostCaps::detect().for_runner(runner),
+                )
+            }
+            crate::RunnerSelection::SystemWine => (
+                "system-wine".to_owned(),
+                system_wine_version(),
+                Provenance::Host,
+                apogee_runtime::HostCaps::detect(),
+            ),
+        };
+        let environment = apogee_runtime::compute_environment(
+            &apogee_runtime::EnvConfig {
+                sync: profile.launch.sync,
+                gpu: profile.launch.gpu.clone(),
+                ..Default::default()
+            },
+            &host,
+        );
+        let (dxvk_version, nvapi) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.dxvk.as_ref())
+            .map_or((None, false), |dxvk| {
+                (Some(dxvk.version.clone()), dxvk.nvapi)
+            });
+        Ok(vec![
+            ResolvedSetup {
+                value: SetupValue::Runner {
+                    name: runner_name,
+                    version: runner_version,
+                },
+                source: runner_source,
+            },
+            ResolvedSetup {
+                value: SetupValue::Sync(environment.sync),
+                source: Provenance::Host,
+            },
+            ResolvedSetup {
+                value: SetupValue::Gpu {
+                    selection: profile.launch.gpu.clone(),
+                    identity: None,
+                },
+                source: Provenance::Profile,
+            },
+            ResolvedSetup {
+                value: SetupValue::Dxvk {
+                    version: dxvk_version,
+                    nvapi,
+                },
+                source: if metadata.is_some() {
+                    Provenance::Prefix
+                } else {
+                    Provenance::Default
+                },
+            },
+            ResolvedSetup {
+                value: SetupValue::Dalamud {
+                    enabled: profile.launch.dalamud,
+                },
+                source: Provenance::Profile,
+            },
+        ])
+    }
+
+    /// Compose the fixed public diagnostic report, optionally including one profile's resolved
+    /// runner and prefix state.
+    pub fn system_report(&self, profile: Option<Uuid>) -> Result<String, CoreError> {
+        let input = self.system_report_input(profile)?;
+        Ok(crate::support::system_report(&input, home_dir().as_deref()))
+    }
+
+    /// Assemble and atomically publish a redacted support archive.
+    pub fn create_support_bundle(
+        &self,
+        destination: impl AsRef<std::path::Path>,
+        profile: Option<Uuid>,
+        facts: Vec<(String, String)>,
+    ) -> Result<(), CoreError> {
+        let profiles = self.profiles()?;
+        let settings = self.settings()?;
+        let system = self.system_report_input(profile)?;
+        let caller_facts = crate::ValidatedCallerFacts::new(facts);
+        let home = home_dir();
+        let input = crate::support::SupportBundleInput {
+            profiles: &profiles,
+            settings: &settings,
+            system: &system,
+            logs: &[],
+            caller_facts: &caller_facts,
+            home: home.as_deref(),
+        };
+        let archive = crate::support::assemble_support_archive(&input)?;
+        crate::support::write_support_bundle(destination, &archive)?;
+        Ok(())
+    }
+
+    /// Load the persisted first-run checkpoint and fill core-owned discovery readings that have not
+    /// been recorded yet.
+    pub async fn first_run(&self) -> Result<crate::FirstRunCheckpoint, CoreError> {
+        let mut checkpoint = self.store.load_first_run()?;
+        if matches!(
+            crate::first_incomplete(&checkpoint),
+            crate::FirstRunPosition::WaitingForImportDiscovery
+        ) {
+            let candidates = crate::xiv_import::candidate_roots()
+                .into_iter()
+                .filter(|path| crate::xiv_import::scan(path).is_ok())
+                .map(|path| crate::FirstRunImportCandidate {
+                    source: if path.to_string_lossy().contains(".var/app/") {
+                        crate::FirstRunImportSource::Flatpak
+                    } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore") {
+                        crate::FirstRunImportSource::Core
+                    } else {
+                        crate::FirstRunImportSource::Native
+                    },
+                    path,
+                })
+                .collect();
+            checkpoint = crate::first_run::transition(
+                &checkpoint,
+                crate::FirstRunTransition::RecordImportDiscovery(candidates),
+            )?;
+        }
+        if checkpoint.runners.is_empty()
+            && matches!(
+                crate::first_incomplete(&checkpoint),
+                crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+                    | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+            )
+        {
+            let catalog = self.runtime_catalog().await?;
+            checkpoint.runners = self
+                .runtime
+                .runner_catalog_view(&catalog)?
+                .into_iter()
+                .map(|row| crate::RunnerReading {
+                    selection: crate::FirstRunRunnerSelection::Managed {
+                        name: row.name,
+                        version: row.version.clone(),
+                    },
+                    version: Some(row.version),
+                    recommended: row.recommended,
+                    available: row.available,
+                })
+                .collect();
+            let system_version = system_wine_version();
+            checkpoint.runners.push(crate::RunnerReading {
+                selection: crate::FirstRunRunnerSelection::SystemWine {
+                    version: system_version.clone(),
+                },
+                version: system_version.clone(),
+                recommended: false,
+                available: system_version.is_some(),
+            });
+        }
+        self.store.save_first_run(&checkpoint)?;
+        Ok(checkpoint)
+    }
+
+    /// Apply and persist one validated first-run transition.
+    pub fn advance_first_run(
+        &self,
+        change: crate::FirstRunTransition,
+    ) -> Result<crate::FirstRunCheckpoint, CoreError> {
+        let checkpoint = self.store.load_first_run()?;
+        let next = crate::first_run::transition(&checkpoint, change)?;
+        self.store.save_first_run(&next)?;
+        Ok(next)
+    }
+
+    fn system_report_input(
+        &self,
+        profile: Option<Uuid>,
+    ) -> Result<crate::SystemReportInput, CoreError> {
+        let selected = profile.map(|id| self.profile(id)).transpose()?;
+        let runner = selected.as_ref().map(|profile| match &profile.runner {
+            crate::RunnerSelection::SystemWine => system_wine_version().map_or_else(
+                || "system-wine".to_owned(),
+                |version| format!("system-wine {version}"),
+            ),
+            crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
+        });
+        let prefix_state = selected
+            .as_ref()
+            .map(|profile| self.prefixes_dir.join(crate::flow::prefix_name(profile)))
+            .map(|path| {
+                if path.join(apogee_runtime::PREFIX_JSON).is_file() {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .to_owned()
+            });
+        Ok(crate::SystemReportInput {
+            application_version: env!("CARGO_PKG_VERSION").to_owned(),
+            target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
+            operating_system: Some(std::env::consts::OS.to_owned()),
+            kernel: None,
+            architecture: Some(std::env::consts::ARCH.to_owned()),
+            gpu: None,
+            driver: None,
+            runner,
+            prefix_state,
+        })
     }
 
     /// Persist the launcher-wide settings.
@@ -561,7 +927,7 @@ impl Core {
         })
     }
 
-    /// Delete `id`, and the account behind it if no other profile still signs in as that account.
+    /// Plan whether removing `id` would also remove its account and stored secrets.
     ///
     /// The account is shared: two profiles can point at one login, and removing one of them must
     /// leave the other able to sign in. Only the last one out takes the account, its stored secrets,
@@ -570,16 +936,14 @@ impl Core {
     /// The rule lives here rather than in a caller so that every front end deletes the same way. A
     /// shell that reimplemented it would eventually reimplement it differently.
     ///
-    /// Nothing is unlinked until the sweep is done. The whole removal is decided first, then the
-    /// secrets go, and only then do the records: a failure anywhere before the first unlink leaves
-    /// the profile exactly as it was, so the user can unlock the store and run the same command
-    /// again. Deleting the profile first would strand the account behind it, and the account is
-    /// reachable only *through* a profile.
+    /// This changes nothing. [`ProfileRemoval::secret_sweep`] is always `None` in a plan because no
+    /// store has been touched yet; [`ProfileRemoval::account_removed`] names the account and its
+    /// secrets when this is the last profile using it.
     ///
     /// # Errors
-    /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
-    /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
-    pub fn remove_profile(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, or a [`CoreError::Store`] when
+    /// the profile set cannot be read.
+    pub fn plan_removal(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
         let account = self.profile(id)?.account;
         // Decided before anything is removed, and excluding the profile on its way out: this is the
         // last user of the account if no *other* profile signs in as it.
@@ -588,13 +952,30 @@ impl Core {
             .iter()
             .any(|p| p.id != id && p.account == account);
 
-        if !last_user {
-            self.delete_profile(id)?;
-            return Ok(ProfileRemoval {
+        Ok(if last_user {
+            ProfileRemoval {
+                account_removed: Some(account),
+                secret_sweep: None,
+            }
+        } else {
+            ProfileRemoval {
                 account_removed: None,
                 secret_sweep: None,
-            });
-        }
+            }
+        })
+    }
+
+    /// Delete `id` according to the result of [`Core::plan_removal`].
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
+    /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
+    pub fn remove_profile(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
+        let plan = self.plan_removal(id)?;
+        let Some(account) = plan.account_removed else {
+            self.delete_profile(id)?;
+            return Ok(plan);
+        };
 
         let secret_sweep = Some(self.forget_secrets(account)?);
         self.delete_profile(id)?;
@@ -1019,8 +1400,28 @@ impl Core {
             computer_id: self.computer_id,
             prefixes_dir: self.prefixes_dir.clone(),
             backups_dir: self.backups_dir.clone(),
+            frontier: self.frontier.clone(),
         }
     }
+}
+
+fn system_wine_version() -> Option<String> {
+    let output = std::process::Command::new("wine")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -1225,7 +1626,7 @@ mod tests {
 
         use super::*;
         use crate::ImportOutcome;
-        use crate::model::{ListenerSettings, OtpDelivery};
+        use crate::model::{LaunchSettings, ListenerSettings, OtpDelivery, Settings};
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
         ///
@@ -1253,6 +1654,43 @@ mod tests {
                     .unwrap();
             }
             (account, profile)
+        }
+
+        #[test]
+        fn defaults_are_independent_of_saved_settings() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(store);
+            let mut saved = Settings::default();
+            saved.keep_patches = !saved.keep_patches;
+            saved.close_after_launch = !saved.close_after_launch;
+            core.save_settings(&saved).unwrap();
+
+            let defaults = core.defaults();
+
+            assert_eq!(defaults.settings, Settings::default());
+            assert_eq!(defaults.launch, LaunchSettings::default());
+            assert_ne!(defaults.settings, saved);
+        }
+
+        #[test]
+        fn removal_plan_changes_nothing_and_matches_account_ownership() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let (account, first) = seeded(&core, &store);
+
+            let last_plan = core.plan_removal(first.id).unwrap();
+            assert_eq!(last_plan.account_removed, Some(account.id));
+            assert_eq!(last_plan.secret_sweep, None);
+            assert_eq!(core.profile(first.id).unwrap().id, first.id);
+            assert_eq!(store.len(), SecretKind::ALL.len());
+
+            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            core.save_profile(&second).unwrap();
+            let shared_plan = core.plan_removal(first.id).unwrap();
+            assert_eq!(shared_plan.account_removed, None);
+            assert_eq!(shared_plan.secret_sweep, None);
+            assert_eq!(core.profiles().unwrap().len(), 2);
+            assert_eq!(store.len(), SecretKind::ALL.len());
         }
 
         /// Where the cached session for `account` lands under a core built with

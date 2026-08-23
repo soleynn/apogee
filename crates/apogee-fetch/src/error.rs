@@ -74,6 +74,22 @@ pub enum SpecError {
         /// Which consistency rule the block map broke.
         reason: &'static str,
     },
+
+    /// The exact expected length is larger than the configured response-size ceiling.
+    #[error("expected length {expected} exceeds maximum response length {max}")]
+    ExpectedLengthExceedsMaximum {
+        /// The exact length the caller expects.
+        expected: u64,
+        /// The response-size ceiling.
+        max: u64,
+    },
+
+    /// A configured MIME allowlist entry is not a valid MIME essence.
+    #[error("invalid allowed content type: {content_type}")]
+    InvalidAllowedContentType {
+        /// The value that could not be normalized.
+        content_type: String,
+    },
 }
 
 /// Download failures.
@@ -159,6 +175,28 @@ pub enum FetchError {
         expected: u64,
         /// The length the server advertised.
         got: u64,
+    },
+
+    /// A response is larger than the request's configured ceiling.
+    #[error("response from {url} exceeds {max} bytes (at least {got} bytes)")]
+    #[non_exhaustive]
+    ResponseTooLarge {
+        /// The source that supplied the oversized response.
+        url: Url,
+        /// The largest accepted body.
+        max: u64,
+        /// The advertised size, or the first streamed byte count observed beyond the ceiling.
+        got: u64,
+    },
+
+    /// A response's MIME type is absent or outside the request's allowlist.
+    #[error("response from {url} has a disallowed content type: {content_type:?}")]
+    #[non_exhaustive]
+    ContentTypeRejected {
+        /// The source that supplied the response.
+        url: Url,
+        /// The raw `Content-Type` header when it was present and valid UTF-8.
+        content_type: Option<String>,
     },
 
     /// The source changed underneath an in-flight resume in a way the transfer could not absorb.
@@ -368,6 +406,8 @@ mod tests {
             FetchError::Http { .. } => None,
             FetchError::RedirectRefused { .. }
             | FetchError::LengthMismatch { .. }
+            | FetchError::ResponseTooLarge { .. }
+            | FetchError::ContentTypeRejected { .. }
             | FetchError::BlockVerifyFailed { .. }
             | FetchError::FileVerifyFailed { .. }
             | FetchError::Io { .. }
@@ -394,6 +434,8 @@ mod tests {
             | FetchError::AllSourcesFailed { .. }
             | FetchError::ServerFileChanged { .. }
             | FetchError::LengthMismatch { .. }
+            | FetchError::ResponseTooLarge { .. }
+            | FetchError::ContentTypeRejected { .. }
             | FetchError::BlockVerifyFailed { .. }
             | FetchError::FileVerifyFailed { .. }
             | FetchError::Client { .. }
@@ -451,6 +493,15 @@ mod tests {
             FetchError::LengthMismatch {
                 expected: 100,
                 got: 99,
+            },
+            FetchError::ResponseTooLarge {
+                url: url.clone(),
+                max: 100,
+                got: 101,
+            },
+            FetchError::ContentTypeRejected {
+                url: url.clone(),
+                content_type: Some("text/html".to_owned()),
             },
             FetchError::BlockVerifyFailed {
                 block: 2,
