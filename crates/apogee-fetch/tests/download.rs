@@ -100,6 +100,119 @@ async fn a_content_length_that_disagrees_fails_before_writing() {
 }
 
 #[tokio::test]
+async fn an_advertised_body_over_the_maximum_is_refused_before_preallocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let server = ChaosServer::builder(1, 4096).start().await.unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("file.bin"),
+        &dest,
+        Validator::Sha256(body_sha256(1, 4096)),
+    )
+    .max_len(1024)
+    .build()
+    .unwrap();
+
+    let err = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        FetchError::ResponseTooLarge {
+            max: 1024,
+            got: 4096,
+            ..
+        }
+    ));
+    assert_eq!(
+        tokio::fs::metadata(sidecar(&dest, ".part"))
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_chunked_body_is_stopped_before_the_first_byte_beyond_the_maximum_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let server = ChaosServer::builder(2, 4096)
+        .omit_content_length()
+        .start()
+        .await
+        .unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("file.bin"),
+        &dest,
+        Validator::Sha256(body_sha256(2, 4096)),
+    )
+    .max_len(1024)
+    .build()
+    .unwrap();
+
+    let err = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        FetchError::ResponseTooLarge { max: 1024, .. }
+    ));
+    assert!(
+        tokio::fs::metadata(sidecar(&dest, ".part"))
+            .await
+            .unwrap()
+            .len()
+            <= 1024
+    );
+}
+
+#[tokio::test]
+async fn a_response_outside_the_mime_allowlist_is_refused_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.bin");
+    let server = ChaosServer::builder(3, 4096).start().await.unwrap();
+    let spec = DownloadSpec::builder(
+        server.url("file.bin"),
+        &dest,
+        Validator::Sha256(body_sha256(3, 4096)),
+    )
+    .allowed_content_type("image/png")
+    .build()
+    .unwrap();
+
+    let err = Fetcher::builder()
+        .build()
+        .unwrap()
+        .download(&spec, None, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        FetchError::ContentTypeRejected {
+            content_type: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        tokio::fs::metadata(sidecar(&dest, ".part"))
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn a_wrong_hash_is_a_verify_failure_that_keeps_the_part() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.bin");

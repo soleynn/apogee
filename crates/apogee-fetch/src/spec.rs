@@ -20,6 +20,8 @@ pub struct DownloadSpec {
     mirrors: Vec<Url>,
     dest: PathBuf,
     expected_len: Option<u64>,
+    max_len: Option<u64>,
+    allowed_content_types: Vec<String>,
     validator: Validator,
     resume: bool,
     overwrite: bool,
@@ -58,6 +60,8 @@ impl DownloadSpec {
             mirrors: Vec::new(),
             dest: dest.into(),
             expected_len: None,
+            max_len: None,
+            allowed_content_types: Vec::new(),
             validator,
             resume: true,
             overwrite: false,
@@ -106,6 +110,25 @@ impl DownloadSpec {
         self.expected_len
     }
 
+    /// The largest response body the transfer may accept, if one was configured.
+    ///
+    /// Unlike [`expected_len`](Self::expected_len), this is an upper bound rather than an exact
+    /// length. It also protects responses without a `Content-Length`: the streaming path stops
+    /// before a byte beyond this limit reaches disk.
+    #[must_use]
+    pub fn max_len(&self) -> Option<u64> {
+        self.max_len
+    }
+
+    /// The normalized MIME types an HTTP response may carry.
+    ///
+    /// An empty slice accepts any response type. Parameters on a response header, such as a charset,
+    /// do not participate in the comparison.
+    #[must_use]
+    pub fn allowed_content_types(&self) -> &[String] {
+        &self.allowed_content_types
+    }
+
     /// The verification policy.
     #[must_use]
     pub fn validator(&self) -> &Validator {
@@ -129,6 +152,86 @@ impl DownloadSpec {
     pub fn priority(&self) -> Priority {
         self.priority
     }
+
+    /// Check the response metadata that is common to both transfer engines before its body is read.
+    pub(crate) fn validate_response(
+        &self,
+        response: &reqwest::Response,
+        url: &Url,
+        total_len: Option<u64>,
+    ) -> Result<(), crate::error::FetchError> {
+        if let (Some(max), Some(got)) = (self.max_len, total_len)
+            && got > max
+        {
+            return Err(crate::error::FetchError::ResponseTooLarge {
+                url: url.clone(),
+                max,
+                got,
+            });
+        }
+        if !self.allowed_content_types.is_empty() {
+            let raw = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            let normalized = raw
+                .and_then(|value| value.split(';').next())
+                .and_then(normalize_content_type);
+            if normalized
+                .as_ref()
+                .is_none_or(|value| !self.allowed_content_types.contains(value))
+            {
+                return Err(crate::error::FetchError::ContentTypeRejected {
+                    url: url.clone(),
+                    content_type: raw.map(str::to_owned),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Check a streaming high-water mark when no trustworthy length was available up front.
+    pub(crate) fn validate_stream_len(
+        &self,
+        url: &Url,
+        got: u64,
+    ) -> Result<(), crate::error::FetchError> {
+        if let Some(max) = self.max_len
+            && got > max
+        {
+            return Err(crate::error::FetchError::ResponseTooLarge {
+                url: url.clone(),
+                max,
+                got,
+            });
+        }
+        Ok(())
+    }
+
+    /// Fingerprint every policy that decides whether journaled bytes remain acceptable.
+    pub(crate) fn resume_identity_digest(&self) -> [u8; 32] {
+        let validator = self.validator.config_digest();
+        if self.max_len.is_none() && self.allowed_content_types.is_empty() {
+            return validator;
+        }
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"apogee-fetch-response-policy-v1\0");
+        digest.update(&validator);
+        match self.max_len {
+            Some(max) => {
+                digest.update(&[1]);
+                digest.update(&max.to_le_bytes());
+            }
+            None => {
+                digest.update(&[0]);
+            }
+        }
+        for content_type in &self.allowed_content_types {
+            digest.update(&(content_type.len() as u64).to_le_bytes());
+            digest.update(content_type.as_bytes());
+        }
+        *digest.finalize().as_bytes()
+    }
 }
 
 /// Builds a [`DownloadSpec`], enforcing the source-safety rules in [`build`](Self::build).
@@ -144,6 +247,8 @@ pub struct DownloadSpecBuilder {
     priority: Priority,
     allow_unverified: bool,
     header_policy: Option<HeaderPolicy>,
+    max_len: Option<u64>,
+    allowed_content_types: Vec<String>,
 }
 
 impl DownloadSpecBuilder {
@@ -152,6 +257,37 @@ impl DownloadSpecBuilder {
     #[must_use]
     pub fn expected_len(mut self, len: u64) -> Self {
         self.expected_len = Some(len);
+        self
+    }
+
+    /// Set the largest response body the transfer may accept.
+    ///
+    /// A declared or advertised length over this bound is rejected before preallocation. A response
+    /// without a length is capped while streaming.
+    #[must_use]
+    pub fn max_len(mut self, len: u64) -> Self {
+        self.max_len = Some(len);
+        self
+    }
+
+    /// Allow one response MIME type.
+    ///
+    /// Types are ASCII case-insensitive and must be MIME essences such as `image/png`, without
+    /// parameters. Calling this method opts the request into MIME enforcement.
+    #[must_use]
+    pub fn allowed_content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.allowed_content_types.push(content_type.into());
+        self
+    }
+
+    /// Allow a set of response MIME types; see [`allowed_content_type`](Self::allowed_content_type).
+    #[must_use]
+    pub fn allowed_content_types(
+        mut self,
+        content_types: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.allowed_content_types
+            .extend(content_types.into_iter().map(Into::into));
         self
     }
 
@@ -229,8 +365,26 @@ impl DownloadSpecBuilder {
     /// [`SpecError::UnverifiedNotAcknowledged`] for [`Validator::None`] over `https://` without
     /// [`allow_unverified`](Self::allow_unverified); [`SpecError::ExternalRequiresLength`] for a
     /// [`Validator::External`] with no declared length; [`SpecError::BlockLayout`] for a
-    /// [`Validator::BlockSha1`] whose block map is inconsistent with the declared length.
+    /// [`Validator::BlockSha1`] whose block map is inconsistent with the declared length;
+    /// [`SpecError::ExpectedLengthExceedsMaximum`] when the exact length exceeds the response cap;
+    /// or [`SpecError::InvalidAllowedContentType`] for a malformed MIME allowlist entry.
     pub fn build(self) -> Result<DownloadSpec, SpecError> {
+        if let (Some(expected), Some(max)) = (self.expected_len, self.max_len)
+            && expected > max
+        {
+            return Err(SpecError::ExpectedLengthExceedsMaximum { expected, max });
+        }
+        let mut allowed_content_types = self
+            .allowed_content_types
+            .into_iter()
+            .map(|value| {
+                normalize_content_type(&value).ok_or(SpecError::InvalidAllowedContentType {
+                    content_type: value,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        allowed_content_types.sort_unstable();
+        allowed_content_types.dedup();
         for url in std::iter::once(&self.url).chain(self.mirrors.iter()) {
             match url.scheme() {
                 "http" | "https" => {}
@@ -283,6 +437,8 @@ impl DownloadSpecBuilder {
             mirrors: self.mirrors,
             dest: self.dest,
             expected_len: self.expected_len,
+            max_len: self.max_len,
+            allowed_content_types,
             validator: self.validator,
             resume: self.resume,
             overwrite: self.overwrite,
@@ -290,6 +446,44 @@ impl DownloadSpecBuilder {
             header_policy: self.header_policy,
         })
     }
+}
+
+/// Normalize a MIME essence for policy comparison. Parameters belong on response headers, not in a
+/// configured allowlist.
+pub(crate) fn normalize_content_type(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(';') || !value.is_ascii() {
+        return None;
+    }
+    let (kind, subtype) = value.split_once('/')?;
+    if subtype.contains('/') || !mime_token(kind) || !mime_token(subtype) {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn mime_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 #[cfg(test)]
@@ -464,5 +658,93 @@ mod tests {
         .build()
         .unwrap_err();
         assert!(matches!(err, SpecError::UnsupportedScheme { scheme } if scheme == "ftp"));
+    }
+
+    /// An exact length cannot contradict the request's own upper bound.
+    #[test]
+    fn an_expected_length_over_the_maximum_is_refused() {
+        let err = DownloadSpec::builder(
+            url("https://host.invalid/f"),
+            "/tmp/f",
+            Validator::Sha256([0; 32]),
+        )
+        .expected_len(11)
+        .max_len(10)
+        .build()
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SpecError::ExpectedLengthExceedsMaximum {
+                expected: 11,
+                max: 10
+            }
+        ));
+    }
+
+    /// MIME entries are normalized, sorted and deduplicated so equivalent policies share an
+    /// identity and callers see the exact enforced set.
+    #[test]
+    fn content_type_allowlists_are_canonical() {
+        let spec = DownloadSpec::builder(
+            url("https://host.invalid/f"),
+            "/tmp/f",
+            Validator::Sha256([0; 32]),
+        )
+        .max_len(1024)
+        .allowed_content_types(["image/webp", "IMAGE/PNG", "image/png"])
+        .build()
+        .unwrap();
+        assert_eq!(spec.max_len(), Some(1024));
+        assert_eq!(
+            spec.allowed_content_types(),
+            &["image/png".to_owned(), "image/webp".to_owned()]
+        );
+    }
+
+    /// Parameters describe a particular response and are not a MIME essence suitable for an
+    /// allowlist.
+    #[test]
+    fn a_parameterized_allowed_content_type_is_refused() {
+        let err = DownloadSpec::builder(
+            url("https://host.invalid/f"),
+            "/tmp/f",
+            Validator::Sha256([0; 32]),
+        )
+        .allowed_content_type("image/png; charset=binary")
+        .build()
+        .unwrap_err();
+        assert!(matches!(err, SpecError::InvalidAllowedContentType { .. }));
+    }
+
+    /// Any policy difference changes the journal fingerprint, while allowlist ordering does not.
+    #[test]
+    fn response_policy_is_part_of_the_resume_identity() {
+        let build = |max, types: &[&str]| {
+            DownloadSpec::builder(
+                url("https://host.invalid/f"),
+                "/tmp/f",
+                Validator::Sha256([7; 32]),
+            )
+            .max_len(max)
+            .allowed_content_types(types.iter().copied())
+            .build()
+            .unwrap()
+        };
+        let a = build(1024, &["image/png", "image/webp"]);
+        let reordered = build(1024, &["IMAGE/WEBP", "image/png"]);
+        let different_max = build(1025, &["image/png", "image/webp"]);
+        let different_type = build(1024, &["image/jpeg"]);
+        assert_eq!(
+            a.resume_identity_digest(),
+            reordered.resume_identity_digest()
+        );
+        assert_ne!(
+            a.resume_identity_digest(),
+            different_max.resume_identity_digest()
+        );
+        assert_ne!(
+            a.resume_identity_digest(),
+            different_type.resume_identity_digest()
+        );
     }
 }
