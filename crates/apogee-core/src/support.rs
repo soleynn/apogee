@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,11 +15,12 @@ use thiserror::Error;
 
 use crate::model::{Profile, Settings};
 
-const MASK: &str = "<redacted>";
-const UNKNOWN: &str = "unknown";
 const FACT_VALUE_MAX: usize = 1_024;
 const LOG_VALUE_MAX: usize = 16 * 1_024;
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn mask() -> &'static str {
+    "<redacted>"
+}
 
 /// A core-owned item shown in the bundle preview and represented by one archive entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -140,7 +140,7 @@ impl ValidatedCallerFacts {
 
             let value = if contains_sensitive_assignment(&raw_value) {
                 rejected += 1;
-                MASK.to_owned()
+                mask().to_owned()
             } else {
                 raw_value
             };
@@ -209,9 +209,9 @@ pub fn system_report(input: &SystemReportInput, home: Option<&Path>) -> String {
 
     let mut report = String::new();
     for (name, value) in fields {
-        let value = value.unwrap_or(UNKNOWN);
+        let value = value.unwrap_or("unknown");
         let value = if contains_sensitive_assignment(value) {
-            MASK.to_owned()
+            mask().to_owned()
         } else {
             rewrite_home(value, home)
         };
@@ -352,9 +352,12 @@ pub fn write_support_bundle(
         path: parent.to_path_buf(),
         source,
     })?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let mut temporary = destination.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}-{sequence}", std::process::id()));
+    temporary.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let temporary = PathBuf::from(temporary);
     let result = write_temporary(&temporary, archive).and_then(|()| {
         if destination.exists() {
@@ -462,7 +465,7 @@ fn profile_snapshot(profile: &Profile, home: Option<&Path>) -> Value {
         .launch
         .extra_env
         .iter()
-        .map(|(key, _)| json!({"key": key, "value": MASK}))
+        .map(|(key, _)| json!({"key": key, "value": mask()}))
         .collect();
 
     json!({
@@ -507,7 +510,7 @@ fn settings_snapshot(settings: &Settings) -> Value {
 
 fn diagnostic_snapshot(record: &DiagnosticRecord, home: Option<&Path>) -> Value {
     let message = if contains_sensitive_assignment(&record.message) {
-        MASK.to_owned()
+        mask().to_owned()
     } else {
         rewrite_home(&bounded(&record.message, LOG_VALUE_MAX), home)
     };
@@ -517,7 +520,7 @@ fn diagnostic_snapshot(record: &DiagnosticRecord, home: Option<&Path>) -> Value 
             continue;
         }
         let value = if contains_sensitive_assignment(value) {
-            MASK.to_owned()
+            mask().to_owned()
         } else {
             rewrite_home(&bounded(value, LOG_VALUE_MAX), home)
         };
@@ -532,7 +535,7 @@ fn diagnostic_snapshot(record: &DiagnosticRecord, home: Option<&Path>) -> Value 
 }
 
 fn masked_values(count: usize) -> Vec<&'static str> {
-    vec![MASK; count]
+    vec![mask(); count]
 }
 
 fn bounded(value: &str, max: usize) -> String {
@@ -547,7 +550,7 @@ fn bounded(value: &str, max: usize) -> String {
 }
 
 fn quoted(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{MASK}\""))
+    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", mask()))
 }
 
 fn excluded_diagnostic_field(name: &str) -> bool {
@@ -608,7 +611,7 @@ fn contains_sensitive_assignment(value: &str) -> bool {
         return true;
     }
 
-    const NAMES: [&str; 13] = [
+    let names = [
         "password",
         "passphrase",
         "otp",
@@ -623,7 +626,7 @@ fn contains_sensitive_assignment(value: &str) -> bool {
         "authorization",
         "bearer",
     ];
-    NAMES.iter().any(|name| {
+    names.iter().any(|name| {
         ["=", ":", "=\"", ":\"", "='", ":'"]
             .iter()
             .any(|separator| lower.contains(&format!("{name}{separator}")))
@@ -789,7 +792,7 @@ mod tests {
 
         assert_eq!(facts.rejected(), 4);
         assert_eq!(snapshot["render_tier"], "software-token-path");
-        assert_eq!(snapshot["render_reason"], MASK);
+        assert_eq!(snapshot["render_reason"], mask());
         assert!(!rendered.contains("caller-planted"));
         assert!(!rendered.contains("password"));
         assert!(!rendered.contains("duplicate"));
@@ -891,7 +894,7 @@ mod tests {
         }
         assert!(text.contains("API_TOKEN"), "environment keys must survive");
         assert!(
-            text.contains(MASK),
+            text.contains(mask()),
             "free-form values must be visibly masked"
         );
         assert!(text.contains("Token Knight and the Password Managers"));

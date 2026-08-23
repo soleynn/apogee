@@ -92,6 +92,8 @@ async fn install_dxvk_places_dlls_and_records_the_prefix() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: server.url("dxvk.tar.gz"),
+        size: tar.len() as u64,
+        recommended: false,
         pin: DigestPin::Blake3(blake3_of(&tar)),
         format: ArchiveFormat::TarGz,
         nvapi: None,
@@ -157,6 +159,8 @@ async fn install_dxvk_with_nvapi_adds_the_nvapi_dll() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: dxvk_server.url("dxvk.tar.gz"),
+        size: dxvk_tar.len() as u64,
+        recommended: false,
         pin: DigestPin::Blake3(blake3_of(&dxvk_tar)),
         format: ArchiveFormat::TarGz,
         nvapi: Some(NvapiRef {
@@ -214,6 +218,8 @@ async fn a_wanted_companion_the_prefix_does_not_have_is_reported() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: server.url("dxvk.tar.gz"),
+        size: tar.len() as u64,
+        recommended: false,
         pin: DigestPin::Blake3(blake3_of(&tar)),
         format: ArchiveFormat::TarGz,
         nvapi: None,
@@ -281,6 +287,8 @@ async fn health_check_flags_a_missing_dxvk_dll() {
     let dxvk = DxvkEntry {
         version: "2.4.1".to_owned(),
         url: server.url("dxvk.tar.gz"),
+        size: tar.len() as u64,
+        recommended: false,
         pin: DigestPin::Blake3(blake3_of(&tar)),
         format: ArchiveFormat::TarGz,
         nvapi: None,

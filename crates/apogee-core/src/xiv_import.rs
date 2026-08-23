@@ -21,9 +21,15 @@ use crate::model::{
 };
 use crate::store::{Store, StoreError};
 
-const ACCOUNTS_FILE: &str = "accountsList.json";
-const CONFIG_FILE: &str = "launcherConfigV3.json";
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+
+fn accounts_file() -> &'static str {
+    "accountsList.json"
+}
+
+fn config_file() -> &'static str {
+    "launcherConfigV3.json"
+}
 
 /// Environment paths used to locate common XIVLauncher data directories.
 ///
@@ -260,8 +266,8 @@ pub enum XivImportError {
 /// Scan the two supported files directly beneath `source`, without walking child directories.
 pub fn scan(source: impl AsRef<Path>) -> Result<ImportScan, XivImportError> {
     let source = source.as_ref().to_path_buf();
-    let accounts_path = source.join(ACCOUNTS_FILE);
-    let config_path = source.join(CONFIG_FILE);
+    let accounts_path = source.join(accounts_file());
+    let config_path = source.join(config_file());
     let accounts = read_bounded(&accounts_path)?;
     let config = read_bounded(&config_path)?;
     if accounts.is_none() && config.is_none() {
@@ -722,8 +728,8 @@ fn finding_id(kind: &str, canonical: &str, occurrence: usize) -> ImportFindingId
 fn fingerprint(accounts: Option<&[u8]>, config: Option<&[u8]>) -> ImportFingerprint {
     let mut digest = Sha256::new();
     digest.update(b"apogee-xiv-import-source\0");
-    fingerprint_file(&mut digest, ACCOUNTS_FILE, accounts);
-    fingerprint_file(&mut digest, CONFIG_FILE, config);
+    fingerprint_file(&mut digest, accounts_file(), accounts);
+    fingerprint_file(&mut digest, config_file(), config);
     ImportFingerprint(hex(&digest.finalize()))
 }
 
@@ -798,13 +804,13 @@ mod tests {
     use super::*;
 
     fn write_sources(root: &Path, accounts: &str, game_path: &Path) {
-        fs::write(root.join(ACCOUNTS_FILE), accounts).expect("write accounts fixture");
+        fs::write(root.join(accounts_file()), accounts).expect("write accounts fixture");
         let config = serde_json::json!({
             "GamePath": game_path,
             "IsFt": false,
         });
         fs::write(
-            root.join(CONFIG_FILE),
+            root.join(config_file()),
             serde_json::to_vec(&config).expect("serialize config fixture"),
         )
         .expect("write config fixture");
@@ -904,7 +910,7 @@ mod tests {
         assert!(!json.contains("private-user"));
 
         fs::write(
-            source.path().join(ACCOUNTS_FILE),
+            source.path().join(accounts_file()),
             r#"[{"UserName":"private-user","Password":"different-secret","LastSuccessfulOtp":"654321"}]"#,
         )
         .expect("replace credential-like fields");
@@ -945,7 +951,7 @@ mod tests {
             .expect("candidate finding");
         let plan = scan.plan([id]).expect("plan succeeds");
         fs::write(
-            source.path().join(ACCOUNTS_FILE),
+            source.path().join(accounts_file()),
             r#"[{"UserName":"changed@example.invalid"}]"#,
         )
         .expect("change source fixture");
@@ -969,8 +975,8 @@ mod tests {
             r#"[{"UserName":"One@Example.invalid","UseOtp":true,"SavePassword":true}]"#,
             game.path(),
         );
-        let before_accounts = fs::read(source.path().join(ACCOUNTS_FILE)).expect("read source");
-        let before_config = fs::read(source.path().join(CONFIG_FILE)).expect("read source");
+        let before_accounts = fs::read(source.path().join(accounts_file())).expect("read source");
+        let before_config = fs::read(source.path().join(config_file())).expect("read source");
         let scan = scan(source.path()).expect("scan succeeds");
         let accepted: Vec<_> = scan
             .findings
@@ -995,11 +1001,11 @@ mod tests {
         assert_eq!(store.list_accounts().expect("list accounts").len(), 1);
         assert_eq!(store.list_profiles().expect("list profiles").len(), 1);
         assert_eq!(
-            fs::read(source.path().join(ACCOUNTS_FILE)).expect("read source"),
+            fs::read(source.path().join(accounts_file())).expect("read source"),
             before_accounts
         );
         assert_eq!(
-            fs::read(source.path().join(CONFIG_FILE)).expect("read source"),
+            fs::read(source.path().join(config_file())).expect("read source"),
             before_config
         );
     }
@@ -1007,7 +1013,7 @@ mod tests {
     #[test]
     fn oversized_source_is_rejected_before_json_parsing() {
         let source = TempDir::new().expect("source temp directory");
-        let file = File::create(source.path().join(ACCOUNTS_FILE)).expect("create source");
+        let file = File::create(source.path().join(accounts_file())).expect("create source");
         file.set_len(MAX_SOURCE_BYTES + 1)
             .expect("extend source fixture");
 

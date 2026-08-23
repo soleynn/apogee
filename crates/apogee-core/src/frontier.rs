@@ -19,7 +19,6 @@ const BANNER_WIDTH_MAX: u32 = 8_192;
 const BANNER_HEIGHT_MAX: u32 = 4_096;
 const BANNER_PIXELS_MAX: u64 = 16_777_216;
 const BANNER_ALLOC_MAX: u64 = 64 * 1024 * 1024;
-const BANNER_TYPES: [&str; 2] = ["image/jpeg", "image/png"];
 
 #[derive(Clone)]
 pub(crate) struct FrontierAssets {
@@ -121,7 +120,7 @@ impl FrontierAssets {
             .resume(false)
             .priority(Priority::Low)
             .max_len(BANNER_BYTES_MAX)
-            .allowed_content_types(BANNER_TYPES)
+            .allowed_content_types(["image/jpeg", "image/png"])
             .build()
             .map_err(|error| format!("artwork request: {error}"))?;
         let downloaded = self

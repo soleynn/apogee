@@ -220,15 +220,16 @@ impl DownloadSpec {
         match self.max_len {
             Some(max) => {
                 digest.update(&[1]);
-                digest.update(&max.to_le_bytes());
+                digest.update(max.to_string().as_bytes());
+                digest.update(&[0]);
             }
             None => {
                 digest.update(&[0]);
             }
         }
         for content_type in &self.allowed_content_types {
-            digest.update(&(content_type.len() as u64).to_le_bytes());
             digest.update(content_type.as_bytes());
+            digest.update(&[0]);
         }
         *digest.finalize().as_bytes()
     }
