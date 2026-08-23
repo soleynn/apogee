@@ -312,6 +312,14 @@ pub enum CatalogError {
         /// The entry's version.
         version: String,
     },
+    /// A non-empty runner or DXVK list does not name exactly one recommended row.
+    #[error("{kind} catalog must contain exactly one recommended row, found {found}")]
+    RecommendationCount {
+        /// The list whose recommendation invariant failed (`runner` or `dxvk`).
+        kind: &'static str,
+        /// How many rows declared themselves recommended.
+        found: usize,
+    },
 }
 
 /// A prefix setup step, recorded in the prefix's own history and named in

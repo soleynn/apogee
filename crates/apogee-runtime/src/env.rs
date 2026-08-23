@@ -464,6 +464,8 @@ mod tests {
                 format: crate::catalog::ArchiveFormat::TarXz,
                 strip_prefix: None,
             },
+            size: 1,
+            recommended: true,
             ntsync,
         }
     }
