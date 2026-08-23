@@ -131,6 +131,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### core
 - Add explicit login contracts and shell driver (#250) _(added)_
+- Complete launcher setup and recovery surfaces (#251) _(added)_
 
 ### nightly
 - Cache fuzz corpus per target across nightly runs (#150) _(ci)_
