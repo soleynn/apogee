@@ -397,7 +397,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("runner-1.0".to_owned()),
             },
-            size: 1,
+            size: len,
             recommended: true,
             ntsync: None,
         };
@@ -436,6 +436,7 @@ mod tests {
         let payload = generated_vec(7, 0, 8 * 1024);
         let tar = runner_targz("r-2", &payload).expect("build archive");
         let pin = DigestPin::Blake3(blake3_of(&tar));
+        let len = tar.len() as u64;
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -451,7 +452,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("r-2".to_owned()),
             },
-            size: 1,
+            size: len,
             recommended: true,
             ntsync: None,
         };
@@ -496,6 +497,7 @@ mod tests {
     async fn a_download_the_token_stopped_reads_as_a_cancellation() {
         let tar = runner_targz("stopped-1", b"payload").expect("build archive");
         let pin = DigestPin::Blake3(blake3_of(&tar));
+        let len = tar.len() as u64;
         let server = ChaosServer::serving(tar).start().await.expect("server");
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -511,7 +513,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("stopped-1".to_owned()),
             },
-            size: 1,
+            size: len,
             recommended: true,
             ntsync: None,
         };
@@ -546,6 +548,7 @@ mod tests {
         let payload = generated_vec(11, 0, 16 * 1024);
         let tar = runner_targz("throttled-1", &payload).expect("build archive");
         let pin = DigestPin::Blake3(blake3_of(&tar));
+        let len = tar.len() as u64;
         let server = ChaosServer::serving(tar)
             .service_unavailable(2, RetryAfter::Seconds(0))
             .start()
@@ -568,7 +571,7 @@ mod tests {
                 format: ArchiveFormat::TarGz,
                 strip_prefix: Some("throttled-1".to_owned()),
             },
-            size: 1,
+            size: len,
             recommended: true,
             ntsync: None,
         };
