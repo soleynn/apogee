@@ -81,6 +81,7 @@ pub(crate) struct FlowContext {
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
     pub(crate) backups_dir: std::path::PathBuf,
+    pub(crate) frontier: crate::frontier::FrontierAssets,
 }
 
 /// Run `cmd` to completion, emitting its events on `tx`. A failure becomes an [`Event::Error`]; a run
@@ -239,9 +240,21 @@ async fn frontier(
         FrontierQuery::News => {
             let rows = fetch_news(&*ctx.transport, &context, &host::launcher_time_now()).await?;
             let data = NewsData {
-                news: rows.news.into_iter().map(news_row).collect(),
-                topics: rows.topics.into_iter().map(news_row).collect(),
-                pinned: rows.pinned.into_iter().map(news_row).collect(),
+                news: rows
+                    .news
+                    .into_iter()
+                    .map(|row| news_row(&ctx.frontier, row))
+                    .collect(),
+                topics: rows
+                    .topics
+                    .into_iter()
+                    .map(|row| news_row(&ctx.frontier, row))
+                    .collect(),
+                pinned: rows
+                    .pinned
+                    .into_iter()
+                    .map(|row| news_row(&ctx.frontier, row))
+                    .collect(),
             };
             let _ = tx.send(Event::Frontier(FrontierData::News(data)));
         }
@@ -263,17 +276,19 @@ async fn frontier(
             }
         },
         FrontierQuery::Banners => {
-            return Err(CoreError::Unavailable {
-                command: "frontier banners",
-            });
+            let rows =
+                sqex_proto::fetch_banners(&*ctx.transport, &context, &host::launcher_time_now())
+                    .await?;
+            let rows = ctx.frontier.cache_banners(rows.banner, cancel).await;
+            let _ = tx.send(Event::Frontier(FrontierData::Banners(rows)));
         }
     }
     Ok(())
 }
 
-fn news_row(row: sqex_proto::Headline) -> NewsRow {
+fn news_row(frontier: &crate::frontier::FrontierAssets, row: sqex_proto::Headline) -> NewsRow {
     NewsRow {
-        id: row.id,
+        id: frontier.register_link(&row.url).unwrap_or_default(),
         date: row.date,
         title: row.title,
         tag: row.tag,

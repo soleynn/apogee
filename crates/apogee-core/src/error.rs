@@ -64,6 +64,8 @@ pub enum CoreError {
     PatchIncomplete { detail: String },
     #[error("preparing the repair failed: {detail}")]
     Repair { detail: String },
+    #[error("no public display link with id {id}")]
+    FrontierLink { id: String },
     /// The command shape is reserved, but this build does not implement its flow yet. Keeping it a
     /// typed failure preserves the stream contract instead of panicking or closing without an outcome.
     #[error("{command} is not available in this build")]

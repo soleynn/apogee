@@ -77,6 +77,7 @@ struct Harness {
     _store_dir: TempDir,
     prefixes: TempDir,
     backups: TempDir,
+    frontier: TempDir,
     store: Store,
     secrets: Arc<MemoryStore>,
     profile: Uuid,
@@ -103,6 +104,7 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
     let store_dir = TempDir::new().unwrap();
     let prefixes = TempDir::new().unwrap();
     let backups = TempDir::new().unwrap();
+    let frontier = TempDir::new().unwrap();
     let store = Store::new(store_dir.path().to_path_buf());
     let secrets = Arc::new(MemoryStore::new());
 
@@ -120,6 +122,7 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
         _store_dir: store_dir,
         prefixes,
         backups,
+        frontier,
         store,
         secrets,
         profile: profile.id,
@@ -216,6 +219,10 @@ fn context_with_otp(
         computer_id: host::computer_id(&h.store),
         prefixes_dir: h.prefixes.path().to_path_buf(),
         backups_dir: h.backups.path().to_path_buf(),
+        frontier: crate::frontier::FrontierAssets::new(
+            apogee_fetch::Fetcher::builder().build().unwrap(),
+            h.frontier.path().to_path_buf(),
+        ),
     }
 }
 
@@ -238,10 +245,6 @@ async fn reserved_commands_fail_as_typed_streams_with_a_terminal_outcome() {
         (
             Command::ImportXivLauncher(PathBuf::from("fixture")),
             "configuration import",
-        ),
-        (
-            Command::Frontier(FrontierQuery::Banners),
-            "frontier banners",
         ),
         (Command::SupportBundle, "support bundle"),
     ];
@@ -319,7 +322,7 @@ async fn frontier_news_returns_display_safe_rows() {
     let [FrontierData::News(data)] = frontier_data(&events).as_slice() else {
         panic!("expected one news result: {events:?}");
     };
-    assert_eq!(data.news[0].id, "n1");
+    assert!(!data.news[0].id.is_empty());
     assert_eq!(data.news[0].title, "Maintenance");
     let rendered = format!("{data:?}");
     assert!(!rendered.contains("example.invalid"));

@@ -95,6 +95,7 @@ impl StableCode for CoreError {
             Self::Launch { .. } => "err-launch",
             Self::PatchIncomplete { .. } => "err-patch-incomplete",
             Self::Repair { .. } => "err-repair",
+            Self::FrontierLink { .. } => "err-frontier-link",
             Self::Unavailable { .. } => "err-unavailable",
         }
     }
@@ -241,6 +242,7 @@ pub const ALL_CODES: &[&str] = &[
     "err-config",
     "err-crypto",
     "err-fetch",
+    "err-frontier-link",
     "err-import",
     "err-init",
     "err-invalid-credential",

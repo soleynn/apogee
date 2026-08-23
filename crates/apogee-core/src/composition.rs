@@ -58,6 +58,8 @@ pub struct CoreConfig {
     /// signed catalog, and the trees an injectable unpacks into. Shared across profiles, because none of
     /// it belongs to any one prefix.
     pub addons_dir: PathBuf,
+    /// Where validated public display artwork is cached after normalization.
+    pub frontier_dir: PathBuf,
 }
 
 impl CoreConfig {
@@ -83,6 +85,7 @@ impl CoreConfig {
             patch_store: base.join("patches"),
             backups_dir: base.join("backups"),
             addons_dir: base.join("addons"),
+            frontier_dir: base.join("frontier"),
         }
     }
 
@@ -112,6 +115,7 @@ impl CoreConfig {
             // Data too: what a launch loads into the game is tens of megabytes and is fetched from a
             // third party, so a cache cleaner removing it turns the next launch into a download.
             addons_dir: data.join("apogee/addons"),
+            frontier_dir: data.join("apogee/frontier"),
         })
     }
 }
@@ -309,6 +313,7 @@ pub struct Core {
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
     backups_dir: PathBuf,
+    frontier: crate::frontier::FrontierAssets,
     /// Where the sealed-file secret store's file goes, whether or not that is the backend in use.
     secrets_path: PathBuf,
 }
@@ -413,6 +418,7 @@ impl Core {
             patch_store,
             backups_dir,
             addons_dir,
+            frontier_dir,
         } = config;
         let store = Store::new(store_dir);
         // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
@@ -423,6 +429,7 @@ impl Core {
             .unwrap_or(false);
 
         let fetcher = Fetcher::builder().build()?;
+        let frontier = crate::frontier::FrontierAssets::new(fetcher.clone(), frontier_dir);
         let runtime = Runtime::new(
             fetcher.clone(),
             RuntimePaths {
@@ -471,6 +478,7 @@ impl Core {
             clock: host::system_clock(),
             prefixes_dir,
             backups_dir,
+            frontier,
             secrets_path,
         })
     }
@@ -499,6 +507,16 @@ impl Core {
             settings: Settings::default(),
             launch: LaunchSettings::default(),
         }
+    }
+
+    /// Resolve an opaque display-row id against links admitted during this core instance.
+    ///
+    /// # Errors
+    /// [`CoreError::FrontierLink`] when the id was not issued by a successful display query.
+    pub fn resolve_frontier_link(&self, id: &str) -> Result<url::Url, CoreError> {
+        self.frontier
+            .resolve_link(id)
+            .ok_or_else(|| CoreError::FrontierLink { id: id.to_owned() })
     }
 
     /// Persist the launcher-wide settings.
@@ -1054,6 +1072,7 @@ impl Core {
             computer_id: self.computer_id,
             prefixes_dir: self.prefixes_dir.clone(),
             backups_dir: self.backups_dir.clone(),
+            frontier: self.frontier.clone(),
         }
     }
 }

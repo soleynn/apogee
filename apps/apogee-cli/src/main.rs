@@ -103,6 +103,8 @@ enum Commands {
     Install(PlayArgs),
     /// Print the public launcher headlines.
     News,
+    /// Cache and print the current promotional banner rows.
+    Banners,
     /// Print the world-gate status, optionally waiting until it opens.
     Gate(GateArgs),
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
@@ -701,6 +703,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             .await)
         }
         Commands::News => Ok(drive(&core, Command::Frontier(FrontierQuery::News)).await),
+        Commands::Banners => Ok(drive(&core, Command::Frontier(FrontierQuery::Banners)).await),
         Commands::Gate(args) => Ok(drive(
             &core,
             Command::Frontier(FrontierQuery::Gate { wait: args.wait }),

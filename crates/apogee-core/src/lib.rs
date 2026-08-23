@@ -15,6 +15,7 @@ mod command;
 mod composition;
 mod error;
 mod flow;
+mod frontier;
 mod host;
 mod launch;
 mod model;

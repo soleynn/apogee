@@ -16,6 +16,8 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
 url.workspace = true
+sha2.workspace = true
+image.workspace = true
 async-trait.workspace = true
 sqex-proto = { path = "../sqex-proto" }
 sqex-crypto = { path = "../sqex-crypto" }
