@@ -61,9 +61,9 @@ pub use apogee_secrets::{
 };
 pub use code::{ALL_CODES, StableCode};
 pub use command::{
-    BannerData, Command, Event, FlowState, FrontierData, FrontierQuery, GateData,
-    LaunchProgramExit, NewsData, NewsRow, Notice, PasswordSource, PrefixAction, PrefixReport,
-    Progress, RunOutcome,
+    BannerData, Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, GateData,
+    ImportData, ImportXivLauncher, LaunchProgramExit, NewsData, NewsRow, Notice, PasswordSource,
+    PrefixAction, PrefixReport, Progress, RunOutcome, SupportBundleData,
 };
 pub use composition::{Core, CoreConfig, Defaults, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;
@@ -87,8 +87,8 @@ pub use status::{NextAction, NextCommand, NextVerb, PendingReading};
 pub use store::StoreError;
 pub use support::{
     BundlePart, CallerFactName, DiagnosticRecord, SupportArchive, SupportError, SystemReportInput,
-    ValidatedCallerFacts, assemble_support_archive, support_bundle_contents, system_report,
-    write_support_bundle,
+    ValidatedCallerFacts, assemble_support_archive, encode_support_bundle, support_bundle_contents,
+    system_report, write_support_bundle,
 };
 pub use uuid::Uuid;
 pub use xiv_import::{

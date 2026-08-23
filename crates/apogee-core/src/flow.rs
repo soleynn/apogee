@@ -29,8 +29,9 @@ use uuid::Uuid;
 
 use crate::addons::AddonBackend;
 use crate::command::{
-    Command, Event, FlowState, FrontierData, FrontierQuery, GateData, NewsData, NewsRow, Notice,
-    PasswordSource, PrefixAction, PrefixReport, RunOutcome,
+    Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, GateData, ImportData,
+    ImportXivLauncher, NewsData, NewsRow, Notice, PasswordSource, PrefixAction, PrefixReport,
+    RunOutcome, SupportBundleData,
 };
 use crate::error::CoreError;
 use crate::host::{self, Clock};
@@ -152,7 +153,7 @@ fn command_profile(command: &Command) -> Option<Uuid> {
         Command::FirstRun(_)
         | Command::ImportXivLauncher(_)
         | Command::Frontier(_)
-        | Command::SupportBundle => None,
+        | Command::SupportBundle { .. } => None,
     }
 }
 
@@ -227,16 +228,10 @@ async fn run_command(
             local_indexes,
         } => repair(&ctx, profile, local_indexes, &tx, &cancel).await,
         Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
-        Command::FirstRun(_) => Err(CoreError::Unavailable {
-            command: "first-run",
-        }),
-        Command::ImportXivLauncher(_) => Err(CoreError::Unavailable {
-            command: "configuration import",
-        }),
+        Command::FirstRun(request) => first_run(&ctx, request, &tx),
+        Command::ImportXivLauncher(command) => import_xivlauncher(&ctx, command, &tx),
         Command::Frontier(query) => frontier(&ctx, query, &tx, &cancel).await,
-        Command::SupportBundle => Err(CoreError::Unavailable {
-            command: "support bundle",
-        }),
+        Command::SupportBundle { facts } => support_bundle(&ctx, facts, &tx),
     };
     match result {
         Ok(()) => {}
@@ -249,6 +244,99 @@ async fn run_command(
             let _ = tx.send(Event::Error(error));
         }
     }
+}
+
+fn first_run(
+    ctx: &FlowContext,
+    request: FirstRunRequest,
+    tx: &UnboundedSender<Event>,
+) -> Result<(), CoreError> {
+    let mut checkpoint = ctx.store.load_first_run()?;
+    match request {
+        FirstRunRequest::Read => {
+            if matches!(
+                crate::first_incomplete(&checkpoint),
+                crate::FirstRunPosition::WaitingForImportDiscovery
+            ) {
+                let candidates = crate::xiv_import::candidate_roots()
+                    .into_iter()
+                    .filter(|path| crate::xiv_import::scan(path).is_ok())
+                    .map(|path| crate::FirstRunImportCandidate {
+                        source: if path.to_string_lossy().contains(".var/app/") {
+                            crate::FirstRunImportSource::Flatpak
+                        } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore")
+                        {
+                            crate::FirstRunImportSource::Core
+                        } else {
+                            crate::FirstRunImportSource::Native
+                        },
+                        path,
+                    })
+                    .collect();
+                checkpoint = crate::first_run::transition(
+                    &checkpoint,
+                    crate::FirstRunTransition::RecordImportDiscovery(candidates),
+                )?;
+                ctx.store.save_first_run(&checkpoint)?;
+            }
+        }
+        FirstRunRequest::Advance(change) => {
+            checkpoint = crate::first_run::transition(&checkpoint, change)?;
+            ctx.store.save_first_run(&checkpoint)?;
+        }
+    }
+    let _ = tx.send(Event::FirstRun(Box::new(checkpoint)));
+    Ok(())
+}
+
+fn import_xivlauncher(
+    ctx: &FlowContext,
+    command: ImportXivLauncher,
+    tx: &UnboundedSender<Event>,
+) -> Result<(), CoreError> {
+    let data = match command {
+        ImportXivLauncher::Scan(path) => ImportData::Scan(crate::xiv_import::scan(path)?),
+        ImportXivLauncher::Apply(plan) => {
+            ImportData::Applied(crate::xiv_import::apply(&ctx.store, &plan)?)
+        }
+    };
+    let _ = tx.send(Event::Import(data));
+    Ok(())
+}
+
+fn support_bundle(
+    ctx: &FlowContext,
+    facts: Vec<(String, String)>,
+    tx: &UnboundedSender<Event>,
+) -> Result<(), CoreError> {
+    let profiles = ctx.store.list_profiles()?;
+    let settings = ctx.store.load_settings()?;
+    let system = crate::SystemReportInput {
+        application_version: env!("CARGO_PKG_VERSION").to_owned(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
+        operating_system: Some(std::env::consts::OS.to_owned()),
+        kernel: None,
+        architecture: Some(std::env::consts::ARCH.to_owned()),
+        gpu: None,
+        driver: None,
+        runner: None,
+        prefix_state: None,
+    };
+    let caller_facts = crate::ValidatedCallerFacts::new(facts);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let archive = crate::assemble_support_archive(&crate::support::SupportBundleInput {
+        profiles: &profiles,
+        settings: &settings,
+        system: &system,
+        logs: &[],
+        caller_facts: &caller_facts,
+        home: home.as_deref(),
+    })?;
+    let bytes = crate::encode_support_bundle(&archive)?;
+    let _ = tx.send(Event::SupportBundle(SupportBundleData::new(bytes)));
+    Ok(())
 }
 
 /// Fetch display-only launcher data. Waiting on a closed gate is core-owned so every shell gets the
@@ -397,6 +485,9 @@ fn observe_status(store: &Store, profile: Uuid, event: &Event) -> Result<(), Sto
         | Event::Addon(_)
         | Event::Setup(_)
         | Event::Frontier(_)
+        | Event::FirstRun(_)
+        | Event::Import(_)
+        | Event::SupportBundle(_)
         | Event::Prefix(_)
         | Event::Notice(_)
         | Event::LaunchProgramExited(_)

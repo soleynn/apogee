@@ -741,7 +741,10 @@ impl Core {
     /// been recorded yet.
     pub async fn first_run(&self) -> Result<crate::FirstRunCheckpoint, CoreError> {
         let mut checkpoint = self.store.load_first_run()?;
-        if matches!(checkpoint.import, crate::ImportState::DiscoveryPending) {
+        if matches!(
+            crate::first_incomplete(&checkpoint),
+            crate::FirstRunPosition::WaitingForImportDiscovery
+        ) {
             let candidates = crate::xiv_import::candidate_roots()
                 .into_iter()
                 .filter(|path| crate::xiv_import::scan(path).is_ok())

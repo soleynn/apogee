@@ -23,8 +23,8 @@ use crate::CoreError;
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
 use crate::command::{
-    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Notice, PasswordSource,
-    PrefixAction, RunOutcome,
+    Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, ImportData,
+    ImportXivLauncher, Notice, PasswordSource, PrefixAction, RunOutcome,
 };
 use crate::host;
 use crate::launch::LaunchBackend;
@@ -238,36 +238,46 @@ async fn run(ctx: FlowContext, cmd: Command) -> Vec<Event> {
 }
 
 #[tokio::test]
-async fn reserved_commands_fail_as_typed_streams_with_a_terminal_outcome() {
+async fn first_run_import_and_support_are_real_successful_streams() {
     let h = harness(false);
-    let cases = [
-        (Command::FirstRun(FirstRunStep::Legibility), "first-run"),
-        (
-            Command::ImportXivLauncher(PathBuf::from("fixture")),
-            "configuration import",
-        ),
-        (Command::SupportBundle, "support bundle"),
-    ];
+    let transport = || Arc::new(FixtureTransport::new([]));
+    let launch = || Arc::new(FakeLaunchBackend::exiting());
 
-    for (command, expected) in cases {
-        let events = run(
-            context(
-                &h,
-                Arc::new(FixtureTransport::new([])),
-                Arc::new(FakeLaunchBackend::exiting()),
-                NOW,
-            ),
-            command,
-        )
-        .await;
-        assert!(matches!(
-            events.as_slice(),
-            [
-                Event::Error(CoreError::Unavailable { command }),
-                Event::Outcome(RunOutcome::Failed)
-            ] if *command == expected
-        ));
-    }
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::FirstRun(FirstRunRequest::Read),
+    )
+    .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Event::FirstRun(_), Event::Outcome(RunOutcome::Succeeded)]
+    ));
+
+    let source = TempDir::new().unwrap();
+    std::fs::write(source.path().join("accountsList.json"), b"[]").unwrap();
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::ImportXivLauncher(ImportXivLauncher::Scan(source.path().to_path_buf())),
+    )
+    .await;
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::Import(ImportData::Scan(_)),
+            Event::Outcome(RunOutcome::Succeeded)
+        ]
+    ));
+
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::SupportBundle { facts: Vec::new() },
+    )
+    .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Event::SupportBundle(data), Event::Outcome(RunOutcome::Succeeded)]
+            if data.bytes().starts_with(b"PK")
+    ));
 }
 
 fn states(events: &[Event]) -> Vec<FlowState> {

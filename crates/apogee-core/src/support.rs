@@ -6,7 +6,7 @@
 //! excluded until this boundary deliberately admits it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -377,6 +377,23 @@ pub fn write_support_bundle(
     result
 }
 
+/// Encode a core-assembled entry set into a deterministic ZIP byte string.
+pub fn encode_support_bundle(archive: &SupportArchive) -> Result<Vec<u8>, SupportError> {
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = archive_options();
+    for entry in archive.entries() {
+        writer.start_file(entry.file_name(), options)?;
+        writer
+            .write_all(entry.bytes())
+            .map_err(|source| SupportError::Io {
+                path: PathBuf::from("<memory>"),
+                source,
+            })?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
 fn write_temporary(path: &Path, archive: &SupportArchive) -> Result<(), SupportError> {
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -387,9 +404,7 @@ fn write_temporary(path: &Path, archive: &SupportArchive) -> Result<(), SupportE
             source,
         })?;
     let mut writer = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::DEFAULT
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default());
+    let options = archive_options();
     for entry in archive.entries() {
         writer.start_file(entry.file_name(), options)?;
         writer
@@ -404,6 +419,12 @@ fn write_temporary(path: &Path, archive: &SupportArchive) -> Result<(), SupportE
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn archive_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::DEFAULT
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default())
 }
 
 fn json_entry(part: BundlePart, value: &Value) -> Result<BundleEntry, SupportError> {

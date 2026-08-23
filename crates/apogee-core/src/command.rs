@@ -14,8 +14,8 @@ use apogee_patcher::{PatchProgress, Repo};
 use apogee_secrets::Secret;
 use uuid::Uuid;
 
-pub use crate::FirstRunStep;
 use crate::error::CoreError;
+use crate::{FirstRunCheckpoint, FirstRunTransition, ImportApplyReport, ImportPlan, ImportScan};
 
 /// A request from a shell to the core.
 ///
@@ -85,11 +85,64 @@ pub enum Command {
         profile: Uuid,
         action: PrefixAction,
     },
-    FirstRun(FirstRunStep),
-    ImportXivLauncher(PathBuf),
+    FirstRun(FirstRunRequest),
+    ImportXivLauncher(ImportXivLauncher),
     /// Fetch pre-login display data (news, gate status, banners).
     Frontier(FrontierQuery),
-    SupportBundle,
+    SupportBundle {
+        facts: Vec<(String, String)>,
+    },
+}
+
+/// Read or advance the persisted initial-setup checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstRunRequest {
+    Read,
+    Advance(FirstRunTransition),
+}
+
+/// Preview or apply an XIVLauncher configuration import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImportXivLauncher {
+    Scan(PathBuf),
+    Apply(ImportPlan),
+}
+
+/// The result of one import command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImportData {
+    Scan(ImportScan),
+    Applied(ImportApplyReport),
+}
+
+/// A fully encoded, redacted support archive.
+pub struct SupportBundleData(Vec<u8>);
+
+impl SupportBundleData {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl fmt::Debug for SupportBundleData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SupportBundleData")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
 }
 
 /// Where a credentialed flow obtains the account password.
@@ -157,11 +210,17 @@ impl fmt::Debug for Command {
                 .field("action", action)
                 .finish(),
             Command::FirstRun(step) => f.debug_tuple("FirstRun").field(step).finish(),
-            Command::ImportXivLauncher(path) => {
-                f.debug_tuple("ImportXivLauncher").field(path).finish()
+            Command::ImportXivLauncher(command) => {
+                f.debug_tuple("ImportXivLauncher").field(command).finish()
             }
             Command::Frontier(query) => f.debug_tuple("Frontier").field(query).finish(),
-            Command::SupportBundle => f.write_str("SupportBundle"),
+            Command::SupportBundle { facts } => f
+                .debug_struct("SupportBundle")
+                .field(
+                    "facts",
+                    &facts.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+                )
+                .finish(),
         }
     }
 }
@@ -202,6 +261,9 @@ pub enum Event {
     /// since they are only useful while the thing is being set up.
     Setup(apogee_addons::SetupEvent),
     Frontier(FrontierData),
+    FirstRun(Box<FirstRunCheckpoint>),
+    Import(ImportData),
+    SupportBundle(SupportBundleData),
     /// What a prefix check found.
     ///
     /// A report rather than a stream of findings: the whole point is the list a user decides about,
