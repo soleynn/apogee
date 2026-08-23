@@ -31,7 +31,9 @@ use crate::flow::{self, FlowContext};
 use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
-use crate::model::{Account, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings};
+use crate::model::{
+    Account, LaunchSettings, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings,
+};
 use crate::patch;
 use crate::patch::PatchBackend;
 use crate::patch::patcher_backend::PatcherBackend;
@@ -218,6 +220,15 @@ pub struct ProfileRemoval {
     /// [`account_removed`](Self::account_removed) is `None`: the account stays, and so does what it
     /// has stored.
     pub secret_sweep: Option<SecretSweep>,
+}
+
+/// The persisted defaults a shell may offer without duplicating them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Defaults {
+    /// Launcher-wide defaults.
+    pub settings: Settings,
+    /// Per-profile launch defaults.
+    pub launch: LaunchSettings,
 }
 
 /// What importing another launcher's password did.
@@ -481,6 +492,15 @@ impl Core {
         Ok(self.store.load_settings()?)
     }
 
+    /// The defaults for launcher-wide and per-profile launch settings.
+    #[must_use]
+    pub fn defaults(&self) -> Defaults {
+        Defaults {
+            settings: Settings::default(),
+            launch: LaunchSettings::default(),
+        }
+    }
+
     /// Persist the launcher-wide settings.
     ///
     /// # Errors
@@ -561,7 +581,7 @@ impl Core {
         })
     }
 
-    /// Delete `id`, and the account behind it if no other profile still signs in as that account.
+    /// Plan whether removing `id` would also remove its account and stored secrets.
     ///
     /// The account is shared: two profiles can point at one login, and removing one of them must
     /// leave the other able to sign in. Only the last one out takes the account, its stored secrets,
@@ -570,16 +590,14 @@ impl Core {
     /// The rule lives here rather than in a caller so that every front end deletes the same way. A
     /// shell that reimplemented it would eventually reimplement it differently.
     ///
-    /// Nothing is unlinked until the sweep is done. The whole removal is decided first, then the
-    /// secrets go, and only then do the records: a failure anywhere before the first unlink leaves
-    /// the profile exactly as it was, so the user can unlock the store and run the same command
-    /// again. Deleting the profile first would strand the account behind it, and the account is
-    /// reachable only *through* a profile.
+    /// This changes nothing. [`ProfileRemoval::secret_sweep`] is always `None` in a plan because no
+    /// store has been touched yet; [`ProfileRemoval::account_removed`] names the account and its
+    /// secrets when this is the last profile using it.
     ///
     /// # Errors
-    /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
-    /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
-    pub fn remove_profile(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, or a [`CoreError::Store`] when
+    /// the profile set cannot be read.
+    pub fn plan_removal(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
         let account = self.profile(id)?.account;
         // Decided before anything is removed, and excluding the profile on its way out: this is the
         // last user of the account if no *other* profile signs in as it.
@@ -588,13 +606,30 @@ impl Core {
             .iter()
             .any(|p| p.id != id && p.account == account);
 
-        if !last_user {
-            self.delete_profile(id)?;
-            return Ok(ProfileRemoval {
+        Ok(if last_user {
+            ProfileRemoval {
+                account_removed: Some(account),
+                secret_sweep: None,
+            }
+        } else {
+            ProfileRemoval {
                 account_removed: None,
                 secret_sweep: None,
-            });
-        }
+            }
+        })
+    }
+
+    /// Delete `id` according to the result of [`Core::plan_removal`].
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
+    /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
+    pub fn remove_profile(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
+        let plan = self.plan_removal(id)?;
+        let Some(account) = plan.account_removed else {
+            self.delete_profile(id)?;
+            return Ok(plan);
+        };
 
         let secret_sweep = Some(self.forget_secrets(account)?);
         self.delete_profile(id)?;
@@ -1225,7 +1260,7 @@ mod tests {
 
         use super::*;
         use crate::ImportOutcome;
-        use crate::model::{ListenerSettings, OtpDelivery};
+        use crate::model::{LaunchSettings, ListenerSettings, OtpDelivery, Settings};
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
         ///
@@ -1253,6 +1288,43 @@ mod tests {
                     .unwrap();
             }
             (account, profile)
+        }
+
+        #[test]
+        fn defaults_are_independent_of_saved_settings() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(store);
+            let mut saved = Settings::default();
+            saved.keep_patches = !saved.keep_patches;
+            saved.close_after_launch = !saved.close_after_launch;
+            core.save_settings(&saved).unwrap();
+
+            let defaults = core.defaults();
+
+            assert_eq!(defaults.settings, Settings::default());
+            assert_eq!(defaults.launch, LaunchSettings::default());
+            assert_ne!(defaults.settings, saved);
+        }
+
+        #[test]
+        fn removal_plan_changes_nothing_and_matches_account_ownership() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let (account, first) = seeded(&core, &store);
+
+            let last_plan = core.plan_removal(first.id).unwrap();
+            assert_eq!(last_plan.account_removed, Some(account.id));
+            assert_eq!(last_plan.secret_sweep, None);
+            assert_eq!(core.profile(first.id).unwrap().id, first.id);
+            assert_eq!(store.len(), SecretKind::ALL.len());
+
+            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            core.save_profile(&second).unwrap();
+            let shared_plan = core.plan_removal(first.id).unwrap();
+            assert_eq!(shared_plan.account_removed, None);
+            assert_eq!(shared_plan.secret_sweep, None);
+            assert_eq!(core.profiles().unwrap().len(), 2);
+            assert_eq!(store.len(), SecretKind::ALL.len());
         }
 
         /// Where the cached session for `account` lands under a core built with

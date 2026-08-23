@@ -58,7 +58,7 @@ pub use command::{
     Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, LaunchProgramExit,
     Notice, PasswordSource, PrefixAction, PrefixReport, Progress, RunOutcome,
 };
-pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval, SecretSweep};
+pub use composition::{Core, CoreConfig, Defaults, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;
 pub use model::{
     Account, AccountKind, LaunchSettings, ListenerSettings, ListenerSources, OtpDelivery,

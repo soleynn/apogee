@@ -158,6 +158,8 @@ enum Commands {
 enum SettingsCommand {
     /// Print the current preferences.
     Show,
+    /// Print the defaults for launcher and profile launch settings.
+    Defaults,
     /// Change a preference. Only the ones named are touched.
     Set(SettingsSetArgs),
 }
@@ -474,9 +476,19 @@ enum ProfileAction {
     /// List stored profiles.
     List,
     /// Remove a profile (and its account, if no other profile references it).
-    Remove(TargetArgs),
+    Remove(ProfileRemoveArgs),
     /// Show or change how a profile's launches are tuned.
     Env(ProfileEnvArgs),
+}
+
+#[derive(Args)]
+struct ProfileRemoveArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Report what would be removed without changing anything.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -984,6 +996,19 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             // Where a user looks for machine-wide state, and where the listener sits is exactly that.
             // Nothing here says whether it is in use: that is per account, and `otp status` says it.
             print_listener_settings(&s.otp_listener);
+            Ok(())
+        }
+        SettingsCommand::Defaults => {
+            let defaults = core.defaults();
+            let s = defaults.settings;
+            println!("language            {}", s.language);
+            println!("secret_backend      {:?}", s.secret_backend);
+            println!("close_after_launch  {}", s.close_after_launch);
+            println!("keep_patches        {}", s.keep_patches);
+            println!("backups_kept        {}", s.backups_kept);
+            println!("backup_before_patch {}", s.backup_before_patch);
+            print_listener_settings(&s.otp_listener);
+            println!("launch               {:?}", defaults.launch);
             Ok(())
         }
         SettingsCommand::Set(args) => {
@@ -1733,6 +1758,16 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
         }
         ProfileAction::Remove(args) => {
             let profile = resolve_profile(core, &args.profile)?;
+            let plan = core.plan_removal(profile.id)?;
+            if args.dry_run {
+                println!("would remove profile {}", profile.id);
+                if let Some(account) = plan.account_removed {
+                    println!("would remove account {account} and its stored secrets");
+                } else {
+                    println!("would keep the shared account and its stored secrets");
+                }
+                return Ok(());
+            }
             let removal = core.remove_profile(profile.id)?;
             println!("removed profile {}", profile.id);
             if let Some(account) = removal.account_removed {

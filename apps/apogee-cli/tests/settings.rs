@@ -89,6 +89,49 @@ fn setting_one_preference_leaves_the_rest_alone() -> std::io::Result<()> {
     Ok(())
 }
 
+#[test]
+fn defaults_ignore_the_saved_preferences() -> std::io::Result<()> {
+    let home = with_profile()?;
+    run(
+        home.path(),
+        &[
+            "settings",
+            "set",
+            "--keep-patches",
+            "false",
+            "--close-after-launch",
+            "true",
+        ],
+    )?;
+
+    let text = stdout(&run(home.path(), &["settings", "defaults"])?);
+    assert!(text.contains("keep_patches        true"), "{text}");
+    assert!(text.contains("close_after_launch  false"), "{text}");
+    assert!(
+        text.contains("launch               LaunchSettings"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn profile_removal_dry_run_changes_nothing() -> std::io::Result<()> {
+    let home = with_profile()?;
+
+    let preview = run(
+        home.path(),
+        &["profile", "remove", "--profile", "main", "--dry-run"],
+    )?;
+    let text = stdout(&preview);
+    assert!(preview.status.success(), "{text}");
+    assert!(text.contains("would remove profile"), "{text}");
+    assert!(text.contains("would remove account"), "{text}");
+
+    let listed = stdout(&run(home.path(), &["profile", "list"])?);
+    assert!(listed.contains("main"), "{listed}");
+    Ok(())
+}
+
 /// A profile starts with nothing chosen, so every knob resolves against the host and the runner at
 /// launch time rather than against a value written on its behalf.
 #[test]
