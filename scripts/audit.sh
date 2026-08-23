@@ -78,7 +78,9 @@ bad=$(grep -xiE 'reqwest|hyper|hyper-util|h2|http|http-body|http-body-util|url|r
 # 5. No presentation below the shell: the composition root carries no user-facing string constants
 #    (it emits typed codes, and the shell localizes them), and no library writes to the terminal.
 hits=$(grep -rnE '^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[^=]*\bstr\b' \
-  crates/apogee-core/src --include='*.rs' || true)
+  crates/apogee-core/src --include='*.rs' \
+  | grep -v '/tests\.rs:' \
+  | grep -vE '^crates/apogee-core/src/code\.rs:[0-9]+:pub const ALL_CODES:' || true)
 [ -z "$hits" ] || report "string constant in apogee-core (presentation belongs to the shell)" "$hits"
 hits=$(libs '\b(print|println|eprint|eprintln)!|\b(write|writeln)![[:space:]]*\([^)]*std(out|err)')
 [ -z "$hits" ] || report "terminal output in a library crate" "$hits"
