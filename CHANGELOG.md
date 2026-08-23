@@ -129,6 +129,9 @@ is tagged with its change type. Versioning aims to follow
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
 
+### core
+- Add explicit login contracts and shell driver (#250) _(added)_
+
 ### nightly
 - Cache fuzz corpus per target across nightly runs (#150) _(ci)_
 
