@@ -177,12 +177,12 @@ pub enum PrefixAction {
     /// Apply a targeted fix for each problem that has one, apply the setup the check reports missing,
     /// and report what is left. Never deletes.
     Fix,
-    /// Delete the prefix and build it again.
+    /// Delete the prefix and build it again, optionally capturing the game's settings first.
     ///
     /// The destructive one, and the only resolution for drift no targeted fix covers. Everything
     /// installed into the prefix goes with it, including the game's own settings, so it is asked for
     /// explicitly and never chosen on a user's behalf.
-    Recreate,
+    Recreate { backup_config: bool },
 }
 
 /// A message emitted while a [`Command`] runs.

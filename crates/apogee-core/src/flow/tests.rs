@@ -1647,7 +1647,9 @@ async fn recreating_is_the_only_action_that_destroys_the_prefix() {
         ctx,
         Command::Prefix {
             profile: h.profile,
-            action: PrefixAction::Recreate,
+            action: PrefixAction::Recreate {
+                backup_config: false,
+            },
         },
     )
     .await;
@@ -1655,6 +1657,70 @@ async fn recreating_is_the_only_action_that_destroys_the_prefix() {
     assert!(states(&events).contains(&FlowState::RecreatingPrefix));
     assert!(launch.was_recreated());
     assert!(errors(&events).is_empty());
+}
+
+/// A requested capture is part of the destructive command, so the archive exists before the
+/// backend is allowed to delete anything.
+#[tokio::test]
+async fn recreating_can_capture_config_before_deletion() {
+    let h = harness(false);
+    plant_config(&h);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Recreate {
+                backup_config: true,
+            },
+        },
+    )
+    .await;
+
+    let states = states(&events);
+    assert_eq!(states, [FlowState::BackingUp, FlowState::RecreatingPrefix]);
+    assert!(launch.was_recreated());
+    let archives = std::fs::read_dir(h.backups.path().join(h.profile.to_string()))
+        .expect("the requested backup directory")
+        .filter_map(Result::ok)
+        .count();
+    assert_eq!(archives, 1);
+}
+
+/// When the promised capture cannot be made, deletion never starts. A backup flag that merely
+/// reports an error while continuing would make the destructive command's safety choice untrue.
+#[tokio::test]
+async fn a_failed_recreate_backup_preserves_the_prefix() {
+    let h = harness(false);
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new(vec![])),
+        launch.clone(),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action: PrefixAction::Recreate {
+                backup_config: true,
+            },
+        },
+    )
+    .await;
+
+    assert_eq!(states(&events), [FlowState::BackingUp]);
+    assert_eq!(errors(&events).len(), 1);
+    assert!(!launch.was_recreated());
 }
 
 /// Creating one is what a launch does first, reachable on its own so a user can pay that cost before
@@ -1690,7 +1756,7 @@ async fn creating_a_prefix_prepares_it_without_launching() {
 /// the first launch that was supposed to have nothing left to do.
 #[rstest::rstest]
 #[case(PrefixAction::Create)]
-#[case(PrefixAction::Recreate)]
+#[case(PrefixAction::Recreate { backup_config: false })]
 #[tokio::test]
 async fn a_prefix_built_on_its_own_gets_the_setup_a_launch_would_apply(
     #[case] action: PrefixAction,
@@ -1963,7 +2029,7 @@ async fn a_launch_asks_its_prefix_for_the_companion_the_profile_chose(#[case] nv
 #[case(PrefixAction::Create)]
 #[case(PrefixAction::Check)]
 #[case(PrefixAction::Fix)]
-#[case(PrefixAction::Recreate)]
+#[case(PrefixAction::Recreate { backup_config: false })]
 #[tokio::test]
 async fn every_prefix_verb_carries_the_companion_the_profile_chose(#[case] action: PrefixAction) {
     let h = harness_customized(false, |profile| profile.launch.nvapi = true);
@@ -2604,6 +2670,10 @@ async fn patches_pending_continue_to_launch() {
     assert_eq!(
         states(&events),
         [
+            FlowState::PatchesPending {
+                count: 2,
+                bytes: 3_000,
+            },
             FlowState::Patching,
             FlowState::PreparingPrefix,
             FlowState::Launching,
@@ -2647,6 +2717,10 @@ async fn a_stale_boot_is_patched_before_registering() {
     assert_eq!(
         states(&events),
         [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 4_096,
+            },
             FlowState::Patching,
             FlowState::PreparingPrefix,
             FlowState::Launching,
@@ -2725,7 +2799,15 @@ async fn install_from_nothing_reaches_launch() {
     assert_eq!(
         states(&events),
         [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 4_096,
+            },
             FlowState::Patching,
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 5_000,
+            },
             FlowState::PreparingPrefix,
             FlowState::Launching,
             FlowState::Running,
@@ -2766,7 +2848,13 @@ async fn patch_applies_pending_without_launching() {
     assert!(errors(&events).is_empty());
     assert_eq!(
         states(&events),
-        [FlowState::Patching],
+        [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 1_000,
+            },
+            FlowState::Patching
+        ],
         "patch applies pending but never launches"
     );
     assert_eq!(patch.installed_repos(), [Repo::Game]);
@@ -2797,7 +2885,17 @@ async fn stopping_a_patch_is_narrated_rather_than_failed() {
         "a patch the user stopped is not a failure: {:?}",
         errors(&events)
     );
-    assert_eq!(states(&events), [FlowState::Patching, FlowState::Cancelled]);
+    assert_eq!(
+        states(&events),
+        [
+            FlowState::PatchesPending {
+                count: 1,
+                bytes: 1_000,
+            },
+            FlowState::Patching,
+            FlowState::Cancelled
+        ]
+    );
     assert_eq!(launch.launch_count(), 0);
 }
 

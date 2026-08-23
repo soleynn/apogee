@@ -841,10 +841,6 @@ async fn patch_to_current(
 ) -> Result<Option<UidCacheEntry>, CoreError> {
     let mut patching_announced = false;
 
-    if mode == InstallMode::FromNothing {
-        announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
-    }
-
     // Boot is brought current before the first registration rather than in reaction to one. A
     // registration carrying an out-of-date boot is answered 410, which is terminal, so the
     // `NeedsBootPatch` arm below never sees an ordinary stale boot; it stays as the tamper case the
@@ -880,6 +876,8 @@ async fn patch_to_current(
                     ctx.store.save_uid_cache(profile.account, &session)?;
                     return Ok(Some(session));
                 }
+                let (count, bytes) = summarize(&pending_patches);
+                emit(tx, FlowState::PatchesPending { count, bytes });
                 announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
                 install_game_patches(
                     ctx,
@@ -925,6 +923,8 @@ async fn ensure_boot_current(
     if patches.is_empty() {
         return Ok(false);
     }
+    let (count, bytes) = summarize(&patches);
+    emit(tx, FlowState::PatchesPending { count, bytes });
     announce_patching(ctx, profile, tx, cancel, announced);
     let request = InstallRequest {
         repo: Repo::Boot,
@@ -1386,7 +1386,20 @@ async fn prefix(
                 }));
             }
         }
-        PrefixAction::Recreate => {
+        PrefixAction::Recreate { backup_config } => {
+            if backup_config {
+                emit(tx, FlowState::BackingUp);
+                let settings = ctx.store.load_settings()?;
+                crate::backup::create(
+                    &ctx.prefixes_dir,
+                    &ctx.backups_dir,
+                    &profile,
+                    settings.backups_kept,
+                    (ctx.clock)(),
+                    Some("before recreating the prefix".to_owned()),
+                    cancel,
+                )?;
+            }
             emit(tx, FlowState::RecreatingPrefix);
             let fresh = ctx
                 .launch

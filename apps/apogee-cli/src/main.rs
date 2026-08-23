@@ -313,6 +313,9 @@ struct PrefixRecreateArgs {
     /// Skip the confirmation. For scripts, which have no one to ask.
     #[arg(long)]
     yes: bool,
+    /// Capture the game's settings before deleting the prefix. If capture fails, nothing is deleted.
+    #[arg(long)]
+    backup_config: bool,
 }
 
 #[cfg(unix)]
@@ -1137,7 +1140,12 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
         PrefixCommand::Create(args) => (&args.profile, PrefixAction::Create),
         PrefixCommand::Health(args) => (&args.profile, PrefixAction::Check),
         PrefixCommand::Fix(args) => (&args.profile, PrefixAction::Fix),
-        PrefixCommand::Recreate(args) => (&args.profile, PrefixAction::Recreate),
+        PrefixCommand::Recreate(args) => (
+            &args.profile,
+            PrefixAction::Recreate {
+                backup_config: args.backup_config,
+            },
+        ),
     };
     let profile = resolve_profile(core, target)?.id;
 
@@ -1145,7 +1153,11 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
         && !args.yes
     {
         println!("this deletes the prefix and everything installed into it, including the game's");
-        println!("own settings. `backup create` captures those first.");
+        if args.backup_config {
+            println!("own settings. Their backup must complete before deletion begins.");
+        } else {
+            println!("own settings. `--backup-config` captures those first.");
+        }
         let expected = resolve_profile(core, target)?.name;
         let answer = prompt_line("type the profile name to confirm: ")?;
         // An empty answer never confirms, whatever the profile is called. Without this a profile
