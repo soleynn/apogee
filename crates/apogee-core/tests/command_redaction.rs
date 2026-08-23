@@ -11,7 +11,7 @@
 //! exclusions cover the marker values below: a byte string next to a credential-shaped field name
 //! reads to it as a hard-coded credential.
 
-use apogee_core::{Command, OtpSource, Secret};
+use apogee_core::{Command, OtpSource, PasswordSource, Secret};
 use uuid::Uuid;
 
 /// Distinctive enough that a substring search for it cannot match anything the formatter emits of
@@ -20,8 +20,8 @@ const MARKER: &[u8] = b"zqx-marker-must-not-render-zqx";
 
 const PROFILE: Uuid = Uuid::from_u128(0x0194_8f2c_7d3e_4a51_9b60_c2e8_1f45_a903);
 
-fn marker() -> Secret {
-    Secret::new(MARKER.to_vec())
+fn marker() -> PasswordSource {
+    PasswordSource::Provided(Secret::new(MARKER.to_vec()))
 }
 
 /// Every variant that takes a credential, rendered, with the marker absent from all of them.
@@ -35,7 +35,7 @@ fn no_credential_bearing_command_renders_what_it_holds() {
         Command::Login {
             profile: PROFILE,
             password: marker(),
-            otp: OtpSource::Manual(marker()),
+            otp: OtpSource::Manual(Secret::new(MARKER.to_vec())),
         },
         Command::PatchAndPlay {
             profile: PROFILE,
@@ -50,7 +50,7 @@ fn no_credential_bearing_command_renders_what_it_holds() {
         Command::Install {
             profile: PROFILE,
             password: marker(),
-            otp: OtpSource::Manual(marker()),
+            otp: OtpSource::Manual(Secret::new(MARKER.to_vec())),
         },
     ];
 

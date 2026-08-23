@@ -49,3 +49,10 @@ tauri = { version = "2", features = [] }
 # The shell owns the wire shape the frontend binds to, so the types that cross the boundary are
 # declared here and derive their serialization here. Nothing is added to the domain model for it.
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "time"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+zeroize = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "test-util"] }

@@ -22,6 +22,10 @@ use crate::store::Store;
 /// cache's validity window can be driven deterministically in tests.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
+/// A late-bound read of the monotonic tick used to encrypt game launch arguments. Kept as a seam so
+/// the refusal path is testable without mutating process-wide host state.
+pub type TickSource = fn() -> Result<TickCount, CoreError>;
+
 /// The real wall-clock source, in seconds since the Unix epoch.
 #[must_use]
 pub fn system_clock() -> Clock {
