@@ -5,11 +5,12 @@
 //! This is the only crate permitted to see every subsystem. It constructs each once, injects it,
 //! owns the concrete network transport, and exposes a single [`Core::execute`] surface that yields
 //! a stream of [`Event`]s. Profiles and settings persist through a versioned store that migrates
-//! forward and never deletes on a load failure. The login-to-play orchestration arrives in a later
-//! change; its command arms are stubbed today.
+//! forward and never deletes on a load failure. Login-to-play is orchestrated entirely behind the
+//! command surface, including credential resolution, patching, launch, and terminal outcomes.
 
 mod addons;
 mod backup;
+mod code;
 mod command;
 mod composition;
 mod error;
@@ -37,7 +38,7 @@ pub use apogee_fetch::Recoveries;
 pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
 // `Repo` rides along because `Command::Repair`'s local-index overrides are keyed by it: a shell
 // naming a repo must be able to name the type without depending on `apogee-patcher` itself.
-pub use apogee_patcher::{PatchProgress, Repo};
+pub use apogee_patcher::{PatchProgress, PreflightError, Repo};
 pub use apogee_runtime::{
     BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
     ProgramStatus, SyncChoice,
@@ -52,9 +53,10 @@ pub use apogee_secrets::{
     ForeignCredentialStore, ForeignKey, ForeignSecretsFile, Import, ImportSource, KdfCost,
     Passphrase, Sandbox, Secret, SecretKind, SecretStore, Secrets, SecretsError, Unprompted,
 };
+pub use code::{ALL_CODES, StableCode};
 pub use command::{
     Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, LaunchProgramExit,
-    Notice, PrefixAction, PrefixReport, Progress,
+    Notice, PasswordSource, PrefixAction, PrefixReport, Progress, RunOutcome,
 };
 pub use composition::{Core, CoreConfig, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;

@@ -15,7 +15,7 @@ use apogee_otp::{
 };
 use apogee_patcher::{InstallRequest, Repo, SePatch};
 use apogee_runtime::{EnvConfig, LaunchPlan, compute_environment};
-use apogee_secrets::Secret;
+use apogee_secrets::{Secret, SecretKind, SecretStore};
 use sqex_crypto::{ArgKey, ArgumentBuilder, ObfuscatedTicket, ServerTime};
 use sqex_proto::{
     Authenticated, ClientContext, ComputerId, Credentials, FrontierContext, InstallPaths,
@@ -28,7 +28,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::addons::AddonBackend;
-use crate::command::{Command, Event, FlowState, Notice, PrefixAction, PrefixReport};
+use crate::command::{
+    Command, Event, FlowState, Notice, PasswordSource, PrefixAction, PrefixReport, RunOutcome,
+};
 use crate::error::CoreError;
 use crate::host::{self, Clock};
 use crate::launch::{LaunchBackend, PrefixRequest};
@@ -70,8 +72,11 @@ pub(crate) struct FlowContext {
     pub(crate) steam: Arc<dyn SteamBackend>,
     /// Where a generated one-time code comes from, and what remembers the last one submitted.
     pub(crate) otp: Otp,
+    /// The account-scoped password store. It is intentionally reachable only inside the flow.
+    pub(crate) secrets: Arc<dyn SecretStore + Send + Sync>,
     pub(crate) store: Store,
     pub(crate) clock: Clock,
+    pub(crate) game_tick: host::TickSource,
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
     pub(crate) backups_dir: std::path::PathBuf,
@@ -82,10 +87,49 @@ pub(crate) struct FlowContext {
 pub(crate) async fn drive(
     ctx: FlowContext,
     cmd: Command,
+    outward: UnboundedSender<Event>,
+    cancel: CancellationToken,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let running = run_command(ctx, cmd, tx.clone(), cancel.clone());
+    tokio::pin!(running);
+
+    let mut finished = None;
+    let mut saw_error = false;
+    let mut saw_cancelled = false;
+    while finished.is_none() {
+        tokio::select! {
+            result = &mut running => finished = Some(result),
+            event = rx.recv() => {
+                let Some(event) = event else { break };
+                observe_and_forward(event, &outward, &mut saw_error, &mut saw_cancelled);
+            }
+        }
+    }
+    drop(tx);
+    while let Ok(event) = rx.try_recv() {
+        observe_and_forward(event, &outward, &mut saw_error, &mut saw_cancelled);
+    }
+
+    let terminal = if saw_error {
+        RunOutcome::Failed
+    } else if saw_cancelled || cancel.is_cancelled() {
+        RunOutcome::Cancelled
+    } else {
+        RunOutcome::Succeeded
+    };
+    let _ = outward.send(Event::Outcome(terminal));
+}
+
+/// Execute one command and normalize its top-level result onto the same event stream its nested
+/// subsystems use. [`drive`] observes that stream before appending the authoritative outcome.
+async fn run_command(
+    ctx: FlowContext,
+    cmd: Command,
     tx: UnboundedSender<Event>,
     cancel: CancellationToken,
 ) {
-    let outcome = match cmd {
+    let result = match cmd {
         Command::Login {
             profile,
             password,
@@ -153,15 +197,31 @@ pub(crate) async fn drive(
         Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
         Command::SupportBundle => todo!("collect a redacted diagnostic bundle"),
     };
-    match outcome {
+    match result {
         Ok(()) => {}
         // Read here rather than at each call site, so every flow that carries the token reports being
         // stopped the same way: one disposition on the stream, and nothing a shell counts as a failure.
-        Err(error) if is_cancellation(&error) => emit(&tx, FlowState::Cancelled),
+        Err(error) if is_cancellation(&error) => {
+            emit(&tx, FlowState::Cancelled);
+        }
         Err(error) => {
             let _ = tx.send(Event::Error(error));
         }
     }
+}
+
+fn observe_and_forward(
+    event: Event,
+    outward: &UnboundedSender<Event>,
+    saw_error: &mut bool,
+    saw_cancelled: &mut bool,
+) {
+    match &event {
+        Event::Error(_) => *saw_error = true,
+        Event::State(FlowState::Cancelled) => *saw_cancelled = true,
+        _ => {}
+    }
+    let _ = outward.send(event);
 }
 
 /// Whether `error` is the run stopping because it was asked to, rather than something going wrong.
@@ -196,12 +256,15 @@ fn is_cancellation(error: &CoreError) -> bool {
 async fn login(
     ctx: &FlowContext,
     profile_id: Uuid,
-    password: Secret,
+    password: PasswordSource,
     otp: OtpSource,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, account) = resolve(ctx, profile_id)?;
+    let Some(password) = resolve_password(ctx, &account, password, tx).await? else {
+        return Ok(());
+    };
     let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx, cancel).await? else {
         return Ok(());
     };
@@ -235,7 +298,7 @@ async fn login(
 async fn play(
     ctx: &FlowContext,
     profile_id: Uuid,
-    password: Secret,
+    password: PasswordSource,
     otp: OtpSource,
     mode: InstallMode,
     launch: bool,
@@ -249,6 +312,9 @@ async fn play(
     {
         return launch_game(ctx, &profile, &account, &session, tx, cancel).await;
     }
+    let Some(password) = resolve_password(ctx, &account, password, tx).await? else {
+        return Ok(());
+    };
     let Some(auth) = authenticate(ctx, &profile, &account, password, otp, tx, cancel).await? else {
         return Ok(());
     };
@@ -259,6 +325,35 @@ async fn play(
         launch_game(ctx, &profile, &account, &session, tx, cancel).await?;
     }
     Ok(())
+}
+
+/// Resolve a shell's write-only password choice without exposing a read API on [`crate::Core`].
+async fn resolve_password(
+    ctx: &FlowContext,
+    account: &Account,
+    source: PasswordSource,
+    tx: &UnboundedSender<Event>,
+) -> Result<Option<Secret>, CoreError> {
+    match source {
+        PasswordSource::Provided(password) => Ok(Some(password)),
+        PasswordSource::Stored => {
+            let store = Arc::clone(&ctx.secrets);
+            let account = account.id;
+            let stored =
+                tokio::task::spawn_blocking(move || store.get(account, SecretKind::Password))
+                    .await
+                    .map_err(|error| CoreError::Init {
+                        detail: format!("credential read task failed: {error}"),
+                    })??;
+            match stored {
+                Some(password) => Ok(Some(password)),
+                None => {
+                    emit(tx, FlowState::NeedsPassword);
+                    Ok(None)
+                }
+            }
+        }
+    }
 }
 
 /// Verify the profile's install against its signed block indexes and re-fetch only the broken ranges.
@@ -1048,7 +1143,12 @@ async fn launch_game(
     );
     let mut plan = LaunchPlan::new(
         game_dir.join("ffxiv_dx11.exe").to_string_lossy(),
-        build_launch_args(session, language_id(&settings.language), steam)?,
+        build_launch_args(
+            session,
+            language_id(&settings.language),
+            steam,
+            ctx.game_tick,
+        )?,
         environment.vars,
     )
     .in_directory(&game_dir)
@@ -1180,8 +1280,9 @@ fn build_launch_args(
     session: &UidCacheEntry,
     language: u8,
     steam: bool,
+    tick_source: host::TickSource,
 ) -> Result<String, CoreError> {
-    let tick = host::game_tick()?;
+    let tick = tick_source()?;
     Ok(launch_arguments(session, language, steam).build_encrypted(&ArgKey::from_tick(tick)))
 }
 

@@ -12,14 +12,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig, Deviation,
-    EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore, ForeignKey,
-    ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome, ImportSource,
-    KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, Notice,
-    OtpDelivery, OtpSource, Passphrase, PatchProgress, PrefixAction, PrefixReport, Profile,
-    Recoveries, Region, Repo, RunIn, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
-    Secret, SecretBackend, SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger,
-    Uuid,
+    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
+    Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore,
+    ForeignKey, ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome,
+    ImportSource, KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources,
+    Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction,
+    PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
+    SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -42,8 +42,11 @@ struct Cli {
     /// (`warn,apogee_fetch=debug`). Also read from `APOGEE_LOG`. Goes to stderr.
     #[arg(long, global = true, value_name = "FILTER")]
     log: Option<String>,
+    /// Print the stable presentation-code inventory, one identifier per line.
+    #[arg(long, global = true, hide = true)]
+    dump_codes: bool,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 /// The environment variable read when `--log` is absent, so a filter can be set for a session or for
@@ -531,6 +534,15 @@ struct PlayArgs {
     /// Profile id or unique name.
     #[arg(long)]
     profile: String,
+    /// Read the password from the account store or prompt securely for this run.
+    #[arg(long, value_enum, default_value_t = PasswordChoice::Prompt)]
+    password_source: PasswordChoice,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PasswordChoice {
+    Stored,
+    Prompt,
 }
 
 /// Stop this process being written to disk if it dies.
@@ -583,18 +595,26 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode, CliError> {
+    if cli.dump_codes {
+        for code in ALL_CODES {
+            println!("{code}");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // Reading what the machine is, and withdrawing a registration, are answerable without the store.
     // They have to be: the environment a game session hands a program is minimal, and these are the
     // two commands worth running when a launch from that session has gone wrong.
     #[cfg(unix)]
-    if let Commands::Steam { action } = &cli.command
+    if let Some(Commands::Steam { action }) = &cli.command
         && !matches!(action, SteamAction::Register(_))
     {
         return steam_without_store(action);
     }
 
+    let command = cli.command.ok_or("a command is required")?;
     let core = build_core()?;
-    match cli.command {
+    match command {
         Commands::Profile { action } => {
             profile(&core, action)?;
             Ok(ExitCode::SUCCESS)
@@ -1621,10 +1641,13 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Resolve the profile, prompt for the password, and select the one-time-password source: the shared
 /// preamble of `login` and `play`.
-fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, Secret, OtpSource), CliError> {
+fn gather(core: &Core, args: &PlayArgs) -> Result<(Uuid, PasswordSource, OtpSource), CliError> {
     let profile = resolve_profile(core, &args.profile)?;
     let account = core.account(profile.account)?;
-    let password = read_password()?;
+    let password = match args.password_source {
+        PasswordChoice::Stored => PasswordSource::Stored,
+        PasswordChoice::Prompt => PasswordSource::Provided(read_password()?),
+    };
     let otp = read_otp(&account)?;
     Ok((profile.id, password, otp))
 }
@@ -1654,17 +1677,22 @@ async fn drive(core: &Core, cmd: Command) -> ExitCode {
     });
 
     let mut stream = core.execute_cancellable(cmd, cancel);
-    let mut failed = false;
+    let mut outcome = None;
+    let mut malformed = false;
     while let Some(event) = stream.next().await {
-        if matches!(event, Event::Error(_)) {
-            failed = true;
+        if outcome.is_some() {
+            malformed = true;
+        }
+        if let Event::Outcome(next) = &event
+            && outcome.replace(*next).is_some()
+        {
+            malformed = true;
         }
         println!("{}", render(&event));
     }
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
+    match (outcome, malformed) {
+        (Some(RunOutcome::Succeeded | RunOutcome::Cancelled), false) => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
     }
 }
 
@@ -2197,6 +2225,7 @@ fn render(event: &Event) -> String {
         Event::Notice(notice) => render_notice(notice),
         Event::LaunchProgramExited(exit) => render_launch_program_exit(exit),
         Event::Error(err) => format!("error: {}", describe(err)),
+        Event::Outcome(outcome) => format!("outcome: {outcome:?}"),
         _ => "unrecognized event".to_owned(),
     }
 }
@@ -2240,6 +2269,7 @@ fn render_launch_program_exit(exit: &LaunchProgramExit) -> String {
 /// has to recognize, and neither reads as either in debug soup.
 fn render_state(state: &FlowState) -> String {
     match state {
+        FlowState::NeedsPassword => "state: this account needs a password for this run".to_owned(),
         FlowState::WaitingForPushedCode { port, seconds } => format!(
             "state: waiting up to {seconds} seconds for a one-time code pushed to this machine on \
              port {port}"

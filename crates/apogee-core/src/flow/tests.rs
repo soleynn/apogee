@@ -11,7 +11,7 @@ use apogee_secrets::{MemoryStore, Secret, SecretKind, SecretStore};
 use apogee_test_support::login_fixtures as fx;
 use apogee_test_support::sandbox::build_game_install;
 use apogee_test_support::transport::FixtureTransport;
-use sqex_proto::{ProtoResponse, Transport};
+use sqex_proto::{ProtoError, ProtoResponse, Transport, TransportError};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -19,9 +19,10 @@ use uuid::Uuid;
 use apogee_patcher::{PatchProgress, Repo};
 
 use super::{FlowContext, client_context, drive, language_id, launch_arguments, read_repo_ver};
+use crate::CoreError;
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
-use crate::command::{Command, Event, FlowState, Notice, PrefixAction};
+use crate::command::{Command, Event, FlowState, Notice, PasswordSource, PrefixAction, RunOutcome};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
@@ -74,6 +75,7 @@ struct Harness {
     prefixes: TempDir,
     backups: TempDir,
     store: Store,
+    secrets: Arc<MemoryStore>,
     profile: Uuid,
     account: Uuid,
 }
@@ -99,6 +101,7 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
     let prefixes = TempDir::new().unwrap();
     let backups = TempDir::new().unwrap();
     let store = Store::new(store_dir.path().to_path_buf());
+    let secrets = Arc::new(MemoryStore::new());
 
     let account = Account {
         use_otp,
@@ -115,6 +118,7 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
         prefixes,
         backups,
         store,
+        secrets,
         profile: profile.id,
         account: account.id,
     }
@@ -202,8 +206,10 @@ fn context_with_otp(
         addons,
         steam,
         otp,
+        secrets: Arc::clone(&h.secrets) as Arc<dyn SecretStore + Send + Sync>,
         store: h.store.clone(),
         clock: Arc::new(move || now),
+        game_tick: host::game_tick,
         computer_id: host::computer_id(&h.store),
         prefixes_dir: h.prefixes.path().to_path_buf(),
         backups_dir: h.backups.path().to_path_buf(),
@@ -217,6 +223,7 @@ async fn run(ctx: FlowContext, cmd: Command) -> Vec<Event> {
     while let Ok(event) = rx.try_recv() {
         events.push(event);
     }
+    assert_terminal_outcome(&events);
     events
 }
 
@@ -251,8 +258,8 @@ fn health_reports(events: &[Event]) -> Vec<crate::command::PrefixReport> {
         .collect()
 }
 
-fn secret(password: &str) -> Secret {
-    Secret::new(password.as_bytes().to_vec())
+fn secret(password: &str) -> PasswordSource {
+    PasswordSource::Provided(Secret::new(password.as_bytes().to_vec()))
 }
 
 /// The `PatchProgress` frames relayed onto the event stream.
@@ -335,12 +342,157 @@ fn play_no_otp(profile: Uuid) -> Command {
 /// Drive `cmd` with a caller-supplied cancellation token (for the Ctrl-C path), collecting events.
 async fn run_with_cancel(ctx: FlowContext, cmd: Command, cancel: CancellationToken) -> Vec<Event> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let observed_cancel = cancel.clone();
     drive(ctx, cmd, tx, cancel).await;
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
         events.push(event);
     }
+    assert_terminal_outcome_for(&events, observed_cancel.is_cancelled());
     events
+}
+
+/// Every flow test also pins the stream contract: one authoritative result, after every other frame,
+/// agreeing with the failure/cancellation frames the run emitted.
+fn assert_terminal_outcome(events: &[Event]) {
+    assert_terminal_outcome_for(events, false);
+}
+
+fn assert_terminal_outcome_for(events: &[Event], token_cancelled: bool) {
+    let outcomes = events
+        .iter()
+        .filter(|event| matches!(event, Event::Outcome(_)))
+        .count();
+    assert_eq!(
+        outcomes, 1,
+        "the stream did not carry exactly one outcome: {events:?}"
+    );
+
+    let expected = if events[..events.len() - 1]
+        .iter()
+        .any(|event| matches!(event, Event::Error(_)))
+    {
+        RunOutcome::Failed
+    } else if token_cancelled
+        || events[..events.len() - 1]
+            .iter()
+            .any(|event| matches!(event, Event::State(FlowState::Cancelled)))
+    {
+        RunOutcome::Cancelled
+    } else {
+        RunOutcome::Succeeded
+    };
+    assert!(
+        matches!(events.last(), Some(Event::Outcome(actual)) if *actual == expected),
+        "the terminal outcome disagreed with the stream: expected {expected:?}, got {events:?}"
+    );
+}
+
+/// The password field of the recorded OAuth submit, which is the third request of a login.
+fn submitted_password(transport: &FixtureTransport) -> Option<String> {
+    let recorded = transport.recorded();
+    let body = recorded.get(2)?.body.as_ref()?.as_bytes().to_vec();
+    String::from_utf8_lossy(&body)
+        .split('&')
+        .find_map(|field| field.strip_prefix("password=").map(str::to_owned))
+}
+
+#[tokio::test]
+async fn a_stored_password_is_read_inside_core_and_reaches_the_login() {
+    let h = harness(false);
+    h.secrets
+        .set(
+            h.account,
+            SecretKind::Password,
+            Secret::new(b"stored-password".to_vec()),
+        )
+        .unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: PasswordSource::Stored,
+            otp: OtpSource::Manual(Secret::new(Vec::new())),
+        },
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(
+        submitted_password(&transport).as_deref(),
+        Some("stored-password")
+    );
+}
+
+#[tokio::test]
+async fn an_absent_stored_password_is_owed_before_any_request() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([]));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: PasswordSource::Stored,
+            otp: OtpSource::Manual(Secret::new(Vec::new())),
+        },
+    )
+    .await;
+
+    assert_eq!(states(&events), [FlowState::NeedsPassword]);
+    assert!(errors(&events).is_empty());
+    assert!(
+        transport.recorded().is_empty(),
+        "a request moved before the password existed"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_manual_code_is_owed_before_any_request() {
+    let h = harness(true);
+    let transport = Arc::new(FixtureTransport::new([]));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(
+        ctx,
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Manual(Secret::new(Vec::new())),
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::State(FlowState::NeedsOtp),
+            Event::Outcome(RunOutcome::Succeeded)
+        ]
+    ));
+    assert!(
+        transport.recorded().is_empty(),
+        "a request moved before the one-time code existed"
+    );
 }
 
 #[tokio::test]
@@ -998,6 +1150,35 @@ async fn a_current_game_launches_straight_through() {
 }
 
 #[tokio::test]
+async fn a_host_without_the_games_tick_source_refuses_before_launch() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new(play_then_current()));
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let mut ctx = context(&h, transport, launch.clone(), NOW);
+    ctx.game_tick = || Err(CoreError::NoTickSource);
+
+    let events = run(
+        ctx,
+        Command::PatchAndPlay {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Manual(Secret::new(Vec::new())),
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::State(FlowState::PreparingPrefix),
+            Event::Error(CoreError::NoTickSource),
+            Event::Outcome(RunOutcome::Failed)
+        ]
+    ));
+    assert_eq!(launch.launch_count(), 0);
+}
+
+#[tokio::test]
 async fn launch_without_a_cached_session_asks_to_log_in_first() {
     let h = harness(false);
     let transport = Arc::new(FixtureTransport::new([]));
@@ -1111,6 +1292,68 @@ async fn a_rejected_password_surfaces_as_one_error() {
         transport.recorded().len(),
         3,
         "no registration after a failed submit"
+    );
+}
+
+#[tokio::test]
+async fn a_changed_top_page_without_stored_is_a_typed_protocol_failure() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        ProtoResponse::new(
+            200,
+            b"<html><body><form>the stored field moved</form></body></html>".to_vec(),
+        ),
+    ]));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::Error(CoreError::Proto(ProtoError::StoredNotFound { .. })),
+            Event::Outcome(RunOutcome::Failed)
+        ]
+    ));
+    assert_eq!(
+        transport.recorded().len(),
+        2,
+        "credentials moved after the top-page shape changed"
+    );
+}
+
+#[tokio::test]
+async fn a_transport_failure_is_a_typed_protocol_failure() {
+    let h = harness(false);
+    let transport = Arc::new(FixtureTransport::failing(TransportError::new(
+        "scripted connection failure",
+    )));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::Error(CoreError::Proto(ProtoError::Transport(_))),
+            Event::Outcome(RunOutcome::Failed)
+        ]
+    ));
+    assert_eq!(
+        transport.recorded().len(),
+        1,
+        "the failed request was not the login-status gate"
     );
 }
 
@@ -2701,6 +2944,79 @@ fn steam_play_then_current() -> [ProtoResponse; 5] {
 }
 
 #[tokio::test]
+async fn a_steam_top_page_that_requests_relinking_is_a_typed_failure() {
+    let h = harness_account(AccountKind::Steam {
+        app_id: STEAM_APP_ID,
+    });
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        ProtoResponse::new(
+            200,
+            br#"<script>window.external.user("restartup");</script>"#.to_vec(),
+        ),
+    ]));
+    let ctx = context_with_steam(
+        &h,
+        transport.clone(),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        Arc::new(FakeAddons::new()),
+        Arc::new(FakeSteam::new()),
+        NOW,
+    );
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::Error(CoreError::Proto(ProtoError::SteamLinkNeeded)),
+            Event::Outcome(RunOutcome::Failed)
+        ]
+    ));
+    assert_eq!(transport.recorded().len(), 2, "a relink request proceeded");
+}
+
+#[tokio::test]
+async fn a_steam_ticket_linked_to_another_account_is_a_typed_failure() {
+    const OTHER_ACCOUNT: &str = "another-account";
+
+    let h = harness_account(AccountKind::Steam {
+        app_id: STEAM_APP_ID,
+    });
+    let transport = Arc::new(FixtureTransport::new([
+        fx::login_status_open(),
+        fx::oauth_top_steam("STOREDBLOB", OTHER_ACCOUNT),
+    ]));
+    let ctx = context_with_steam(
+        &h,
+        transport.clone(),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting()),
+        Arc::new(FakeAddons::new()),
+        Arc::new(FakeSteam::new()),
+        NOW,
+    );
+
+    let events = run(ctx, login_no_otp(h.profile)).await;
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            Event::Error(CoreError::Proto(ProtoError::SteamWrongAccount {
+                expected_hint
+            })),
+            Event::Outcome(RunOutcome::Failed)
+        ] if expected_hint == "a***t"
+    ));
+    assert_eq!(
+        transport.recorded().len(),
+        2,
+        "credentials were submitted to the wrong linked account"
+    );
+}
+
+#[tokio::test]
 async fn a_steam_account_mints_a_ticket_and_flags_the_launch() {
     const APP_ID: u32 = 39_210;
     let h = harness_account(AccountKind::Steam { app_id: APP_ID });
@@ -3122,6 +3438,7 @@ fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, seen: &mut Vec<Ev
     while let Ok(event) = rx.try_recv() {
         seen.push(event);
     }
+    assert_terminal_outcome(seen);
 }
 
 /// The port a run said it was listening on.

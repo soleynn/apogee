@@ -26,11 +26,11 @@ use crate::error::CoreError;
 #[non_exhaustive]
 pub enum Command {
     /// Authenticate the profile's account and register the session, caching the result. Does not
-    /// launch. The password is provided by the shell (write-only, never persisted); the one-time
-    /// password is sourced as specified.
+    /// launch. The password is either provided write-only for this run or resolved from the
+    /// account-scoped store inside core; the one-time password is sourced as specified.
     Login {
         profile: Uuid,
-        password: Secret,
+        password: PasswordSource,
         otp: OtpSource,
     },
     /// Launch the profile's game from a still-valid cached session, skipping authentication. Emits
@@ -42,7 +42,7 @@ pub enum Command {
     /// game in one flow.
     PatchAndPlay {
         profile: Uuid,
-        password: Secret,
+        password: PasswordSource,
         otp: OtpSource,
     },
     /// Authenticate, register, and apply any pending boot and game patches, bringing the install
@@ -50,7 +50,7 @@ pub enum Command {
     /// the final launch.
     Patch {
         profile: Uuid,
-        password: Secret,
+        password: PasswordSource,
         otp: OtpSource,
     },
     /// Install the game from nothing into the profile's (empty) game directory: register at the base
@@ -58,7 +58,7 @@ pub enum Command {
     /// patch flow as [`Command::PatchAndPlay`], started from the sentinel version.
     Install {
         profile: Uuid,
-        password: Secret,
+        password: PasswordSource,
         otp: OtpSource,
     },
     /// Verify the profile's install against its signed block indexes and re-fetch only the broken
@@ -89,6 +89,27 @@ pub enum Command {
     /// Fetch pre-login display data (news, gate status, banners).
     Frontier(FrontierQuery),
     SupportBundle,
+}
+
+/// Where a credentialed flow obtains the account password.
+///
+/// A shell can provide a password once, but it can never read one back out of the credential store.
+/// [`Stored`](Self::Stored) therefore carries no secret material: the core resolves it at the point
+/// of use, and answers with [`FlowState::NeedsPassword`] when the store has none.
+pub enum PasswordSource {
+    /// Read the account-scoped password inside the core.
+    Stored,
+    /// Use this write-only password for this run without persisting it.
+    Provided(Secret),
+}
+
+impl fmt::Debug for PasswordSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stored => f.write_str("Stored"),
+            Self::Provided(_) => f.write_str("Provided(<redacted>)"),
+        }
+    }
 }
 
 impl fmt::Debug for Command {
@@ -194,6 +215,22 @@ pub enum Event {
     /// The program a launch was spawned as reported its exit status, for a launch something redirected.
     LaunchProgramExited(LaunchProgramExit),
     Error(CoreError),
+    /// The authoritative result of this run. Exactly one is emitted, and it is always the final
+    /// frame, so a shell never has to infer success from a channel closing.
+    Outcome(RunOutcome),
+}
+
+/// The authoritative result of one command stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunOutcome {
+    /// The command completed without a failure. A benign disposition such as
+    /// [`FlowState::NeedsPassword`] is still a successfully answered command.
+    Succeeded,
+    /// The command ended in [`Event::Error`].
+    Failed,
+    /// The caller's cancellation token stopped the command.
+    Cancelled,
 }
 
 /// What the program a launch was spawned as reported when it exited.
@@ -284,6 +321,8 @@ pub enum Notice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FlowState {
+    /// A stored password was requested, but the account has none in the selected credential store.
+    NeedsPassword,
     /// A one-time password is required but none was usable.
     NeedsOtp,
     /// The code this account generates cannot be sent as it stands, either because the server has
