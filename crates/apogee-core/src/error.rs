@@ -23,6 +23,10 @@ pub enum CoreError {
     Fetch(#[from] apogee_fetch::FetchError),
     #[error("patch: {0}")]
     Patch(#[from] apogee_patcher::PatchError),
+    #[error("game is running{process}", process = running_game_suffix(.process.as_ref()))]
+    GameRunning {
+        process: Option<apogee_runtime::RunningGame>,
+    },
     #[error("runtime: {0}")]
     Runtime(#[from] apogee_runtime::RuntimeError),
     #[error("addons: {0}")]
@@ -70,4 +74,30 @@ pub enum CoreError {
     /// typed failure preserves the stream contract instead of panicking or closing without an outcome.
     #[error("{command} is not available in this build")]
     Unavailable { command: &'static str },
+}
+
+fn running_game_suffix(process: Option<&apogee_runtime::RunningGame>) -> String {
+    process.map_or_else(String::new, |process| {
+        format!(" ({}, pid {})", process.executable, process.pid)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_game_error_names_the_process_when_it_was_resolved() {
+        let error = CoreError::GameRunning {
+            process: Some(apogee_runtime::RunningGame {
+                executable: "ffxiv_dx11.exe".to_owned(),
+                pid: 41_207,
+            }),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "game is running (ffxiv_dx11.exe, pid 41207)"
+        );
+    }
 }

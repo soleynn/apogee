@@ -175,8 +175,11 @@ impl PatchBackend for PatcherBackend {
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<Installed, CoreError> {
+        let game_root = request.game_root.clone();
         let job = self.patcher.install(request);
-        Ok(drive_job(job, cancel, events).await?)
+        drive_job(job, cancel, events)
+            .await
+            .map_err(|error| enrich_game_running(error, &game_root))
     }
 
     async fn repair(
@@ -185,10 +188,32 @@ impl PatchBackend for PatcherBackend {
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Result<RepairOutcome, CoreError> {
+        let game_root = plan.game_root.clone();
         let request = self.build_repair_request(plan).await?;
         let job = self.patcher.repair(request);
-        Ok(drive_job(job, cancel, events).await?)
+        drive_job(job, cancel, events)
+            .await
+            .map_err(|error| enrich_game_running(error, &game_root))
     }
+}
+
+fn enrich_game_running(error: PatchError, game_root: &Path) -> CoreError {
+    enrich_game_running_with(error, || {
+        apogee_runtime::running_game(game_root).ok().flatten()
+    })
+}
+
+fn enrich_game_running_with(
+    error: PatchError,
+    resolve: impl FnOnce() -> Option<apogee_runtime::RunningGame>,
+) -> CoreError {
+    if matches!(
+        error,
+        PatchError::Preflight(apogee_patcher::PreflightError::GameRunning)
+    ) {
+        return CoreError::GameRunning { process: resolve() };
+    }
+    CoreError::Patch(error)
 }
 
 /// Run a patcher [`Job`] to completion, relaying its progress onto `events` and bridging the flow's
@@ -347,6 +372,42 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
+
+    #[test]
+    fn a_game_running_refusal_is_enriched_with_the_resolved_process() {
+        let error = enrich_game_running_with(
+            PatchError::Preflight(apogee_patcher::PreflightError::GameRunning),
+            || {
+                Some(apogee_runtime::RunningGame {
+                    executable: "ffxiv_dx11.exe".to_owned(),
+                    pid: 41_207,
+                })
+            },
+        );
+
+        assert!(matches!(
+            error,
+            CoreError::GameRunning {
+                process: Some(apogee_runtime::RunningGame { pid: 41_207, .. })
+            }
+        ));
+    }
+
+    #[test]
+    fn another_patch_failure_is_not_reclassified_or_resolved() {
+        let error = enrich_game_running_with(
+            PatchError::Patchlist {
+                index: 3,
+                detail: "bad row".to_owned(),
+            },
+            || panic!("the process resolver must not run"),
+        );
+
+        assert!(matches!(
+            error,
+            CoreError::Patch(PatchError::Patchlist { index: 3, .. })
+        ));
+    }
 
     /// A catalog row for `repo`, optionally naming the base its source patches are served under.
     fn entry(repo: Repo, source_base: Option<&str>) -> IndexEntry {

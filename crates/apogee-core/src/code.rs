@@ -78,6 +78,7 @@ impl StableCode for CoreError {
             Self::Proto(error) => proto_code(error),
             Self::Fetch(_) => "err-fetch",
             Self::Patch(_) => "err-patch",
+            Self::GameRunning { .. } => "preflight-game-running",
             Self::Runtime(_) => "err-runtime",
             Self::Addons(_) => "err-addons",
             Self::Addon { .. } => "err-addon",

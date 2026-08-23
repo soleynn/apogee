@@ -159,7 +159,16 @@ pub use steam::{
     steam_installs,
 };
 #[cfg(target_os = "windows")]
-pub use windows::{GameExit, GameSession, game_running};
+pub use windows::{GameExit, GameSession, game_running, running_game};
+
+/// A native game process resolved to the install it is running from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningGame {
+    /// The client executable name used to identify the process.
+    pub executable: String,
+    /// The operating-system process identifier.
+    pub pid: u32,
+}
 
 /// The pids of processes running inside `prefix` whose kernel-visible name matches `program_name`.
 ///
@@ -213,10 +222,23 @@ pub async fn prefix_processes(
 /// [`RuntimeError::Io`] if `/proc` cannot be read.
 #[cfg(target_os = "linux")]
 pub fn game_running(game_root: &Path) -> Result<bool, RuntimeError> {
-    supervise::running_in_install(game_root).map_err(|source| RuntimeError::Io {
-        path: PathBuf::from("/proc"),
-        source,
-    })
+    Ok(running_game(game_root)?.is_some())
+}
+
+/// Resolve the game process currently reading from `game_root`.
+#[cfg(target_os = "linux")]
+pub fn running_game(game_root: &Path) -> Result<Option<RunningGame>, RuntimeError> {
+    supervise::running_in_install(game_root)
+        .map(|pid| {
+            pid.map(|pid| RunningGame {
+                executable: "ffxiv_dx11.exe".to_owned(),
+                pid: pid as u32,
+            })
+        })
+        .map_err(|source| RuntimeError::Io {
+            path: PathBuf::from("/proc"),
+            source,
+        })
 }
 
 /// Reap the spawned program in the background and report its status on `progress`.
