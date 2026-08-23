@@ -55,8 +55,9 @@ pub use apogee_secrets::{
 };
 pub use code::{ALL_CODES, StableCode};
 pub use command::{
-    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, LaunchProgramExit,
-    Notice, PasswordSource, PrefixAction, PrefixReport, Progress, RunOutcome,
+    BannerData, Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, GateData,
+    LaunchProgramExit, NewsData, NewsRow, Notice, PasswordSource, PrefixAction, PrefixReport,
+    Progress, RunOutcome,
 };
 pub use composition::{Core, CoreConfig, Defaults, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;

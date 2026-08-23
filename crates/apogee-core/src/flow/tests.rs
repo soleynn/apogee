@@ -23,8 +23,8 @@ use crate::CoreError;
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
 use crate::command::{
-    Command, Event, FirstRunStep, FlowState, FrontierQuery, Notice, PasswordSource, PrefixAction,
-    RunOutcome,
+    Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, Notice, PasswordSource,
+    PrefixAction, RunOutcome,
 };
 use crate::host;
 use crate::launch::LaunchBackend;
@@ -239,7 +239,10 @@ async fn reserved_commands_fail_as_typed_streams_with_a_terminal_outcome() {
             Command::ImportXivLauncher(PathBuf::from("fixture")),
             "configuration import",
         ),
-        (Command::Frontier(FrontierQuery::Gate), "frontier data"),
+        (
+            Command::Frontier(FrontierQuery::Banners),
+            "frontier banners",
+        ),
         (Command::SupportBundle, "support bundle"),
     ];
 
@@ -282,6 +285,68 @@ fn errors(events: &[Event]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn frontier_data(events: &[Event]) -> Vec<&FrontierData> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Frontier(data) => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn frontier_news_returns_display_safe_rows() {
+    let h = harness(false);
+    let response = ProtoResponse::new(
+        200,
+        br#"{
+            "news":[{"id":"n1","date":"2026-08-23","title":"Maintenance","url":"https://example.invalid/private","tag":"maintenance"}],
+            "topics":[],"pinned":[],"banner":[]
+        }"#
+        .to_vec(),
+    );
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new([response])),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Frontier(FrontierQuery::News)).await;
+    let [FrontierData::News(data)] = frontier_data(&events).as_slice() else {
+        panic!("expected one news result: {events:?}");
+    };
+    assert_eq!(data.news[0].id, "n1");
+    assert_eq!(data.news[0].title, "Maintenance");
+    let rendered = format!("{data:?}");
+    assert!(!rendered.contains("example.invalid"));
+}
+
+#[tokio::test]
+async fn frontier_gate_returns_the_current_reading_without_waiting() {
+    let h = harness(false);
+    let response = ProtoResponse::new(
+        200,
+        br#"{"status":0,"message":["maintenance"],"news":["follow-up"]}"#.to_vec(),
+    );
+    let transport = Arc::new(FixtureTransport::new([response]));
+    let ctx = context(
+        &h,
+        transport.clone(),
+        Arc::new(FakeLaunchBackend::exiting()),
+        NOW,
+    );
+
+    let events = run(ctx, Command::Frontier(FrontierQuery::Gate { wait: false })).await;
+    let [FrontierData::Gate(data)] = frontier_data(&events).as_slice() else {
+        panic!("expected one gate result: {events:?}");
+    };
+    assert!(!data.open);
+    assert_eq!(data.messages, ["maintenance"]);
+    assert_eq!(transport.recorded().len(), 1);
 }
 
 /// The prefix reports a run emitted, in order.
@@ -2153,6 +2218,7 @@ async fn close_after_launch_detaches_without_supervising() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
         })
         .unwrap();
@@ -2259,6 +2325,7 @@ async fn a_patch_captures_nothing_when_the_setting_is_off() {
     h.store
         .save_settings(&Settings {
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
             ..Settings::default()
         })
@@ -2408,6 +2475,7 @@ async fn close_after_launch_stays_attached_when_teardown_is_owed() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
         })
         .unwrap();
@@ -2447,6 +2515,7 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
             keep_patches: false,
             backups_kept: 5,
             backup_before_patch: false,
+            frontier_poll_seconds: 30,
             otp_listener: ListenerSettings::default(),
         })
         .unwrap();

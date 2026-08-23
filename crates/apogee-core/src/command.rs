@@ -417,14 +417,54 @@ pub struct Progress {
 #[non_exhaustive]
 pub enum FrontierQuery {
     News,
-    Gate,
+    Gate { wait: bool },
     Banners,
 }
 
 /// Pre-login display data returned for a [`FrontierQuery`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct FrontierData {}
+pub enum FrontierData {
+    News(NewsData),
+    Gate(GateData),
+    Banners(Vec<BannerData>),
+}
+
+/// Headline groups from the public launcher feed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewsData {
+    pub news: Vec<NewsRow>,
+    pub topics: Vec<NewsRow>,
+    pub pinned: Vec<NewsRow>,
+}
+
+/// One display-safe headline. The upstream URL is deliberately absent: shells open links through a
+/// core-owned resolver rather than handing server input to a webview.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewsRow {
+    pub id: String,
+    pub date: String,
+    pub title: String,
+    pub tag: String,
+}
+
+/// The current world-gate reading.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GateData {
+    pub open: bool,
+    pub messages: Vec<String>,
+    pub news: Vec<String>,
+}
+
+/// One promotional banner. `artwork` is a local cache path when the image passed the download and
+/// decode limits; a remote origin is never returned to a shell.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BannerData {
+    pub id: String,
+    pub artwork: Option<PathBuf>,
+    pub order_priority: String,
+    pub fix_order: Option<String>,
+}
 
 /// A step in the initial setup walk.
 #[derive(Debug, Clone)]

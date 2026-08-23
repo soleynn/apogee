@@ -20,7 +20,7 @@ use sqex_crypto::{ArgKey, ArgumentBuilder, ObfuscatedTicket, ServerTime};
 use sqex_proto::{
     Authenticated, ClientContext, ComputerId, Credentials, FrontierContext, InstallPaths,
     LoginKind, OauthContext, PatchListEntry, Registration, Transport, VersionReport, begin_login,
-    check_boot_version, check_login_status, register_session,
+    check_boot_version, check_gate_status, check_login_status, fetch_news, register_session,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -29,7 +29,8 @@ use uuid::Uuid;
 
 use crate::addons::AddonBackend;
 use crate::command::{
-    Command, Event, FlowState, Notice, PasswordSource, PrefixAction, PrefixReport, RunOutcome,
+    Command, Event, FlowState, FrontierData, FrontierQuery, GateData, NewsData, NewsRow, Notice,
+    PasswordSource, PrefixAction, PrefixReport, RunOutcome,
 };
 use crate::error::CoreError;
 use crate::host::{self, Clock};
@@ -198,9 +199,7 @@ async fn run_command(
         Command::ImportXivLauncher(_) => Err(CoreError::Unavailable {
             command: "configuration import",
         }),
-        Command::Frontier(_) => Err(CoreError::Unavailable {
-            command: "frontier data",
-        }),
+        Command::Frontier(query) => frontier(&ctx, query, &tx, &cancel).await,
         Command::SupportBundle => Err(CoreError::Unavailable {
             command: "support bundle",
         }),
@@ -215,6 +214,79 @@ async fn run_command(
         Err(error) => {
             let _ = tx.send(Event::Error(error));
         }
+    }
+}
+
+/// Fetch display-only launcher data. Waiting on a closed gate is core-owned so every shell gets the
+/// same cadence and cancellation behavior.
+async fn frontier(
+    ctx: &FlowContext,
+    query: FrontierQuery,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<(), CoreError> {
+    let settings = ctx.store.load_settings()?;
+    let language = frontier_language(&settings.language);
+    let context = FrontierContext {
+        client: ClientContext {
+            computer_id: &ctx.computer_id,
+            language,
+            accept_language: "ja",
+            referer_template: "https://launcher.finalfantasyxiv.com/v700/?rc_lang={lang}&time={time}",
+        },
+    };
+    match query {
+        FrontierQuery::News => {
+            let rows = fetch_news(&*ctx.transport, &context, &host::launcher_time_now()).await?;
+            let data = NewsData {
+                news: rows.news.into_iter().map(news_row).collect(),
+                topics: rows.topics.into_iter().map(news_row).collect(),
+                pinned: rows.pinned.into_iter().map(news_row).collect(),
+            };
+            let _ = tx.send(Event::Frontier(FrontierData::News(data)));
+        }
+        FrontierQuery::Gate { wait } => loop {
+            let status =
+                check_gate_status(&*ctx.transport, &context, &host::launcher_time_now()).await?;
+            let open = status.status;
+            let _ = tx.send(Event::Frontier(FrontierData::Gate(GateData {
+                open,
+                messages: status.message,
+                news: status.news,
+            })));
+            if open || !wait {
+                break;
+            }
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_secs(settings.frontier_poll_seconds.max(1))) => {}
+            }
+        },
+        FrontierQuery::Banners => {
+            return Err(CoreError::Unavailable {
+                command: "frontier banners",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn news_row(row: sqex_proto::Headline) -> NewsRow {
+    NewsRow {
+        id: row.id,
+        date: row.date,
+        title: row.title,
+        tag: row.tag,
+    }
+}
+
+fn frontier_language(language: &str) -> &str {
+    match language {
+        "en" => "en-us",
+        "ja" => "ja",
+        "de" => "de",
+        "fr" => "fr",
+        other => other,
     }
 }
 

@@ -14,12 +14,12 @@ use std::process::ExitCode;
 use apogee_core::{
     ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
     Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore,
-    ForeignKey, ForeignSecretsFile, FrameLog, GpuSelect, HealthIssue, Hud, ImportOutcome,
-    ImportSource, KdfCost, LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources,
-    Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction,
-    PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
-    SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, GpuSelect, HealthIssue,
+    Hud, ImportOutcome, ImportSource, KdfCost, LaunchProgramExit, ListenerConsent,
+    ListenerSettings, ListenerSources, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource,
+    PatchProgress, PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn,
+    RunOutcome, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend,
+    SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -101,6 +101,10 @@ enum Commands {
     Patch(PlayArgs),
     /// Install the game from nothing into the profile's (empty) game directory, then launch.
     Install(PlayArgs),
+    /// Print the public launcher headlines.
+    News,
+    /// Print the world-gate status, optionally waiting until it opens.
+    Gate(GateArgs),
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
     Repair(RepairArgs),
     /// Frame-consistency analysis over MangoHud frametime logs.
@@ -152,6 +156,13 @@ enum Commands {
         #[command(subcommand)]
         action: SteamAction,
     },
+}
+
+#[derive(Args)]
+struct GateArgs {
+    /// Keep checking at the configured interval until the gate opens or the command is cancelled.
+    #[arg(long)]
+    wait: bool,
 }
 
 #[derive(Subcommand)]
@@ -260,6 +271,9 @@ struct SettingsSetArgs {
     /// How many captures to keep per profile.
     #[arg(long)]
     backups_kept: Option<u32>,
+    /// Seconds between checks while `gate --wait` is holding for maintenance to end.
+    #[arg(long)]
+    frontier_poll_seconds: Option<u64>,
     /// Stop supervising once the game is up.
     #[arg(long)]
     close_after_launch: Option<bool>,
@@ -686,6 +700,12 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             )
             .await)
         }
+        Commands::News => Ok(drive(&core, Command::Frontier(FrontierQuery::News)).await),
+        Commands::Gate(args) => Ok(drive(
+            &core,
+            Command::Frontier(FrontierQuery::Gate { wait: args.wait }),
+        )
+        .await),
         Commands::Repair(args) => {
             let profile = resolve_profile(&core, &args.profile)?.id;
             let local_indexes = parse_local_indexes(&args.local_index)?;
@@ -996,6 +1016,7 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             println!("keep_patches        {}", s.keep_patches);
             println!("backups_kept        {}", s.backups_kept);
             println!("backup_before_patch {}", s.backup_before_patch);
+            println!("frontier_poll_secs  {}", s.frontier_poll_seconds);
             // Where a user looks for machine-wide state, and where the listener sits is exactly that.
             // Nothing here says whether it is in use: that is per account, and `otp status` says it.
             print_listener_settings(&s.otp_listener);
@@ -1010,6 +1031,7 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             println!("keep_patches        {}", s.keep_patches);
             println!("backups_kept        {}", s.backups_kept);
             println!("backup_before_patch {}", s.backup_before_patch);
+            println!("frontier_poll_secs  {}", s.frontier_poll_seconds);
             print_listener_settings(&s.otp_listener);
             println!("launch               {:?}", defaults.launch);
             Ok(())
@@ -1024,6 +1046,9 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
             }
             if let Some(v) = args.backups_kept {
                 s.backups_kept = v;
+            }
+            if let Some(v) = args.frontier_poll_seconds {
+                s.frontier_poll_seconds = v.max(1);
             }
             if let Some(v) = args.close_after_launch {
                 s.close_after_launch = v;
@@ -2267,13 +2292,38 @@ fn render(event: &Event) -> String {
         Event::Patch(patch) => render_patch(patch),
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
-        Event::Frontier(_) => "frontier data received".to_owned(),
+        Event::Frontier(data) => render_frontier(data),
         Event::Prefix(report) => render_health(report),
         Event::Notice(notice) => render_notice(notice),
         Event::LaunchProgramExited(exit) => render_launch_program_exit(exit),
         Event::Error(err) => format!("error: {}", describe(err)),
         Event::Outcome(outcome) => format!("outcome: {outcome:?}"),
         _ => "unrecognized event".to_owned(),
+    }
+}
+
+fn render_frontier(data: &FrontierData) -> String {
+    match data {
+        FrontierData::News(data) => {
+            let mut lines = Vec::new();
+            for row in data.pinned.iter().chain(&data.news).chain(&data.topics) {
+                lines.push(format!("{}\t{}\t{}", row.date, row.tag, row.title));
+            }
+            lines.join("\n")
+        }
+        FrontierData::Gate(data) => {
+            let state = if data.open { "open" } else { "closed" };
+            let mut lines = vec![format!("gate: {state}")];
+            lines.extend(
+                data.messages
+                    .iter()
+                    .map(|message| format!("message: {message}")),
+            );
+            lines.extend(data.news.iter().map(|news| format!("news: {news}")));
+            lines.join("\n")
+        }
+        FrontierData::Banners(rows) => format!("banners: {}", rows.len()),
+        _ => "unrecognized frontier data".to_owned(),
     }
 }
 

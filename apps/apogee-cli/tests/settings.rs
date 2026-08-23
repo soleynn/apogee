@@ -75,6 +75,8 @@ fn setting_one_preference_leaves_the_rest_alone() -> std::io::Result<()> {
             "9",
             "--keep-patches",
             "false",
+            "--frontier-poll-seconds",
+            "11",
         ],
     )?;
     run(
@@ -86,6 +88,7 @@ fn setting_one_preference_leaves_the_rest_alone() -> std::io::Result<()> {
     assert!(text.contains("backups_kept        9"), "{text}");
     assert!(text.contains("keep_patches        false"), "{text}");
     assert!(text.contains("close_after_launch  true"), "{text}");
+    assert!(text.contains("frontier_poll_secs  11"), "{text}");
     Ok(())
 }
 

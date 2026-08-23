@@ -210,7 +210,7 @@ impl Migrate for Uuid {
 }
 
 impl Migrate for Settings {
-    const CURRENT_VERSION: u32 = 7;
+    const CURRENT_VERSION: u32 = 8;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -254,6 +254,12 @@ impl Migrate for Settings {
                         |err| format!("the default listener settings do not encode: {err}"),
                     )?,
                 );
+            }
+            // Gained the interval for callers that wait on the public world gate. Existing installs
+            // take the same conservative cadence as new ones.
+            7 => {
+                obj.entry("frontier_poll_seconds")
+                    .or_insert(serde_json::Value::from(30));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }
