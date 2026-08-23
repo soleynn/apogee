@@ -192,10 +192,18 @@ async fn run_command(
             local_indexes,
         } => repair(&ctx, profile, local_indexes, &tx, &cancel).await,
         Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
-        Command::FirstRun(_) => todo!("walk the initial setup"),
-        Command::ImportXivLauncher(_) => todo!("import an existing launcher configuration"),
-        Command::Frontier(_) => todo!("fetch pre-login news and gate status"),
-        Command::SupportBundle => todo!("collect a redacted diagnostic bundle"),
+        Command::FirstRun(_) => Err(CoreError::Unavailable {
+            command: "first-run",
+        }),
+        Command::ImportXivLauncher(_) => Err(CoreError::Unavailable {
+            command: "configuration import",
+        }),
+        Command::Frontier(_) => Err(CoreError::Unavailable {
+            command: "frontier data",
+        }),
+        Command::SupportBundle => Err(CoreError::Unavailable {
+            command: "support bundle",
+        }),
     };
     match result {
         Ok(()) => {}

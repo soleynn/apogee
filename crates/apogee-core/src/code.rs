@@ -95,6 +95,7 @@ impl StableCode for CoreError {
             Self::Launch { .. } => "err-launch",
             Self::PatchIncomplete { .. } => "err-patch-incomplete",
             Self::Repair { .. } => "err-repair",
+            Self::Unavailable { .. } => "err-unavailable",
         }
     }
 }
@@ -265,6 +266,7 @@ pub const ALL_CODES: &[&str] = &[
     "err-runtime",
     "err-secrets",
     "err-store",
+    "err-unavailable",
     "event-frontier",
     "event-launch-program-exited",
     "event-outcome-cancelled",

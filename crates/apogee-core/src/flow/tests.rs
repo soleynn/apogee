@@ -22,7 +22,10 @@ use super::{FlowContext, client_context, drive, language_id, launch_arguments, r
 use crate::CoreError;
 use crate::addons::AddonBackend;
 use crate::addons::fake::{AddonCall, FakeAddons};
-use crate::command::{Command, Event, FlowState, Notice, PasswordSource, PrefixAction, RunOutcome};
+use crate::command::{
+    Command, Event, FirstRunStep, FlowState, FrontierQuery, Notice, PasswordSource, PrefixAction,
+    RunOutcome,
+};
 use crate::host;
 use crate::launch::LaunchBackend;
 use crate::launch::fake::FakeLaunchBackend;
@@ -225,6 +228,40 @@ async fn run(ctx: FlowContext, cmd: Command) -> Vec<Event> {
     }
     assert_terminal_outcome(&events);
     events
+}
+
+#[tokio::test]
+async fn reserved_commands_fail_as_typed_streams_with_a_terminal_outcome() {
+    let h = harness(false);
+    let cases = [
+        (Command::FirstRun(FirstRunStep::Start), "first-run"),
+        (
+            Command::ImportXivLauncher(PathBuf::from("fixture")),
+            "configuration import",
+        ),
+        (Command::Frontier(FrontierQuery::Gate), "frontier data"),
+        (Command::SupportBundle, "support bundle"),
+    ];
+
+    for (command, expected) in cases {
+        let events = run(
+            context(
+                &h,
+                Arc::new(FixtureTransport::new([])),
+                Arc::new(FakeLaunchBackend::exiting()),
+                NOW,
+            ),
+            command,
+        )
+        .await;
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Event::Error(CoreError::Unavailable { command }),
+                Event::Outcome(RunOutcome::Failed)
+            ] if *command == expected
+        ));
+    }
 }
 
 fn states(events: &[Event]) -> Vec<FlowState> {
