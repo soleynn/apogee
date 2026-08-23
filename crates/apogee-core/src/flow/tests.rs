@@ -241,7 +241,7 @@ async fn run(ctx: FlowContext, cmd: Command) -> Vec<Event> {
 async fn reserved_commands_fail_as_typed_streams_with_a_terminal_outcome() {
     let h = harness(false);
     let cases = [
-        (Command::FirstRun(FirstRunStep::Start), "first-run"),
+        (Command::FirstRun(FirstRunStep::Legibility), "first-run"),
         (
             Command::ImportXivLauncher(PathBuf::from("fixture")),
             "configuration import",

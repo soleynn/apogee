@@ -14,6 +14,7 @@ use apogee_patcher::{PatchProgress, Repo};
 use apogee_secrets::Secret;
 use uuid::Uuid;
 
+pub use crate::FirstRunStep;
 use crate::error::CoreError;
 
 /// A request from a shell to the core.
@@ -464,11 +465,4 @@ pub struct BannerData {
     pub artwork: Option<PathBuf>,
     pub order_priority: String,
     pub fix_order: Option<String>,
-}
-
-/// A step in the initial setup walk.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum FirstRunStep {
-    Start,
 }

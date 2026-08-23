@@ -22,7 +22,7 @@ pub enum CoreError {
     #[error("download: {0}")]
     Fetch(#[from] apogee_fetch::FetchError),
     #[error("patch: {0}")]
-    Patch(#[from] apogee_patcher::PatchError),
+    Patch(#[source] Box<apogee_patcher::PatchError>),
     #[error("game is running{process}", process = running_game_suffix(.process.as_ref()))]
     GameRunning {
         process: Option<apogee_runtime::RunningGame>,
@@ -60,6 +60,12 @@ pub enum CoreError {
     InvalidCredential,
     #[error("import from {path:?} failed: {detail}")]
     Import { path: PathBuf, detail: String },
+    #[error("configuration import: {0}")]
+    XivImport(#[from] crate::xiv_import::XivImportError),
+    #[error("support bundle: {0}")]
+    Support(#[from] crate::support::SupportError),
+    #[error("first-run setup: {0}")]
+    FirstRun(#[from] crate::FirstRunTransitionError),
     #[error("initialization failed: {detail}")]
     Init { detail: String },
     #[error("preparing the launch failed: {detail}")]
@@ -80,6 +86,12 @@ fn running_game_suffix(process: Option<&apogee_runtime::RunningGame>) -> String 
     process.map_or_else(String::new, |process| {
         format!(" ({}, pid {})", process.executable, process.pid)
     })
+}
+
+impl From<apogee_patcher::PatchError> for CoreError {
+    fn from(error: apogee_patcher::PatchError) -> Self {
+        Self::Patch(Box::new(error))
+    }
 }
 
 #[cfg(test)]

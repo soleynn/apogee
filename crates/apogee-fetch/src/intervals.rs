@@ -106,6 +106,11 @@ impl IntervalSet {
         self.runs.iter().map(|r| r.end - r.start).sum()
     }
 
+    /// The largest exclusive end in the set, or zero when the set is empty.
+    pub(crate) fn highest_end(&self) -> u64 {
+        self.runs.last().map_or(0, |run| run.end)
+    }
+
     /// The end of the contiguous run covering byte 0 (the resumable prefix), or 0 when 0 is
     /// uncovered. For a single-connection download this is exactly the old watermark.
     pub(crate) fn leading_end(&self) -> u64 {

@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, Command, Consent, Core, CoreConfig,
-    Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState, ForeignCredentialStore,
-    ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, GpuSelect, HealthIssue,
-    Hud, ImportOutcome, ImportSource, KdfCost, LaunchProgramExit, ListenerConsent,
-    ListenerSettings, ListenerSources, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource,
-    PatchProgress, PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn,
-    RunOutcome, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend,
-    SecretKind, SecretSweep, SecretsError, SetupEvent, SyncChoice, Trigger, Uuid,
+    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
+    Core, CoreConfig, Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState,
+    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery,
+    GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource, KdfCost,
+    LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
+    NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
+    PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
+    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
+    SecretSweep, SecretsError, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -91,6 +92,8 @@ enum Commands {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// Print the action core derives from the profile's install and persisted run state.
+    Status(TargetArgs),
     /// Authenticate and register a session (does not launch).
     Login(PlayArgs),
     /// Launch the game from a still-valid cached session.
@@ -107,6 +110,32 @@ enum Commands {
     Banners,
     /// Print the world-gate status, optionally waiting until it opens.
     Gate(GateArgs),
+    /// Show the launch setup core resolves for a profile.
+    Setup {
+        #[command(subcommand)]
+        action: SetupCommand,
+    },
+    /// List managed runner builds.
+    Runner {
+        #[command(subcommand)]
+        action: RunnerCommand,
+    },
+    /// List graphics translation builds.
+    Dxvk {
+        #[command(subcommand)]
+        action: DxvkCommand,
+    },
+    /// Preview or apply configuration imports.
+    Import {
+        #[command(subcommand)]
+        action: ImportCommand,
+    },
+    /// Create a redacted diagnostic archive.
+    SupportBundle(SupportBundleArgs),
+    /// Print the core-owned public diagnostic report.
+    SystemReport(OptionalTargetArgs),
+    /// Print the resumable initial-setup checkpoint and its next required step.
+    FirstRun,
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
     Repair(RepairArgs),
     /// Frame-consistency analysis over MangoHud frametime logs.
@@ -165,6 +194,55 @@ struct GateArgs {
     /// Keep checking at the configured interval until the gate opens or the command is cancelled.
     #[arg(long)]
     wait: bool,
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    Show(TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum RunnerCommand {
+    List,
+}
+
+#[derive(Subcommand)]
+enum DxvkCommand {
+    List(TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum ImportCommand {
+    Xivlauncher(XivImportArgs),
+}
+
+#[derive(Args)]
+struct XivImportArgs {
+    /// Data directory containing accountsList.json and launcherConfigV3.json.
+    path: Option<PathBuf>,
+    /// Print the complete finding set without writing accepted rows.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct SupportBundleArgs {
+    /// Refuse to overwrite this output archive if it already exists.
+    #[arg(long, default_value = "apogee-support.zip")]
+    output: PathBuf,
+    /// Optional profile name or id whose runner and prefix should be reported.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Validated shell fact in NAME=VALUE form. Unknown names are omitted.
+    #[arg(long = "fact")]
+    facts: Vec<String>,
+}
+
+#[derive(Args)]
+struct OptionalTargetArgs {
+    /// Profile name or id whose runner and prefix should be reported.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -650,6 +728,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             profile(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Status(args) => {
+            let profile = resolve_profile(&core, &args.profile)?.id;
+            print!("{}", render_next_action(&core.next_action(profile).await?));
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Login(args) => {
             let (profile, password, otp) = gather(&core, &args)?;
             Ok(drive(
@@ -709,6 +792,91 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Command::Frontier(FrontierQuery::Gate { wait: args.wait }),
         )
         .await),
+        Commands::Setup { action } => match action {
+            SetupCommand::Show(args) => {
+                let profile = resolve_profile(&core, &args.profile)?.id;
+                for item in core.resolved_setup(profile).await? {
+                    match item.value {
+                        SetupValue::Runner { name, version } => println!(
+                            "runner\t{name}\t{}\t{:?}",
+                            version.as_deref().unwrap_or("unknown"),
+                            item.source
+                        ),
+                        SetupValue::Sync(sync) => {
+                            println!("sync\t{sync:?}\t{:?}", item.source)
+                        }
+                        SetupValue::Gpu {
+                            selection,
+                            identity,
+                        } => println!(
+                            "gpu\t{selection:?}\t{}\t{:?}",
+                            identity.as_deref().unwrap_or("unknown"),
+                            item.source
+                        ),
+                        SetupValue::Dxvk { version, nvapi } => println!(
+                            "dxvk\t{}\tnvapi={nvapi}\t{:?}",
+                            version.as_deref().unwrap_or("not installed"),
+                            item.source
+                        ),
+                        SetupValue::Dalamud { enabled } => {
+                            println!("dalamud\tenabled={enabled}\t{:?}", item.source)
+                        }
+                        _ => println!("setup\tunknown\t{:?}", item.source),
+                    }
+                }
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Commands::Runner { action } => match action {
+            RunnerCommand::List => {
+                print_catalog_rows(&core.runner_catalog().await?);
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Commands::Dxvk { action } => match action {
+            DxvkCommand::List(args) => {
+                let profile = resolve_profile(&core, &args.profile)?.id;
+                print_catalog_rows(&core.dxvk_catalog(profile).await?);
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Commands::Import { action } => match action {
+            ImportCommand::Xivlauncher(args) => import_xivlauncher(&core, args),
+        },
+        Commands::SupportBundle(args) => {
+            let profile = args
+                .profile
+                .as_deref()
+                .map(|target| resolve_profile(&core, target).map(|profile| profile.id))
+                .transpose()?;
+            let facts = args
+                .facts
+                .iter()
+                .map(|fact| {
+                    fact.split_once('=')
+                        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                        .ok_or_else(|| format!("invalid fact {fact:?}; expected NAME=VALUE"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            core.create_support_bundle(&args.output, profile, facts)?;
+            println!("{}", args.output.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::SystemReport(args) => {
+            let profile = args
+                .profile
+                .as_deref()
+                .map(|target| resolve_profile(&core, target).map(|profile| profile.id))
+                .transpose()?;
+            print!("{}", core.system_report(profile)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::FirstRun => {
+            let checkpoint = core.first_run().await?;
+            println!("next\t{:?}", apogee_core::first_incomplete(&checkpoint));
+            println!("checkpoint\t{checkpoint:#?}");
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Repair(args) => {
             let profile = resolve_profile(&core, &args.profile)?.id;
             let local_indexes = parse_local_indexes(&args.local_index)?;
@@ -2328,6 +2496,117 @@ fn render_frontier(data: &FrontierData) -> String {
         FrontierData::Banners(rows) => format!("banners: {}", rows.len()),
         _ => "unrecognized frontier data".to_owned(),
     }
+}
+
+fn render_next_action(action: &NextAction) -> String {
+    let verb = match action.verb {
+        NextVerb::Play => "Play",
+        NextVerb::UpdateAndPlay => "Update and play",
+        NextVerb::Install => "Install",
+        NextVerb::Resume => "Resume",
+        NextVerb::Repair => "Repair",
+        NextVerb::SignIn => "Sign in",
+        NextVerb::AcceptTerms => "Accept the terms",
+        NextVerb::WaitForMaintenance => "Wait for maintenance",
+        NextVerb::CloseGameFirst => "Close the game first",
+        _ => "Unknown",
+    };
+    let command = match action.command {
+        NextCommand::Launch => "launch",
+        NextCommand::PatchAndPlay => "play",
+        NextCommand::Install => "install",
+        NextCommand::Repair => "repair",
+        NextCommand::Login => "login",
+        NextCommand::WaitForGate => "gate --wait",
+        _ => "unknown",
+    };
+    let mut output = format!(
+        "verb: {verb}\ncommand: {command}\nresumable: {}\npatching available: {}\n",
+        action.resumable, action.patching_available
+    );
+    if let Some(pending) = action.pending {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "pending: {} patches, {} bytes, observed {}",
+            pending.count, pending.bytes, pending.as_of
+        );
+    }
+    if let Some(blocked) = &action.blocked {
+        use std::fmt::Write as _;
+        let _ = writeln!(output, "blocked: {blocked}");
+    }
+    output
+}
+
+fn print_catalog_rows(rows: &[CatalogViewEntry]) {
+    for row in rows {
+        println!(
+            "{}\t{}\tinstalled={}\tavailable={}\tsize={}\trecommended={}",
+            row.name,
+            row.version,
+            row.installed,
+            row.available,
+            row.size
+                .map_or_else(|| "unknown".to_owned(), |size| size.to_string()),
+            row.recommended
+        );
+    }
+}
+
+fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliError> {
+    let scan = if let Some(path) = args.path {
+        core.scan_xivlauncher(path)?
+    } else {
+        let mut found = None;
+        for path in core.xivlauncher_candidate_roots() {
+            match core.scan_xivlauncher(&path) {
+                Ok(scan) => {
+                    found = Some(scan);
+                    break;
+                }
+                Err(apogee_core::CoreError::XivImport(apogee_core::XivImportError::NoSource {
+                    ..
+                })) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        found.ok_or("no XIVLauncher configuration was found in the known locations")?
+    };
+    println!("source\t{}", scan.source.display());
+    for finding in &scan.findings {
+        match &finding.result {
+            ImportFindingResult::Candidate(candidate) => println!(
+                "candidate\t{}\t{}\t{:?}\totp={}\tnever-store={}\tgame={}",
+                finding.id.as_str(),
+                candidate.sqex_id,
+                candidate.kind,
+                candidate.use_otp,
+                candidate.never_store,
+                candidate
+                    .game_path
+                    .as_deref()
+                    .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
+            ),
+            ImportFindingResult::Skipped(issue) => println!(
+                "skipped\t{}\t{:?}\t{:?}",
+                finding.id.as_str(),
+                finding.location,
+                issue
+            ),
+            _ => println!("skipped\t{}\tunknown", finding.id.as_str()),
+        }
+    }
+    if args.dry_run {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let accepted = scan.findings.iter().filter_map(|finding| {
+        matches!(finding.result, ImportFindingResult::Candidate(_)).then(|| finding.id.clone())
+    });
+    let plan = scan.plan(accepted)?;
+    let report = core.apply_xivlauncher(&plan)?;
+    println!("applied\t{}", report.applied.len());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Render what the loader a launch was redirected through reported on its way out.

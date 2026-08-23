@@ -14,6 +14,7 @@ mod code;
 mod command;
 mod composition;
 mod error;
+mod first_run;
 mod flow;
 mod frontier;
 mod host;
@@ -21,10 +22,14 @@ mod launch;
 mod model;
 mod patch;
 mod redirect;
+mod setup;
+mod status;
 mod steam;
 mod store;
+mod support;
 mod transport;
 mod trust;
+mod xiv_import;
 
 pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
 pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
@@ -41,8 +46,8 @@ pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
 // naming a repo must be able to name the type without depending on `apogee-patcher` itself.
 pub use apogee_patcher::{PatchProgress, PreflightError, Repo};
 pub use apogee_runtime::{
-    BenchError, BenchStats, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud, PrefixHealth,
-    ProgramStatus, SyncChoice,
+    BenchError, BenchStats, CatalogViewEntry, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud,
+    PrefixHealth, ProgramStatus, SyncChoice,
 };
 #[cfg(unix)]
 pub use apogee_runtime::{
@@ -56,17 +61,39 @@ pub use apogee_secrets::{
 };
 pub use code::{ALL_CODES, StableCode};
 pub use command::{
-    BannerData, Command, Event, FirstRunStep, FlowState, FrontierData, FrontierQuery, GateData,
+    BannerData, Command, Event, FlowState, FrontierData, FrontierQuery, GateData,
     LaunchProgramExit, NewsData, NewsRow, Notice, PasswordSource, PrefixAction, PrefixReport,
     Progress, RunOutcome,
 };
 pub use composition::{Core, CoreConfig, Defaults, ImportOutcome, ProfileRemoval, SecretSweep};
 pub use error::CoreError;
+pub use first_run::{
+    AccountChoice, CredentialBackend, CredentialBackendReading, CredentialBackendState,
+    CredentialChoice, ExistingGameState, FirstRunAccountKind, FirstRunCheckpoint,
+    FirstRunImportCandidate, FirstRunImportSource, FirstRunPosition, FirstRunRunnerSelection,
+    FirstRunStep, FirstRunTransition, FirstRunTransitionError, GameCandidate, GameCandidateState,
+    GameChoice, ImportDecision, ImportState, LegibilityReading, PatchReading, PrefixOutcome,
+    ReadyAction, ReadyState, RunnerAndPrefixChoice, RunnerReading, SessionType, SteamClientReading,
+    first_incomplete, ready_action,
+};
 pub use model::{
     Account, AccountKind, LaunchSettings, ListenerSettings, ListenerSources, OtpDelivery,
     PrefixSelection, Profile, Region, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
     SecretBackend, Settings,
 };
+pub use setup::{Provenance, ResolvedSetup, SetupValue};
 pub use sqex_proto::Transport;
+pub use status::{NextAction, NextCommand, NextVerb, PendingReading};
 pub use store::StoreError;
+pub use support::{
+    BundlePart, CallerFactName, DiagnosticRecord, SupportArchive, SupportError, SystemReportInput,
+    ValidatedCallerFacts, assemble_support_archive, support_bundle_contents, system_report,
+    write_support_bundle,
+};
 pub use uuid::Uuid;
+pub use xiv_import::{
+    AppliedFinding, ImportApplyReport, ImportCandidate, ImportEnvironment, ImportFinding,
+    ImportFindingId, ImportFindingResult, ImportFingerprint, ImportIssue, ImportLocation,
+    ImportPlan, ImportScan, ImportWrite, XivImportError,
+    candidate_roots as xivlauncher_candidate_roots, scan as scan_xivlauncher,
+};

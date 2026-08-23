@@ -213,7 +213,7 @@ fn enrich_game_running_with(
     ) {
         return CoreError::GameRunning { process: resolve() };
     }
-    CoreError::Patch(error)
+    CoreError::from(error)
 }
 
 /// Run a patcher [`Job`] to completion, relaying its progress onto `events` and bridging the flow's
@@ -405,7 +405,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            CoreError::Patch(PatchError::Patchlist { index: 3, .. })
+            CoreError::Patch(inner)
+                if matches!(inner.as_ref(), PatchError::Patchlist { index: 3, .. })
         ));
     }
 
@@ -681,10 +682,11 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CoreError::Patch(PatchError::VersionCrossCheck {
-                    repo: Repo::Game,
-                    ..
-                })
+                CoreError::Patch(ref inner)
+                    if matches!(inner.as_ref(), PatchError::VersionCrossCheck {
+                        repo: Repo::Game,
+                        ..
+                    })
             ),
             "expected the typed cross-check error, got {err:?}"
         );

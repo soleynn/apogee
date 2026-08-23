@@ -218,7 +218,7 @@ pub(crate) mod fake {
 
             if self.cancels {
                 cancel.cancel();
-                return Err(CoreError::Patch(apogee_patcher::PatchError::Cancelled));
+                return Err(apogee_patcher::PatchError::Cancelled.into());
             }
 
             materialize(&game_root, repo, &new_version);

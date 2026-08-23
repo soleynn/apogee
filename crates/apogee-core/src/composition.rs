@@ -313,6 +313,7 @@ pub struct Core {
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
     backups_dir: PathBuf,
+    patch_store: PathBuf,
     frontier: crate::frontier::FrontierAssets,
     /// Where the sealed-file secret store's file goes, whether or not that is the backend in use.
     secrets_path: PathBuf,
@@ -453,8 +454,11 @@ impl Core {
         // The signed index catalog for repair rides the same download engine as everything else, so
         // its fetch sits under the engine's redirect floor and stall bounds rather than a second,
         // differently-configured client's.
-        let patch: Arc<dyn PatchBackend> =
-            Arc::new(PatcherBackend::new(patcher, fetcher.clone(), patch_store));
+        let patch: Arc<dyn PatchBackend> = Arc::new(PatcherBackend::new(
+            patcher,
+            fetcher.clone(),
+            patch_store.clone(),
+        ));
         let addons = Addons::new(
             runtime.clone(),
             fetcher.clone(),
@@ -478,6 +482,7 @@ impl Core {
             clock: host::system_clock(),
             prefixes_dir,
             backups_dir,
+            patch_store,
             frontier,
             secrets_path,
         })
@@ -517,6 +522,326 @@ impl Core {
         self.frontier
             .resolve_link(id)
             .ok_or_else(|| CoreError::FrontierLink { id: id.to_owned() })
+    }
+
+    /// Read the selected profile's persisted readiness and choose its next credential-free action.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoProfile`] for an unknown profile or [`CoreError::Store`] when its
+    /// persisted state cannot be read.
+    pub async fn next_action(&self, profile: Uuid) -> Result<crate::NextAction, CoreError> {
+        let profile = self.profile(profile)?;
+        let status = self.store.load_status(profile.id)?;
+        let cached = self.store.load_uid_cache(profile.account).ok().flatten();
+        let max_expansion = cached.as_ref().map_or(0, |entry| entry.max_expansion);
+        let report = sqex_proto::VersionReport::from_install(
+            &sqex_proto::InstallPaths::new(&profile.game_path),
+            max_expansion,
+        )
+        .ok();
+        let cache_valid = report.as_ref().is_some_and(|report| {
+            cached
+                .as_ref()
+                .is_some_and(|entry| entry.is_valid((self.clock)(), report.game_version()))
+        });
+        let game_running = match apogee_runtime::game_running(&profile.game_path) {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect the running game while reading status");
+                false
+            }
+        };
+        let resumable =
+            if let Some(pending) = status.as_ref().and_then(|status| status.pending.as_ref()) {
+                crate::status::has_staged_patch(&self.patch_store, pending).await
+            } else {
+                false
+            };
+        Ok(crate::status::derive_next_action(
+            status.as_ref(),
+            report.is_some(),
+            cache_valid,
+            resumable,
+            game_running,
+        ))
+    }
+
+    /// Scan an XIVLauncher data directory without changing either launcher's files.
+    pub fn scan_xivlauncher(
+        &self,
+        source: impl AsRef<std::path::Path>,
+    ) -> Result<crate::ImportScan, CoreError> {
+        Ok(crate::xiv_import::scan(source)?)
+    }
+
+    /// Apply a reviewed import plan after proving its source files have not changed.
+    pub fn apply_xivlauncher(
+        &self,
+        plan: &crate::ImportPlan,
+    ) -> Result<crate::ImportApplyReport, CoreError> {
+        Ok(crate::xiv_import::apply(&self.store, plan)?)
+    }
+
+    /// Common XIVLauncher data directories in stable preference order.
+    #[must_use]
+    pub fn xivlauncher_candidate_roots(&self) -> Vec<PathBuf> {
+        crate::xiv_import::candidate_roots()
+    }
+
+    async fn runtime_catalog(&self) -> Result<apogee_runtime::Catalog, CoreError> {
+        let (manifest, signature) = crate::launch::runtime_backend::catalog_urls()?;
+        Ok(self
+            .runtime
+            .fetch_catalog(
+                &manifest,
+                &signature,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?)
+    }
+
+    /// Read the authenticated runner catalog and local installation state.
+    pub async fn runner_catalog(&self) -> Result<Vec<apogee_runtime::CatalogViewEntry>, CoreError> {
+        let catalog = self.runtime_catalog().await?;
+        Ok(self.runtime.runner_catalog_view(&catalog)?)
+    }
+
+    /// Read the authenticated DXVK catalog and the selected prefix's recorded installation state.
+    pub async fn dxvk_catalog(
+        &self,
+        profile: Uuid,
+    ) -> Result<Vec<apogee_runtime::CatalogViewEntry>, CoreError> {
+        let profile = self.profile(profile)?;
+        let catalog = self.runtime_catalog().await?;
+        let prefix = self.prefixes_dir.join(crate::flow::prefix_name(&profile));
+        Ok(self.runtime.dxvk_catalog_view(&catalog, Some(&prefix))?)
+    }
+
+    /// Resolve the selected profile's runner, synchronization, graphics, prefix, and injection
+    /// choices without installing or changing anything.
+    pub async fn resolved_setup(
+        &self,
+        profile: Uuid,
+    ) -> Result<Vec<crate::ResolvedSetup>, CoreError> {
+        use crate::{Provenance, ResolvedSetup, SetupValue};
+        let profile = self.profile(profile)?;
+        let prefix = self.prefixes_dir.join(crate::flow::prefix_name(&profile));
+        let metadata =
+            apogee_runtime::PrefixMetadata::load(&prefix.join(apogee_runtime::PREFIX_JSON))?;
+        let (runner_name, runner_version, runner_source, host) = match &profile.runner {
+            crate::RunnerSelection::Managed { name, version } => {
+                let catalog = self.runtime_catalog().await?;
+                let runner = catalog
+                    .runner(name, version)
+                    .ok_or_else(|| CoreError::Launch {
+                        detail: format!(
+                            "runner {name} {version} is not in the authenticated catalog"
+                        ),
+                    })?;
+                (
+                    name.clone(),
+                    Some(version.clone()),
+                    Provenance::Catalog,
+                    apogee_runtime::HostCaps::detect().for_runner(runner),
+                )
+            }
+            crate::RunnerSelection::SystemWine => (
+                "system-wine".to_owned(),
+                system_wine_version(),
+                Provenance::Host,
+                apogee_runtime::HostCaps::detect(),
+            ),
+        };
+        let environment = apogee_runtime::compute_environment(
+            &apogee_runtime::EnvConfig {
+                sync: profile.launch.sync,
+                gpu: profile.launch.gpu.clone(),
+                ..Default::default()
+            },
+            &host,
+        );
+        let (dxvk_version, nvapi) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.dxvk.as_ref())
+            .map_or((None, false), |dxvk| {
+                (Some(dxvk.version.clone()), dxvk.nvapi)
+            });
+        Ok(vec![
+            ResolvedSetup {
+                value: SetupValue::Runner {
+                    name: runner_name,
+                    version: runner_version,
+                },
+                source: runner_source,
+            },
+            ResolvedSetup {
+                value: SetupValue::Sync(environment.sync),
+                source: Provenance::Host,
+            },
+            ResolvedSetup {
+                value: SetupValue::Gpu {
+                    selection: profile.launch.gpu.clone(),
+                    identity: None,
+                },
+                source: Provenance::Profile,
+            },
+            ResolvedSetup {
+                value: SetupValue::Dxvk {
+                    version: dxvk_version,
+                    nvapi,
+                },
+                source: if metadata.is_some() {
+                    Provenance::Prefix
+                } else {
+                    Provenance::Default
+                },
+            },
+            ResolvedSetup {
+                value: SetupValue::Dalamud {
+                    enabled: profile.launch.dalamud,
+                },
+                source: Provenance::Profile,
+            },
+        ])
+    }
+
+    /// Compose the fixed public diagnostic report, optionally including one profile's resolved
+    /// runner and prefix state.
+    pub fn system_report(&self, profile: Option<Uuid>) -> Result<String, CoreError> {
+        let input = self.system_report_input(profile)?;
+        Ok(crate::support::system_report(&input, home_dir().as_deref()))
+    }
+
+    /// Assemble and atomically publish a redacted support archive.
+    pub fn create_support_bundle(
+        &self,
+        destination: impl AsRef<std::path::Path>,
+        profile: Option<Uuid>,
+        facts: Vec<(String, String)>,
+    ) -> Result<(), CoreError> {
+        let profiles = self.profiles()?;
+        let settings = self.settings()?;
+        let system = self.system_report_input(profile)?;
+        let caller_facts = crate::ValidatedCallerFacts::new(facts);
+        let home = home_dir();
+        let input = crate::support::SupportBundleInput {
+            profiles: &profiles,
+            settings: &settings,
+            system: &system,
+            logs: &[],
+            caller_facts: &caller_facts,
+            home: home.as_deref(),
+        };
+        let archive = crate::support::assemble_support_archive(&input)?;
+        crate::support::write_support_bundle(destination, &archive)?;
+        Ok(())
+    }
+
+    /// Load the persisted first-run checkpoint and fill core-owned discovery readings that have not
+    /// been recorded yet.
+    pub async fn first_run(&self) -> Result<crate::FirstRunCheckpoint, CoreError> {
+        let mut checkpoint = self.store.load_first_run()?;
+        if matches!(checkpoint.import, crate::ImportState::DiscoveryPending) {
+            let candidates = crate::xiv_import::candidate_roots()
+                .into_iter()
+                .filter(|path| crate::xiv_import::scan(path).is_ok())
+                .map(|path| crate::FirstRunImportCandidate {
+                    source: if path.to_string_lossy().contains(".var/app/") {
+                        crate::FirstRunImportSource::Flatpak
+                    } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore") {
+                        crate::FirstRunImportSource::Core
+                    } else {
+                        crate::FirstRunImportSource::Native
+                    },
+                    path,
+                })
+                .collect();
+            checkpoint = crate::first_run::transition(
+                &checkpoint,
+                crate::FirstRunTransition::RecordImportDiscovery(candidates),
+            )?;
+        }
+        if checkpoint.runners.is_empty()
+            && matches!(
+                crate::first_incomplete(&checkpoint),
+                crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+                    | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+            )
+        {
+            let catalog = self.runtime_catalog().await?;
+            checkpoint.runners = self
+                .runtime
+                .runner_catalog_view(&catalog)?
+                .into_iter()
+                .map(|row| crate::RunnerReading {
+                    selection: crate::FirstRunRunnerSelection::Managed {
+                        name: row.name,
+                        version: row.version.clone(),
+                    },
+                    version: Some(row.version),
+                    recommended: row.recommended,
+                    available: row.available,
+                })
+                .collect();
+            let system_version = system_wine_version();
+            checkpoint.runners.push(crate::RunnerReading {
+                selection: crate::FirstRunRunnerSelection::SystemWine {
+                    version: system_version.clone(),
+                },
+                version: system_version.clone(),
+                recommended: false,
+                available: system_version.is_some(),
+            });
+        }
+        self.store.save_first_run(&checkpoint)?;
+        Ok(checkpoint)
+    }
+
+    /// Apply and persist one validated first-run transition.
+    pub fn advance_first_run(
+        &self,
+        change: crate::FirstRunTransition,
+    ) -> Result<crate::FirstRunCheckpoint, CoreError> {
+        let checkpoint = self.store.load_first_run()?;
+        let next = crate::first_run::transition(&checkpoint, change)?;
+        self.store.save_first_run(&next)?;
+        Ok(next)
+    }
+
+    fn system_report_input(
+        &self,
+        profile: Option<Uuid>,
+    ) -> Result<crate::SystemReportInput, CoreError> {
+        let selected = profile.map(|id| self.profile(id)).transpose()?;
+        let runner = selected.as_ref().map(|profile| match &profile.runner {
+            crate::RunnerSelection::SystemWine => system_wine_version().map_or_else(
+                || "system-wine".to_owned(),
+                |version| format!("system-wine {version}"),
+            ),
+            crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
+        });
+        let prefix_state = selected
+            .as_ref()
+            .map(|profile| self.prefixes_dir.join(crate::flow::prefix_name(profile)))
+            .map(|path| {
+                if path.join(apogee_runtime::PREFIX_JSON).is_file() {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .to_owned()
+            });
+        Ok(crate::SystemReportInput {
+            application_version: env!("CARGO_PKG_VERSION").to_owned(),
+            target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
+            operating_system: Some(std::env::consts::OS.to_owned()),
+            kernel: None,
+            architecture: Some(std::env::consts::ARCH.to_owned()),
+            gpu: None,
+            driver: None,
+            runner,
+            prefix_state,
+        })
     }
 
     /// Persist the launcher-wide settings.
@@ -1075,6 +1400,25 @@ impl Core {
             frontier: self.frontier.clone(),
         }
     }
+}
+
+fn system_wine_version() -> Option<String> {
+    let output = std::process::Command::new("wine")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]

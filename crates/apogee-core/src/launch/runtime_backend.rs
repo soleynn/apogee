@@ -560,7 +560,7 @@ fn to_core_event(event: RuntimeEvent) -> Option<Event> {
 /// `APOGEE_RUNNER_CATALOG_URL` overrides the manifest URL for a mirror or a pre-deploy test. The
 /// override cannot weaken trust: the Ed25519 signature over the manifest is the authenticity gate
 /// regardless of origin, and the fetcher refuses plain `http`.
-fn catalog_urls() -> Result<(Url, Url), CoreError> {
+pub(crate) fn catalog_urls() -> Result<(Url, Url), CoreError> {
     let manifest = std::env::var("APOGEE_RUNNER_CATALOG_URL")
         .unwrap_or_else(|_| "https://soleynn.github.io/apogee/runners/manifest.json".to_owned());
     let signature = format!("{manifest}.sig");

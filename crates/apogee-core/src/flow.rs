@@ -40,6 +40,7 @@ use crate::model::{
     STEAM_FREE_TRIAL_APP_ID, Settings,
 };
 use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo_ver_path};
+use crate::status::{PendingPatch, PendingRepo, StatusRecord, StoredDisposition, StoredPending};
 use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
 
@@ -92,6 +93,8 @@ pub(crate) async fn drive(
     outward: UnboundedSender<Event>,
     cancel: CancellationToken,
 ) {
+    let status_profile = command_profile(&cmd);
+    let status_store = ctx.store.clone();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let running = run_command(ctx, cmd, tx.clone(), cancel.clone());
     tokio::pin!(running);
@@ -104,13 +107,27 @@ pub(crate) async fn drive(
             result = &mut running => finished = Some(result),
             event = rx.recv() => {
                 let Some(event) = event else { break };
-                observe_and_forward(event, &outward, &mut saw_error, &mut saw_cancelled);
+                observe_and_forward(
+                    event,
+                    &outward,
+                    &status_store,
+                    status_profile,
+                    &mut saw_error,
+                    &mut saw_cancelled,
+                );
             }
         }
     }
     drop(tx);
     while let Ok(event) = rx.try_recv() {
-        observe_and_forward(event, &outward, &mut saw_error, &mut saw_cancelled);
+        observe_and_forward(
+            event,
+            &outward,
+            &status_store,
+            status_profile,
+            &mut saw_error,
+            &mut saw_cancelled,
+        );
     }
 
     let terminal = if saw_error {
@@ -121,6 +138,22 @@ pub(crate) async fn drive(
         RunOutcome::Succeeded
     };
     let _ = outward.send(Event::Outcome(terminal));
+}
+
+fn command_profile(command: &Command) -> Option<Uuid> {
+    match command {
+        Command::Login { profile, .. }
+        | Command::Launch { profile }
+        | Command::PatchAndPlay { profile, .. }
+        | Command::Patch { profile, .. }
+        | Command::Install { profile, .. }
+        | Command::Repair { profile, .. }
+        | Command::Prefix { profile, .. } => Some(*profile),
+        Command::FirstRun(_)
+        | Command::ImportXivLauncher(_)
+        | Command::Frontier(_)
+        | Command::SupportBundle => None,
+    }
 }
 
 /// Execute one command and normalize its top-level result onto the same event stream its nested
@@ -308,6 +341,8 @@ fn frontier_language(language: &str) -> &str {
 fn observe_and_forward(
     event: Event,
     outward: &UnboundedSender<Event>,
+    store: &Store,
+    profile: Option<Uuid>,
     saw_error: &mut bool,
     saw_cancelled: &mut bool,
 ) {
@@ -316,7 +351,66 @@ fn observe_and_forward(
         Event::State(FlowState::Cancelled) => *saw_cancelled = true,
         _ => {}
     }
+    if let Some(profile) = profile
+        && let Err(error) = observe_status(store, profile, &event)
+    {
+        *saw_error = true;
+        let _ = outward.send(Event::Error(error.into()));
+    }
     let _ = outward.send(event);
+}
+
+fn observe_status(store: &Store, profile: Uuid, event: &Event) -> Result<(), StoreError> {
+    use FlowState as State;
+
+    let disposition = match event {
+        Event::State(State::NeedsPassword) => Some(StoredDisposition::NeedsPassword),
+        Event::State(State::NeedsOtp) => Some(StoredDisposition::NeedsOtp),
+        Event::State(State::NeedsTerms) => Some(StoredDisposition::NeedsTerms),
+        Event::State(State::NoService) => Some(StoredDisposition::NoService),
+        Event::State(State::NeedsLogin) => Some(StoredDisposition::NeedsLogin),
+        Event::State(State::NeedsBootPatch) => Some(StoredDisposition::NeedsBootPatch),
+        Event::State(State::PatchesPending { .. }) => Some(StoredDisposition::PatchesPending),
+        Event::State(State::VersionNotServiced) => Some(StoredDisposition::VersionNotServiced),
+        Event::State(State::Cancelled) => Some(StoredDisposition::Cancelled),
+        Event::State(State::Running | State::Exited) => Some(StoredDisposition::Current),
+        Event::Error(error) => Some(StoredDisposition::Failed {
+            code: crate::StableCode::code(error).to_owned(),
+        }),
+        Event::State(
+            State::WaitingForOtpWindow { .. }
+            | State::WaitingForPushedCode { .. }
+            | State::PushedCodeReceived { .. }
+            | State::BackingUp
+            | State::PreparingPrefix
+            | State::Patching
+            | State::Repairing
+            | State::CheckingPrefix
+            | State::NoPrefix
+            | State::FixingPrefix
+            | State::RecreatingPrefix
+            | State::Launching
+            | State::SupervisingAddons,
+        )
+        | Event::Progress(_)
+        | Event::Patch(_)
+        | Event::Addon(_)
+        | Event::Setup(_)
+        | Event::Frontier(_)
+        | Event::Prefix(_)
+        | Event::Notice(_)
+        | Event::LaunchProgramExited(_)
+        | Event::Outcome(_) => None,
+    };
+    let Some(disposition) = disposition else {
+        return Ok(());
+    };
+    let mut status = store.load_status(profile)?.unwrap_or_default();
+    status.disposition = disposition;
+    if matches!(status.disposition, StoredDisposition::Current) {
+        status.pending = None;
+    }
+    store.save_status(profile, &status)
 }
 
 /// Whether `error` is the run stopping because it was asked to, rather than something going wrong.
@@ -338,7 +432,11 @@ fn observe_and_forward(
 /// before there is a command to stop.
 fn is_cancellation(error: &CoreError) -> bool {
     match error {
-        CoreError::Patch(apogee_patcher::PatchError::Cancelled) => true,
+        CoreError::Patch(error)
+            if matches!(error.as_ref(), apogee_patcher::PatchError::Cancelled) =>
+        {
+            true
+        }
         CoreError::Runtime(error) => error.is_cancellation(),
         CoreError::Addons(error) => error.is_cancellation(),
         _ => false,
@@ -374,7 +472,9 @@ async fn login(
             if pending_patches.is_empty() {
                 let session = build_session(ctx, &auth, &report, unique_id.expose());
                 ctx.store.save_uid_cache(profile.account, &session)?;
+                record_current(ctx, profile.id)?;
             } else {
+                record_pending(ctx, profile.id, &pending_patches, None)?;
                 let (count, bytes) = summarize(&pending_patches);
                 emit(tx, FlowState::PatchesPending { count, bytes });
             }
@@ -961,8 +1061,10 @@ async fn patch_to_current(
                 if pending_patches.is_empty() {
                     let session = build_session(ctx, auth, &report, unique_id.expose());
                     ctx.store.save_uid_cache(profile.account, &session)?;
+                    record_current(ctx, profile.id)?;
                     return Ok(Some(session));
                 }
+                record_pending(ctx, profile.id, &pending_patches, None)?;
                 let (count, bytes) = summarize(&pending_patches);
                 emit(tx, FlowState::PatchesPending { count, bytes });
                 announce_patching(ctx, profile, tx, cancel, &mut patching_announced);
@@ -1010,6 +1112,7 @@ async fn ensure_boot_current(
     if patches.is_empty() {
         return Ok(false);
     }
+    record_pending(ctx, profile.id, &patches, Some(Repo::Boot))?;
     let (count, bytes) = summarize(&patches);
     emit(tx, FlowState::PatchesPending { count, bytes });
     announce_patching(ctx, profile, tx, cancel, announced);
@@ -1133,6 +1236,66 @@ fn summarize(patches: &[PatchListEntry]) -> (u32, u64) {
     let bytes = patches.iter().map(|p| p.length).sum();
     let count = u32::try_from(patches.len()).unwrap_or(u32::MAX);
     (count, bytes)
+}
+
+fn record_current(ctx: &FlowContext, profile: Uuid) -> Result<(), CoreError> {
+    ctx.store.save_status(
+        profile,
+        &StatusRecord {
+            disposition: StoredDisposition::Current,
+            pending: None,
+        },
+    )?;
+    Ok(())
+}
+
+fn record_pending(
+    ctx: &FlowContext,
+    profile: Uuid,
+    patches: &[PatchListEntry],
+    fixed_repo: Option<Repo>,
+) -> Result<(), CoreError> {
+    let patches = patches
+        .iter()
+        .map(|patch| {
+            let repo = fixed_repo.unwrap_or_else(|| {
+                Url::parse(&patch.url)
+                    .ok()
+                    .and_then(|url| {
+                        url.path_segments()
+                            .map(|segments| classify_repo(segments.collect::<Vec<_>>()))
+                    })
+                    .unwrap_or(Repo::Game)
+            });
+            PendingPatch {
+                repo: match repo {
+                    Repo::Boot => PendingRepo::Boot,
+                    Repo::Game => PendingRepo::Game,
+                    Repo::Expansion(number) => PendingRepo::Expansion(number),
+                },
+                length: patch.length,
+                version_id: patch.version_id.clone(),
+                url: patch.url.clone(),
+                block_size: patch.hashes.as_ref().map(|hashes| hashes.block_size),
+                hashes: patch
+                    .hashes
+                    .as_ref()
+                    .map(|hashes| hashes.hashes.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    ctx.store.save_status(
+        profile,
+        &StatusRecord {
+            disposition: StoredDisposition::PatchesPending,
+            pending: Some(StoredPending {
+                as_of: (ctx.clock)(),
+                patches,
+            }),
+        },
+    )?;
+    Ok(())
 }
 
 /// Split a game patchlist into per-repo ordered sets, base game first then expansions ascending. SE
