@@ -153,9 +153,7 @@ pub(super) async fn seal_secrets_file(
     seal_secrets_file_inner(&state).await
 }
 
-async fn seal_secrets_file_inner(
-    state: &ShellState,
-) -> Result<SecretsFileStatusDto, IpcErrorDto> {
+async fn seal_secrets_file_inner(state: &ShellState) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     let core = state.ready_core().await?;
     let _permit = state.secret_file_permit().await?;
     run_blocking(move || {
@@ -220,7 +218,8 @@ mod tests {
             if event != PASSPHRASE_REQUEST_EVENT {
                 return Err(PromptEmitError::new());
             }
-            let request = Uuid::parse_str(&prompt.request_id).map_err(|_| PromptEmitError::new())?;
+            let request =
+                Uuid::parse_str(&prompt.request_id).map_err(|_| PromptEmitError::new())?;
             self.sent.send(request).map_err(|_| PromptEmitError::new())
         }
     }
@@ -271,12 +270,9 @@ mod tests {
             "not-a-request-id",
             malformed
         ));
-        let unconfirmed = create_secrets_file_inner(
-            &state,
-            false,
-            Secret::new(b"correct passphrase".to_vec()),
-        )
-        .await;
+        let unconfirmed =
+            create_secrets_file_inner(&state, false, Secret::new(b"correct passphrase".to_vec()))
+                .await;
         assert!(unconfirmed.is_err());
         assert!(
             !state
@@ -287,13 +283,10 @@ mod tests {
                 .exists()
         );
 
-        let created = create_secrets_file_inner(
-            &state,
-            true,
-            Secret::new(b"correct passphrase".to_vec()),
-        )
-        .await
-        .map_err(ipc_error)?;
+        let created =
+            create_secrets_file_inner(&state, true, Secret::new(b"correct passphrase".to_vec()))
+                .await
+                .map_err(ipc_error)?;
         assert!(serde_json::to_string(&created)?.contains(r#""isOpen":true"#));
         let sealed = seal_secrets_file_inner(&state).await.map_err(ipc_error)?;
         assert!(serde_json::to_string(&sealed)?.contains(r#""isOpen":false"#));

@@ -22,8 +22,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use apogee_core::{Core, CoreConfig, Uuid};
-use tauri::{Emitter, Manager};
 use tauri::ipc::Channel;
+use tauri::{Emitter, Manager};
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use command::CommandDto;

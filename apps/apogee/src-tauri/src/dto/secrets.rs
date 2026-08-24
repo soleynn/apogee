@@ -1,8 +1,6 @@
 //! Credential-backend health without any secret-presence surface.
 
-use apogee_core::{
-    Backend, BackendReport, BackendState, FileState, KdfCost, Sandbox, Secret,
-};
+use apogee_core::{Backend, BackendReport, BackendState, FileState, KdfCost, Sandbox, Secret};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use zeroize::Zeroizing;
@@ -136,10 +134,7 @@ pub(crate) struct ChangeSecretsFilePassphraseRequestDto {
 
 impl ChangeSecretsFilePassphraseRequestDto {
     pub(crate) fn into_parts(self) -> (Secret, Secret) {
-        (
-            self.current.into_secret(),
-            self.replacement.into_secret(),
-        )
+        (self.current.into_secret(), self.replacement.into_secret())
     }
 }
 
@@ -332,8 +327,8 @@ mod tests {
 
         for (state, expected) in states {
             let is_open = matches!(state, FileState::Sealed { .. });
-            let json =
-                serde_json::to_string(&SecretsFileStatusDto::new(state, is_open)).unwrap_or_default();
+            let json = serde_json::to_string(&SecretsFileStatusDto::new(state, is_open))
+                .unwrap_or_default();
             assert_eq!(json, expected);
             assert!(!json.contains("path"));
             assert!(!json.contains("passphrase"));
