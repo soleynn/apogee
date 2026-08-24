@@ -276,7 +276,7 @@ impl From<&Hud> for HudDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
-enum GpuSelectDto {
+pub(crate) enum GpuSelectDto {
     Default,
     NvidiaPrime,
     MesaPrime,

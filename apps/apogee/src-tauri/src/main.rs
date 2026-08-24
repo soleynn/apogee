@@ -11,6 +11,7 @@
 //! Startup store reads and the complete command/event stream use the same core instance.
 
 mod command;
+mod direct;
 mod dto;
 mod supervisor;
 
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use apogee_core::{Core, CoreConfig, Uuid};
 use tauri::Manager;
 use tauri::ipc::Channel;
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use command::CommandDto;
 use dto::secrets::SecretsReportDto;
@@ -41,6 +42,7 @@ struct ShellState {
     #[cfg(test)]
     core_waiting: Notify,
     startup: OnceCell<StartupDto>,
+    direct_reads: Arc<Semaphore>,
     runs: Runs,
 }
 
@@ -52,6 +54,7 @@ impl Default for ShellState {
             #[cfg(test)]
             core_waiting: Notify::new(),
             startup: OnceCell::new(),
+            direct_reads: Arc::new(Semaphore::new(4)),
             runs: Runs::default(),
         }
     }
@@ -123,6 +126,17 @@ impl ShellState {
     {
         bootstrap.await?;
         self.ready_core().await
+    }
+
+    async fn ready_core_for_direct_read(
+        &self,
+    ) -> Result<(Arc<Core>, OwnedSemaphorePermit), IpcErrorDto> {
+        let core = self.ready_core().await?;
+        let permit = Arc::clone(&self.direct_reads)
+            .acquire_owned()
+            .await
+            .map_err(|_| IpcErrorDto::shell("shell.state.unavailable"))?;
+        Ok((core, permit))
     }
 }
 
@@ -252,6 +266,13 @@ fn main() -> ExitCode {
         .invoke_handler(tauri::generate_handler![
             startup,
             secrets_report,
+            direct::next_action,
+            direct::defaults,
+            direct::resolved_setup,
+            direct::runner_catalog,
+            direct::dxvk_catalog,
+            direct::system_report,
+            direct::support_bundle_contents,
             execute,
             cancel
         ])
@@ -354,6 +375,33 @@ mod tests {
             .map_err(ipc_test_error)?;
 
         assert_ne!(worker, caller);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_core_reads_have_a_bounded_blocking_budget() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let core = Core::new(CoreConfig::with_base(temporary.path()))?;
+        let state = Arc::new(ShellState::default());
+        state.install_core(Ok(core));
+        let mut admitted = Vec::new();
+        for _ in 0..4 {
+            admitted.push(
+                state
+                    .ready_core_for_direct_read()
+                    .await
+                    .map_err(ipc_test_error)?,
+            );
+        }
+        let waiting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.ready_core_for_direct_read().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+
+        admitted.pop();
+        assert!(waiting.await?.is_ok());
         Ok(())
     }
 

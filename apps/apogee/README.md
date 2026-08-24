@@ -4,7 +4,8 @@ The launcher's window: a Rust binary under `src-tauri/` that owns the window and
 page invokes, and a Svelte frontend under `src/` that renders them. It holds no launcher rules. Its
 Rust half initializes `apogee-core`, accepts every async command in its current public surface, and
 returns the local store snapshot after initialization, probes credential health independently, and
-relays the complete typed event stream—including its final outcome—over one Tauri channel per run.
+exposes core-owned status, setup, catalog, and diagnostic reads. It relays the complete typed event
+stream—including its final outcome—over one Tauri channel per run.
 The frontend still only renders the startup snapshot; binding those streams to screens is separate
 presentation work.
 
@@ -14,7 +15,9 @@ presentation work.
 | --- | --- |
 | `src-tauri/` | The Rust crate. Workspace root, `apogee` binary, its own `Cargo.lock`. |
 | `src-tauri/src/command.rs` | Write-only IPC request DTOs converted directly into core commands. |
+| `src-tauri/src/direct.rs` | Read-only methods projected from core without frontend derivation. |
 | `src-tauri/src/dto.rs` | Shell-owned event wire format keyed by core's stable codes. |
+| `src-tauri/src/dto/read.rs` | Shell-owned status, catalog, setup, and diagnostic read formats. |
 | `src-tauri/src/dto/store.rs` | Secret-free persisted records and defaults returned at startup. |
 | `src-tauri/src/supervisor.rs` | Run lifetime, cancellation, and bounded-rate channel forwarding. |
 | `src/generated/` | TypeScript command and event declarations generated from the Rust DTO trees. |

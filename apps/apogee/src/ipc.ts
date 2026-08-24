@@ -1,10 +1,15 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 import type { CommandDto } from './generated/Command';
+import type { BundlePartDto } from './generated/BundlePart';
+import type { CatalogEntryDto } from './generated/CatalogEntry';
+import type { DefaultsDto } from './generated/DefaultsDto';
 import type { EventDto } from './generated/Event';
 import type { CoreErrorDto } from './generated/CoreErrorDto';
 import type { IpcErrorDto } from './generated/IpcError';
 import type { SecretsReportDto } from './generated/SecretsReport';
+import type { NextActionDto } from './generated/NextAction';
+import type { ResolvedSetupDto } from './generated/ResolvedSetup';
 import type { StartupDto } from './generated/Startup';
 
 export interface FutureCoreEvent {
@@ -138,6 +143,41 @@ export function selectActiveProfile(
 /** Probes credential-backend health independently from the local startup snapshot. */
 export function secretsReport(): Promise<SecretsReportDto> {
   return invokeIpc<SecretsReportDto>('secrets_report');
+}
+
+/** Reads the core-selected action for one profile without deriving readiness in the frontend. */
+export function nextAction(profile: string): Promise<NextActionDto> {
+  return invokeIpc<NextActionDto>('next_action', { profile });
+}
+
+/** Reads core-owned settings and launch defaults for structural comparisons and resets. */
+export function defaults(): Promise<DefaultsDto> {
+  return invokeIpc<DefaultsDto>('defaults');
+}
+
+/** Reads the effective launch setup together with the authority behind every value. */
+export function resolvedSetup(profile: string): Promise<ResolvedSetupDto[]> {
+  return invokeIpc<ResolvedSetupDto[]>('resolved_setup', { profile });
+}
+
+/** Reads authenticated runner rows and local installation state. */
+export function runnerCatalog(): Promise<CatalogEntryDto[]> {
+  return invokeIpc<CatalogEntryDto[]>('runner_catalog');
+}
+
+/** Reads authenticated DXVK rows and the selected prefix's installation state. */
+export function dxvkCatalog(profile: string): Promise<CatalogEntryDto[]> {
+  return invokeIpc<CatalogEntryDto[]>('dxvk_catalog', { profile });
+}
+
+/** Reads core's fixed, public-safe diagnostic report as one opaque document. */
+export function systemReport(profile: string | null = null): Promise<string> {
+  return invokeIpc<string>('system_report', { profile });
+}
+
+/** Reads core's ordered preview of the entries included in a support archive. */
+export function supportBundleContents(): Promise<BundlePartDto[]> {
+  return invokeIpc<BundlePartDto[]>('support_bundle_contents');
 }
 
 /** Selects the structured corrupt-store recovery fields from any invoke rejection. */
