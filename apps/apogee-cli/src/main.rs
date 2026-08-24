@@ -286,6 +286,10 @@ struct AccountEditArgs {
 enum SecretsCommand {
     /// Report which credential store answered and what condition it is in.
     Status,
+    /// Open the sealed secret file for this process without reading or changing a stored secret.
+    Unlock,
+    /// Forget this process's cached sealed-file key immediately.
+    Seal,
     /// Save a profile's account password, read from the terminal.
     Save(AccountTargetArgs),
     /// Save the secret a profile's account derives its one-time passwords from, read from stdin, and
@@ -1134,6 +1138,16 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
                 None => println!("sandbox  none"),
             }
             println!("usable   {}", report.is_usable());
+            Ok(())
+        }
+        SecretsCommand::Unlock => {
+            core.unlock_secrets_file()?;
+            println!("opened the secret file for this process");
+            Ok(())
+        }
+        SecretsCommand::Seal => {
+            core.seal_secrets_file();
+            println!("forgot the cached secret-file key");
             Ok(())
         }
         SecretsCommand::Save(args) => {
@@ -3201,7 +3215,59 @@ fn render_patch(patch: &PatchProgress) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
+
+    #[derive(Deserialize)]
+    struct ParityManifest {
+        commands: Vec<ParityRow>,
+    }
+
+    #[derive(Deserialize)]
+    struct ParityRow {
+        ipc: String,
+        cli: Vec<Vec<String>>,
+        shell_local: Option<String>,
+        equivalence: String,
+    }
+
+    #[test]
+    fn every_manifest_cli_route_is_a_real_subcommand() {
+        let manifest: ParityManifest =
+            serde_json::from_str(include_str!("../../apogee/ipc-parity.json"))
+                .expect("the committed IPC parity table should parse");
+
+        for row in manifest.commands {
+            assert!(!row.equivalence.trim().is_empty(), "{}", row.ipc);
+            if row.cli.is_empty() {
+                assert!(
+                    row.shell_local
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty()),
+                    "{} has neither a CLI route nor a shell-local justification",
+                    row.ipc
+                );
+                continue;
+            }
+            assert!(
+                row.shell_local.is_none(),
+                "{} claims both route kinds",
+                row.ipc
+            );
+            for route in row.cli {
+                let argv = std::iter::once("apogee-cli").chain(route.iter().map(String::as_str));
+                let parsed = Cli::try_parse_from(argv);
+                assert!(
+                    parsed.is_ok(),
+                    "{} maps to an invalid CLI route {:?}: {:?}",
+                    row.ipc,
+                    route,
+                    parsed.err()
+                );
+            }
+        }
+    }
 
     /// Every reader that takes a typed answer hands back a buffer that erases itself.
     ///
@@ -3275,14 +3341,7 @@ mod tests {
                 "--kind",
                 "password",
             ],
-            vec![
-                "secrets",
-                "never-store",
-                "--account",
-                &account,
-                "--on",
-                "true",
-            ],
+            vec!["secrets", "never-store", "--account", &account, "--on"],
             vec!["otp", "status", "--account", &account],
             vec!["otp", "listen", "--account", &account],
             vec!["otp", "ask", "--account", &account],

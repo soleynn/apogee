@@ -33,6 +33,62 @@ use dto::startup::StartupDto;
 use dto::{EventWireDto, IpcErrorDto};
 use supervisor::{RunAdmissionError, RunClass, Runs};
 
+// One declaration feeds both Tauri's handler and the parity test. Adding an IPC command in only one
+// place is therefore impossible: the committed shell/CLI table must grow before this crate passes.
+macro_rules! ipc_surface {
+    ($consumer:ident) => {
+        $consumer! {
+            startup,
+            secrets_report,
+            direct::next_action,
+            direct::defaults,
+            direct::resolved_setup,
+            direct::runner_catalog,
+            direct::dxvk_catalog,
+            direct::system_report,
+            direct::support_bundle_contents,
+            secrets::secrets_file_status,
+            secrets::unlock_secrets_file,
+            secrets::create_secrets_file,
+            secrets::change_secrets_file_passphrase,
+            secrets::remove_secrets_file,
+            secrets::seal_secrets_file,
+            secrets::answer_passphrase_prompt,
+            mutation::update_account,
+            mutation::update_profile,
+            mutation::update_settings,
+            mutation::store_password,
+            mutation::import_totp_secret,
+            mutation::use_pushed_codes,
+            mutation::disable_pushed_codes,
+            mutation::delete_secret,
+            mutation::forget_secrets,
+            mutation::set_never_store,
+            mutation::plan_profile_removal,
+            mutation::cancel_profile_removal,
+            mutation::remove_profile,
+            execute,
+            cancel,
+        }
+    };
+}
+
+macro_rules! tauri_handler {
+    ($($handler:path),+ $(,)?) => {
+        tauri::generate_handler![$($handler),+]
+    };
+}
+
+#[cfg(test)]
+macro_rules! handler_paths {
+    ($($handler:path),+ $(,)?) => {
+        &[$(stringify!($handler)),+]
+    };
+}
+
+#[cfg(test)]
+const IPC_HANDLER_PATHS: &[&str] = ipc_surface!(handler_paths);
+
 struct TauriPromptEmitter {
     handle: tauri::AppHandle,
 }
@@ -299,39 +355,7 @@ fn main() -> ExitCode {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            startup,
-            secrets_report,
-            direct::next_action,
-            direct::defaults,
-            direct::resolved_setup,
-            direct::runner_catalog,
-            direct::dxvk_catalog,
-            direct::system_report,
-            direct::support_bundle_contents,
-            secrets::secrets_file_status,
-            secrets::unlock_secrets_file,
-            secrets::create_secrets_file,
-            secrets::change_secrets_file_passphrase,
-            secrets::remove_secrets_file,
-            secrets::seal_secrets_file,
-            secrets::answer_passphrase_prompt,
-            mutation::update_account,
-            mutation::update_profile,
-            mutation::update_settings,
-            mutation::store_password,
-            mutation::import_totp_secret,
-            mutation::use_pushed_codes,
-            mutation::disable_pushed_codes,
-            mutation::delete_secret,
-            mutation::forget_secrets,
-            mutation::set_never_store,
-            mutation::plan_profile_removal,
-            mutation::cancel_profile_removal,
-            mutation::remove_profile,
-            execute,
-            cancel
-        ])
+        .invoke_handler(ipc_surface!(tauri_handler))
         .run(context)
     {
         Ok(()) => ExitCode::SUCCESS,
@@ -346,9 +370,66 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use serde::Deserialize;
+
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Deserialize)]
+    struct ParityManifest {
+        commands: Vec<ParityRow>,
+    }
+
+    #[derive(Deserialize)]
+    struct ParityRow {
+        ipc: String,
+        cli: Vec<Vec<String>>,
+        shell_local: Option<String>,
+        equivalence: String,
+    }
+
+    #[test]
+    fn every_registered_ipc_command_has_one_exact_parity_row() -> TestResult {
+        let manifest: ParityManifest =
+            serde_json::from_str(include_str!("../../ipc-parity.json"))?;
+        let registered: BTreeSet<&str> = IPC_HANDLER_PATHS
+            .iter()
+            .filter_map(|path| path.rsplit("::").next().map(str::trim))
+            .collect();
+        let declared: BTreeSet<&str> = manifest
+            .commands
+            .iter()
+            .map(|row| row.ipc.as_str())
+            .collect();
+
+        assert_eq!(
+            declared.len(),
+            manifest.commands.len(),
+            "an IPC command appears more than once in the parity table"
+        );
+        assert_eq!(registered, declared);
+        for row in manifest.commands {
+            let has_cli = !row.cli.is_empty() && row.cli.iter().all(|route| !route.is_empty());
+            let has_shell_reason = row
+                .shell_local
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty());
+            assert!(
+                has_cli ^ has_shell_reason,
+                "{} must have CLI routes or one shell-local justification, exclusively",
+                row.ipc
+            );
+            assert!(
+                !row.equivalence.trim().is_empty(),
+                "{} does not state why its CLI route is equivalent",
+                row.ipc
+            );
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn startup_waits_for_core_initialization() -> TestResult {
