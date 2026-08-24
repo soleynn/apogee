@@ -403,8 +403,7 @@ mod tests {
 
     #[test]
     fn every_registered_ipc_command_has_one_exact_parity_row() -> TestResult {
-        let manifest: ParityManifest =
-            serde_json::from_str(include_str!("../../ipc-parity.json"))?;
+        let manifest: ParityManifest = serde_json::from_str(include_str!("../../ipc-parity.json"))?;
         let registered: BTreeSet<&str> = IPC_HANDLER_PATHS
             .iter()
             .filter_map(|path| path.rsplit("::").next().map(str::trim))
@@ -435,9 +434,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| !reason.trim().is_empty());
             assert!(
-                usize::from(has_cli)
-                    + usize::from(has_operations)
-                    + usize::from(has_shell_reason)
+                usize::from(has_cli) + usize::from(has_operations) + usize::from(has_shell_reason)
                     == 1,
                 "{} must have direct CLI routes, leaf operations, or one shell-local justification, exclusively",
                 row.ipc
@@ -460,7 +457,11 @@ mod tests {
                 );
                 assert_eq!(command::operation_ids(), operations);
             } else {
-                assert!(row.operations.is_empty(), "{} owns unexpected leaf operations", row.ipc);
+                assert!(
+                    row.operations.is_empty(),
+                    "{} owns unexpected leaf operations",
+                    row.ipc
+                );
             }
         }
         Ok(())

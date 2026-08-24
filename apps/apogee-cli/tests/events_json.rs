@@ -18,27 +18,27 @@ fn run(home: &Path, args: &[&str]) -> std::io::Result<Output> {
         .output()
 }
 
-fn json_lines(output: &Output) -> Vec<Value> {
+fn json_lines(output: &Output) -> Result<Vec<Value>, serde_json::Error> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     let lines = stdout
         .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("every line is one JSON value"))
-        .collect::<Vec<_>>();
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
     assert!(!lines.is_empty());
     assert!(lines.iter().all(Value::is_object));
     assert_eq!(
         lines.last().and_then(|line| line["kind"].as_str()),
         Some("outcome")
     );
-    lines
+    Ok(lines)
 }
 
 #[test]
 fn first_run_read_is_jsonl_from_the_core_stream() -> TestResult {
     let home = TempDir::new()?;
     let output = run(home.path(), &["--events-json", "first-run"])?;
-    let lines = json_lines(&output);
+    let lines = json_lines(&output)?;
 
     assert!(lines.iter().any(|line| line["kind"] == "firstRun"));
     Ok(())
@@ -71,7 +71,7 @@ fn import_preview_is_jsonl_from_the_core_stream() -> TestResult {
             "--dry-run",
         ],
     )?;
-    let lines = json_lines(&output);
+    let lines = json_lines(&output)?;
 
     assert!(lines.iter().any(|line| line["kind"] == "import"));
     Ok(())
@@ -91,7 +91,7 @@ fn support_bundle_is_written_while_stdout_stays_jsonl() -> TestResult {
             &output_path_text,
         ],
     )?;
-    let lines = json_lines(&output);
+    let lines = json_lines(&output)?;
 
     assert!(lines.iter().any(|line| line["kind"] == "supportBundle"));
     assert!(output_path.is_file());

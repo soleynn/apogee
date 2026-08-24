@@ -488,10 +488,7 @@ mod tests {
                 }),
             ),
             ("firstRun", Event::FirstRun(Box::default())),
-            (
-                "notice",
-                Event::Notice(Notice::ClockSkew { seconds: -45 }),
-            ),
+            ("notice", Event::Notice(Notice::ClockSkew { seconds: -45 })),
             (
                 "error",
                 Event::Error(apogee_core::CoreError::Launch {
