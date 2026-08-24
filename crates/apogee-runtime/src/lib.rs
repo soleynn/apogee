@@ -399,6 +399,7 @@ impl Runtime {
         let path = cache.join(".fetch.lock");
         let file = tokio::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&path)
             .await
