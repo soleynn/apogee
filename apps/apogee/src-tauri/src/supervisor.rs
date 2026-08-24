@@ -140,13 +140,16 @@ fn observe_event<A: AssetRegistrar + ?Sized>(
                 import: crate::dto::ImportDto::from_observed(import, Some(scan_id)),
             }
         }
-        Event::FirstRun(checkpoint) => EventDto::FirstRun {
-            code: event.code(),
-            first_run: Box::new(crate::dto::first_run::FirstRunDto::from_observed(
-                checkpoint,
-                Some(navigation),
-            )),
-        },
+        Event::FirstRun(checkpoint) => {
+            let snapshot = navigation.replace_first_run(checkpoint);
+            EventDto::FirstRun {
+                code: event.code(),
+                first_run: Box::new(crate::dto::first_run::FirstRunDto::from_observed(
+                    checkpoint,
+                    Some(&snapshot),
+                )),
+            }
+        }
         _ => EventDto::from(event),
     }
 }
@@ -489,6 +492,51 @@ mod tests {
                 .is_none()
         );
         assert!(NavigationState::default().first_run_game(game_id).is_none());
+
+        let next_import_path = std::path::PathBuf::from("private/import-next");
+        let next_game_path = std::path::PathBuf::from("private/game-next");
+        let next_checkpoint = apogee_core::FirstRunCheckpoint {
+            import: apogee_core::ImportState::Candidates(vec![
+                apogee_core::FirstRunImportCandidate {
+                    path: next_import_path.clone(),
+                    source: apogee_core::FirstRunImportSource::Native,
+                },
+            ]),
+            game_candidates: vec![apogee_core::GameCandidate {
+                path: next_game_path.clone(),
+                state: apogee_core::GameCandidateState::Current {
+                    installed_bytes: 84,
+                },
+            }],
+            ..apogee_core::FirstRunCheckpoint::default()
+        };
+        let next_event = observe_event(
+            &Event::FirstRun(Box::new(next_checkpoint)),
+            Uuid::new_v4(),
+            &navigation,
+            &NoAssets,
+        );
+        let next_json = serde_json::to_value(next_event).unwrap_or_default();
+        let next_import_id = next_json["firstRun"]["import"]["value"][0]["id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("replacement import candidate id");
+        let next_game_id = next_json["firstRun"]["gameCandidates"][0]["id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("replacement game candidate id");
+
+        assert_eq!(navigation.first_run_capability_counts(), (1, 1));
+        assert!(navigation.first_run_import(import_id).is_none());
+        assert!(navigation.first_run_game(game_id).is_none());
+        assert!(matches!(
+            navigation.first_run_import(next_import_id),
+            Some(apogee_core::ImportDecision::Import(path)) if path == next_import_path
+        ));
+        assert!(matches!(
+            navigation.first_run_game(next_game_id),
+            Some(apogee_core::GameChoice::Existing { path, .. }) if path == next_game_path
+        ));
     }
 
     impl EventSink for VecSink {

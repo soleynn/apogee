@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::path::PathDto;
-use crate::navigation::NavigationState;
+use crate::navigation::FirstRunSnapshot;
 
 /// Everything needed to resume or render initial setup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -39,16 +39,22 @@ impl From<&FirstRunCheckpoint> for FirstRunDto {
 impl FirstRunDto {
     pub(crate) fn from_observed(
         checkpoint: &FirstRunCheckpoint,
-        navigation: Option<&NavigationState>,
+        snapshot: Option<&FirstRunSnapshot>,
     ) -> Self {
         Self {
             legibility: checkpoint.legibility.as_ref().map(LegibilityDto::from),
-            import: ImportStateDto::from_observed(&checkpoint.import, navigation),
+            import: ImportStateDto::from_observed(&checkpoint.import, snapshot),
             account: checkpoint.account.as_ref().map(AccountChoiceDto::from),
             game_candidates: checkpoint
                 .game_candidates
                 .iter()
-                .map(|candidate| GameCandidateDto::from_observed(candidate, navigation))
+                .enumerate()
+                .map(|(index, candidate)| {
+                    GameCandidateDto::from_observed(
+                        candidate,
+                        snapshot.and_then(|value| value.game_id(index)),
+                    )
+                })
                 .collect(),
             game: checkpoint.game.as_ref().map(GameChoiceDto::from),
             credential_backends: checkpoint
@@ -159,15 +165,19 @@ impl From<&ImportState> for ImportStateDto {
 }
 
 impl ImportStateDto {
-    fn from_observed(state: &ImportState, navigation: Option<&NavigationState>) -> Self {
+    fn from_observed(state: &ImportState, snapshot: Option<&FirstRunSnapshot>) -> Self {
         match state {
             ImportState::DiscoveryPending => Self::DiscoveryPending,
             ImportState::NoneFound => Self::NoneFound,
             ImportState::Candidates(candidates) => Self::Candidates(
                 candidates
                     .iter()
-                    .map(|candidate| {
-                        FirstRunImportCandidateDto::from_observed(candidate, navigation)
+                    .enumerate()
+                    .map(|(index, candidate)| {
+                        FirstRunImportCandidateDto::from_observed(
+                            candidate,
+                            snapshot.and_then(|value| value.import_id(index)),
+                        )
                     })
                     .collect(),
             ),
@@ -187,14 +197,9 @@ pub(crate) struct FirstRunImportCandidateDto {
 }
 
 impl FirstRunImportCandidateDto {
-    fn from_observed(
-        candidate: &FirstRunImportCandidate,
-        navigation: Option<&NavigationState>,
-    ) -> Self {
+    fn from_observed(candidate: &FirstRunImportCandidate, id: Option<Uuid>) -> Self {
         Self {
-            id: navigation.map_or_else(Uuid::nil, |state| {
-                state.register_first_run_import(candidate.clone())
-            }),
+            id: id.unwrap_or_else(Uuid::nil),
             display: candidate.path.to_string_lossy().into_owned(),
             source: FirstRunImportSourceDto::from(candidate.source),
         }
@@ -347,11 +352,9 @@ pub(crate) struct GameCandidateDto {
 }
 
 impl GameCandidateDto {
-    fn from_observed(candidate: &GameCandidate, navigation: Option<&NavigationState>) -> Self {
+    fn from_observed(candidate: &GameCandidate, id: Option<Uuid>) -> Self {
         Self {
-            id: navigation.map_or_else(Uuid::nil, |state| {
-                state.register_first_run_game(candidate.clone())
-            }),
+            id: id.unwrap_or_else(Uuid::nil),
             display: candidate.path.to_string_lossy().into_owned(),
             state: GameCandidateStateDto::from(&candidate.state),
         }

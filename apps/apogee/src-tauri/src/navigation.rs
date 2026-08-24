@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use apogee_core::{
-    Core, ExistingGameState, FirstRunImportCandidate, GameCandidate, GameCandidateState,
-    GameChoice, ImportDecision, ImportPlan, ImportScan, SupportBundleData, Uuid,
+    Core, ExistingGameState, FirstRunCheckpoint, FirstRunImportCandidate, GameCandidate,
+    GameCandidateState, GameChoice, ImportDecision, ImportPlan, ImportScan, SupportBundleData,
+    Uuid,
 };
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
@@ -91,6 +92,26 @@ struct Registry {
     next_sequence: u64,
 }
 
+/// Opaque ids minted for one observed first-run checkpoint.
+///
+/// The registry replaces both candidate sets under one lock before this snapshot is projected into
+/// a DTO. A later checkpoint therefore invalidates every id from the previous generation instead of
+/// accumulating capabilities for the lifetime of the process.
+pub(crate) struct FirstRunSnapshot {
+    import_ids: Vec<Uuid>,
+    game_ids: Vec<Uuid>,
+}
+
+impl FirstRunSnapshot {
+    pub(crate) fn import_id(&self, index: usize) -> Option<Uuid> {
+        self.import_ids.get(index).copied()
+    }
+
+    pub(crate) fn game_id(&self, index: usize) -> Option<Uuid> {
+        self.game_ids.get(index).copied()
+    }
+}
+
 impl NavigationState {
     pub(crate) fn register_folder(&self, path: PathBuf) -> FolderSelectionDto {
         let id = Uuid::new_v4();
@@ -119,10 +140,33 @@ impl NavigationState {
         ))
     }
 
-    pub(crate) fn register_first_run_import(&self, candidate: FirstRunImportCandidate) -> Uuid {
-        let id = Uuid::new_v4();
-        self.lock().first_run_imports.insert(id, candidate);
-        id
+    pub(crate) fn replace_first_run(&self, checkpoint: &FirstRunCheckpoint) -> FirstRunSnapshot {
+        let mut registry = self.lock();
+        registry.first_run_imports.clear();
+        registry.first_run_games.clear();
+
+        let import_candidates = match &checkpoint.import {
+            apogee_core::ImportState::Candidates(candidates) => candidates.as_slice(),
+            _ => &[],
+        };
+        let mut import_ids = Vec::with_capacity(import_candidates.len());
+        for candidate in import_candidates {
+            let id = Uuid::new_v4();
+            registry.first_run_imports.insert(id, candidate.clone());
+            import_ids.push(id);
+        }
+
+        let mut game_ids = Vec::with_capacity(checkpoint.game_candidates.len());
+        for candidate in &checkpoint.game_candidates {
+            let id = Uuid::new_v4();
+            registry.first_run_games.insert(id, candidate.clone());
+            game_ids.push(id);
+        }
+
+        FirstRunSnapshot {
+            import_ids,
+            game_ids,
+        }
     }
 
     pub(crate) fn first_run_import(&self, id: Uuid) -> Option<ImportDecision> {
@@ -130,12 +174,6 @@ impl NavigationState {
             .first_run_imports
             .get(&id)
             .map(|candidate| ImportDecision::Import(candidate.path.clone()))
-    }
-
-    pub(crate) fn register_first_run_game(&self, candidate: GameCandidate) -> Uuid {
-        let id = Uuid::new_v4();
-        self.lock().first_run_games.insert(id, candidate);
-        id
     }
 
     pub(crate) fn first_run_game(&self, id: Uuid) -> Option<GameChoice> {
@@ -151,6 +189,15 @@ impl NavigationState {
             path: candidate.path.clone(),
             state,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_run_capability_counts(&self) -> (usize, usize) {
+        let registry = self.lock();
+        (
+            registry.first_run_imports.len(),
+            registry.first_run_games.len(),
+        )
     }
 
     pub(crate) fn register_evidence(&self, run: Uuid, path: PathBuf) -> Uuid {

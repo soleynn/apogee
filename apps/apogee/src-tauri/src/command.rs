@@ -525,17 +525,25 @@ mod tests {
     fn first_run_capabilities_restore_the_observed_core_values() {
         let navigation = NavigationState::default();
         let import_path = std::path::PathBuf::from("private/import");
-        let import = navigation.register_first_run_import(apogee_core::FirstRunImportCandidate {
-            path: import_path.clone(),
-            source: apogee_core::FirstRunImportSource::Core,
-        });
         let game_path = std::path::PathBuf::from("private/game");
-        let game = navigation.register_first_run_game(apogee_core::GameCandidate {
-            path: game_path.clone(),
-            state: apogee_core::GameCandidateState::Current {
-                installed_bytes: 42,
-            },
-        });
+        let checkpoint = apogee_core::FirstRunCheckpoint {
+            import: apogee_core::ImportState::Candidates(vec![
+                apogee_core::FirstRunImportCandidate {
+                    path: import_path.clone(),
+                    source: apogee_core::FirstRunImportSource::Core,
+                },
+            ]),
+            game_candidates: vec![apogee_core::GameCandidate {
+                path: game_path.clone(),
+                state: apogee_core::GameCandidateState::Current {
+                    installed_bytes: 42,
+                },
+            }],
+            ..apogee_core::FirstRunCheckpoint::default()
+        };
+        let snapshot = navigation.replace_first_run(&checkpoint);
+        let import = snapshot.import_id(0).expect("import capability");
+        let game = snapshot.game_id(0).expect("game capability");
         let import_command = format!(
             r#"{{"kind":"firstRun","request":{{"kind":"advance","value":{{"kind":"decideImport","value":{{"choice":"import","candidate":"{import}"}}}}}}}}"#
         );
