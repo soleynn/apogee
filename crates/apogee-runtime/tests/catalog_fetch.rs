@@ -19,6 +19,7 @@
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{CatalogError, Runtime, RuntimeError, RuntimePaths};
@@ -42,6 +43,26 @@ const CATALOG: &str = r#"{ "version": 1, "runners": [], "tools": [], "dxvk": [] 
 fn published(root: &Path) -> (PathBuf, PathBuf) {
     let cache = root.join("runners").join(".catalog");
     (cache.join("catalog.json"), cache.join("catalog.json.sig"))
+}
+
+fn runtime_trusting(root: &Path, servers: &[&ChaosServer]) -> Result<Runtime, Box<dyn Error>> {
+    let certificates = servers
+        .iter()
+        .map(|server| {
+            server
+                .cert_der()
+                .ok_or_else(|| std::io::Error::other("server is not running over tls"))
+                .map(<[u8]>::to_vec)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let certificates = certificates.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    Ok(Runtime::new(
+        fetcher_trusting(&certificates)?,
+        RuntimePaths {
+            runners: root.join("runners"),
+            prefixes: root.join("prefixes"),
+        },
+    ))
 }
 
 /// A runtime whose fetcher trusts every server below, plus the three servers: the manifest, a
@@ -73,20 +94,78 @@ impl Servers {
     }
 
     fn runtime(&self, root: &Path) -> Result<Runtime, Box<dyn Error>> {
-        let der = |s: &ChaosServer| -> Result<Vec<u8>, Box<dyn Error>> {
-            Ok(s.cert_der()
-                .ok_or("server is not running over tls")?
-                .to_vec())
-        };
-        let (m, g, b) = (der(&self.manifest)?, der(&self.good)?, der(&self.bad)?);
-        Ok(Runtime::new(
-            fetcher_trusting(&[&m, &g, &b])?,
-            RuntimePaths {
-                runners: root.join("runners"),
-                prefixes: root.join("prefixes"),
-            },
-        ))
+        runtime_trusting(root, &[&self.manifest, &self.good, &self.bad])
     }
+}
+
+/// Independent runtimes and processes can publish through the same fixed staging directory. Two
+/// overlapping fetches must therefore share one publication turn instead of deleting or renaming
+/// the other's files.
+#[tokio::test]
+async fn concurrent_catalog_fetches_serialize_publication() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = ChaosServer::serving(CATALOG.as_bytes().to_vec())
+        .tls()
+        .chunk(1)
+        .throttle(Duration::from_millis(5))
+        .start()
+        .await
+        .expect("manifest server");
+    let signature = ChaosServer::serving(sign_manifest(CATALOG.as_bytes()).to_vec())
+        .tls()
+        .start()
+        .await
+        .expect("signature server");
+    let first = runtime_trusting(dir.path(), &[&manifest, &signature]).expect("first runtime");
+    let second = runtime_trusting(dir.path(), &[&manifest, &signature]).expect("second runtime");
+    let manifest_url = manifest.url("manifest.json");
+    let signature_url = signature.url("manifest.json.sig");
+    let key = [test_verifying_key_bytes()];
+    let cancel = CancellationToken::new();
+
+    let (left, right) = tokio::join!(
+        first.fetch_catalog_for_testing(&manifest_url, &signature_url, &key, &cancel),
+        second.fetch_catalog_for_testing(&manifest_url, &signature_url, &key, &cancel),
+    );
+
+    assert_eq!(left.expect("first fetch").version, 1);
+    assert_eq!(right.expect("second fetch").version, 1);
+    assert_eq!(manifest.stats().requests(), 2);
+    assert_eq!(manifest.stats().peak_concurrency(), 1);
+}
+
+/// Waiting for another publisher must remain cancellable. In particular, cancellation must stop
+/// before either catalog request starts, rather than becoming visible only after the lock owner
+/// finishes its network work.
+#[tokio::test]
+async fn a_catalog_fetch_cancelled_while_waiting_starts_no_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let servers = Servers::start().await.expect("servers");
+    let runtime = servers.runtime(dir.path()).expect("runtime");
+    let cache = dir.path().join("runners").join(".catalog");
+    std::fs::create_dir_all(&cache).expect("catalog cache");
+    let publication_lock = std::fs::File::create(cache.join(".fetch.lock")).expect("lock file");
+    publication_lock.lock().expect("hold publication lock");
+    let cancel = CancellationToken::new();
+    let manifest_url = servers.manifest.url("manifest.json");
+    let signature_url = servers.good.url("manifest.json.sig");
+    let keys = [test_verifying_key_bytes()];
+
+    let fetch = runtime.fetch_catalog_for_testing(&manifest_url, &signature_url, &keys, &cancel);
+    tokio::pin!(fetch);
+    tokio::select! {
+        result = &mut fetch => panic!("fetch completed while the publication lock was held: {result:?}"),
+        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    cancel.cancel();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), fetch)
+        .await
+        .expect("cancelled lock waiter must stop promptly")
+        .expect_err("cancelled lock waiter");
+    assert!(error.is_cancellation(), "typed cancellation: {error:?}");
+    assert_eq!(servers.manifest.stats().requests(), 0);
+    assert_eq!(servers.good.stats().requests(), 0);
 }
 
 /// The fetch is the only thing that establishes the catalog is authentic, so a signature that does not
