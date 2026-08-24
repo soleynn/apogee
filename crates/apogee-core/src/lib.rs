@@ -35,7 +35,9 @@ pub use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport};
 pub use apogee_addons::backup::{RestoreReport, RestoredRoot};
 // Under its own name: the addon layer already has a public `AddonOutcome`, and re-exporting a second,
 // different type under that name gives a shell two things it cannot tell apart from the import alone.
-pub use apogee_addons::{AddonEvent, ExternalAddon, Outcome, RunIn, SetupEvent, Trigger};
+pub use apogee_addons::{
+    AddonEvent, ExternalAddon, ExternalAddonProblem, Outcome, RunIn, SetupEvent, Trigger,
+};
 // Three names only: a shell chooses where a code comes from, renders what an imported secret will not
 // be accepted for, and says that the user asked for a port on their network to be opened. The handle,
 // the profile, the code, the clock offset, the listener and its configuration all stay behind the

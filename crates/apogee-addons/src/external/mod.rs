@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use apogee_runtime::{CompanionSpec, Prefix, Runtime};
 
-pub use addon::{ExternalAddon, RunIn, Trigger};
+pub use addon::{ExternalAddon, ExternalAddonProblem, RunIn, Trigger};
 pub use event::{AddonEvent, AddonEvents};
 // Not public: every function that produces one is crate-private, so a caller outside could name the
 // type and never obtain one.
