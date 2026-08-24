@@ -1,10 +1,33 @@
 //! Explicitly selected error fields safe to send to the webview.
 
-use apogee_core::{CoreError, StoreError};
+use apogee_core::{CoreError, StableCode, StoreError};
 use serde::Serialize;
 use ts_rs::TS;
 
 use super::path::PathDto;
+
+/// A direct IPC failure. Core errors keep their safe selected fields; shell failures carry only a
+/// stable code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "IpcError.ts")]
+pub(crate) struct IpcErrorDto {
+    code: &'static str,
+    error: Option<Box<CoreErrorDto>>,
+}
+
+impl IpcErrorDto {
+    pub(crate) const fn shell(code: &'static str) -> Self {
+        Self { code, error: None }
+    }
+
+    pub(crate) fn core(error: &CoreError) -> Self {
+        Self {
+            code: error.code(),
+            error: Some(Box::new(CoreErrorDto::from(error))),
+        }
+    }
+}
 
 /// The aggregate error kind without `Display` text or nested protocol excerpts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
