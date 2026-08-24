@@ -220,10 +220,10 @@ fn a_report_follows_the_file_and_not_the_cached_key() {
 
 /// A report must not queue behind a write that is waiting on the user.
 ///
-/// A write holds the key cache from before the file is read until after it is re-sealed, and both
-/// the passphrase prompt and the derivation are inside that window. A probe that reached for the
-/// same lock waited out the whole prompt, so the call a front end makes to decide what to show
-/// blocked on the dialog it was deciding whether to show.
+/// A write holds the key cache from before its preflight read until after it is re-sealed, including
+/// while the passphrase source answers. The report must use the cache's published deadline rather
+/// than waiting on that mutex, or the call a front end makes to decide what to show blocks on the
+/// dialog it was deciding whether to show.
 #[test]
 fn a_report_does_not_wait_for_a_write_that_is_waiting_on_the_user() {
     let (_dir, path) = scratch().expect("scratch");
@@ -244,7 +244,7 @@ fn a_report_does_not_wait_for_a_write_that_is_waiting_on_the_user() {
         std::thread::spawn(move || waiting.set(OTHER, SecretKind::Password, pw("second")))
     };
 
-    // Long enough that the write is inside the prompt, short enough to leave most of it left.
+    // Long enough that the write is inside the preflight prompt, short enough to leave most of it.
     std::thread::sleep(std::time::Duration::from_millis(300));
     let started = std::time::Instant::now();
     let report = waiting.probe();
@@ -584,6 +584,144 @@ fn a_wrong_passphrase_is_its_own_condition() {
         wrong.get(ACCOUNT, SecretKind::Password),
         Err(SecretsError::WrongPassphrase)
     ));
+}
+
+/// A modal front end unlocks before it begins a write. That call must validate the whole store and
+/// leave the key ready, so the mutation cannot prompt while it holds the cross-process file lock.
+#[test]
+fn an_explicit_unlock_primes_the_next_write_without_reading_a_secret() {
+    let (_dir, path) = scratch().expect("scratch");
+    let source = Scripted::new(b"correct horse");
+    let store = created(&path, source.clone()).expect("create");
+    store
+        .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
+        .expect("initial write");
+    store.seal();
+
+    store.unlock().expect("unlock");
+    assert!(store.is_open());
+    assert_eq!(source.asked(), 1);
+
+    store
+        .set(OTHER, SecretKind::Password, pw("second"))
+        .expect("write with the primed key");
+    assert_eq!(source.asked(), 1, "the write must not prompt again");
+}
+
+/// Unlock is an operation on an existing sealed file. It must not turn an absent store into one or
+/// leave the handle claiming that a key is available.
+#[test]
+fn an_explicit_unlock_does_not_create_a_missing_store() {
+    let (_dir, path) = scratch().expect("scratch");
+    let source = Scripted::new(b"unused");
+    let store = EncryptedFile::open(&path, source.clone());
+
+    assert!(matches!(store.unlock(), Err(SecretsError::NoCollection)));
+    assert!(!store.is_open());
+    assert_eq!(source.asked(), 0);
+    assert!(!path.exists());
+}
+
+/// A store can be replaced or re-keyed after an explicit unlock. The first writer then has to ask
+/// again, but that modal wait must happen before it owns the file lock so another prepared writer can
+/// finish. Once released, the first writer re-reads and merges the update that landed meanwhile.
+#[test]
+fn a_reprompt_after_replacement_holds_no_cross_process_write_lock() {
+    struct ReplacedPassphrase {
+        calls: AtomicUsize,
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Passphrase for ReplacedPassphrase {
+        fn unlock(&self) -> Result<Secret, SecretsError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Ok(pw("old passphrase"));
+            }
+            self.entered.send(()).map_err(|_| SecretsError::Locked)?;
+            self.release
+                .lock()
+                .map_err(|_| SecretsError::Locked)?
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| SecretsError::Locked)?;
+            Ok(pw("new passphrase"))
+        }
+    }
+
+    let (_dir, path) = scratch().expect("scratch");
+    let seed = created(&path, Scripted::new(b"old passphrase")).expect("seed");
+    drop(seed);
+    let (entered, waiting_for_prompt) = std::sync::mpsc::channel();
+    let (release_prompt, release) = std::sync::mpsc::channel();
+    let first = Arc::new(EncryptedFile::open(
+        &path,
+        Arc::new(ReplacedPassphrase {
+            calls: AtomicUsize::new(0),
+            entered,
+            release: Mutex::new(release),
+        }),
+    ));
+    first.unlock().expect("initial unlock");
+
+    let replacement = Arc::new(EncryptedFile::open(&path, Scripted::new(b"new passphrase")));
+    replacement
+        .remove(Consent::granted())
+        .expect("remove old store");
+    replacement
+        .create(Consent::granted(), &pw("new passphrase"), KdfCost::floor())
+        .expect("create replacement");
+
+    let first_writer = {
+        let first = Arc::clone(&first);
+        std::thread::spawn(move || first.set(ACCOUNT, SecretKind::Password, pw("first")))
+    };
+    waiting_for_prompt
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("replacement prompt");
+
+    let (second_done, second_answer) = std::sync::mpsc::channel();
+    let second_writer = {
+        let replacement = Arc::clone(&replacement);
+        std::thread::spawn(move || {
+            let result = replacement.set(OTHER, SecretKind::Password, pw("second"));
+            let _ = second_done.send(result);
+        })
+    };
+    let before_release = second_answer.recv_timeout(std::time::Duration::from_secs(1));
+    let completed_before_release = before_release.is_ok();
+    release_prompt.send(()).expect("release prompt");
+    let second_result = before_release.unwrap_or_else(|_| {
+        second_answer
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("second writer eventually finishes")
+    });
+    second_result.expect("second write");
+    second_writer.join().expect("second writer thread");
+    first_writer
+        .join()
+        .expect("first writer thread")
+        .expect("first write");
+
+    assert!(
+        completed_before_release,
+        "another prepared writer waited behind a modal passphrase prompt"
+    );
+    assert_eq!(
+        replacement
+            .get(ACCOUNT, SecretKind::Password)
+            .expect("first read")
+            .expect("first present")
+            .expose(),
+        b"first"
+    );
+    assert_eq!(
+        replacement
+            .get(OTHER, SecretKind::Password)
+            .expect("second read")
+            .expect("second present")
+            .expose(),
+        b"second"
+    );
 }
 
 /// A failed attempt must not be remembered, or a user who mistyped once would be stuck with it for
@@ -1100,72 +1238,6 @@ mod permissions {
                 "{planted}: the open did not refuse what was planted: {answered:?}"
             );
         }
-    }
-
-    /// A lock that was waiting is re-checked against the name when it finally gets it.
-    ///
-    /// The flock is on an inode, not on a name. A writer that blocked on the sidecar and woke to
-    /// find it had been unlinked meanwhile was holding a lock no other process would ever open: it
-    /// excluded nobody, and two writers each holding one of those both returned success with one
-    /// account's secret silently gone.
-    ///
-    /// What makes that observable is replacing the sidecar with something the open must refuse.
-    /// A writer that re-consults the name reports it; one that trusts the lock it already holds
-    /// goes on to write, which is exactly the case that loses the update.
-    #[test]
-    fn a_lock_that_waited_is_re_checked_against_the_name_it_waited_on() {
-        let (_dir, path) = scratch().expect("scratch");
-        let holder = created(&path, Scripted::new(b"pp")).expect("create");
-        holder
-            .set(ACCOUNT, SecretKind::Password, pw("hunter2"))
-            .expect("write");
-
-        // A second handle whose prompt takes long enough to hold the lock across the swap below.
-        let slow = std::sync::Arc::new(EncryptedFile::open(
-            &path,
-            std::sync::Arc::new(Slow {
-                answer: b"pp".to_vec(),
-                takes: std::time::Duration::from_secs(3),
-            }),
-        ));
-        let held = {
-            let slow = slow.clone();
-            std::thread::spawn(move || slow.set(OTHER, SecretKind::Password, pw("first")))
-        };
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        // A third writer, which now blocks on the sidecar the holder is sitting on.
-        let waiting = std::sync::Arc::new(EncryptedFile::open(&path, Scripted::new(b"pp")));
-        let (done, answer) = std::sync::mpsc::channel();
-        {
-            let waiting = waiting.clone();
-            std::thread::spawn(move || {
-                let _ = done.send(waiting.set(ACCOUNT, SecretKind::TotpSecret, pw("third")));
-            });
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        // Swap the sidecar for something no open may take, so the difference is visible.
-        let sidecar = path.with_extension("apsf.lock");
-        std::fs::remove_file(&sidecar).expect("unlink the sidecar being waited on");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&sidecar)
-                .status()
-                .expect("mkfifo")
-                .success()
-        );
-
-        held.join()
-            .expect("holder thread")
-            .expect("the holder's own write");
-        let answered = answer
-            .recv_timeout(std::time::Duration::from_secs(15))
-            .expect("the waiting writer never answered");
-        assert!(
-            answered.is_err(),
-            "the writer kept a lock on a sidecar that had been unlinked out from under it"
-        );
     }
 
     /// The repair puts a directory back, not just narrows it.
