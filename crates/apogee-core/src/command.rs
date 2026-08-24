@@ -90,6 +90,7 @@ pub enum Command {
     /// Fetch pre-login display data (news, gate status, banners).
     Frontier(FrontierQuery),
     SupportBundle {
+        profile: Option<Uuid>,
         facts: Vec<(String, String)>,
     },
 }
@@ -129,6 +130,14 @@ impl SupportBundleData {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    /// Atomically publish this already-redacted archive without replacing an existing file.
+    pub fn write_to(
+        &self,
+        destination: impl AsRef<std::path::Path>,
+    ) -> Result<(), crate::SupportError> {
+        crate::support::write_encoded_support_bundle(destination.as_ref(), &self.0)
     }
 
     #[must_use]
@@ -214,8 +223,9 @@ impl fmt::Debug for Command {
                 f.debug_tuple("ImportXivLauncher").field(command).finish()
             }
             Command::Frontier(query) => f.debug_tuple("Frontier").field(query).finish(),
-            Command::SupportBundle { facts } => f
+            Command::SupportBundle { profile, facts } => f
                 .debug_struct("SupportBundle")
+                .field("profile", profile)
                 .field(
                     "facts",
                     &facts.iter().map(|(name, _)| name).collect::<Vec<_>>(),

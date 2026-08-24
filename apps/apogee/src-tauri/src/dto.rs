@@ -15,6 +15,8 @@ use apogee_core::{
     AddonEvent, Event, FlowState, Notice, Outcome, PatchProgress, PrefixReport, ProgramStatus,
     Recoveries, Repo, RunOutcome, SetupEvent, StableCode,
 };
+#[cfg(test)]
+use apogee_core::{BannerData, FrontierData, GateData, NewsData, NewsRow};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -458,6 +460,90 @@ mod tests {
         for kind in kinds {
             assert!(event.contains(&format!(r#""kind": "{kind}""#)));
         }
+    }
+
+    #[test]
+    fn representative_events_match_the_shared_terminal_wire_contract() {
+        let goldens: serde_json::Value =
+            serde_json::from_str(include_str!("../../event-wire-golden.json")).unwrap_or_default();
+        let cases = [
+            (
+                "state",
+                Event::State(FlowState::PatchesPending {
+                    count: 7,
+                    bytes: 4096,
+                }),
+            ),
+            (
+                "progress",
+                Event::Progress(apogee_core::Progress {
+                    completed: 64,
+                    total: 128,
+                    recoveries: Recoveries {
+                        retries: 1,
+                        rotations: 2,
+                        stalls: 3,
+                        blocks_refetched: 4,
+                        sources_dropped: 5,
+                        demoted: true,
+                    },
+                }),
+            ),
+            (
+                "frontierNews",
+                Event::Frontier(FrontierData::News(NewsData {
+                    news: vec![NewsRow {
+                        id: "headline-1".to_owned(),
+                        date: "2026-08-24".to_owned(),
+                        title: "Launcher news".to_owned(),
+                        tag: "news".to_owned(),
+                    }],
+                    topics: Vec::new(),
+                    pinned: Vec::new(),
+                })),
+            ),
+            (
+                "frontierGate",
+                Event::Frontier(FrontierData::Gate(GateData {
+                    open: false,
+                    messages: vec!["Maintenance".to_owned()],
+                    news: vec!["notice-1".to_owned()],
+                })),
+            ),
+            (
+                "frontierBanners",
+                Event::Frontier(FrontierData::Banners(vec![BannerData {
+                    id: "banner-1".to_owned(),
+                    artwork: None,
+                    order_priority: "1".to_owned(),
+                    fix_order: Some("2".to_owned()),
+                }])),
+            ),
+            ("firstRun", Event::FirstRun(Box::default())),
+            ("notice", Event::Notice(Notice::ClockSkew { seconds: -45 })),
+            (
+                "error",
+                Event::Error(apogee_core::CoreError::Launch {
+                    detail: "token=planted-secret".to_owned(),
+                }),
+            ),
+            ("outcome", Event::Outcome(RunOutcome::Cancelled)),
+        ];
+
+        for (name, event) in cases {
+            let value = serde_json::to_value(EventDto::from(&event)).unwrap_or_default();
+            assert_eq!(value, goldens[name], "{name}");
+            assert!(!value.to_string().contains("planted-secret"));
+        }
+
+        assert_eq!(
+            serde_json::to_value(EventDto::SupportBundle {
+                code: "event-support-bundle",
+                bytes: vec![1, 2, 3],
+            })
+            .unwrap_or_default(),
+            goldens["supportBundle"]
+        );
     }
 }
 

@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use std::{io::Cursor, io::Read};
 
 use apogee_otp::{ClockSkew, Otp, OtpSource, TotpParams};
 use apogee_secrets::{MemoryStore, Secret, SecretKind, SecretStore};
@@ -208,6 +209,13 @@ fn context_with_otp(
     FlowContext {
         transport,
         patch,
+        runtime: apogee_runtime::Runtime::new(
+            apogee_fetch::Fetcher::builder().build().unwrap(),
+            apogee_runtime::RuntimePaths {
+                runners: h.prefixes.path().join("runners"),
+                prefixes: h.prefixes.path().to_path_buf(),
+            },
+        ),
         launch,
         addons,
         steam,
@@ -270,7 +278,10 @@ async fn first_run_import_and_support_are_real_successful_streams() {
 
     let events = run(
         context(&h, transport(), launch(), NOW),
-        Command::SupportBundle { facts: Vec::new() },
+        Command::SupportBundle {
+            profile: Some(h.profile),
+            facts: Vec::new(),
+        },
     )
     .await;
     assert!(matches!(
@@ -278,6 +289,43 @@ async fn first_run_import_and_support_are_real_successful_streams() {
         [Event::SupportBundle(data), Event::Outcome(RunOutcome::Succeeded)]
             if data.bytes().starts_with(b"PK")
     ));
+    let Event::SupportBundle(data) = &events[0] else {
+        return;
+    };
+    let mut archive = zip::ZipArchive::new(Cursor::new(data.bytes())).unwrap();
+    let mut report = String::new();
+    archive
+        .by_name("system-report.txt")
+        .unwrap()
+        .read_to_string(&mut report)
+        .unwrap();
+    assert!(report.contains("runtime.runner=\"system-wine"));
+}
+
+#[tokio::test]
+async fn streamed_first_run_read_matches_the_direct_core_reading() {
+    let h = harness(false);
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakeLaunchBackend::exiting()),
+        1_700_000_000,
+    );
+    let direct = crate::composition::read_first_run_checkpoint(
+        ctx.store.clone(),
+        ctx.runtime.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let events = run(ctx, Command::FirstRun(FirstRunRequest::Read)).await;
+    let streamed = events.iter().find_map(|event| match event {
+        Event::FirstRun(checkpoint) => Some(checkpoint.as_ref()),
+        _ => None,
+    });
+
+    assert_eq!(streamed, Some(&direct));
 }
 
 fn states(events: &[Event]) -> Vec<FlowState> {

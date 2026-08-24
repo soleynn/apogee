@@ -110,6 +110,8 @@ pub(crate) enum CommandDto {
         query: FrontierQueryDto,
     },
     SupportBundle {
+        #[ts(type = "string | null")]
+        profile: Option<Uuid>,
         facts: Vec<CallerFactDto>,
     },
 }
@@ -171,7 +173,8 @@ impl CommandDto {
             Self::FirstRun { request } => Command::FirstRun(request.into_core()?),
             Self::ImportXivLauncher { request } => Command::ImportXivLauncher(request.into_core()?),
             Self::Frontier { query } => Command::Frontier(query.into_core()),
-            Self::SupportBundle { facts } => Command::SupportBundle {
+            Self::SupportBundle { profile, facts } => Command::SupportBundle {
+                profile,
                 facts: facts
                     .into_iter()
                     .map(|fact| (fact.name, fact.value))
@@ -403,6 +406,57 @@ pub(crate) struct CallerFactDto {
     value: String,
 }
 
+/// Every leaf operation the generic `execute` IPC command accepts.
+///
+/// The inventory is derived from the same generated discriminants the webview uses. Adding a
+/// command, subcommand, or first-run decision therefore changes this set without a second manual
+/// list that can drift.
+#[cfg(test)]
+pub(crate) fn operation_ids() -> std::collections::BTreeSet<String> {
+    let mut operations = tagged_kinds::<CommandDto>();
+    for family in ["prefix", "firstRun", "importXivLauncher", "frontier"] {
+        operations.remove(family);
+    }
+    operations.extend(
+        tagged_kinds::<PrefixActionDto>()
+            .into_iter()
+            .map(|kind| format!("prefix.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<FirstRunRequestDto>()
+            .into_iter()
+            .filter(|kind| kind != "advance")
+            .map(|kind| format!("firstRun.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<FirstRunTransitionDto>()
+            .into_iter()
+            .map(|kind| format!("firstRun.advance.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<ImportXivLauncherDto>()
+            .into_iter()
+            .map(|kind| format!("importXivLauncher.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<FrontierQueryDto>()
+            .into_iter()
+            .map(|kind| format!("frontier.{kind}")),
+    );
+    operations
+}
+
+#[cfg(test)]
+fn tagged_kinds<T: TS>() -> std::collections::BTreeSet<String> {
+    let declaration = T::decl(&ts_rs::Config::default());
+    let marker = r#""kind": ""#;
+    declaration
+        .split(marker)
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next().map(str::to_owned))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +507,29 @@ mod tests {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"saveAccount","value":{"squareEnixId":"person","kind":"unknown","neverSavePassword":true,"steamClient":"notRequired"}}}}"#;
 
         assert!(parse(command).is_none());
+    }
+
+    #[test]
+    fn first_run_discovery_transitions_have_a_typed_webview_shape() {
+        let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"recordRunners","value":[]}}}"#;
+
+        assert!(matches!(
+            parse(command),
+            Some(Command::FirstRun(FirstRunRequest::Advance(
+                FirstRunTransition::RecordRunners(readings)
+            ))) if readings.is_empty()
+        ));
+    }
+
+    #[test]
+    fn operation_inventory_is_derived_from_every_nested_command_family() {
+        let operations = operation_ids();
+
+        assert!(operations.contains("login"));
+        assert!(operations.contains("prefix.recreate"));
+        assert!(operations.contains("firstRun.advance.confirmLegibility"));
+        assert!(operations.contains("importXivLauncher.apply"));
+        assert!(operations.contains("frontier.gate"));
+        assert_eq!(operations.len(), 28);
     }
 }
