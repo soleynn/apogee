@@ -160,6 +160,29 @@
       "equivalence": "Consume a freshly confirmed core removal plan."
     },
     {
+      "ipc": "open_link",
+      "cli": [],
+      "shell_local": "The desktop asks the operating system to open a current core-issued row id; the terminal renders public rows without owning a window or an ambient browser action.",
+      "equivalence": "Presentation transport only; the URL is admitted and retained by core rather than accepted from either user interface."
+    },
+    {
+      "ipc": "reveal",
+      "cli": [],
+      "shell_local": "The desktop asks its file manager to reveal one closed launcher-owned target; the terminal already prints paths into its controlling terminal and performs no ambient file-manager action.",
+      "equivalence": "Presentation transport only; every target resolves from current core or process state."
+    },
+    {
+      "ipc": "activity_log",
+      "cli": [],
+      "shell_local": "The long-lived desktop process retains a bounded diagnostic list for its window; each terminal invocation writes diagnostics directly to its controlling terminal.",
+      "equivalence": "Process-local presentation diagnostics only."
+    },
+    {
+      "ipc": "save_support_bundle",
+      "cli": [["support-bundle", "--output", "apogee-support.zip"]],
+      "equivalence": "Publish core's same redacted archive without exposing its bytes or an arbitrary destination path to the webview."
+    },
+    {
       "ipc": "execute",
       "operations": [
         {"shell": "login", "cli": [["login", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate one profile with the same password and one-time-password sources."},

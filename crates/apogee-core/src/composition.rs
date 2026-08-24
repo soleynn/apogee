@@ -941,6 +941,40 @@ impl Core {
         stored_profile(&self.store, id)
     }
 
+    /// The selected profile's persisted game directory.
+    ///
+    /// A presentation layer uses this instead of reconstructing or accepting the path when it needs
+    /// to show the location in the platform file manager.
+    ///
+    /// # Errors
+    /// As [`Core::profile`].
+    pub fn game_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
+        Ok(self.profile(id)?.game_path)
+    }
+
+    /// The directory containing the selected profile's configuration backups.
+    ///
+    /// # Errors
+    /// As [`Core::profile`].
+    pub fn backup_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
+        let profile = self.profile(id)?;
+        Ok(crate::backup::profile_dir(&self.backups_dir, &profile))
+    }
+
+    /// The repair recycler beneath the selected profile's game directory.
+    ///
+    /// Repair quarantines unrecognized files here rather than deleting them. Keeping this path in
+    /// core prevents a presentation layer from duplicating that on-disk contract.
+    ///
+    /// # Errors
+    /// As [`Core::profile`].
+    pub fn repair_recycler_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
+        Ok(self
+            .profile(id)?
+            .game_path
+            .join("apogee_repair_recycler"))
+    }
+
     /// Every stored account.
     ///
     /// # Errors
@@ -1937,6 +1971,28 @@ mod tests {
         assert_eq!(
             config.secrets_path(),
             std::path::Path::new("/base/store/secrets.apsf")
+        );
+    }
+
+    #[test]
+    fn profile_owned_directories_are_resolved_from_persisted_state() {
+        let dir = TempDir::new().unwrap();
+        let config = CoreConfig::with_base(dir.path());
+        let backups = config.backups_dir.clone();
+        let core = Core::new(config).unwrap();
+        let account = Account::new("person", AccountKind::Standard);
+        let profile = Profile::new("Main", account.id, dir.path().join("game-root"));
+        core.save_account(&account).unwrap();
+        core.save_profile(&profile).unwrap();
+
+        assert_eq!(core.game_directory(profile.id).unwrap(), profile.game_path);
+        assert_eq!(
+            core.backup_directory(profile.id).unwrap(),
+            backups.join(profile.id.to_string())
+        );
+        assert_eq!(
+            core.repair_recycler_directory(profile.id).unwrap(),
+            profile.game_path.join("apogee_repair_recycler")
         );
     }
 

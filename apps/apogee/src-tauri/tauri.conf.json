@@ -19,7 +19,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'none';\nscript-src 'self';\nstyle-src 'self';\nimg-src 'self' asset: http://asset.localhost data:;\nfont-src 'self';\nconnect-src ipc: http://ipc.localhost;\nbase-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
   "bundle": {

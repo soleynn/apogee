@@ -120,6 +120,7 @@ pub enum ImportData {
 }
 
 /// A fully encoded, redacted support archive.
+#[derive(Clone)]
 pub struct SupportBundleData(Vec<u8>);
 
 impl SupportBundleData {

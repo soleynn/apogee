@@ -14,6 +14,7 @@ mod command;
 mod direct;
 mod dto;
 mod mutation;
+mod navigation;
 mod passphrase;
 mod secrets;
 mod supervisor;
@@ -67,6 +68,10 @@ macro_rules! ipc_surface {
             mutation::plan_profile_removal,
             mutation::cancel_profile_removal,
             mutation::remove_profile,
+            navigation::open_link,
+            navigation::reveal,
+            navigation::activity_log,
+            navigation::save_support_bundle,
             execute,
             cancel,
         }
@@ -120,6 +125,7 @@ struct ShellState {
     direct_reads: Arc<Semaphore>,
     passphrases: Arc<passphrase::PromptBroker>,
     removal_plans: Arc<mutation::RemovalPlans>,
+    navigation: navigation::NavigationState,
     runs: Runs,
 }
 
@@ -134,6 +140,7 @@ impl Default for ShellState {
             direct_reads: Arc::new(Semaphore::new(4)),
             passphrases: Arc::new(passphrase::PromptBroker::default()),
             removal_plans: Arc::new(mutation::RemovalPlans::default()),
+            navigation: navigation::NavigationState::default(),
             runs: Runs::default(),
         }
     }
@@ -272,6 +279,7 @@ where
 /// Start one core command and relay its event stream over `on_event` until core closes it.
 #[tauri::command]
 async fn execute(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ShellState>,
     command: CommandDto,
     on_event: Channel<EventWireDto>,
@@ -291,8 +299,19 @@ async fn execute(
         .start(run_id, class)
         .map_err(run_admission_error)?;
     let cancel = lease.cancellation();
+    let navigation = state.navigation.clone();
+    let assets = app.asset_protocol_scope();
     tauri::async_runtime::spawn(async move {
-        supervisor::drive(core.as_ref(), command, cancel, &on_event).await;
+        supervisor::drive(
+            core.as_ref(),
+            command,
+            cancel,
+            run_id,
+            &navigation,
+            &assets,
+            &on_event,
+        )
+        .await;
         drop(lease);
     });
     Ok(run_id)
@@ -328,6 +347,10 @@ fn main() -> ExitCode {
     let context = tauri::generate_context!();
 
     match tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(ShellState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -373,10 +396,60 @@ mod tests {
     use std::collections::BTreeSet;
 
     use serde::Deserialize;
+    use serde_json::Value;
 
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn desktop_policy_exposes_only_the_required_webview_capabilities() -> TestResult {
+        const CSP: &str = "default-src 'none';\nscript-src 'self';\nstyle-src 'self';\nimg-src 'self' asset: http://asset.localhost data:;\nfont-src 'self';\nconnect-src ipc: http://ipc.localhost;\nbase-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
+
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json"))?;
+        assert_eq!(
+            config.pointer("/app/security/csp").and_then(Value::as_str),
+            Some(CSP)
+        );
+        assert_eq!(
+            config
+                .pointer("/app/security/assetProtocol/enable")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            config
+                .pointer("/app/security/assetProtocol/scope")
+                .and_then(Value::as_array),
+            Some(&Vec::new())
+        );
+
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))?;
+        let permissions = capability["permissions"]
+            .as_array()
+            .ok_or("capability permissions must be an array")?;
+        let actual = permissions
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected = BTreeSet::from([
+            "clipboard-manager:allow-write-text",
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "notification:allow-is-permission-granted",
+            "notification:allow-notify",
+            "notification:allow-request-permission",
+        ]);
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|permission| {
+            !permission.starts_with("fs:")
+                && !permission.starts_with("http:")
+                && !permission.starts_with("opener:")
+                && !permission.starts_with("shell:")
+                && !permission.ends_with(":default")
+        }));
+        Ok(())
+    }
 
     #[derive(Deserialize)]
     struct ParityManifest {

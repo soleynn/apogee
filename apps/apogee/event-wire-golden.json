@@ -70,8 +70,7 @@
   },
   "supportBundle": {
     "kind": "supportBundle",
-    "code": "event-support-bundle",
-    "bytes": [1, 2, 3]
+    "code": "event-support-bundle"
   },
   "firstRun": {
     "kind": "firstRun",

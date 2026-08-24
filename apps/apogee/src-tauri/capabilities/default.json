@@ -1,7 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window may reach. The shell's own commands are not listed: a command this crate defines needs no permission, and the set below is the built-in one nothing has narrowed yet.",
+  "description": "The narrow native surface available to the main window. Paths, network access, processes, and external navigation remain behind Rust-owned commands.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "clipboard-manager:allow-write-text",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify"
+  ]
 }

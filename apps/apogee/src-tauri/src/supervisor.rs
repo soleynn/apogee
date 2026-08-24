@@ -6,13 +6,27 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apogee_core::{
-    Command, Core, Event, FirstRunRequest, ImportXivLauncher, PatchProgress, Repo, SetupEvent, Uuid,
+    AddonEvent, Command, Core, Event, FirstRunRequest, FrontierData, ImportXivLauncher,
+    PatchProgress, Repo, SetupEvent, StableCode, Uuid,
 };
 use tauri::ipc::Channel;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{EventDto, EventWireDto};
+use crate::navigation::NavigationState;
+
+pub(crate) trait AssetRegistrar {
+    fn allow_file(&self, path: &std::path::Path) -> Result<(), ()>;
+}
+
+impl AssetRegistrar for tauri::scope::fs::Scope {
+    fn allow_file(&self, path: &std::path::Path) -> Result<(), ()> {
+        tauri::scope::fs::Scope::allow_file(self, path).map_err(|error| {
+            tracing::warn!(%error, path = %path.display(), "could not admit a validated banner asset");
+        })
+    }
+}
 
 pub(crate) trait Driver {
     fn execute_cancellable(
@@ -52,10 +66,18 @@ impl EventSink for Channel<EventWireDto> {
 }
 
 /// Drive exactly the command the request converted, forwarding every core frame in order.
-pub(crate) async fn drive<D, S>(driver: &D, command: Command, cancel: CancellationToken, sink: &S)
-where
+pub(crate) async fn drive<D, S, A>(
+    driver: &D,
+    command: Command,
+    cancel: CancellationToken,
+    run_id: Uuid,
+    navigation: &NavigationState,
+    assets: &A,
+    sink: &S,
+) where
     D: Driver + ?Sized,
     S: EventSink + ?Sized,
+    A: AssetRegistrar + ?Sized,
 {
     let mut events = driver.execute_cancellable(command, cancel);
     let mut pending = HashMap::new();
@@ -75,13 +97,44 @@ where
                     pending.insert(key, (observed, event));
                 } else {
                     flush_pending(&mut pending, sink);
-                    sink.send(EventDto::from(&event));
+                    sink.send(observe_event(&event, run_id, navigation, assets));
                 }
             }
             _ = flush.tick() => flush_pending(&mut pending, sink),
         }
     }
     flush_pending(&mut pending, sink);
+}
+
+fn observe_event<A: AssetRegistrar + ?Sized>(
+    event: &Event,
+    run_id: Uuid,
+    navigation: &NavigationState,
+    assets: &A,
+) -> EventDto {
+    match event {
+        Event::Addon(addon @ AddonEvent::NotConfirmed { evidence, .. }) => {
+            let addon_id = navigation.register_evidence(run_id, evidence.clone());
+            EventDto::Addon {
+                code: event.code(),
+                addon: crate::dto::AddonDto::from_observed(addon, Some(addon_id)),
+            }
+        }
+        Event::Frontier(FrontierData::Banners(banners)) => {
+            for artwork in banners
+                .iter()
+                .filter_map(|banner| banner.artwork.as_deref())
+            {
+                let _ = assets.allow_file(artwork);
+            }
+            EventDto::from(event)
+        }
+        Event::SupportBundle(bundle) => {
+            navigation.set_pending_support_bundle(bundle.clone());
+            EventDto::from(event)
+        }
+        _ => EventDto::from(event),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -267,7 +320,7 @@ impl Runs {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use apogee_core::{FlowState, OtpSource, PasswordSource, RunOutcome};
+    use apogee_core::{BannerData, FlowState, FrontierData, OtpSource, PasswordSource, RunOutcome};
 
     use super::*;
     use crate::command::{CommandDto, OtpSourceDto, PasswordSourceDto};
@@ -305,6 +358,72 @@ mod tests {
     #[derive(Default)]
     struct VecSink(Mutex<Vec<EventDto>>);
 
+    struct NoAssets;
+
+    impl AssetRegistrar for NoAssets {
+        fn allow_file(&self, _path: &std::path::Path) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAssets(Mutex<Vec<std::path::PathBuf>>);
+
+    impl AssetRegistrar for RecordingAssets {
+        fn allow_file(&self, path: &std::path::Path) -> Result<(), ()> {
+            match self.0.lock() {
+                Ok(mut paths) => paths.push(path.to_path_buf()),
+                Err(poisoned) => poisoned.into_inner().push(path.to_path_buf()),
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn observation_confines_banner_and_evidence_paths_before_serialization() {
+        let run = Uuid::new_v4();
+        let navigation = NavigationState::default();
+        let assets = RecordingAssets::default();
+        let artwork = std::path::PathBuf::from("/validated/banners/banner.png");
+        let evidence = std::path::PathBuf::from("/private/evidence/loaded.txt");
+
+        let banner = observe_event(
+            &Event::Frontier(FrontierData::Banners(vec![BannerData {
+                artwork: Some(artwork.clone()),
+                ..BannerData::default()
+            }])),
+            run,
+            &navigation,
+            &assets,
+        );
+        assert!(matches!(banner, EventDto::Frontier { .. }));
+        let admitted = match assets.0.lock() {
+            Ok(paths) => paths.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert_eq!(admitted, vec![artwork]);
+
+        let addon_id = navigation.register_evidence(run, evidence.clone());
+        let addon = EventDto::Addon {
+            code: "addon.not-confirmed",
+            addon: crate::dto::AddonDto::NotConfirmed {
+                what: "Dalamud".to_owned(),
+                waited_seconds: 10,
+                addon: addon_id,
+            },
+        };
+        assert!(matches!(
+            &addon,
+            EventDto::Addon {
+                addon: crate::dto::AddonDto::NotConfirmed { addon, .. },
+                ..
+            } if *addon != Uuid::nil()
+        ));
+        let json = serde_json::to_string(&addon).unwrap_or_default();
+        assert!(!json.contains(&evidence.to_string_lossy().into_owned()));
+        assert!(!json.contains("evidence"));
+    }
+
     impl EventSink for VecSink {
         fn send(&self, event: EventDto) {
             if let Ok(mut events) = self.0.lock() {
@@ -331,6 +450,9 @@ mod tests {
             &driver,
             request.into_core().unwrap_or(Command::Launch { profile }),
             CancellationToken::new(),
+            Uuid::new_v4(),
+            &NavigationState::default(),
+            &NoAssets,
             &sink,
         )
         .await;
@@ -385,6 +507,9 @@ mod tests {
                 profile: Uuid::nil(),
             },
             CancellationToken::new(),
+            Uuid::new_v4(),
+            &NavigationState::default(),
+            &NoAssets,
             &sink,
         )
         .await;
@@ -463,6 +588,9 @@ mod tests {
                 profile: Uuid::nil(),
             },
             CancellationToken::new(),
+            Uuid::new_v4(),
+            &NavigationState::default(),
+            &NoAssets,
             &sink,
         )
         .await;

@@ -32,6 +32,8 @@ import type { TotpImportResultDto } from './generated/TotpImportResult';
 import type { UpdateAccountRequestDto } from './generated/UpdateAccountRequest';
 import type { UpdateProfileRequestDto } from './generated/UpdateProfileRequest';
 import type { UpdateSettingsRequestDto } from './generated/UpdateSettingsRequest';
+import type { ActivityEntryDto } from './generated/ActivityEntry';
+import type { RevealTargetDto } from './generated/RevealTarget';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -350,6 +352,26 @@ export function systemReport(profile: string | null = null): Promise<string> {
 /** Reads core's ordered preview of the entries included in a support archive. */
 export function supportBundleContents(): Promise<BundlePartDto[]> {
   return invokeIpc<BundlePartDto[]>('support_bundle_contents');
+}
+
+/** Opens only the ordinary HTTPS URL behind a row id issued by this core process. */
+export function openLink(rowId: string): Promise<void> {
+  return invokeIpc<void>('open_link', { rowId });
+}
+
+/** Reveals one launcher-owned path selected by a closed, path-free target. */
+export function reveal(target: RevealTargetDto): Promise<void> {
+  return invokeIpc<void>('reveal', { target });
+}
+
+/** Reads bounded native-shell diagnostics as stable localization codes. */
+export function activityLog(): Promise<ActivityEntryDto[]> {
+  return invokeIpc<ActivityEntryDto[]>('activity_log');
+}
+
+/** Publishes the pending redacted archive under a native folder choice. */
+export function saveSupportBundle(): Promise<boolean> {
+  return invokeIpc<boolean>('save_support_bundle');
 }
 
 /** Selects the structured corrupt-store recovery fields from any invoke rejection. */

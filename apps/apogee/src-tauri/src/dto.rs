@@ -73,7 +73,6 @@ pub(crate) enum EventDto {
     },
     SupportBundle {
         code: &'static str,
-        bytes: Vec<u8>,
     },
     Prefix {
         code: &'static str,
@@ -140,7 +139,7 @@ impl From<&Event> for EventDto {
             },
             Event::Addon(addon) => Self::Addon {
                 code,
-                addon: AddonDto::from(addon),
+                addon: AddonDto::from_observed(addon, None),
             },
             Event::Setup(setup) => Self::Setup {
                 code,
@@ -158,10 +157,7 @@ impl From<&Event> for EventDto {
                 code,
                 import: ImportDto::from(import),
             },
-            Event::SupportBundle(bundle) => Self::SupportBundle {
-                code,
-                bytes: bundle.bytes().to_vec(),
-            },
+            Event::SupportBundle(_) => Self::SupportBundle { code },
             Event::Prefix(report) => prefix(code, report),
             Event::Notice(notice) => Self::Notice {
                 code,
@@ -534,7 +530,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(EventDto::SupportBundle {
                 code: "event-support-bundle",
-                bytes: vec![1, 2, 3],
             })
             .unwrap_or_default(),
             goldens["supportBundle"]
@@ -645,7 +640,8 @@ pub(crate) enum AddonDto {
     NotConfirmed {
         what: String,
         waited_seconds: u64,
-        evidence: String,
+        #[ts(type = "string")]
+        addon: apogee_core::Uuid,
     },
     Unknown {
         code: &'static str,
@@ -654,6 +650,15 @@ pub(crate) enum AddonDto {
 
 impl From<&AddonEvent> for AddonDto {
     fn from(event: &AddonEvent) -> Self {
+        Self::from_observed(event, None)
+    }
+}
+
+impl AddonDto {
+    pub(crate) fn from_observed(
+        event: &AddonEvent,
+        evidence_id: Option<apogee_core::Uuid>,
+    ) -> Self {
         match event {
             AddonEvent::Started { program, pid, .. } => Self::Started {
                 program: program.to_string_lossy().into_owned(),
@@ -686,16 +691,15 @@ impl From<&AddonEvent> for AddonDto {
                 seconds: *seconds,
             },
             AddonEvent::Loaded { what, .. } => Self::Loaded { what: what.clone() },
-            AddonEvent::NotConfirmed {
-                what,
-                waited,
-                evidence,
-                ..
-            } => Self::NotConfirmed {
-                what: what.clone(),
-                waited_seconds: waited.as_secs(),
-                evidence: evidence.to_string_lossy().into_owned(),
-            },
+            AddonEvent::NotConfirmed { what, waited, .. } => {
+                evidence_id.map_or(Self::Unknown { code: event.code() }, |addon| {
+                    Self::NotConfirmed {
+                        what: what.clone(),
+                        waited_seconds: waited.as_secs(),
+                        addon,
+                    }
+                })
+            }
             _ => Self::Unknown { code: event.code() },
         }
     }

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   IpcFailure,
+  activityLog,
   cancelPassphrase,
   cancel,
   changeSecretsFilePassphrase,
@@ -18,12 +19,15 @@ import {
   forgetSecrets,
   importTotpSecret,
   nextAction,
+  openLink,
   onPassphrasePrompt,
   planProfileRemoval,
   removeProfile,
   removeSecretsFile,
+  reveal,
   resolvedSetup,
   runnerCatalog,
+  saveSupportBundle,
   secretsReport,
   secretsFileStatus,
   sealSecretsFile,
@@ -60,6 +64,23 @@ beforeEach(() => {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => values.set(key, value),
     removeItem: (key: string) => values.delete(key),
+  });
+});
+
+describe('confined host actions', () => {
+  it('forwards only opaque link ids and closed reveal targets', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    const target = { kind: 'evidence' as const, run: 'run-id', addon: 'addon-id' };
+
+    await openLink('row-id');
+    await reveal(target);
+    await activityLog();
+    await saveSupportBundle();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'open_link', { rowId: 'row-id' });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'reveal', { target });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'activity_log');
+    expect(invoke).toHaveBeenNthCalledWith(4, 'save_support_bundle');
   });
 });
 
