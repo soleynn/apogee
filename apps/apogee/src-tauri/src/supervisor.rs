@@ -132,7 +132,13 @@ fn flush_pending<S: EventSink + ?Sized>(
 
 /// The cancellation tokens for runs the shell has started.
 #[derive(Clone, Default)]
-pub(crate) struct Runs(Arc<Mutex<HashMap<Uuid, ActiveRun>>>);
+pub(crate) struct Runs(Arc<Mutex<RunState>>);
+
+#[derive(Default)]
+struct RunState {
+    active: HashMap<Uuid, ActiveRun>,
+    direct_mutation: bool,
+}
 
 struct ActiveRun {
     cancel: CancellationToken,
@@ -164,40 +170,92 @@ pub(crate) enum RunAdmissionError {
     Unavailable,
 }
 
+/// Ownership of a registered run. Dropping the lease unregisters it even when its task unwinds or
+/// returns early, so one failed driver cannot strand the shell's exclusive slot.
+pub(crate) struct RunLease {
+    runs: Runs,
+    id: Uuid,
+    cancel: CancellationToken,
+}
+
+impl RunLease {
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for RunLease {
+    fn drop(&mut self) {
+        let mut state = match self.runs.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.active.remove(&self.id);
+    }
+}
+
+/// Ownership of the one direct-write slot shared with exclusive streamed runs.
+pub(crate) struct MutationLease {
+    runs: Runs,
+}
+
+impl Drop for MutationLease {
+    fn drop(&mut self) {
+        let mut state = match self.runs.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.direct_mutation = false;
+    }
+}
+
 impl Runs {
-    pub(crate) fn start(
-        &self,
-        id: Uuid,
-        class: RunClass,
-    ) -> Result<CancellationToken, RunAdmissionError> {
-        let mut runs = self.0.lock().map_err(|_| RunAdmissionError::Unavailable)?;
-        if runs.contains_key(&id) {
+    pub(crate) fn start(&self, id: Uuid, class: RunClass) -> Result<RunLease, RunAdmissionError> {
+        let mut state = self.0.lock().map_err(|_| RunAdmissionError::Unavailable)?;
+        if state.active.contains_key(&id) {
             return Err(RunAdmissionError::Duplicate);
         }
-        if class == RunClass::Exclusive && runs.values().any(|run| run.class == RunClass::Exclusive)
+        if class == RunClass::Exclusive
+            && (state.direct_mutation
+                || state
+                    .active
+                    .values()
+                    .any(|run| run.class == RunClass::Exclusive))
         {
             return Err(RunAdmissionError::Busy);
         }
         let cancel = CancellationToken::new();
-        runs.insert(
+        state.active.insert(
             id,
             ActiveRun {
                 cancel: cancel.clone(),
                 class,
             },
         );
-        Ok(cancel)
+        Ok(RunLease {
+            runs: self.clone(),
+            id,
+            cancel,
+        })
     }
 
-    pub(crate) fn finish(&self, id: Uuid) {
-        if let Ok(mut runs) = self.0.lock() {
-            runs.remove(&id);
+    pub(crate) fn start_mutation(&self) -> Result<MutationLease, RunAdmissionError> {
+        let mut state = self.0.lock().map_err(|_| RunAdmissionError::Unavailable)?;
+        if state.direct_mutation
+            || state
+                .active
+                .values()
+                .any(|run| run.class == RunClass::Exclusive)
+        {
+            return Err(RunAdmissionError::Busy);
         }
+        state.direct_mutation = true;
+        Ok(MutationLease { runs: self.clone() })
     }
 
     pub(crate) fn cancel(&self, id: Uuid) -> Result<bool, ()> {
-        let runs = self.0.lock().map_err(|_| ())?;
-        let Some(run) = runs.get(&id) else {
+        let state = self.0.lock().map_err(|_| ())?;
+        let Some(run) = state.active.get(&id) else {
             return Ok(false);
         };
         run.cancel.cancel();
@@ -448,9 +506,15 @@ mod tests {
         let exclusive_one = Uuid::new_v4();
         let exclusive_two = Uuid::new_v4();
 
-        assert!(runs.start(read_one, RunClass::ReadOnly).is_ok());
-        assert!(runs.start(read_two, RunClass::ReadOnly).is_ok());
-        assert!(runs.start(exclusive_one, RunClass::Exclusive).is_ok());
+        let read_one_lease = runs
+            .start(read_one, RunClass::ReadOnly)
+            .unwrap_or_else(|_| unreachable!("the first read must be admitted"));
+        let _read_two_lease = runs
+            .start(read_two, RunClass::ReadOnly)
+            .unwrap_or_else(|_| unreachable!("the second read must be admitted"));
+        let exclusive_one_lease = runs
+            .start(exclusive_one, RunClass::Exclusive)
+            .unwrap_or_else(|_| unreachable!("the first writer must be admitted"));
         assert_eq!(
             runs.start(exclusive_two, RunClass::Exclusive).err(),
             Some(RunAdmissionError::Busy)
@@ -460,8 +524,27 @@ mod tests {
             Some(RunAdmissionError::Duplicate)
         );
 
-        runs.finish(exclusive_one);
+        drop(exclusive_one_lease);
         assert!(runs.start(exclusive_two, RunClass::Exclusive).is_ok());
+        drop(read_one_lease);
+    }
+
+    #[test]
+    fn direct_mutations_share_the_exclusive_slot_and_release_it_on_drop() {
+        let runs = Runs::default();
+        let mutation = runs
+            .start_mutation()
+            .unwrap_or_else(|_| unreachable!("the first direct mutation must be admitted"));
+
+        assert_eq!(
+            runs.start(Uuid::new_v4(), RunClass::Exclusive).err(),
+            Some(RunAdmissionError::Busy)
+        );
+        assert_eq!(runs.start_mutation().err(), Some(RunAdmissionError::Busy));
+        assert!(runs.start(Uuid::new_v4(), RunClass::ReadOnly).is_ok());
+
+        drop(mutation);
+        assert!(runs.start_mutation().is_ok());
     }
 
     #[test]
@@ -478,10 +561,27 @@ mod tests {
     fn cancellation_reaches_the_registered_token() {
         let runs = Runs::default();
         let run_id = Uuid::new_v4();
-        let token = runs.start(run_id, RunClass::Exclusive).unwrap_or_default();
+        let lease = runs
+            .start(run_id, RunClass::Exclusive)
+            .unwrap_or_else(|_| unreachable!("the run must be admitted"));
+        let token = lease.cancellation();
 
         assert_eq!(runs.cancel(run_id), Ok(true));
         assert!(token.is_cancelled());
         assert_eq!(runs.cancel(Uuid::new_v4()), Ok(false));
+    }
+
+    #[test]
+    fn dropping_a_run_lease_unregisters_it() {
+        let runs = Runs::default();
+        let run_id = Uuid::new_v4();
+        let lease = runs
+            .start(run_id, RunClass::Exclusive)
+            .unwrap_or_else(|_| unreachable!("the run must be admitted"));
+
+        drop(lease);
+
+        assert_eq!(runs.cancel(run_id), Ok(false));
+        assert!(runs.start_mutation().is_ok());
     }
 }

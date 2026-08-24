@@ -51,7 +51,7 @@ async fn unlock_secrets_file_inner(
     state: &ShellState,
 ) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
+    let _lease = state.mutation_lease()?;
     blocking_core_result(core, |core| {
         core.unlock_secrets_file()
             .map_err(|error| IpcErrorDto::core(&error))?;
@@ -81,7 +81,7 @@ async fn create_secrets_file_inner(
     }
     state.initial_snapshot().await?;
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
+    let _lease = state.mutation_lease()?;
     blocking_core_result(core, move |core| {
         core.create_secrets_file(Consent::granted(), &passphrase)
             .map_err(|error| IpcErrorDto::core(&error))?;
@@ -108,7 +108,7 @@ async fn change_secrets_file_passphrase_inner(
 ) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     state.initial_snapshot().await?;
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
+    let _lease = state.mutation_lease()?;
     blocking_core_result(core, move |core| {
         core.change_secrets_file_passphrase(&current, &replacement)
             .map_err(|error| IpcErrorDto::core(&error))?;
@@ -135,7 +135,7 @@ async fn remove_secrets_file_inner(
     }
     state.initial_snapshot().await?;
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
+    let _lease = state.mutation_lease()?;
     blocking_core_result(core, |core| {
         let removed = core
             .remove_secrets_file(Consent::granted())
@@ -155,7 +155,7 @@ pub(super) async fn seal_secrets_file(
 
 async fn seal_secrets_file_inner(state: &ShellState) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
+    let _lease = state.mutation_lease()?;
     run_blocking(move || {
         core.seal_secrets_file();
         status(&core)
