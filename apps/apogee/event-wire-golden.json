@@ -22,6 +22,57 @@
       "demoted": true
     }
   },
+  "frontierNews": {
+    "kind": "frontier",
+    "code": "event-frontier",
+    "frontier": {
+      "kind": "news",
+      "value": {
+        "news": [
+          {
+            "id": "headline-1",
+            "date": "2026-08-24",
+            "title": "Launcher news",
+            "tag": "news"
+          }
+        ],
+        "topics": [],
+        "pinned": []
+      }
+    }
+  },
+  "frontierGate": {
+    "kind": "frontier",
+    "code": "event-frontier",
+    "frontier": {
+      "kind": "gate",
+      "value": {
+        "open": false,
+        "messages": ["Maintenance"],
+        "news": ["notice-1"]
+      }
+    }
+  },
+  "frontierBanners": {
+    "kind": "frontier",
+    "code": "event-frontier",
+    "frontier": {
+      "kind": "banners",
+      "value": [
+        {
+          "id": "banner-1",
+          "artwork": null,
+          "orderPriority": "1",
+          "fixOrder": "2"
+        }
+      ]
+    }
+  },
+  "supportBundle": {
+    "kind": "supportBundle",
+    "code": "event-support-bundle",
+    "bytes": [1, 2, 3]
+  },
   "firstRun": {
     "kind": "firstRun",
     "code": "event-first-run",

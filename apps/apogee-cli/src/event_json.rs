@@ -4,6 +4,8 @@ use apogee_core::{
     AddonEvent, Event, FlowState, FrontierData, Notice, Outcome, PatchProgress, ProgramStatus,
     Recoveries, Repo, RunOutcome, SetupEvent, StableCode,
 };
+#[cfg(test)]
+use apogee_core::{BannerData, GateData, NewsData, NewsRow};
 use serde_json::{Value, json};
 
 /// Render one event as one JSON object with no embedded newline.
@@ -59,7 +61,7 @@ fn event_value(event: &Event) -> Value {
         Event::SupportBundle(bundle) => json!({
             "kind": "supportBundle",
             "code": code,
-            "bytes": bundle.bytes().len(),
+            "bytes": bundle.bytes(),
         }),
         Event::Prefix(report) => json!({
             "kind": "prefix",
@@ -352,19 +354,23 @@ fn frontier_value(data: &FrontierData) -> Value {
     match data {
         FrontierData::News(data) => json!({
             "kind": "news",
-            "news": data.news.iter().map(news_row_value).collect::<Vec<_>>(),
-            "topics": data.topics.iter().map(news_row_value).collect::<Vec<_>>(),
-            "pinned": data.pinned.iter().map(news_row_value).collect::<Vec<_>>(),
+            "value": {
+                "news": data.news.iter().map(news_row_value).collect::<Vec<_>>(),
+                "topics": data.topics.iter().map(news_row_value).collect::<Vec<_>>(),
+                "pinned": data.pinned.iter().map(news_row_value).collect::<Vec<_>>(),
+            },
         }),
         FrontierData::Gate(data) => json!({
             "kind": "gate",
-            "open": data.open,
-            "messages": data.messages,
-            "news": data.news,
+            "value": {
+                "open": data.open,
+                "messages": data.messages,
+                "news": data.news,
+            },
         }),
         FrontierData::Banners(rows) => json!({
             "kind": "banners",
-            "rows": rows.iter().map(|row| json!({
+            "value": rows.iter().map(|row| json!({
                 "id": row.id,
                 "artwork": row.artwork.as_ref().map(|path| path.to_string_lossy()),
                 "orderPriority": row.order_priority,
@@ -1018,6 +1024,36 @@ mod tests {
                         demoted: true,
                     },
                 }),
+            ),
+            (
+                "frontierNews",
+                Event::Frontier(FrontierData::News(NewsData {
+                    news: vec![NewsRow {
+                        id: "headline-1".to_owned(),
+                        date: "2026-08-24".to_owned(),
+                        title: "Launcher news".to_owned(),
+                        tag: "news".to_owned(),
+                    }],
+                    topics: Vec::new(),
+                    pinned: Vec::new(),
+                })),
+            ),
+            (
+                "frontierGate",
+                Event::Frontier(FrontierData::Gate(GateData {
+                    open: false,
+                    messages: vec!["Maintenance".to_owned()],
+                    news: vec!["notice-1".to_owned()],
+                })),
+            ),
+            (
+                "frontierBanners",
+                Event::Frontier(FrontierData::Banners(vec![BannerData {
+                    id: "banner-1".to_owned(),
+                    artwork: None,
+                    order_priority: "1".to_owned(),
+                    fix_order: Some("2".to_owned()),
+                }])),
             ),
             ("firstRun", Event::FirstRun(Box::default())),
             ("notice", Event::Notice(Notice::ClockSkew { seconds: -45 })),

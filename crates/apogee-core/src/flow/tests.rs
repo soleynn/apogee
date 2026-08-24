@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use std::{io::Cursor, io::Read};
 
 use apogee_otp::{ClockSkew, Otp, OtpSource, TotpParams};
 use apogee_secrets::{MemoryStore, Secret, SecretKind, SecretStore};
@@ -277,7 +278,10 @@ async fn first_run_import_and_support_are_real_successful_streams() {
 
     let events = run(
         context(&h, transport(), launch(), NOW),
-        Command::SupportBundle { facts: Vec::new() },
+        Command::SupportBundle {
+            profile: Some(h.profile),
+            facts: Vec::new(),
+        },
     )
     .await;
     assert!(matches!(
@@ -285,6 +289,17 @@ async fn first_run_import_and_support_are_real_successful_streams() {
         [Event::SupportBundle(data), Event::Outcome(RunOutcome::Succeeded)]
             if data.bytes().starts_with(b"PK")
     ));
+    let Event::SupportBundle(data) = &events[0] else {
+        return;
+    };
+    let mut archive = zip::ZipArchive::new(Cursor::new(data.bytes())).unwrap();
+    let mut report = String::new();
+    archive
+        .by_name("system-report.txt")
+        .unwrap()
+        .read_to_string(&mut report)
+        .unwrap();
+    assert!(report.contains("runtime.runner=\"system-wine"));
 }
 
 #[tokio::test]

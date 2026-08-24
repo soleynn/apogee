@@ -893,36 +893,7 @@ impl Core {
         &self,
         profile: Option<Uuid>,
     ) -> Result<crate::SystemReportInput, CoreError> {
-        let selected = profile.map(|id| self.profile(id)).transpose()?;
-        let runner = selected.as_ref().map(|profile| match &profile.runner {
-            crate::RunnerSelection::SystemWine => system_wine_version().map_or_else(
-                || "system-wine".to_owned(),
-                |version| format!("system-wine {version}"),
-            ),
-            crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
-        });
-        let prefix_state = selected
-            .as_ref()
-            .map(|profile| self.prefixes_dir.join(crate::flow::prefix_name(profile)))
-            .map(|path| {
-                if path.join(apogee_runtime::PREFIX_JSON).is_file() {
-                    "present"
-                } else {
-                    "absent"
-                }
-                .to_owned()
-            });
-        Ok(crate::SystemReportInput {
-            application_version: env!("CARGO_PKG_VERSION").to_owned(),
-            target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
-            operating_system: Some(std::env::consts::OS.to_owned()),
-            kernel: None,
-            architecture: Some(std::env::consts::ARCH.to_owned()),
-            gpu: None,
-            driver: None,
-            runner,
-            prefix_state,
-        })
+        system_report_input(&self.store, &self.prefixes_dir, profile)
     }
 
     /// Persist the launcher-wide settings.
@@ -1624,6 +1595,81 @@ impl Core {
             backups_dir: self.backups_dir.clone(),
             frontier: self.frontier.clone(),
         }
+    }
+}
+
+pub(crate) fn system_report_input(
+    store: &Store,
+    prefixes_dir: &Path,
+    profile: Option<Uuid>,
+) -> Result<crate::SystemReportInput, CoreError> {
+    let selected = profile.map(|id| stored_profile(store, id)).transpose()?;
+    let system_wine = selected
+        .as_ref()
+        .is_some_and(|profile| matches!(&profile.runner, crate::RunnerSelection::SystemWine))
+        .then(system_wine_version)
+        .flatten();
+    Ok(system_report_input_from_profile(
+        selected,
+        prefixes_dir,
+        system_wine,
+    ))
+}
+
+pub(crate) async fn bounded_system_report_input(
+    store: &Store,
+    prefixes_dir: &Path,
+    profile: Option<Uuid>,
+) -> Result<crate::SystemReportInput, CoreError> {
+    let selected = profile.map(|id| stored_profile(store, id)).transpose()?;
+    let system_wine = if selected
+        .as_ref()
+        .is_some_and(|profile| matches!(&profile.runner, crate::RunnerSelection::SystemWine))
+    {
+        bounded_system_wine_version().await
+    } else {
+        None
+    };
+    Ok(system_report_input_from_profile(
+        selected,
+        prefixes_dir,
+        system_wine,
+    ))
+}
+
+fn system_report_input_from_profile(
+    selected: Option<Profile>,
+    prefixes_dir: &Path,
+    system_wine: Option<String>,
+) -> crate::SystemReportInput {
+    let runner = selected.as_ref().map(|profile| match &profile.runner {
+        crate::RunnerSelection::SystemWine => system_wine.map_or_else(
+            || "system-wine".to_owned(),
+            |version| format!("system-wine {version}"),
+        ),
+        crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
+    });
+    let prefix_state = selected
+        .as_ref()
+        .map(|profile| prefixes_dir.join(crate::flow::prefix_name(profile)))
+        .map(|path| {
+            if path.join(apogee_runtime::PREFIX_JSON).is_file() {
+                "present"
+            } else {
+                "absent"
+            }
+            .to_owned()
+        });
+    crate::SystemReportInput {
+        application_version: env!("CARGO_PKG_VERSION").to_owned(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
+        operating_system: Some(std::env::consts::OS.to_owned()),
+        kernel: None,
+        architecture: Some(std::env::consts::ARCH.to_owned()),
+        gpu: None,
+        driver: None,
+        runner,
+        prefix_state,
     }
 }
 

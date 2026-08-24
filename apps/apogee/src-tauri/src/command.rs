@@ -10,8 +10,9 @@ use serde::Deserialize;
 use ts_rs::TS;
 
 use crate::dto::first_run::{
-    AccountChoiceDto, CredentialChoiceDto, GameChoiceDto, ImportDecisionDto, LegibilityDto,
-    ReadyActionDto,
+    AccountChoiceDto, CredentialBackendReadingDto, CredentialChoiceDto, FirstRunImportCandidateDto,
+    GameCandidateDto, GameChoiceDto, ImportDecisionDto, LegibilityDto, ReadyActionDto,
+    RunnerAndPrefixChoiceDto, RunnerReadingDto,
 };
 use crate::dto::path::PathDto;
 use crate::dto::secrets::SecretBytes;
@@ -109,6 +110,8 @@ pub(crate) enum CommandDto {
         query: FrontierQueryDto,
     },
     SupportBundle {
+        #[ts(type = "string | null")]
+        profile: Option<Uuid>,
         facts: Vec<CallerFactDto>,
     },
 }
@@ -170,7 +173,8 @@ impl CommandDto {
             Self::FirstRun { request } => Command::FirstRun(request.into_core()?),
             Self::ImportXivLauncher { request } => Command::ImportXivLauncher(request.into_core()?),
             Self::Frontier { query } => Command::Frontier(query.into_core()),
-            Self::SupportBundle { facts } => Command::SupportBundle {
+            Self::SupportBundle { profile, facts } => Command::SupportBundle {
+                profile,
                 facts: facts
                     .into_iter()
                     .map(|fact| (fact.name, fact.value))
@@ -267,10 +271,15 @@ impl FirstRunRequestDto {
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub(crate) enum FirstRunTransitionDto {
     ConfirmLegibility(LegibilityDto),
+    RecordImportDiscovery(Vec<FirstRunImportCandidateDto>),
     DecideImport(ImportDecisionDto),
     SaveAccount(AccountChoiceDto),
+    RecordGameCandidates(Vec<GameCandidateDto>),
     SelectGame(GameChoiceDto),
+    RecordCredentialBackends(Vec<CredentialBackendReadingDto>),
     SelectCredential(CredentialChoiceDto),
+    RecordRunners(Vec<RunnerReadingDto>),
+    FinishRunnerAndPrefix(RunnerAndPrefixChoiceDto),
     StartReady(ReadyActionDto),
 }
 
@@ -281,17 +290,50 @@ impl FirstRunTransitionDto {
             Self::ConfirmLegibility(reading) => {
                 FirstRunTransition::ConfirmLegibility(reading.into_core().ok_or_else(unsupported)?)
             }
+            Self::RecordImportDiscovery(candidates) => FirstRunTransition::RecordImportDiscovery(
+                candidates
+                    .into_iter()
+                    .map(FirstRunImportCandidateDto::into_core)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(unsupported)?,
+            ),
             Self::DecideImport(decision) => {
                 FirstRunTransition::DecideImport(decision.into_core().ok_or_else(unsupported)?)
             }
             Self::SaveAccount(account) => {
                 FirstRunTransition::SaveAccount(account.into_core().ok_or_else(unsupported)?)
             }
+            Self::RecordGameCandidates(candidates) => FirstRunTransition::RecordGameCandidates(
+                candidates
+                    .into_iter()
+                    .map(GameCandidateDto::into_core)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(unsupported)?,
+            ),
             Self::SelectGame(game) => {
                 FirstRunTransition::SelectGame(game.into_core().ok_or_else(unsupported)?)
             }
+            Self::RecordCredentialBackends(backends) => {
+                FirstRunTransition::RecordCredentialBackends(
+                    backends
+                        .into_iter()
+                        .map(CredentialBackendReadingDto::into_core)
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(unsupported)?,
+                )
+            }
             Self::SelectCredential(credential) => FirstRunTransition::SelectCredential(
                 credential.into_core().ok_or_else(unsupported)?,
+            ),
+            Self::RecordRunners(runners) => FirstRunTransition::RecordRunners(
+                runners
+                    .into_iter()
+                    .map(RunnerReadingDto::into_core)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(unsupported)?,
+            ),
+            Self::FinishRunnerAndPrefix(choice) => FirstRunTransition::FinishRunnerAndPrefix(
+                choice.into_core().ok_or_else(unsupported)?,
             ),
             Self::StartReady(action) => {
                 FirstRunTransition::StartReady(action.into_core().ok_or_else(unsupported)?)
@@ -468,10 +510,15 @@ mod tests {
     }
 
     #[test]
-    fn backend_owned_first_run_readings_are_not_accepted_from_the_webview() {
+    fn first_run_discovery_transitions_have_a_typed_webview_shape() {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"recordRunners","value":[]}}}"#;
 
-        assert!(parse(command).is_none());
+        assert!(matches!(
+            parse(command),
+            Some(Command::FirstRun(FirstRunRequest::Advance(
+                FirstRunTransition::RecordRunners(readings)
+            ))) if readings.is_empty()
+        ));
     }
 
     #[test]
@@ -483,6 +530,6 @@ mod tests {
         assert!(operations.contains("firstRun.advance.confirmLegibility"));
         assert!(operations.contains("importXivLauncher.apply"));
         assert!(operations.contains("frontier.gate"));
-        assert_eq!(operations.len(), 23);
+        assert_eq!(operations.len(), 28);
     }
 }

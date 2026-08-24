@@ -90,6 +90,7 @@ pub enum Command {
     /// Fetch pre-login display data (news, gate status, banners).
     Frontier(FrontierQuery),
     SupportBundle {
+        profile: Option<Uuid>,
         facts: Vec<(String, String)>,
     },
 }
@@ -222,8 +223,9 @@ impl fmt::Debug for Command {
                 f.debug_tuple("ImportXivLauncher").field(command).finish()
             }
             Command::Frontier(query) => f.debug_tuple("Frontier").field(query).finish(),
-            Command::SupportBundle { facts } => f
+            Command::SupportBundle { profile, facts } => f
                 .debug_struct("SupportBundle")
+                .field("profile", profile)
                 .field(
                     "facts",
                     &facts.iter().map(|(name, _)| name).collect::<Vec<_>>(),

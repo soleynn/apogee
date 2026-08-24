@@ -15,6 +15,8 @@ use apogee_core::{
     AddonEvent, Event, FlowState, Notice, Outcome, PatchProgress, PrefixReport, ProgramStatus,
     Recoveries, Repo, RunOutcome, SetupEvent, StableCode,
 };
+#[cfg(test)]
+use apogee_core::{BannerData, FrontierData, GateData, NewsData, NewsRow};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -487,6 +489,36 @@ mod tests {
                     },
                 }),
             ),
+            (
+                "frontierNews",
+                Event::Frontier(FrontierData::News(NewsData {
+                    news: vec![NewsRow {
+                        id: "headline-1".to_owned(),
+                        date: "2026-08-24".to_owned(),
+                        title: "Launcher news".to_owned(),
+                        tag: "news".to_owned(),
+                    }],
+                    topics: Vec::new(),
+                    pinned: Vec::new(),
+                })),
+            ),
+            (
+                "frontierGate",
+                Event::Frontier(FrontierData::Gate(GateData {
+                    open: false,
+                    messages: vec!["Maintenance".to_owned()],
+                    news: vec!["notice-1".to_owned()],
+                })),
+            ),
+            (
+                "frontierBanners",
+                Event::Frontier(FrontierData::Banners(vec![BannerData {
+                    id: "banner-1".to_owned(),
+                    artwork: None,
+                    order_priority: "1".to_owned(),
+                    fix_order: Some("2".to_owned()),
+                }])),
+            ),
             ("firstRun", Event::FirstRun(Box::default())),
             ("notice", Event::Notice(Notice::ClockSkew { seconds: -45 })),
             (
@@ -503,6 +535,15 @@ mod tests {
             assert_eq!(value, goldens[name], "{name}");
             assert!(!value.to_string().contains("planted-secret"));
         }
+
+        assert_eq!(
+            serde_json::to_value(EventDto::SupportBundle {
+                code: "event-support-bundle",
+                bytes: vec![1, 2, 3],
+            })
+            .unwrap_or_default(),
+            goldens["supportBundle"]
+        );
     }
 }
 

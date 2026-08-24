@@ -13,15 +13,16 @@ use std::process::ExitCode;
 
 use apogee_core::{
     ALL_CODES, Account, AccountChoice, AccountKind, AddonEvent, BenchStats, CatalogViewEntry,
-    Command, Consent, Core, CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon,
-    FileState, FirstRunRequest, FirstRunTransition, FlowState, ForeignCredentialStore, ForeignKey,
-    ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, GameChoice, Gamescope, GpuSelect,
-    HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher,
-    LaunchProgramExit, LegibilityReading, ListenerConsent, ListenerSettings, ListenerSources,
-    NextAction, NextCommand, NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource,
-    PatchProgress, PrefixAction, PrefixReport, Profile, ReadyAction, Recoveries, Region, Repo,
-    RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
-    SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
+    Command, Consent, Core, CoreConfig, CredentialBackendReading, CredentialChoice, Deviation,
+    Event, ExternalAddon, FileState, FirstRunImportCandidate, FirstRunRequest, FirstRunTransition,
+    FlowState, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData,
+    FrontierQuery, GameCandidate, GameChoice, Gamescope, GpuSelect, HealthIssue, Hud,
+    ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
+    LegibilityReading, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
+    NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
+    PrefixAction, PrefixReport, Profile, ReadyAction, Recoveries, Region, Repo, RunIn, RunOutcome,
+    RunnerAndPrefixChoice, RunnerReading, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
+    Secret, SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
     SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -262,10 +263,15 @@ struct FirstRunAdvanceArgs {
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 enum FirstRunTransitionInput {
     ConfirmLegibility(LegibilityReading),
+    RecordImportDiscovery(Vec<FirstRunImportCandidate>),
     DecideImport(apogee_core::ImportDecision),
     SaveAccount(AccountChoice),
+    RecordGameCandidates(Vec<GameCandidate>),
     SelectGame(GameChoice),
+    RecordCredentialBackends(Vec<CredentialBackendReading>),
     SelectCredential(CredentialChoice),
+    RecordRunners(Vec<RunnerReading>),
+    FinishRunnerAndPrefix(RunnerAndPrefixChoice),
     StartReady(ReadyAction),
 }
 
@@ -273,11 +279,24 @@ impl From<FirstRunTransitionInput> for FirstRunTransition {
     fn from(value: FirstRunTransitionInput) -> Self {
         match value {
             FirstRunTransitionInput::ConfirmLegibility(reading) => Self::ConfirmLegibility(reading),
+            FirstRunTransitionInput::RecordImportDiscovery(candidates) => {
+                Self::RecordImportDiscovery(candidates)
+            }
             FirstRunTransitionInput::DecideImport(decision) => Self::DecideImport(decision),
             FirstRunTransitionInput::SaveAccount(account) => Self::SaveAccount(account),
+            FirstRunTransitionInput::RecordGameCandidates(candidates) => {
+                Self::RecordGameCandidates(candidates)
+            }
             FirstRunTransitionInput::SelectGame(game) => Self::SelectGame(game),
+            FirstRunTransitionInput::RecordCredentialBackends(backends) => {
+                Self::RecordCredentialBackends(backends)
+            }
             FirstRunTransitionInput::SelectCredential(credential) => {
                 Self::SelectCredential(credential)
+            }
+            FirstRunTransitionInput::RecordRunners(runners) => Self::RecordRunners(runners),
+            FirstRunTransitionInput::FinishRunnerAndPrefix(choice) => {
+                Self::FinishRunnerAndPrefix(choice)
             }
             FirstRunTransitionInput::StartReady(action) => Self::StartReady(action),
         }
@@ -1134,7 +1153,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 let mut wrote_bundle = false;
                 let status = drive_observing(
                     &core,
-                    Command::SupportBundle { facts },
+                    Command::SupportBundle { profile, facts },
                     event_format,
                     |event| {
                         if let Event::SupportBundle(bundle) = event {
@@ -2252,23 +2271,29 @@ async fn drive_observing(
         {
             malformed = true;
         }
-        if observer_error.is_none()
-            && let Err(error) = observe(&event)
-        {
+        let render_this = observer_error.is_none();
+        if render_this && let Err(error) = observe(&event) {
             observer_error = Some(error);
         }
-        match event_format {
-            EventFormat::Human => println!("{}", render(&event)),
-            EventFormat::Json => println!("{}", render_event_json(&event)),
+        if render_this && !matches!((&observer_error, &event), (Some(_), Event::Outcome(_))) {
+            render_stream_event(&event, event_format);
         }
     }
     if let Some(error) = observer_error {
+        render_stream_event(&Event::Outcome(RunOutcome::Failed), event_format);
         return Err(error);
     }
     Ok(match (outcome, malformed) {
         (Some(RunOutcome::Succeeded | RunOutcome::Cancelled), false) => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     })
+}
+
+fn render_stream_event(event: &Event, event_format: EventFormat) {
+    match event_format {
+        EventFormat::Human => println!("{}", render(event)),
+        EventFormat::Json => println!("{}", render_event_json(event)),
+    }
 }
 
 /// Edit the public fields of an account without replacing secret policy or delivery metadata.
@@ -3551,11 +3576,14 @@ mod tests {
     }
 
     #[test]
-    fn first_run_transition_json_rejects_backend_owned_readings() {
-        let error = parse_first_run_transition(r#"{"kind":"record_runners","value":[]}"#)
-            .expect_err("runner discovery belongs to core");
+    fn first_run_transition_json_covers_persisted_discovery_steps() {
+        let transition = parse_first_run_transition(r#"{"kind":"record_runners","value":[]}"#)
+            .expect("runner discovery transition parses");
 
-        assert!(error.to_string().contains("unknown variant"));
+        assert!(matches!(
+            transition,
+            FirstRunTransition::RecordRunners(readings) if readings.is_empty()
+        ));
     }
 
     /// Every reader that takes a typed answer hands back a buffer that erases itself.

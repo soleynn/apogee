@@ -93,8 +93,56 @@ fn support_bundle_is_written_while_stdout_stays_jsonl() -> TestResult {
     )?;
     let lines = json_lines(&output)?;
 
-    assert!(lines.iter().any(|line| line["kind"] == "supportBundle"));
+    let support = lines
+        .iter()
+        .find(|line| line["kind"] == "supportBundle")
+        .ok_or("support-bundle event was missing")?;
+    let emitted = support["bytes"]
+        .as_array()
+        .ok_or("support-bundle bytes were not an array")?
+        .iter()
+        .map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("support-bundle byte array contained a non-byte value")?;
+    assert_eq!(emitted, std::fs::read(&output_path)?);
     assert!(output_path.is_file());
     assert!(std::fs::metadata(output_path)?.len() > 0);
+    Ok(())
+}
+
+#[test]
+fn support_bundle_publish_failure_ends_with_a_failed_outcome() -> TestResult {
+    let home = TempDir::new()?;
+    let output_path = home.path().join("support.zip");
+    std::fs::write(&output_path, b"existing archive")?;
+    let output_path_text = output_path.to_string_lossy();
+    let output = run(
+        home.path(),
+        &[
+            "--events-json",
+            "support-bundle",
+            "--output",
+            &output_path_text,
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        lines.last().and_then(|line| line["outcome"].as_str()),
+        Some("failed")
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line["kind"] == "outcome")
+            .count(),
+        1
+    );
+    assert_eq!(std::fs::read(output_path)?, b"existing archive");
     Ok(())
 }

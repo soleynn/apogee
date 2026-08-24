@@ -232,7 +232,9 @@ async fn run_command(
         Command::FirstRun(request) => first_run(&ctx, request, &tx, &cancel).await,
         Command::ImportXivLauncher(command) => import_xivlauncher(&ctx, command, &tx),
         Command::Frontier(query) => frontier(&ctx, query, &tx, &cancel).await,
-        Command::SupportBundle { facts } => support_bundle(&ctx, facts, &tx),
+        Command::SupportBundle { profile, facts } => {
+            support_bundle(&ctx, profile, facts, &tx).await
+        }
     };
     match result {
         Ok(()) => {}
@@ -288,24 +290,17 @@ fn import_xivlauncher(
     Ok(())
 }
 
-fn support_bundle(
+async fn support_bundle(
     ctx: &FlowContext,
+    profile: Option<Uuid>,
     facts: Vec<(String, String)>,
     tx: &UnboundedSender<Event>,
 ) -> Result<(), CoreError> {
     let profiles = ctx.store.list_profiles()?;
     let settings = ctx.store.load_settings()?;
-    let system = crate::SystemReportInput {
-        application_version: env!("CARGO_PKG_VERSION").to_owned(),
-        target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
-        operating_system: Some(std::env::consts::OS.to_owned()),
-        kernel: None,
-        architecture: Some(std::env::consts::ARCH.to_owned()),
-        gpu: None,
-        driver: None,
-        runner: None,
-        prefix_state: None,
-    };
+    let system =
+        crate::composition::bounded_system_report_input(&ctx.store, &ctx.prefixes_dir, profile)
+            .await?;
     let caller_facts = crate::ValidatedCallerFacts::new(facts);
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
