@@ -297,6 +297,26 @@ pub struct Store {
     ephemeral_install_id: Arc<Mutex<Option<Uuid>>>,
 }
 
+/// An exclusive lease over changes to the profile/account ownership graph.
+///
+/// The file handle is the lease: the operating system releases its lock if this process exits, so
+/// there is no stale owner to recover. Callers that need to re-check ownership and then perform more
+/// than one write keep this value alive across the whole operation.
+pub(crate) struct ProfileGraphLock<'a> {
+    store: &'a Store,
+    _file: fs::File,
+}
+
+impl ProfileGraphLock<'_> {
+    pub(crate) fn delete_profile(&self, id: Uuid) -> Result<(), StoreError> {
+        self.store.remove(self.store.profile_path(id))
+    }
+
+    pub(crate) fn delete_account(&self, id: Uuid) -> Result<(), StoreError> {
+        self.store.remove(self.store.account_path(id))
+    }
+}
+
 impl Store {
     /// A store rooted at `base`. Directories are created lazily on first write.
     #[must_use]
@@ -335,6 +355,33 @@ impl Store {
         self.base.join("first-run.json")
     }
 
+    fn profile_graph_lock_file(&self) -> PathBuf {
+        self.base.join("profile-graph.lock")
+    }
+
+    /// Serialize changes that can create or remove a profile-to-account reference across every
+    /// process using this store.
+    pub(crate) fn lock_profile_graph(&self) -> Result<ProfileGraphLock<'_>, StoreError> {
+        private_dir(&self.base)?;
+        let path = self.profile_graph_lock_file();
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&path).map_err(io_at(&path))?;
+        if !file.metadata().map_err(io_at(&path))?.is_file() {
+            return Err(StoreError::Io {
+                path,
+                source: io::Error::new(ErrorKind::InvalidData, "profile graph lock is not a file"),
+            });
+        }
+        file.lock().map_err(io_at(&path))?;
+        Ok(ProfileGraphLock {
+            store: self,
+            _file: file,
+        })
+    }
+
     fn profile_path(&self, id: Uuid) -> PathBuf {
         self.profiles_dir().join(format!("{id}.json"))
     }
@@ -353,6 +400,10 @@ impl Store {
 
     /// Persist `profile`, keyed by its id.
     pub fn save_profile(&self, profile: &Profile) -> Result<(), StoreError> {
+        let _graph = self.lock_profile_graph()?;
+        // The check and write share the graph lock. A concurrent account removal therefore either
+        // happens first and this refuses the dangling reference, or happens second and sees it.
+        self.load_account(profile.account)?;
         self.save(&self.profile_path(profile.id), profile)
     }
 
@@ -363,7 +414,7 @@ impl Store {
 
     /// Remove the profile with `id`. A missing profile is [`StoreError::NotFound`].
     pub fn delete_profile(&self, id: Uuid) -> Result<(), StoreError> {
-        self.remove(self.profile_path(id))
+        self.lock_profile_graph()?.delete_profile(id)
     }
 
     /// Every stored profile. A missing directory is an empty list, not an error.
@@ -388,7 +439,7 @@ impl Store {
 
     /// Remove the account with `id`. A missing account is [`StoreError::NotFound`].
     pub fn delete_account(&self, id: Uuid) -> Result<(), StoreError> {
-        self.remove(self.account_path(id))
+        self.lock_profile_graph()?.delete_account(id)
     }
 
     /// Delete `path`, mapping a missing file to [`StoreError::NotFound`] (the shared shape for the
