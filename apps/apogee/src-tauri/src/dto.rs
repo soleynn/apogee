@@ -1,19 +1,34 @@
 //! Shell-owned serialization of the core event stream.
 
-use std::net::IpAddr;
+mod error;
+pub(crate) mod first_run;
+mod frontier;
+mod import;
+pub(crate) mod path;
 
 use apogee_core::{
     AddonEvent, Event, FlowState, Notice, Outcome, PatchProgress, PrefixReport, ProgramStatus,
     Recoveries, Repo, RunOutcome, SetupEvent, StableCode,
 };
 use serde::Serialize;
+use ts_rs::TS;
+
+use error::CoreErrorDto;
+use first_run::FirstRunDto;
+use frontier::FrontierDto;
+use import::ImportDto;
 
 /// One frame sent to the webview.
 ///
 /// The stable code is always present. Unknown future variants remain visible as an `unknown` frame
 /// instead of disappearing, while errors deliberately cross with no `Display` text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export, export_to = "Event.ts")]
 pub(crate) enum EventDto {
     State {
         code: &'static str,
@@ -39,6 +54,19 @@ pub(crate) enum EventDto {
     },
     Frontier {
         code: &'static str,
+        frontier: FrontierDto,
+    },
+    FirstRun {
+        code: &'static str,
+        first_run: Box<FirstRunDto>,
+    },
+    Import {
+        code: &'static str,
+        import: ImportDto,
+    },
+    SupportBundle {
+        code: &'static str,
+        bytes: Vec<u8>,
     },
     Prefix {
         code: &'static str,
@@ -56,6 +84,7 @@ pub(crate) enum EventDto {
     },
     Error {
         code: &'static str,
+        error: CoreErrorDto,
     },
     Outcome {
         code: &'static str,
@@ -64,6 +93,24 @@ pub(crate) enum EventDto {
     Unknown {
         code: &'static str,
     },
+}
+
+/// The serialized channel can carry a fallback for a newer core frame.
+///
+/// `serde(untagged)` keeps the runtime JSON identical to `EventDto`; TypeScript normalizes the
+/// fallback to a separate discriminant before presenting it.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum EventWireDto {
+    Known(EventDto),
+    Unknown(UnknownEventDto),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnknownEventDto {
+    pub(crate) kind: String,
+    pub(crate) code: String,
 }
 
 impl From<&Event> for EventDto {
@@ -92,7 +139,22 @@ impl From<&Event> for EventDto {
                 code,
                 setup: SetupDto::from(setup),
             },
-            Event::Frontier(_) => Self::Frontier { code },
+            Event::Frontier(frontier) => Self::Frontier {
+                code,
+                frontier: FrontierDto::from(frontier),
+            },
+            Event::FirstRun(checkpoint) => Self::FirstRun {
+                code,
+                first_run: Box::new(FirstRunDto::from(checkpoint.as_ref())),
+            },
+            Event::Import(import) => Self::Import {
+                code,
+                import: ImportDto::from(import),
+            },
+            Event::SupportBundle(bundle) => Self::SupportBundle {
+                code,
+                bytes: bundle.bytes().to_vec(),
+            },
             Event::Prefix(report) => prefix(code, report),
             Event::Notice(notice) => Self::Notice {
                 code,
@@ -103,7 +165,10 @@ impl From<&Event> for EventDto {
                 program: exit.program.clone(),
                 status: ProgramStatusDto::from(exit.status),
             },
-            Event::Error(_) => Self::Error { code },
+            Event::Error(error) => Self::Error {
+                code,
+                error: CoreErrorDto::from(error),
+            },
             Event::Outcome(outcome) => Self::Outcome {
                 code,
                 outcome: OutcomeDto::from(*outcome),
@@ -121,14 +186,18 @@ fn prefix(code: &'static str, report: &PrefixReport) -> EventDto {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum StateDto {
     NeedsPassword,
     NeedsOtp,
     WaitingForOtpWindow { seconds: u64 },
     WaitingForPushedCode { port: u16, seconds: u64 },
-    PushedCodeReceived { from: IpAddr },
+    PushedCodeReceived { from: String },
     NeedsTerms,
     NoService,
     NeedsLogin,
@@ -163,7 +232,9 @@ impl From<&FlowState> for StateDto {
                 port: *port,
                 seconds: *seconds,
             },
-            FlowState::PushedCodeReceived { from } => Self::PushedCodeReceived { from: *from },
+            FlowState::PushedCodeReceived { from } => Self::PushedCodeReceived {
+                from: from.to_string(),
+            },
             FlowState::NeedsTerms => Self::NeedsTerms,
             FlowState::NoService => Self::NoService,
             FlowState::NeedsLogin => Self::NeedsLogin,
@@ -191,7 +262,7 @@ impl From<&FlowState> for StateDto {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RecoveriesDto {
     retries: u32,
@@ -215,8 +286,12 @@ impl From<Recoveries> for RecoveriesDto {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum PatchDto {
     Downloading {
         repo: String,
@@ -321,11 +396,75 @@ fn repo_label(repo: Repo) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_event_type_is_a_closed_discriminated_union() {
+        let event = EventDto::decl(&ts_rs::Config::default());
+
+        assert!(event.contains("type EventDto ="));
+        assert!(!event.contains("kind: string"));
+    }
+
+    #[test]
+    fn unknown_frames_serialize_as_visible_rows() {
+        let event = EventWireDto::Unknown(UnknownEventDto {
+            kind: "futureFrame".to_owned(),
+            code: "future-frame".to_owned(),
+        });
+        let json = serde_json::to_string(&event).unwrap_or_default();
+
+        assert_eq!(json, r#"{"kind":"futureFrame","code":"future-frame"}"#);
+    }
+
+    #[test]
+    fn generated_event_fields_follow_the_frontend_case() {
+        let event = EventDto::decl(&ts_rs::Config::default());
+
+        assert!(event.contains("firstRun: FirstRunDto"));
+        assert!(event.contains("missingSetup: Array<string> | null"));
+        assert!(!event.contains("first_run"));
+        assert!(!event.contains("missing_setup"));
+    }
+
+    #[test]
+    fn generated_union_names_every_current_event_arm() {
+        let event = EventDto::decl(&ts_rs::Config::default());
+        let kinds = [
+            "state",
+            "progress",
+            "patch",
+            "addon",
+            "setup",
+            "frontier",
+            "firstRun",
+            "import",
+            "supportBundle",
+            "prefix",
+            "notice",
+            "launchProgramExited",
+            "error",
+            "outcome",
+            "unknown",
+        ];
+
+        for kind in kinds {
+            assert!(event.contains(&format!(r#""kind": "{kind}""#)));
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum NoticeDto {
     ClockSkew { seconds: i64 },
-    OtpListenerFlood { from: IpAddr, refused: u32 },
+    OtpListenerFlood { from: String, refused: u32 },
     Unknown,
 }
 
@@ -334,7 +473,7 @@ impl From<&Notice> for NoticeDto {
         match notice {
             Notice::ClockSkew { seconds } => Self::ClockSkew { seconds: *seconds },
             Notice::OtpListenerFlood { from, refused } => Self::OtpListenerFlood {
-                from: *from,
+                from: from.to_string(),
                 refused: *refused,
             },
             _ => Self::Unknown,
@@ -342,8 +481,13 @@ impl From<&Notice> for NoticeDto {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum ProgramStatusDto {
     Code(i32),
     Signal(i32),
@@ -358,8 +502,8 @@ impl From<ProgramStatus> for ProgramStatusDto {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(crate) enum OutcomeDto {
     Succeeded,
     Failed,
@@ -378,8 +522,12 @@ impl From<RunOutcome> for OutcomeDto {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum AddonDto {
     Started {
         program: String,
@@ -467,8 +615,12 @@ impl From<&AddonEvent> for AddonDto {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum AddonOutcomeDto {
     Started { pid: i32 },
     AlreadyRunning { pid: i32 },
@@ -495,8 +647,12 @@ impl From<&Outcome> for AddonOutcomeDto {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum SetupDto {
     Downloading {
         what: String,

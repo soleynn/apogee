@@ -405,9 +405,18 @@ jobs:
       - name: Frontend build
         run: npm run build
         working-directory: apps/apogee
-      - run: cargo fmt --manifest-path apps/apogee/src-tauri/Cargo.toml --all --check
-      - run: cargo clippy --manifest-path apps/apogee/src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path apps/apogee/src-tauri/Cargo.toml
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+        working-directory: apps/apogee
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        working-directory: apps/apogee
+      - name: Clean generated event and command types
+        run: rm -rf src/generated
+        working-directory: apps/apogee
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+        working-directory: apps/apogee
+      - name: Generated IPC types are current
+        run: test -z "$(git status --porcelain --untracked-files=all -- src/generated)"
+        working-directory: apps/apogee
       # The shell resolves its own graph, so the policy beside its manifest is the one that applies;
       # the `deny` job above reads the root workspace's and never sees this one.
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
