@@ -212,7 +212,8 @@ mod tests {
     use apogee_core::{FlowState, OtpSource, PasswordSource, RunOutcome};
 
     use super::*;
-    use crate::command::{CommandDto, OtpSourceDto, PasswordSourceDto, SecretBytes};
+    use crate::command::{CommandDto, OtpSourceDto, PasswordSourceDto};
+    use crate::dto::secrets::SecretBytes;
     use crate::dto::{OutcomeDto, StateDto};
 
     struct ScriptedDriver {
