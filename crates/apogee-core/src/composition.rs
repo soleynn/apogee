@@ -33,7 +33,8 @@ use crate::host::{self, Clock};
 use crate::launch::LaunchBackend;
 use crate::launch::runtime_backend::RuntimeLauncher;
 use crate::model::{
-    Account, LaunchSettings, ListenerSettings, OtpDelivery, Profile, SecretBackend, Settings,
+    Account, LaunchSettings, ListenerSettings, ListenerSources, OtpDelivery, Profile,
+    SecretBackend, Settings,
 };
 use crate::patch;
 use crate::patch::PatchBackend;
@@ -60,6 +61,28 @@ fn stored_profile(store: &Store, id: Uuid) -> Result<Profile, CoreError> {
         StoreError::NotFound { .. } => CoreError::NoProfile(id),
         other => other.into(),
     })
+}
+
+fn validate_listener_settings(listener: &ListenerSettings) -> Result<(), CoreError> {
+    let ListenerSources::Only { addresses } = &listener.sources else {
+        return Ok(());
+    };
+    if addresses.is_empty() {
+        return Err(CoreError::Config {
+            var: "otp_listener.sources".to_owned(),
+            reason: "an allowlist must name at least one address",
+        });
+    }
+    if addresses
+        .iter()
+        .any(|address| matches!(address, std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()))
+    {
+        return Err(CoreError::Config {
+            var: "otp_listener.sources".to_owned(),
+            reason: "a link-local address does not identify an interface",
+        });
+    }
+    Ok(())
 }
 
 /// Filesystem locations the core reads and writes.
@@ -983,17 +1006,25 @@ impl Core {
     /// Persist the launcher-wide settings.
     ///
     /// # Errors
-    /// Returns a [`CoreError::Store`] if the settings file cannot be written.
+    /// Returns [`CoreError::Config`] for an unusable listener allowlist, or a [`CoreError::Store`]
+    /// if the settings file cannot be written.
     pub fn save_settings(&self, settings: &Settings) -> Result<(), CoreError> {
-        Ok(self.store.save_settings(settings)?)
+        validate_listener_settings(&settings.otp_listener)?;
+        let mut normalized = settings.clone();
+        normalized.frontier_poll_seconds = normalized.frontier_poll_seconds.max(1);
+        Ok(self.store.save_settings(&normalized)?)
     }
 
     /// Persist `profile`, keyed by its id.
     ///
     /// # Errors
-    /// Returns a [`CoreError::Store`] if the profile cannot be written.
+    /// Returns [`CoreError::NoAccount`] if the profile points at no stored account, or a
+    /// [`CoreError::Store`] if the profile cannot be written.
     pub fn save_profile(&self, profile: &Profile) -> Result<(), CoreError> {
-        Ok(self.store.save_profile(profile)?)
+        self.store.save_profile(profile).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoAccount(profile.account),
+            other => other.into(),
+        })
     }
 
     /// Delete the profile with `id`.
@@ -1105,13 +1136,19 @@ impl Core {
     /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
     /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
     pub fn remove_profile(&self, plan: ProfileRemovalPlan) -> Result<ProfileRemoval, CoreError> {
+        // This lock is shared by every process using the store. It stays held through the secret
+        // sweep because ownership must not change between the re-check and the destructive writes.
+        let graph = self.store.lock_profile_graph()?;
         if self.plan_removal(plan.profile)? != plan {
             return Err(CoreError::RemovalPlanChanged {
                 profile: plan.profile,
             });
         }
         let Some(account) = plan.account_removed else {
-            self.delete_profile(plan.profile)?;
+            graph.delete_profile(plan.profile).map_err(|e| match e {
+                StoreError::NotFound { .. } => CoreError::NoProfile(plan.profile),
+                other => other.into(),
+            })?;
             return Ok(ProfileRemoval {
                 account_removed: None,
                 secret_sweep: None,
@@ -1119,9 +1156,15 @@ impl Core {
         };
 
         let secret_sweep = Some(self.forget_secrets(account)?);
-        self.delete_profile(plan.profile)?;
+        graph.delete_profile(plan.profile).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoProfile(plan.profile),
+            other => other.into(),
+        })?;
         self.store.clear_uid_cache(account)?;
-        self.delete_account(account)?;
+        graph.delete_account(account).map_err(|e| match e {
+            StoreError::NotFound { .. } => CoreError::NoAccount(account),
+            other => other.into(),
+        })?;
         Ok(ProfileRemoval {
             account_removed: Some(account),
             secret_sweep,
@@ -1508,8 +1551,9 @@ impl Core {
     /// Keeping the two apart is what stops tuning being a way around the acknowledgment.
     ///
     /// # Errors
-    /// The store's own failure.
+    /// Returns [`CoreError::Config`] for an unusable allowlist, or the store's own failure.
     pub fn set_listener_settings(&self, listener: ListenerSettings) -> Result<(), CoreError> {
+        validate_listener_settings(&listener)?;
         // Propagated rather than defaulted. A settings file that cannot be read is not an empty one:
         // defaulting here would write a fresh record over it, and the field that would silently move
         // is where secrets are kept, which sends the next run looking in a store the user's password
@@ -1873,6 +1917,7 @@ mod tests {
         let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
         let id = profile.id;
 
+        core.save_account(&account).unwrap();
         core.save_profile(&profile).unwrap();
         assert_eq!(core.profiles().unwrap(), vec![profile]);
 
@@ -1892,6 +1937,7 @@ mod tests {
     /// login keyring, or raised its unlock dialog and waited on a human, would be a worse bug than
     /// anything it caught.
     mod lifecycle {
+        use std::net::{IpAddr, Ipv6Addr};
         use std::sync::Arc;
 
         use apogee_secrets::{
@@ -1906,7 +1952,9 @@ mod tests {
 
         use super::*;
         use crate::ImportOutcome;
-        use crate::model::{LaunchSettings, ListenerSettings, OtpDelivery, Settings};
+        use crate::model::{
+            LaunchSettings, ListenerSettings, ListenerSources, OtpDelivery, Settings,
+        };
 
         /// Build a core over `store`, keeping the handle so a test can read back what it recorded.
         ///
@@ -2819,6 +2867,47 @@ mod tests {
             let saved = core.account(account.id).unwrap();
             assert_eq!(saved.otp_delivery, OtpDelivery::Ask);
             assert!(!saved.use_otp);
+        }
+
+        #[test]
+        fn settings_refuse_unusable_listener_allowlists_before_writing() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(store);
+            let original = core.settings().unwrap();
+
+            let mut empty = original.clone();
+            empty.otp_listener.sources = ListenerSources::Only {
+                addresses: Vec::new(),
+            };
+            assert!(matches!(
+                core.save_settings(&empty),
+                Err(CoreError::Config { .. })
+            ));
+            assert_eq!(core.settings().unwrap(), original);
+
+            let mut link_local = original.clone();
+            link_local.otp_listener.sources = ListenerSources::Only {
+                addresses: vec![IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))],
+            };
+            assert!(matches!(
+                core.set_listener_settings(link_local.otp_listener),
+                Err(CoreError::Config { .. })
+            ));
+            assert_eq!(core.settings().unwrap(), original);
+        }
+
+        #[test]
+        fn settings_normalize_a_zero_frontier_poll_interval_before_writing() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(store);
+            let settings = Settings {
+                frontier_poll_seconds: 0,
+                ..Settings::default()
+            };
+
+            core.save_settings(&settings).unwrap();
+
+            assert_eq!(core.settings().unwrap().frontier_poll_seconds, 1);
         }
 
         /// A sweep for an account that was already typing its codes leaves the record alone, and one

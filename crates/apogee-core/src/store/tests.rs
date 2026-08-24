@@ -235,6 +235,7 @@ fn a_profile_round_trips_through_the_store() {
     let (_dir, store) = store();
     let account = Account::new("me@example.invalid", AccountKind::Standard);
     let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+    store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
     assert_eq!(store.list_profiles().unwrap(), vec![profile]);
 }
@@ -244,6 +245,7 @@ fn listing_profiles_ignores_a_corrupt_backup_beside_them() {
     let (dir, store) = store();
     let account = Account::new("me@example.invalid", AccountKind::Standard);
     let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+    store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
     // A stray backup file must not be parsed as a profile.
     fs::write(
@@ -261,6 +263,41 @@ fn deleting_a_missing_profile_reports_not_found() {
         store.delete_profile(uuid::Uuid::new_v4()).unwrap_err(),
         StoreError::NotFound { .. }
     ));
+}
+
+#[test]
+fn a_profile_cannot_attach_to_an_account_while_its_removal_holds_the_graph_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (dir, store) = store();
+    let account = Account::new("me@example.invalid", AccountKind::Standard);
+    let profile = Profile::new("Alt", account.id, "/games/ffxiv".into());
+    store.save_account(&account).unwrap();
+
+    // This is the interval after removal has re-checked ownership and while its secret sweep may be
+    // waiting on a credential-store prompt. A second process uses a separately constructed Store,
+    // so only the operating-system lock can serialize it.
+    let removal = store.lock_profile_graph().unwrap();
+    let writer = Store::new(dir.path().to_path_buf());
+    let (sent, result) = mpsc::channel();
+    let join = std::thread::spawn(move || {
+        sent.send(writer.save_profile(&profile)).unwrap();
+    });
+
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the second store changed ownership while removal held the graph lock"
+    );
+    removal.delete_account(account.id).unwrap();
+    drop(removal);
+
+    assert!(matches!(
+        result.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Err(StoreError::NotFound { .. })
+    ));
+    join.join().unwrap();
+    assert!(store.list_profiles().unwrap().is_empty());
 }
 
 #[test]
@@ -447,6 +484,7 @@ fn a_directory_left_readable_by_an_earlier_build_is_narrowed() {
 
     let store = Store::new(base.clone());
     let account = Account::new("someone", AccountKind::Standard);
+    store.save_account(&account).unwrap();
     store
         .save_profile(&Profile::new("main", account.id, "/tmp/ffxiv".into()))
         .unwrap();
@@ -521,6 +559,12 @@ fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) 
     assert!(!loaded.launch.nvapi);
 
     // A re-save rewrites the envelope at the current schema version, without the set it shed.
+    store
+        .save_account(&Account {
+            id: account,
+            ..Account::new("me@example.invalid", AccountKind::Standard)
+        })
+        .unwrap();
     store.save_profile(&loaded).unwrap();
     let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(

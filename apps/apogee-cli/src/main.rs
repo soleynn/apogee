@@ -15,12 +15,12 @@ use apogee_core::{
     ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
     Core, CoreConfig, Deviation, Event, ExternalAddon, FileState, FlowState,
     ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery,
-    GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource,
+    Gamescope, GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource,
     LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
     NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
     PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
     RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
-    SecretSweep, SecretsError, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
+    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -87,6 +87,11 @@ fn init_logging(flag: Option<&str>) -> Result<(), CliError> {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Edit stored Square Enix account records without exposing their secrets.
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Manage launch profiles.
     Profile {
         #[command(subcommand)]
@@ -256,20 +261,42 @@ enum SettingsCommand {
 }
 
 #[derive(Subcommand)]
+enum AccountAction {
+    /// Change the login id, licence kind, or one-time-password use for an existing account.
+    Edit(AccountEditArgs),
+}
+
+#[derive(Args)]
+struct AccountEditArgs {
+    #[command(flatten)]
+    target: AccountTargetArgs,
+    /// Replacement Square Enix login id.
+    #[arg(long)]
+    square_enix_id: Option<String>,
+    /// Replacement licence: `standard`, `free-trial`, `steam`, `steam-free-trial`, or
+    /// `steam:<app-id>`.
+    #[arg(long)]
+    licence: Option<String>,
+    /// Whether this account uses a one-time password.
+    #[arg(long)]
+    use_otp: Option<bool>,
+}
+
+#[derive(Subcommand)]
 enum SecretsCommand {
     /// Report which credential store answered and what condition it is in.
     Status,
     /// Save a profile's account password, read from the terminal.
-    Save(TargetArgs),
+    Save(AccountTargetArgs),
     /// Save the secret a profile's account derives its one-time passwords from, read from stdin, and
     /// stop asking for a code. Takes an `otpauth://` link or the bare base32 secret behind it.
     ///
     /// Read from stdin like every other secret here and never taken as an argument: a shared secret
     /// in `/proc/<pid>/cmdline` is readable by every local user, and it is worse to leak than a code,
     /// which expires in half a minute.
-    Totp(TargetArgs),
+    Totp(AccountTargetArgs),
     /// Delete every secret stored for a profile's account.
-    Forget(TargetArgs),
+    Forget(AccountTargetArgs),
     /// Delete one stored secret for a profile's account.
     Delete(DeleteSecretArgs),
     /// Stop keeping a profile's account password, or start again. Turning it on deletes whatever is
@@ -317,9 +344,8 @@ struct BackendArgs {
 
 #[derive(Args)]
 struct NeverStoreArgs {
-    /// Profile id or unique name.
-    #[arg(long)]
-    profile: String,
+    #[command(flatten)]
+    target: AccountTargetArgs,
     /// Whether to keep nothing for the account.
     #[arg(long)]
     on: bool,
@@ -342,9 +368,8 @@ impl From<SecretKindChoice> for SecretKind {
 
 #[derive(Args)]
 struct DeleteSecretArgs {
-    /// Profile id or unique name.
-    #[arg(long)]
-    profile: String,
+    #[command(flatten)]
+    target: AccountTargetArgs,
     /// Which write-only secret to delete.
     #[arg(long, value_enum)]
     kind: SecretKindChoice,
@@ -368,6 +393,9 @@ struct ImportArgs {
 
 #[derive(Args)]
 struct SettingsSetArgs {
+    /// Language tag passed to the game client at launch.
+    #[arg(long)]
+    language: Option<String>,
     /// Keep downloaded patches after they apply. Costs disk, and lets a later repair rebuild broken
     /// ranges from them instead of downloading again.
     #[arg(long)]
@@ -463,13 +491,13 @@ enum DalamudAction {
 #[derive(Subcommand)]
 enum OtpAction {
     /// Say where this profile's account gets its one-time code, and where the listener would sit.
-    Status(TargetArgs),
+    Status(AccountTargetArgs),
     /// Take the code from a companion app pushing it to this machine, and stop asking for one.
     ///
     /// Opens a port on this machine's network while a login waits, so it asks first.
-    Listen(TargetArgs),
+    Listen(AccountTargetArgs),
     /// Go back to typing the code. Deletes nothing and closes nothing that is not already closed.
-    Ask(TargetArgs),
+    Ask(AccountTargetArgs),
     /// Change where the listener sits and who may reach it. Only the settings named are touched.
     Listener(ListenerArgs),
 }
@@ -601,8 +629,109 @@ enum ProfileAction {
     List,
     /// Remove a profile (and its account, if no other profile references it).
     Remove(ProfileRemoveArgs),
+    /// Change a profile's name, runner, and launch settings without moving its installation.
+    Edit(ProfileEditArgs),
     /// Show or change how a profile's launches are tuned.
     Env(ProfileEnvArgs),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GamescopeChoice {
+    Enabled,
+    Disabled,
+}
+
+/// Editable profile fields. Identity, ownership, installation paths, prefix, and companion tools
+/// are deliberately absent: this command cannot replace them as a side effect of editing launch
+/// preferences.
+#[derive(Args)]
+struct ProfileEditArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Replacement display name.
+    #[arg(long)]
+    name: Option<String>,
+    /// Replacement runner: `system` or `managed:<name>@<version>`.
+    #[arg(long)]
+    runner: Option<String>,
+    /// Service region: `global`, `korea`, or `china`.
+    #[arg(long)]
+    region: Option<String>,
+    /// Replace the game's additional argument vector. Repeat once per argument.
+    #[arg(long = "extra-arg", allow_hyphen_values = true)]
+    extra_args: Vec<String>,
+    /// Replace the additional argument vector with an empty one.
+    #[arg(long, conflicts_with = "extra_args")]
+    clear_extra_args: bool,
+    /// Replace the launcher's final environment overrides, in `NAME=VALUE` form. Repeat per entry.
+    #[arg(long = "extra-env", value_name = "NAME=VALUE")]
+    extra_env: Vec<String>,
+    /// Replace the final environment override table with an empty one.
+    #[arg(long, conflicts_with = "extra_env")]
+    clear_extra_env: bool,
+    /// Replace the outermost-first wrapper list. Repeat once per wrapper.
+    #[arg(long = "wrapper", allow_hyphen_values = true)]
+    wrappers: Vec<String>,
+    /// Replace the wrapper list with an empty one.
+    #[arg(long, conflicts_with = "wrappers")]
+    clear_wrappers: bool,
+    /// Synchronization: `auto`, `ntsync`, `fsync`, `esync`, or `none`.
+    #[arg(long)]
+    sync: Option<String>,
+    /// Overlay: `none`, `mangohud`, or `dxvk:<spec>`.
+    #[arg(long)]
+    hud: Option<String>,
+    /// GPU: `default`, `nvidia`, `mesa`, or `vulkan:<vendor>:<device>`.
+    #[arg(long)]
+    gpu: Option<String>,
+    /// Whether to install and load the DXVK nvapi companion.
+    #[arg(long)]
+    nvapi: Option<bool>,
+    /// Enable or disable the gamescope wrapper. Enabling preserves existing gamescope fields and
+    /// starts from its defaults when it was previously disabled.
+    #[arg(long, value_enum)]
+    gamescope: Option<GamescopeChoice>,
+    /// Gamescope output width.
+    #[arg(long, requires = "gamescope")]
+    gamescope_width: Option<u32>,
+    /// Let gamescope choose its output width.
+    #[arg(long, requires = "gamescope", conflicts_with = "gamescope_width")]
+    clear_gamescope_width: bool,
+    /// Gamescope output height.
+    #[arg(long, requires = "gamescope")]
+    gamescope_height: Option<u32>,
+    /// Let gamescope choose its output height.
+    #[arg(long, requires = "gamescope", conflicts_with = "gamescope_height")]
+    clear_gamescope_height: bool,
+    /// Gamescope refresh rate in Hz.
+    #[arg(long, requires = "gamescope")]
+    gamescope_refresh: Option<u32>,
+    /// Let gamescope choose its output refresh rate.
+    #[arg(long, requires = "gamescope", conflicts_with = "gamescope_refresh")]
+    clear_gamescope_refresh: bool,
+    /// Whether gamescope runs fullscreen.
+    #[arg(long, requires = "gamescope")]
+    gamescope_fullscreen: Option<bool>,
+    /// Whether gamescope requests HDR output.
+    #[arg(long, requires = "gamescope")]
+    gamescope_hdr: Option<bool>,
+    /// Replace gamescope's additional argument vector. Repeat once per argument.
+    #[arg(
+        long = "gamescope-arg",
+        allow_hyphen_values = true,
+        requires = "gamescope"
+    )]
+    gamescope_extra: Vec<String>,
+    /// Replace gamescope's additional argument vector with an empty one.
+    #[arg(long, requires = "gamescope", conflicts_with = "gamescope_extra")]
+    clear_gamescope_args: bool,
+    /// Whether to ask the system for its game performance profile.
+    #[arg(long)]
+    gamemode: Option<bool>,
+    /// Whether to load Dalamud into the game.
+    #[arg(long)]
+    dalamud: Option<bool>,
 }
 
 #[derive(Args)]
@@ -646,6 +775,16 @@ struct TargetArgs {
     /// Profile id or unique name.
     #[arg(long)]
     profile: String,
+}
+
+#[derive(Args)]
+struct AccountTargetArgs {
+    /// Profile id or unique name whose account should be used.
+    #[arg(long, required_unless_present = "account", conflicts_with = "account")]
+    profile: Option<String>,
+    /// Account id. Works before the account has a profile.
+    #[arg(long, required_unless_present = "profile", conflicts_with = "profile")]
+    account: Option<Uuid>,
 }
 
 #[derive(Args)]
@@ -751,6 +890,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     let command = cli.command.ok_or("a command is required")?;
     let core = build_core()?;
     match command {
+        Commands::Account { action } => {
+            account(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Profile { action } => {
             profile(&core, action)?;
             Ok(ExitCode::SUCCESS)
@@ -994,13 +1137,13 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             Ok(())
         }
         SecretsCommand::Save(args) => {
-            let account = resolve_profile(core, &args.profile)?.account;
+            let account = resolve_account(core, &args)?.id;
             core.store_secret(account, SecretKind::Password, read_password()?)?;
             println!("saved the password for account {account}");
             Ok(())
         }
         SecretsCommand::Totp(args) => {
-            let account = resolve_profile(core, &args.profile)?.account;
+            let account = resolve_account(core, &args)?.id;
             let offered = read_line_erased("otpauth link or secret: ")?;
             let text = std::str::from_utf8(offered.expose())
                 .map_err(|_| "what was typed is not valid text")?;
@@ -1016,7 +1159,7 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             Ok(())
         }
         SecretsCommand::Forget(args) => {
-            let account = resolve_profile(core, &args.profile)?.account;
+            let account = resolve_account(core, &args)?.id;
             match secrets_left_behind(core.forget_secrets(account)?) {
                 None => println!("forgot every secret stored for account {account}"),
                 Some(left) => println!("{left}"),
@@ -1024,13 +1167,13 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             Ok(())
         }
         SecretsCommand::Delete(args) => {
-            let account = resolve_profile(core, &args.profile)?.account;
+            let account = resolve_account(core, &args.target)?.id;
             core.delete_secret(account, args.kind.into())?;
             println!("deleted the selected secret for account {account}");
             Ok(())
         }
         SecretsCommand::NeverStore(args) => {
-            let id = resolve_profile(core, &args.profile)?.account;
+            let id = resolve_account(core, &args.target)?.id;
             if let Some(sweep) = core.set_never_store(id, args.on)?
                 && let Some(left) = secrets_left_behind(sweep)
             {
@@ -1224,25 +1367,32 @@ fn settings(core: &Core, action: SettingsCommand) -> Result<(), CliError> {
         }
         SettingsCommand::Set(args) => {
             let mut s = core.settings()?;
-            if let Some(v) = args.keep_patches {
-                s.keep_patches = v;
-            }
-            if let Some(v) = args.backup_before_patch {
-                s.backup_before_patch = v;
-            }
-            if let Some(v) = args.backups_kept {
-                s.backups_kept = v;
-            }
-            if let Some(v) = args.frontier_poll_seconds {
-                s.frontier_poll_seconds = v.max(1);
-            }
-            if let Some(v) = args.close_after_launch {
-                s.close_after_launch = v;
-            }
+            apply_settings_edit(&mut s, &args);
             core.save_settings(&s)?;
             println!("saved");
             Ok(())
         }
+    }
+}
+
+fn apply_settings_edit(settings: &mut Settings, args: &SettingsSetArgs) {
+    if let Some(value) = &args.language {
+        settings.language.clone_from(value);
+    }
+    if let Some(value) = args.keep_patches {
+        settings.keep_patches = value;
+    }
+    if let Some(value) = args.backup_before_patch {
+        settings.backup_before_patch = value;
+    }
+    if let Some(value) = args.backups_kept {
+        settings.backups_kept = value;
+    }
+    if let Some(value) = args.frontier_poll_seconds {
+        settings.frontier_poll_seconds = value;
+    }
+    if let Some(value) = args.close_after_launch {
+        settings.close_after_launch = value;
     }
 }
 
@@ -1630,12 +1780,12 @@ fn dalamud(core: &Core, action: DalamudAction) -> Result<(), CliError> {
 /// Where an account's one-time code comes from, and where the listener that can receive one sits.
 fn otp(core: &Core, action: OtpAction) -> Result<(), CliError> {
     match action {
-        OtpAction::Status(args) => otp_status(core, &args.profile),
-        OtpAction::Listen(args) => otp_listen(core, &args.profile),
+        OtpAction::Status(args) => otp_status(core, &args),
+        OtpAction::Listen(args) => otp_listen(core, &args),
         OtpAction::Ask(args) => {
-            let profile = resolve_profile(core, &args.profile)?;
-            core.ask_for_pushed_codes_no_longer(profile.account)?;
-            println!("{} will be asked for a code again", profile.name);
+            let account = resolve_account(core, &args)?;
+            core.ask_for_pushed_codes_no_longer(account.id)?;
+            println!("account {} will be asked for a code again", account.id);
             Ok(())
         }
         OtpAction::Listener(args) => otp_listener(core, args),
@@ -1643,9 +1793,8 @@ fn otp(core: &Core, action: OtpAction) -> Result<(), CliError> {
 }
 
 /// Print where this account's code comes from and how the listener is configured.
-fn otp_status(core: &Core, target: &str) -> Result<(), CliError> {
-    let profile = resolve_profile(core, target)?;
-    let account = core.account(profile.account)?;
+fn otp_status(core: &Core, target: &AccountTargetArgs) -> Result<(), CliError> {
+    let account = resolve_account(core, target)?;
     let where_from = match (account.use_otp, account.otp_delivery) {
         (false, _) => "not used by this account",
         (true, OtpDelivery::Generate) => "generated here from a stored secret",
@@ -1681,13 +1830,15 @@ fn print_listener_settings(listener: &ListenerSettings) {
 ///
 /// The one-time acknowledgment. It is a typed word rather than a yes/no because the thing being
 /// agreed to is visible to other people on the network and cannot be taken back by closing a dialog.
-fn otp_listen(core: &Core, target: &str) -> Result<(), CliError> {
-    let profile = resolve_profile(core, target)?;
-    let account = core.account(profile.account)?;
+fn otp_listen(core: &Core, target: &AccountTargetArgs) -> Result<(), CliError> {
+    let account = resolve_account(core, target)?;
     let listener = core.settings()?.otp_listener;
 
     if account.otp_delivery == OtpDelivery::Listen {
-        println!("{} already takes its code from the listener", profile.name);
+        println!(
+            "account {} already takes its code from the listener",
+            account.id
+        );
         print_listener_settings(&listener);
         return Ok(());
     }
@@ -1729,8 +1880,11 @@ fn otp_listen(core: &Core, target: &str) -> Result<(), CliError> {
         println!("left alone");
         return Ok(());
     }
-    core.use_pushed_codes(profile.account, ListenerConsent::granted())?;
-    println!("{} will take its code from the listener", profile.name);
+    core.use_pushed_codes(account.id, ListenerConsent::granted())?;
+    println!(
+        "account {} will take its code from the listener",
+        account.id
+    );
     Ok(())
 }
 
@@ -1944,6 +2098,32 @@ async fn drive(core: &Core, cmd: Command) -> ExitCode {
     }
 }
 
+/// Edit the public fields of an account without replacing secret policy or delivery metadata.
+fn account(core: &Core, action: AccountAction) -> Result<(), CliError> {
+    match action {
+        AccountAction::Edit(args) => {
+            let mut account = resolve_account(core, &args.target)?;
+            apply_account_edit(&mut account, &args)?;
+            core.save_account(&account)?;
+            println!("updated account {}", account.id);
+            Ok(())
+        }
+    }
+}
+
+fn apply_account_edit(account: &mut Account, args: &AccountEditArgs) -> Result<(), CliError> {
+    if let Some(value) = &args.square_enix_id {
+        account.sqex_id.clone_from(value);
+    }
+    if let Some(value) = &args.licence {
+        account.kind = parse_licence(value)?;
+    }
+    if let Some(value) = args.use_otp {
+        account.use_otp = value;
+    }
+    Ok(())
+}
+
 fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
     match action {
         ProfileAction::Add(args) => {
@@ -2006,8 +2186,126 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
             }
             Ok(())
         }
+        ProfileAction::Edit(args) => {
+            let mut profile = resolve_profile(core, &args.profile)?;
+            apply_profile_edit(&mut profile, &args)?;
+            core.save_profile(&profile)?;
+            println!("updated profile {} \"{}\"", profile.id, profile.name);
+            Ok(())
+        }
         ProfileAction::Env(args) => profile_env(core, args),
     }
+}
+
+/// Apply only the editable record projection exposed by both user interfaces. Building a complete
+/// replacement first means a malformed environment entry cannot leave an in-memory record half
+/// changed, while identity, ownership, paths, prefix, and companion tools remain untouched.
+fn apply_profile_edit(profile: &mut Profile, args: &ProfileEditArgs) -> Result<(), CliError> {
+    let mut next = profile.clone();
+    if let Some(value) = &args.name {
+        next.name.clone_from(value);
+    }
+    if let Some(value) = &args.runner {
+        next.runner = parse_runner(value)?;
+    }
+    if let Some(value) = &args.region {
+        next.launch.region = parse_region(value)?;
+    }
+    if args.clear_extra_args {
+        next.launch.extra_args.clear();
+    } else if !args.extra_args.is_empty() {
+        next.launch.extra_args.clone_from(&args.extra_args);
+    }
+    if args.clear_extra_env {
+        next.launch.extra_env.clear();
+    } else if !args.extra_env.is_empty() {
+        next.launch.extra_env = parse_environment_entries(&args.extra_env)?;
+    }
+    if args.clear_wrappers {
+        next.launch.wrappers.clear();
+    } else if !args.wrappers.is_empty() {
+        next.launch.wrappers.clone_from(&args.wrappers);
+    }
+    if let Some(value) = &args.sync {
+        next.launch.sync = parse_sync(value)?;
+    }
+    if let Some(value) = &args.hud {
+        next.launch.hud = parse_hud(value)?;
+    }
+    if let Some(value) = &args.gpu {
+        next.launch.gpu = parse_gpu(value)?;
+    }
+    if let Some(value) = args.nvapi {
+        next.launch.nvapi = value;
+    }
+    if let Some(choice) = args.gamescope {
+        let has_fields = args.gamescope_width.is_some()
+            || args.clear_gamescope_width
+            || args.gamescope_height.is_some()
+            || args.clear_gamescope_height
+            || args.gamescope_refresh.is_some()
+            || args.clear_gamescope_refresh
+            || args.gamescope_fullscreen.is_some()
+            || args.gamescope_hdr.is_some()
+            || !args.gamescope_extra.is_empty()
+            || args.clear_gamescope_args;
+        match choice {
+            GamescopeChoice::Disabled if has_fields => {
+                return Err("gamescope fields cannot be set while gamescope is disabled".into());
+            }
+            GamescopeChoice::Disabled => next.launch.gamescope = None,
+            GamescopeChoice::Enabled => {
+                let gamescope = next.launch.gamescope.get_or_insert_with(Gamescope::default);
+                if let Some(value) = args.gamescope_width {
+                    gamescope.width = Some(value);
+                } else if args.clear_gamescope_width {
+                    gamescope.width = None;
+                }
+                if let Some(value) = args.gamescope_height {
+                    gamescope.height = Some(value);
+                } else if args.clear_gamescope_height {
+                    gamescope.height = None;
+                }
+                if let Some(value) = args.gamescope_refresh {
+                    gamescope.refresh = Some(value);
+                } else if args.clear_gamescope_refresh {
+                    gamescope.refresh = None;
+                }
+                if let Some(value) = args.gamescope_fullscreen {
+                    gamescope.fullscreen = value;
+                }
+                if let Some(value) = args.gamescope_hdr {
+                    gamescope.hdr = value;
+                }
+                if args.clear_gamescope_args {
+                    gamescope.extra.clear();
+                } else if !args.gamescope_extra.is_empty() {
+                    gamescope.extra.clone_from(&args.gamescope_extra);
+                }
+            }
+        }
+    }
+    if let Some(value) = args.gamemode {
+        next.launch.gamemode = value;
+    }
+    if let Some(value) = args.dalamud {
+        next.launch.dalamud = value;
+    }
+    *profile = next;
+    Ok(())
+}
+
+fn parse_environment_entries(entries: &[String]) -> Result<Vec<(String, String)>, CliError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (name, value) = entry
+                .split_once('=')
+                .filter(|(name, _)| !name.is_empty())
+                .ok_or_else(|| format!("--extra-env takes NAME=VALUE, got {entry:?}"))?;
+            Ok((name.to_owned(), value.to_owned()))
+        })
+        .collect()
 }
 
 /// Resolve a profile id or unique name to the profile. An id is loaded by key (one file); a name is
@@ -2025,6 +2323,20 @@ fn resolve_profile(core: &Core, target: &str) -> Result<Profile, CliError> {
         1 => Ok(matches.remove(0)),
         0 => Err(format!("no profile named {target:?}").into()),
         _ => Err(format!("multiple profiles named {target:?}; use the id").into()),
+    }
+}
+
+/// Resolve an account directly, or through a profile as a convenience for interactive use.
+fn resolve_account(core: &Core, target: &AccountTargetArgs) -> Result<Account, CliError> {
+    match (target.account, target.profile.as_deref()) {
+        (Some(id), None) => Ok(core.account(id)?),
+        (None, Some(profile)) => {
+            let account = resolve_profile(core, profile)?.account;
+            Ok(core.account(account)?)
+        }
+        // Clap enforces this shape for command-line callers. Keeping the function total makes direct
+        // tests and future non-Clap callers fail clearly instead of choosing one target silently.
+        _ => Err("choose exactly one of --account or --profile".into()),
     }
 }
 
@@ -2903,6 +3215,270 @@ mod tests {
         erased_text(typed);
         erased_secret(read_line_erased);
     };
+
+    #[test]
+    fn account_edit_changes_login_fields_without_replacing_policy_metadata() {
+        let cli = Cli::try_parse_from([
+            "apogee-cli",
+            "account",
+            "edit",
+            "--profile",
+            "main",
+            "--square-enix-id",
+            "new-login",
+            "--licence",
+            "steam-free-trial",
+            "--use-otp",
+            "false",
+        ])
+        .expect("account edit parses");
+        let Some(Commands::Account {
+            action: AccountAction::Edit(args),
+        }) = cli.command
+        else {
+            panic!("account edit should select its command arm");
+        };
+
+        let mut account = Account::new("old-login", AccountKind::Standard);
+        account.use_otp = true;
+        account.never_store = true;
+        account.otp_delivery = OtpDelivery::Listen;
+        let id = account.id;
+        apply_account_edit(&mut account, &args).expect("valid edit applies");
+
+        assert_eq!(account.id, id);
+        assert_eq!(account.sqex_id, "new-login");
+        assert_eq!(
+            account.kind,
+            AccountKind::Steam {
+                app_id: STEAM_FREE_TRIAL_APP_ID,
+            }
+        );
+        assert!(!account.use_otp);
+        assert!(account.never_store);
+        assert_eq!(account.otp_delivery, OtpDelivery::Listen);
+    }
+
+    #[test]
+    fn account_scoped_mutations_accept_an_account_without_a_profile() {
+        let account = Uuid::new_v4().to_string();
+        for args in [
+            vec!["account", "edit", "--account", &account],
+            vec!["secrets", "save", "--account", &account],
+            vec!["secrets", "totp", "--account", &account],
+            vec!["secrets", "forget", "--account", &account],
+            vec![
+                "secrets",
+                "delete",
+                "--account",
+                &account,
+                "--kind",
+                "password",
+            ],
+            vec![
+                "secrets",
+                "never-store",
+                "--account",
+                &account,
+                "--on",
+                "true",
+            ],
+            vec!["otp", "status", "--account", &account],
+            vec!["otp", "listen", "--account", &account],
+            vec!["otp", "ask", "--account", &account],
+        ] {
+            let argv = std::iter::once("apogee-cli").chain(args);
+            Cli::try_parse_from(argv).expect("account id target should parse");
+        }
+    }
+
+    #[test]
+    fn profile_edit_reaches_every_launch_field_and_preserves_record_ownership() {
+        let cli = Cli::try_parse_from([
+            "apogee-cli",
+            "profile",
+            "edit",
+            "--profile",
+            "main",
+            "--name",
+            "Raids",
+            "--runner",
+            "managed:proton@9.0",
+            "--region",
+            "korea",
+            "--extra-arg=-dx11",
+            "--extra-env",
+            "TOKEN=one=two",
+            "--wrapper",
+            "capture",
+            "--sync",
+            "ntsync",
+            "--hud",
+            "dxvk:fps",
+            "--gpu",
+            "vulkan:10de:2482",
+            "--nvapi",
+            "true",
+            "--gamescope",
+            "enabled",
+            "--gamescope-width",
+            "1920",
+            "--clear-gamescope-height",
+            "--gamescope-refresh",
+            "120",
+            "--gamescope-fullscreen",
+            "true",
+            "--gamescope-hdr",
+            "true",
+            "--gamescope-arg=-b",
+            "--gamemode",
+            "true",
+            "--dalamud",
+            "true",
+        ])
+        .expect("complete profile edit parses");
+        let Some(Commands::Profile {
+            action: ProfileAction::Edit(args),
+        }) = cli.command
+        else {
+            panic!("profile edit should select its command arm");
+        };
+
+        let account = Uuid::new_v4();
+        let game_path = std::env::current_dir()
+            .expect("working directory")
+            .join("game");
+        let mut profile = Profile::new("Main", account, game_path.clone());
+        profile.prefix.name = "owned-prefix".to_owned();
+        profile.external.push(
+            ExternalAddon::new(
+                std::env::current_dir()
+                    .expect("working directory")
+                    .join("capture.exe"),
+                vec!["--quiet".to_owned()],
+                RunIn::Host,
+                Trigger::OnClose,
+            )
+            .expect("absolute addon path"),
+        );
+        profile.launch.gamescope = Some(Gamescope {
+            width: Some(800),
+            height: Some(600),
+            refresh: Some(60),
+            fullscreen: false,
+            hdr: false,
+            extra: vec!["old".to_owned()],
+        });
+        let id = profile.id;
+        let external = profile.external.clone();
+
+        apply_profile_edit(&mut profile, &args).expect("valid edit applies");
+
+        assert_eq!(profile.id, id);
+        assert_eq!(profile.account, account);
+        assert_eq!(profile.game_path, game_path);
+        assert_eq!(profile.prefix.name, "owned-prefix");
+        assert_eq!(profile.external, external);
+        assert_eq!(profile.name, "Raids");
+        assert_eq!(
+            profile.runner,
+            RunnerSelection::Managed {
+                name: "proton".to_owned(),
+                version: "9.0".to_owned(),
+            }
+        );
+        assert_eq!(profile.launch.region, Region::Korea);
+        assert_eq!(profile.launch.extra_args, ["-dx11"]);
+        assert_eq!(
+            profile.launch.extra_env,
+            [("TOKEN".to_owned(), "one=two".to_owned())]
+        );
+        assert_eq!(profile.launch.wrappers, ["capture"]);
+        assert_eq!(profile.launch.sync, SyncChoice::Ntsync);
+        assert_eq!(profile.launch.hud, Hud::Dxvk("fps".to_owned()));
+        assert_eq!(
+            profile.launch.gpu,
+            GpuSelect::VulkanDevice("10de:2482".to_owned())
+        );
+        assert!(profile.launch.nvapi);
+        assert_eq!(
+            profile.launch.gamescope,
+            Some(Gamescope {
+                width: Some(1920),
+                height: None,
+                refresh: Some(120),
+                fullscreen: true,
+                hdr: true,
+                extra: vec!["-b".to_owned()],
+            })
+        );
+        assert!(profile.launch.gamemode);
+        assert!(profile.launch.dalamud);
+    }
+
+    #[test]
+    fn a_malformed_environment_edit_leaves_the_profile_unchanged() {
+        let cli = Cli::try_parse_from([
+            "apogee-cli",
+            "profile",
+            "edit",
+            "--profile",
+            "main",
+            "--name",
+            "would-have-changed",
+            "--extra-env",
+            "missing-separator",
+        ])
+        .expect("the environment grammar is checked by the mutator");
+        let Some(Commands::Profile {
+            action: ProfileAction::Edit(args),
+        }) = cli.command
+        else {
+            panic!("profile edit should select its command arm");
+        };
+        let mut profile = Profile::new("unchanged", Uuid::new_v4(), PathBuf::from("game"));
+        let before = profile.clone();
+
+        let error = apply_profile_edit(&mut profile, &args).expect_err("missing '=' is refused");
+
+        assert!(error.to_string().contains("NAME=VALUE"));
+        assert_eq!(profile, before);
+    }
+
+    #[test]
+    fn settings_edit_accepts_language_and_preserves_unnamed_fields() {
+        let cli = Cli::try_parse_from([
+            "apogee-cli",
+            "settings",
+            "set",
+            "--language",
+            "ja-JP",
+            "--keep-patches",
+            "false",
+        ])
+        .expect("settings edit parses");
+        let Some(Commands::Settings {
+            action: SettingsCommand::Set(args),
+        }) = cli.command
+        else {
+            panic!("settings set should select its command arm");
+        };
+
+        let mut settings = Settings {
+            backups_kept: 11,
+            otp_listener: ListenerSettings {
+                port: 9_999,
+                ..ListenerSettings::default()
+            },
+            ..Settings::default()
+        };
+        apply_settings_edit(&mut settings, &args);
+
+        assert_eq!(settings.language, "ja-JP");
+        assert!(!settings.keep_patches);
+        assert_eq!(settings.backups_kept, 11);
+        assert_eq!(settings.otp_listener.port, 9_999);
+    }
 
     /// A transfer with nothing wrong adds nothing to the line, so a healthy patch day reads exactly
     /// as it did before the counters existed.
