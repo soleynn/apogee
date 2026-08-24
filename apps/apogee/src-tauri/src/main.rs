@@ -386,8 +386,18 @@ mod tests {
     #[derive(Deserialize)]
     struct ParityRow {
         ipc: String,
+        #[serde(default)]
         cli: Vec<Vec<String>>,
+        #[serde(default)]
+        operations: Vec<ParityOperation>,
         shell_local: Option<String>,
+        equivalence: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ParityOperation {
+        shell: String,
+        cli: Vec<Vec<String>>,
         equivalence: String,
     }
 
@@ -413,13 +423,23 @@ mod tests {
         assert_eq!(registered, declared);
         for row in manifest.commands {
             let has_cli = !row.cli.is_empty() && row.cli.iter().all(|route| !route.is_empty());
+            let has_operations = !row.operations.is_empty()
+                && row.operations.iter().all(|operation| {
+                    !operation.shell.trim().is_empty()
+                        && !operation.equivalence.trim().is_empty()
+                        && !operation.cli.is_empty()
+                        && operation.cli.iter().all(|route| !route.is_empty())
+                });
             let has_shell_reason = row
                 .shell_local
                 .as_deref()
                 .is_some_and(|reason| !reason.trim().is_empty());
             assert!(
-                has_cli ^ has_shell_reason,
-                "{} must have CLI routes or one shell-local justification, exclusively",
+                usize::from(has_cli)
+                    + usize::from(has_operations)
+                    + usize::from(has_shell_reason)
+                    == 1,
+                "{} must have direct CLI routes, leaf operations, or one shell-local justification, exclusively",
                 row.ipc
             );
             assert!(
@@ -427,6 +447,21 @@ mod tests {
                 "{} does not state why its CLI route is equivalent",
                 row.ipc
             );
+            if row.ipc == "execute" {
+                let operations: BTreeSet<_> = row
+                    .operations
+                    .iter()
+                    .map(|operation| operation.shell.clone())
+                    .collect();
+                assert_eq!(
+                    operations.len(),
+                    row.operations.len(),
+                    "an execute operation appears more than once in the parity table"
+                );
+                assert_eq!(command::operation_ids(), operations);
+            } else {
+                assert!(row.operations.is_empty(), "{} owns unexpected leaf operations", row.ipc);
+            }
         }
         Ok(())
     }

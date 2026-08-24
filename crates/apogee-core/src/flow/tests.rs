@@ -208,6 +208,13 @@ fn context_with_otp(
     FlowContext {
         transport,
         patch,
+        runtime: apogee_runtime::Runtime::new(
+            apogee_fetch::Fetcher::builder().build().unwrap(),
+            apogee_runtime::RuntimePaths {
+                runners: h.prefixes.path().join("runners"),
+                prefixes: h.prefixes.path().to_path_buf(),
+            },
+        ),
         launch,
         addons,
         steam,
@@ -278,6 +285,32 @@ async fn first_run_import_and_support_are_real_successful_streams() {
         [Event::SupportBundle(data), Event::Outcome(RunOutcome::Succeeded)]
             if data.bytes().starts_with(b"PK")
     ));
+}
+
+#[tokio::test]
+async fn streamed_first_run_read_matches_the_direct_core_reading() {
+    let h = harness(false);
+    let ctx = context(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakeLaunchBackend::exiting()),
+        1_700_000_000,
+    );
+    let direct = crate::composition::read_first_run_checkpoint(
+        ctx.store.clone(),
+        ctx.runtime.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let events = run(ctx, Command::FirstRun(FirstRunRequest::Read)).await;
+    let streamed = events.iter().find_map(|event| match event {
+        Event::FirstRun(checkpoint) => Some(checkpoint.as_ref()),
+        _ => None,
+    });
+
+    assert_eq!(streamed, Some(&direct));
 }
 
 fn states(events: &[Event]) -> Vec<FlowState> {

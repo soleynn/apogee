@@ -459,6 +459,54 @@ mod tests {
             assert!(event.contains(&format!(r#""kind": "{kind}""#)));
         }
     }
+
+    #[test]
+    fn representative_events_match_the_shared_terminal_wire_contract() {
+        let goldens: serde_json::Value =
+            serde_json::from_str(include_str!("../../event-wire-golden.json")).unwrap_or_default();
+        let cases = [
+            (
+                "state",
+                Event::State(FlowState::PatchesPending {
+                    count: 7,
+                    bytes: 4096,
+                }),
+            ),
+            (
+                "progress",
+                Event::Progress(apogee_core::Progress {
+                    completed: 64,
+                    total: 128,
+                    recoveries: Recoveries {
+                        retries: 1,
+                        rotations: 2,
+                        stalls: 3,
+                        blocks_refetched: 4,
+                        sources_dropped: 5,
+                        demoted: true,
+                    },
+                }),
+            ),
+            ("firstRun", Event::FirstRun(Box::default())),
+            (
+                "notice",
+                Event::Notice(Notice::ClockSkew { seconds: -45 }),
+            ),
+            (
+                "error",
+                Event::Error(apogee_core::CoreError::Launch {
+                    detail: "token=planted-secret".to_owned(),
+                }),
+            ),
+            ("outcome", Event::Outcome(RunOutcome::Cancelled)),
+        ];
+
+        for (name, event) in cases {
+            let value = serde_json::to_value(EventDto::from(&event)).unwrap_or_default();
+            assert_eq!(value, goldens[name], "{name}");
+            assert!(!value.to_string().contains("planted-secret"));
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]

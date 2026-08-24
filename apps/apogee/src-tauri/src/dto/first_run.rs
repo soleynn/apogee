@@ -175,15 +175,6 @@ impl From<&FirstRunImportCandidate> for FirstRunImportCandidateDto {
     }
 }
 
-impl FirstRunImportCandidateDto {
-    pub(crate) fn into_core(self) -> Option<FirstRunImportCandidate> {
-        Some(FirstRunImportCandidate {
-            path: self.path.into_path().ok()?,
-            source: self.source.into_core()?,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(super) enum FirstRunImportSourceDto {
@@ -200,17 +191,6 @@ impl From<FirstRunImportSource> for FirstRunImportSourceDto {
             FirstRunImportSource::Core => Self::Core,
             FirstRunImportSource::Flatpak => Self::Flatpak,
             _ => Self::Unknown,
-        }
-    }
-}
-
-impl FirstRunImportSourceDto {
-    fn into_core(self) -> Option<FirstRunImportSource> {
-        match self {
-            Self::Native => Some(FirstRunImportSource::Native),
-            Self::Core => Some(FirstRunImportSource::Core),
-            Self::Flatpak => Some(FirstRunImportSource::Flatpak),
-            Self::Unknown => None,
         }
     }
 }
@@ -357,15 +337,6 @@ impl From<&GameCandidate> for GameCandidateDto {
     }
 }
 
-impl GameCandidateDto {
-    pub(crate) fn into_core(self) -> Option<GameCandidate> {
-        Some(GameCandidate {
-            path: self.path.into_path().ok()?,
-            state: self.state.into_core()?,
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(
     tag = "state",
@@ -393,22 +364,6 @@ impl From<&GameCandidateState> for GameCandidateStateDto {
             GameCandidateState::NotAGame => Self::NotAGame,
             GameCandidateState::Unreadable { code } => Self::Unreadable { code: code.clone() },
             _ => Self::Unknown,
-        }
-    }
-}
-
-impl GameCandidateStateDto {
-    fn into_core(self) -> Option<GameCandidateState> {
-        match self {
-            Self::Current { installed_bytes } => {
-                Some(GameCandidateState::Current { installed_bytes })
-            }
-            Self::NeedsUpdate(reading) => {
-                Some(GameCandidateState::NeedsUpdate(reading.into_core()))
-            }
-            Self::NotAGame => Some(GameCandidateState::NotAGame),
-            Self::Unreadable { code } => Some(GameCandidateState::Unreadable { code }),
-            Self::Unknown => None,
         }
     }
 }
@@ -551,15 +506,6 @@ impl From<&CredentialBackendReading> for CredentialBackendReadingDto {
     }
 }
 
-impl CredentialBackendReadingDto {
-    pub(crate) fn into_core(self) -> Option<CredentialBackendReading> {
-        Some(CredentialBackendReading {
-            backend: self.backend.into_core()?,
-            state: self.state.into_core()?,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(crate) enum CredentialBackendDto {
@@ -617,17 +563,6 @@ impl From<&CredentialBackendState> for CredentialBackendStateDto {
     }
 }
 
-impl CredentialBackendStateDto {
-    fn into_core(self) -> Option<CredentialBackendState> {
-        match self {
-            Self::Ready => Some(CredentialBackendState::Ready),
-            Self::NeedsPassphrase => Some(CredentialBackendState::NeedsPassphrase),
-            Self::Unavailable { code } => Some(CredentialBackendState::Unavailable { code }),
-            Self::Unknown => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(
     tag = "choice",
@@ -681,17 +616,6 @@ impl From<&RunnerReading> for RunnerReadingDto {
     }
 }
 
-impl RunnerReadingDto {
-    pub(crate) fn into_core(self) -> Option<RunnerReading> {
-        Some(RunnerReading {
-            selection: self.selection.into_core()?,
-            version: self.version,
-            recommended: self.recommended,
-            available: self.available,
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(
     tag = "kind",
@@ -719,18 +643,6 @@ impl From<&FirstRunRunnerSelection> for FirstRunRunnerSelectionDto {
     }
 }
 
-impl FirstRunRunnerSelectionDto {
-    fn into_core(self) -> Option<FirstRunRunnerSelection> {
-        match self {
-            Self::Managed { name, version } => {
-                Some(FirstRunRunnerSelection::Managed { name, version })
-            }
-            Self::SystemWine { version } => Some(FirstRunRunnerSelection::SystemWine { version }),
-            Self::Unknown => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunnerAndPrefixChoiceDto {
@@ -744,15 +656,6 @@ impl From<&RunnerAndPrefixChoice> for RunnerAndPrefixChoiceDto {
             runner: FirstRunRunnerSelectionDto::from(&choice.runner),
             prefix: PrefixOutcomeDto::from(&choice.prefix),
         }
-    }
-}
-
-impl RunnerAndPrefixChoiceDto {
-    pub(crate) fn into_core(self) -> Option<RunnerAndPrefixChoice> {
-        Some(RunnerAndPrefixChoice {
-            runner: self.runner.into_core()?,
-            prefix: self.prefix.into_core()?,
-        })
     }
 }
 
@@ -776,18 +679,6 @@ impl From<&PrefixOutcome> for PrefixOutcomeDto {
                 Self::ContinueWithoutPrefix { code: code.clone() }
             }
             _ => Self::Unknown,
-        }
-    }
-}
-
-impl PrefixOutcomeDto {
-    fn into_core(self) -> Option<PrefixOutcome> {
-        match self {
-            Self::Ready => Some(PrefixOutcome::Ready),
-            Self::ContinueWithoutPrefix { code } => {
-                Some(PrefixOutcome::ContinueWithoutPrefix { code })
-            }
-            Self::Unknown => None,
         }
     }
 }

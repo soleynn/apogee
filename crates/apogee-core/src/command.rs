@@ -131,6 +131,14 @@ impl SupportBundleData {
         &self.0
     }
 
+    /// Atomically publish this already-redacted archive without replacing an existing file.
+    pub fn write_to(
+        &self,
+        destination: impl AsRef<std::path::Path>,
+    ) -> Result<(), crate::SupportError> {
+        crate::support::write_encoded_support_bundle(destination.as_ref(), &self.0)
+    }
+
     #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.0

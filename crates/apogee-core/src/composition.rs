@@ -870,89 +870,11 @@ impl Core {
     /// Load the persisted first-run checkpoint and fill core-owned discovery readings that have not
     /// been recorded yet.
     pub async fn first_run(&self) -> Result<crate::FirstRunCheckpoint, CoreError> {
-        let store = self.store.clone();
-        let mut checkpoint = blocking_read("first-run load", move || {
-            store
-                .load_first_run()
-                .map_err(CoreError::from)
-                .map_err(Box::new)
-        })
-        .await?;
-        if matches!(
-            crate::first_incomplete(&checkpoint),
-            crate::FirstRunPosition::WaitingForImportDiscovery
-        ) {
-            checkpoint = blocking_read("first-run discovery", move || {
-                let candidates = crate::xiv_import::candidate_roots()
-                    .into_iter()
-                    .filter(|path| crate::xiv_import::scan(path).is_ok())
-                    .map(|path| crate::FirstRunImportCandidate {
-                        source: if path.to_string_lossy().contains(".var/app/") {
-                            crate::FirstRunImportSource::Flatpak
-                        } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore")
-                        {
-                            crate::FirstRunImportSource::Core
-                        } else {
-                            crate::FirstRunImportSource::Native
-                        },
-                        path,
-                    })
-                    .collect();
-                crate::first_run::transition(
-                    &checkpoint,
-                    crate::FirstRunTransition::RecordImportDiscovery(candidates),
-                )
-                .map_err(CoreError::from)
-                .map_err(Box::new)
-            })
-            .await?;
-        }
-        if checkpoint.runners.is_empty()
-            && matches!(
-                crate::first_incomplete(&checkpoint),
-                crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
-                    | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
-            )
-        {
-            let catalog = self.runtime_catalog().await?;
-            let runtime = self.runtime.clone();
-            let rows = blocking_read("first-run runner catalog", move || {
-                runtime
-                    .runner_catalog_view(&catalog)
-                    .map_err(CoreError::from)
-                    .map_err(Box::new)
-            })
-            .await?;
-            checkpoint.runners = rows
-                .into_iter()
-                .map(|row| crate::RunnerReading {
-                    selection: crate::FirstRunRunnerSelection::Managed {
-                        name: row.name,
-                        version: row.version.clone(),
-                    },
-                    version: Some(row.version),
-                    recommended: row.recommended,
-                    available: row.available,
-                })
-                .collect();
-            let system_version = bounded_system_wine_version().await;
-            checkpoint.runners.push(crate::RunnerReading {
-                selection: crate::FirstRunRunnerSelection::SystemWine {
-                    version: system_version.clone(),
-                },
-                version: system_version.clone(),
-                recommended: false,
-                available: system_version.is_some(),
-            });
-        }
-        let store = self.store.clone();
-        blocking_read("first-run save", move || {
-            store
-                .save_first_run(&checkpoint)
-                .map_err(CoreError::from)
-                .map_err(Box::new)?;
-            Ok(checkpoint)
-        })
+        read_first_run_checkpoint(
+            self.store.clone(),
+            self.runtime.clone(),
+            CancellationToken::new(),
+        )
         .await
     }
 
@@ -1688,6 +1610,7 @@ impl Core {
         FlowContext {
             transport: self.transport.clone(),
             patch: self.patch.clone(),
+            runtime: self.runtime.clone(),
             launch: self.launch.clone(),
             addons: self.addons.clone(),
             steam: self.steam.clone(),
@@ -1702,6 +1625,98 @@ impl Core {
             frontier: self.frontier.clone(),
         }
     }
+}
+
+pub(crate) async fn read_first_run_checkpoint(
+    store: Store,
+    runtime: Runtime,
+    cancel: CancellationToken,
+) -> Result<crate::FirstRunCheckpoint, CoreError> {
+    let read_store = store.clone();
+    let mut checkpoint = blocking_read("first-run load", move || {
+        read_store
+            .load_first_run()
+            .map_err(CoreError::from)
+            .map_err(Box::new)
+    })
+    .await?;
+    if matches!(
+        crate::first_incomplete(&checkpoint),
+        crate::FirstRunPosition::WaitingForImportDiscovery
+    ) {
+        checkpoint = blocking_read("first-run discovery", move || {
+            let candidates = crate::xiv_import::candidate_roots()
+                .into_iter()
+                .filter(|path| crate::xiv_import::scan(path).is_ok())
+                .map(|path| crate::FirstRunImportCandidate {
+                    source: if path.to_string_lossy().contains(".var/app/") {
+                        crate::FirstRunImportSource::Flatpak
+                    } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore") {
+                        crate::FirstRunImportSource::Core
+                    } else {
+                        crate::FirstRunImportSource::Native
+                    },
+                    path,
+                })
+                .collect();
+            crate::first_run::transition(
+                &checkpoint,
+                crate::FirstRunTransition::RecordImportDiscovery(candidates),
+            )
+            .map_err(CoreError::from)
+            .map_err(Box::new)
+        })
+        .await?;
+    }
+    if checkpoint.runners.is_empty()
+        && matches!(
+            crate::first_incomplete(&checkpoint),
+            crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+                | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+        )
+    {
+        let (manifest, signature) = crate::launch::runtime_backend::catalog_urls()?;
+        let catalog = runtime
+            .fetch_catalog(&manifest, &signature, &cancel)
+            .await?;
+        let catalog_runtime = runtime.clone();
+        let rows = blocking_read("first-run runner catalog", move || {
+            catalog_runtime
+                .runner_catalog_view(&catalog)
+                .map_err(CoreError::from)
+                .map_err(Box::new)
+        })
+        .await?;
+        checkpoint.runners = rows
+            .into_iter()
+            .map(|row| crate::RunnerReading {
+                selection: crate::FirstRunRunnerSelection::Managed {
+                    name: row.name,
+                    version: row.version.clone(),
+                },
+                version: Some(row.version),
+                recommended: row.recommended,
+                available: row.available,
+            })
+            .collect();
+        let system_version = bounded_system_wine_version().await;
+        checkpoint.runners.push(crate::RunnerReading {
+            selection: crate::FirstRunRunnerSelection::SystemWine {
+                version: system_version.clone(),
+            },
+            version: system_version.clone(),
+            recommended: false,
+            available: system_version.is_some(),
+        });
+    }
+    blocking_read("first-run save", move || {
+        store
+            .save_first_run(&checkpoint)
+            .map_err(CoreError::from)
+            .map_err(Box::new)?;
+        Ok(checkpoint)
+    })
+    .await
 }
 
 fn system_wine_version() -> Option<String> {

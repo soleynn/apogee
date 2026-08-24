@@ -380,6 +380,49 @@ pub fn write_support_bundle(
     result
 }
 
+pub(crate) fn write_encoded_support_bundle(
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<(), SupportError> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| SupportError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let mut temporary = destination.as_os_str().to_owned();
+    temporary.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let temporary = PathBuf::from(temporary);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| SupportError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
+        file.write_all(bytes).map_err(|source| SupportError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+        file.sync_all().map_err(|source| SupportError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+        std::fs::hard_link(&temporary, destination).map_err(|source| SupportError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
 /// Encode a core-assembled entry set into a deterministic ZIP byte string.
 pub fn encode_support_bundle(archive: &SupportArchive) -> Result<Vec<u8>, SupportError> {
     let cursor = Cursor::new(Vec::new());
@@ -921,6 +964,26 @@ mod tests {
         assert_eq!(
             rewrite_home(&format!("x{literal}/game"), Some(&home)),
             format!("x{literal}/game")
+        );
+    }
+
+    #[test]
+    fn encoded_archive_publish_is_atomic_and_never_replaces() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("support.zip");
+
+        write_encoded_support_bundle(&destination, b"first archive").unwrap();
+        let second = write_encoded_support_bundle(&destination, b"replacement");
+
+        assert!(second.is_err());
+        assert_eq!(std::fs::read(destination).unwrap(), b"first archive");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

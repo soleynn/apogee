@@ -10,9 +10,8 @@ use serde::Deserialize;
 use ts_rs::TS;
 
 use crate::dto::first_run::{
-    AccountChoiceDto, CredentialBackendReadingDto, CredentialChoiceDto, FirstRunImportCandidateDto,
-    GameCandidateDto, GameChoiceDto, ImportDecisionDto, LegibilityDto, ReadyActionDto,
-    RunnerAndPrefixChoiceDto, RunnerReadingDto,
+    AccountChoiceDto, CredentialChoiceDto, GameChoiceDto, ImportDecisionDto, LegibilityDto,
+    ReadyActionDto,
 };
 use crate::dto::path::PathDto;
 use crate::dto::secrets::SecretBytes;
@@ -268,15 +267,10 @@ impl FirstRunRequestDto {
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub(crate) enum FirstRunTransitionDto {
     ConfirmLegibility(LegibilityDto),
-    RecordImportDiscovery(Vec<FirstRunImportCandidateDto>),
     DecideImport(ImportDecisionDto),
     SaveAccount(AccountChoiceDto),
-    RecordGameCandidates(Vec<GameCandidateDto>),
     SelectGame(GameChoiceDto),
-    RecordCredentialBackends(Vec<CredentialBackendReadingDto>),
     SelectCredential(CredentialChoiceDto),
-    RecordRunners(Vec<RunnerReadingDto>),
-    FinishRunnerAndPrefix(RunnerAndPrefixChoiceDto),
     StartReady(ReadyActionDto),
 }
 
@@ -287,50 +281,17 @@ impl FirstRunTransitionDto {
             Self::ConfirmLegibility(reading) => {
                 FirstRunTransition::ConfirmLegibility(reading.into_core().ok_or_else(unsupported)?)
             }
-            Self::RecordImportDiscovery(candidates) => FirstRunTransition::RecordImportDiscovery(
-                candidates
-                    .into_iter()
-                    .map(FirstRunImportCandidateDto::into_core)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(unsupported)?,
-            ),
             Self::DecideImport(decision) => {
                 FirstRunTransition::DecideImport(decision.into_core().ok_or_else(unsupported)?)
             }
             Self::SaveAccount(account) => {
                 FirstRunTransition::SaveAccount(account.into_core().ok_or_else(unsupported)?)
             }
-            Self::RecordGameCandidates(candidates) => FirstRunTransition::RecordGameCandidates(
-                candidates
-                    .into_iter()
-                    .map(GameCandidateDto::into_core)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(unsupported)?,
-            ),
             Self::SelectGame(game) => {
                 FirstRunTransition::SelectGame(game.into_core().ok_or_else(unsupported)?)
             }
-            Self::RecordCredentialBackends(backends) => {
-                FirstRunTransition::RecordCredentialBackends(
-                    backends
-                        .into_iter()
-                        .map(CredentialBackendReadingDto::into_core)
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(unsupported)?,
-                )
-            }
             Self::SelectCredential(credential) => FirstRunTransition::SelectCredential(
                 credential.into_core().ok_or_else(unsupported)?,
-            ),
-            Self::RecordRunners(runners) => FirstRunTransition::RecordRunners(
-                runners
-                    .into_iter()
-                    .map(RunnerReadingDto::into_core)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(unsupported)?,
-            ),
-            Self::FinishRunnerAndPrefix(choice) => FirstRunTransition::FinishRunnerAndPrefix(
-                choice.into_core().ok_or_else(unsupported)?,
             ),
             Self::StartReady(action) => {
                 FirstRunTransition::StartReady(action.into_core().ok_or_else(unsupported)?)
@@ -403,6 +364,57 @@ pub(crate) struct CallerFactDto {
     value: String,
 }
 
+/// Every leaf operation the generic `execute` IPC command accepts.
+///
+/// The inventory is derived from the same generated discriminants the webview uses. Adding a
+/// command, subcommand, or first-run decision therefore changes this set without a second manual
+/// list that can drift.
+#[cfg(test)]
+pub(crate) fn operation_ids() -> std::collections::BTreeSet<String> {
+    let mut operations = tagged_kinds::<CommandDto>();
+    for family in ["prefix", "firstRun", "importXivLauncher", "frontier"] {
+        operations.remove(family);
+    }
+    operations.extend(
+        tagged_kinds::<PrefixActionDto>()
+            .into_iter()
+            .map(|kind| format!("prefix.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<FirstRunRequestDto>()
+            .into_iter()
+            .filter(|kind| kind != "advance")
+            .map(|kind| format!("firstRun.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<FirstRunTransitionDto>()
+            .into_iter()
+            .map(|kind| format!("firstRun.advance.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<ImportXivLauncherDto>()
+            .into_iter()
+            .map(|kind| format!("importXivLauncher.{kind}")),
+    );
+    operations.extend(
+        tagged_kinds::<FrontierQueryDto>()
+            .into_iter()
+            .map(|kind| format!("frontier.{kind}")),
+    );
+    operations
+}
+
+#[cfg(test)]
+fn tagged_kinds<T: TS>() -> std::collections::BTreeSet<String> {
+    let declaration = T::decl(&ts_rs::Config::default());
+    let marker = r#""kind": ""#;
+    declaration
+        .split(marker)
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next().map(str::to_owned))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +465,24 @@ mod tests {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"saveAccount","value":{"squareEnixId":"person","kind":"unknown","neverSavePassword":true,"steamClient":"notRequired"}}}}"#;
 
         assert!(parse(command).is_none());
+    }
+
+    #[test]
+    fn backend_owned_first_run_readings_are_not_accepted_from_the_webview() {
+        let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"recordRunners","value":[]}}}"#;
+
+        assert!(parse(command).is_none());
+    }
+
+    #[test]
+    fn operation_inventory_is_derived_from_every_nested_command_family() {
+        let operations = operation_ids();
+
+        assert!(operations.contains("login"));
+        assert!(operations.contains("prefix.recreate"));
+        assert!(operations.contains("firstRun.advance.confirmLegibility"));
+        assert!(operations.contains("importXivLauncher.apply"));
+        assert!(operations.contains("frontier.gate"));
+        assert_eq!(operations.len(), 23);
     }
 }

@@ -58,8 +58,9 @@
     },
     {
       "ipc": "unlock_secrets_file",
-      "cli": [["secrets", "unlock"]],
-      "equivalence": "Explicitly prime the sealed-file key for this process."
+      "cli": [],
+      "shell_local": "The desktop can keep the unsealed key in its long-lived process cache. A one-shot CLI process would discard that key immediately on exit, so its next mutation prompts normally instead.",
+      "equivalence": "Process-lifetime credential-store control only; it does not change persisted launcher state."
     },
     {
       "ipc": "create_secrets_file",
@@ -78,8 +79,9 @@
     },
     {
       "ipc": "seal_secrets_file",
-      "cli": [["secrets", "seal"]],
-      "equivalence": "Immediately erase the process-cached sealed-file key."
+      "cli": [],
+      "shell_local": "The desktop can erase a key retained by its long-lived process. The CLI retains no key after any invocation exits, so it is already sealed at that boundary.",
+      "equivalence": "Process-lifetime credential-store control only; both shells retain no key after their process ends."
     },
     {
       "ipc": "answer_passphrase_prompt",
@@ -89,12 +91,12 @@
     },
     {
       "ipc": "update_account",
-      "cli": [["account", "edit", "--account", "00000000-0000-0000-0000-000000000001"]],
+      "cli": [["account", "edit", "--account", "00000000-0000-0000-0000-000000000001", "--square-enix-id", "updated-user"]],
       "equivalence": "Path-free edit of public account fields."
     },
     {
       "ipc": "update_profile",
-      "cli": [["profile", "edit", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "cli": [["profile", "edit", "--profile", "00000000-0000-0000-0000-000000000001", "--name", "Updated profile"]],
       "equivalence": "Edit profile display and launch fields without replacing ownership or paths."
     },
     {
@@ -159,25 +161,30 @@
     },
     {
       "ipc": "execute",
-      "cli": [
-        ["login", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"],
-        ["launch", "--profile", "00000000-0000-0000-0000-000000000001"],
-        ["play", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"],
-        ["patch", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"],
-        ["install", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"],
-        ["repair", "--profile", "00000000-0000-0000-0000-000000000001"],
-        ["prefix", "create", "--profile", "00000000-0000-0000-0000-000000000001"],
-        ["prefix", "health", "--profile", "00000000-0000-0000-0000-000000000001"],
-        ["prefix", "fix", "--profile", "00000000-0000-0000-0000-000000000001"],
-        ["prefix", "recreate", "--profile", "00000000-0000-0000-0000-000000000001", "--yes", "--backup-config"],
-        ["first-run"],
-        ["first-run", "advance", "--transition-json", "{\"kind\":\"confirm_legibility\",\"value\":{\"gpu\":null,\"driver\":null,\"session\":\"unknown\",\"render_tier\":0}}"],
-        ["import", "xivlauncher", "--dry-run"],
-        ["import", "xivlauncher", "--accept", "account:0"],
-        ["news"],
-        ["banners"],
-        ["gate"],
-        ["support-bundle", "--output", "apogee-support.zip"]
+      "operations": [
+        {"shell": "login", "cli": [["login", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate one profile with the same password and one-time-password sources."},
+        {"shell": "launch", "cli": [["launch", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Launch from the same cached-session requirement."},
+        {"shell": "patchAndPlay", "cli": [["play", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate, patch when needed, and launch through the same core flow."},
+        {"shell": "patch", "cli": [["patch", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate and apply the same patch plan without launching."},
+        {"shell": "install", "cli": [["install", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Install from nothing and launch through the same core flow."},
+        {"shell": "repair", "cli": [["repair", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Verify and repair the selected profile through the same signed indexes."},
+        {"shell": "supportBundle", "cli": [["support-bundle", "--output", "apogee-support.zip"]], "equivalence": "Assemble the same core-owned redacted archive."},
+        {"shell": "prefix.create", "cli": [["prefix", "create", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Create and prepare the selected profile prefix."},
+        {"shell": "prefix.check", "cli": [["prefix", "health", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Read the same composed prefix health report."},
+        {"shell": "prefix.fix", "cli": [["prefix", "fix", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Apply the same targeted prefix repairs."},
+        {"shell": "prefix.recreate", "cli": [["prefix", "recreate", "--profile", "00000000-0000-0000-0000-000000000001", "--yes", "--backup-config"]], "equivalence": "Back up configuration and recreate the prefix through the same core action."},
+        {"shell": "firstRun.read", "cli": [["first-run"]], "equivalence": "Read the persisted setup checkpoint and core-owned discovery."},
+        {"shell": "firstRun.advance.confirmLegibility", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"confirm_legibility\",\"value\":{\"gpu\":null,\"driver\":null,\"session\":\"unknown\",\"render_tier\":0}}"]], "equivalence": "Record the same render facts after a person confirms the surface is legible."},
+        {"shell": "firstRun.advance.decideImport", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"decide_import\",\"value\":{\"choice\":\"skip\"}}"]], "equivalence": "Persist the same reviewed import decision."},
+        {"shell": "firstRun.advance.saveAccount", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"save_account\",\"value\":{\"square_enix_id\":\"person\",\"kind\":\"standard\",\"never_save_password\":true,\"steam_client\":\"not_required\"}}"]], "equivalence": "Persist the same non-secret account choice."},
+        {"shell": "firstRun.advance.selectGame", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_game\",\"value\":{\"choice\":\"install\",\"value\":{\"path\":\"game\",\"approximate_bytes\":1,\"exact_download_bytes\":1}}}"]], "equivalence": "Select one core-validated game destination and reading."},
+        {"shell": "firstRun.advance.selectCredential", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_credential\",\"value\":{\"choice\":\"do_not_save\"}}"]], "equivalence": "Persist the same credential-storage decision."},
+        {"shell": "firstRun.advance.startReady", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"start_ready\",\"value\":{\"action\":\"play\"}}"]], "equivalence": "Start the same core-validated final setup action."},
+        {"shell": "importXivLauncher.scan", "cli": [["import", "xivlauncher", "--dry-run"]], "equivalence": "Scan and print the same typed import findings without writes."},
+        {"shell": "importXivLauncher.apply", "cli": [["import", "xivlauncher", "--accept", "account:0"]], "equivalence": "Apply only the same reviewed finding identifiers after a fresh scan."},
+        {"shell": "frontier.news", "cli": [["news"], ["--events-json", "news"]], "equivalence": "Fetch the same public news rows; the second route proves the stable JSONL event surface."},
+        {"shell": "frontier.gate", "cli": [["gate"]], "equivalence": "Fetch the same public gate reading."},
+        {"shell": "frontier.banners", "cli": [["banners"]], "equivalence": "Fetch and validate the same public banner rows."}
       ],
       "equivalence": "The generic desktop stream carries the same core flow families exposed as terminal subcommands."
     },

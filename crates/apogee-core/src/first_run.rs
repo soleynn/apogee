@@ -276,8 +276,7 @@ pub struct FirstRunCheckpoint {
 }
 
 /// A pure state change accepted by [`transition`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FirstRunTransition {
     ConfirmLegibility(LegibilityReading),

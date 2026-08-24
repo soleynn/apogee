@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 //! The headless launcher CLI: profile management and the login → launch flows, driving the one
 //! `apogee-core` command/event surface. It holds no launcher logic: it parses arguments, collects a
-//! password, issues a [`Command`], and renders the [`Event`] stream. The output format is a plain
-//! line per event and is not a stable interface.
+//! password, issues a [`Command`], and renders the [`Event`] stream. Human-readable output is not a
+//! stable interface; `--events-json` emits the stable, error-redacted machine-readable form.
 
 use std::error::Error;
 use std::io::{self, Write};
@@ -12,16 +12,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
-    Core, CoreConfig, Deviation, Event, ExternalAddon, FileState, FirstRunRequest, FlowState,
-    ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery,
-    Gamescope, GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource,
-    LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
-    NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
-    PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
-    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
-    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, StableCode, SyncChoice, Trigger,
-    Uuid,
+    ALL_CODES, Account, AccountChoice, AccountKind, AddonEvent, BenchStats, CatalogViewEntry,
+    Command, Consent, Core, CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon,
+    FileState, FirstRunRequest, FirstRunTransition, FlowState, ForeignCredentialStore, ForeignKey,
+    ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, GameChoice, Gamescope, GpuSelect,
+    HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher,
+    LaunchProgramExit, LegibilityReading, ListenerConsent, ListenerSettings, ListenerSources,
+    NextAction, NextCommand, NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource,
+    PatchProgress, PrefixAction, PrefixReport, Profile, ReadyAction, Recoveries, Region, Repo,
+    RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
+    SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
+    SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -31,8 +32,11 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use zeroize::Zeroizing;
 
+mod event_json;
 #[cfg(feature = "fixtures")]
 mod fixtures;
+
+use event_json::render_event_json;
 
 /// A convenient boxed error for the CLI's top level.
 type CliError = Box<dyn Error>;
@@ -244,10 +248,46 @@ enum FirstRunAction {
 
 #[derive(Args)]
 struct FirstRunAdvanceArgs {
-    /// A serialized FirstRunTransition. The current checkpoint still validates its position and
-    /// every selected candidate before anything is persisted.
+    /// A transition JSON object. The current checkpoint still validates its position and every
+    /// selected candidate before anything is persisted.
     #[arg(long)]
     transition_json: String,
+}
+
+/// The terminal's input format for first-run transitions.
+///
+/// This mirror deliberately lives at the presentation boundary. Core owns the domain transition,
+/// while each shell owns how that transition is encoded on its wire.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+enum FirstRunTransitionInput {
+    ConfirmLegibility(LegibilityReading),
+    DecideImport(apogee_core::ImportDecision),
+    SaveAccount(AccountChoice),
+    SelectGame(GameChoice),
+    SelectCredential(CredentialChoice),
+    StartReady(ReadyAction),
+}
+
+impl From<FirstRunTransitionInput> for FirstRunTransition {
+    fn from(value: FirstRunTransitionInput) -> Self {
+        match value {
+            FirstRunTransitionInput::ConfirmLegibility(reading) => Self::ConfirmLegibility(reading),
+            FirstRunTransitionInput::DecideImport(decision) => Self::DecideImport(decision),
+            FirstRunTransitionInput::SaveAccount(account) => Self::SaveAccount(account),
+            FirstRunTransitionInput::SelectGame(game) => Self::SelectGame(game),
+            FirstRunTransitionInput::SelectCredential(credential) => {
+                Self::SelectCredential(credential)
+            }
+            FirstRunTransitionInput::StartReady(action) => Self::StartReady(action),
+        }
+    }
+}
+
+fn parse_first_run_transition(input: &str) -> Result<FirstRunTransition, CliError> {
+    let transition: FirstRunTransitionInput = serde_json::from_str(input)
+        .map_err(|error| format!("invalid first-run transition JSON: {error}"))?;
+    Ok(transition.into())
 }
 
 #[derive(Args)]
@@ -323,12 +363,8 @@ struct AccountEditArgs {
 enum SecretsCommand {
     /// Report which credential store answered and what condition it is in.
     Status,
-    /// Open the sealed secret file for this process without reading or changing a stored secret.
-    Unlock,
     /// Create the sealed secret file without changing which backend future writes use.
     CreateFile,
-    /// Forget this process's cached sealed-file key immediately.
-    Seal,
     /// Save a profile's account password, read from the terminal.
     Save(AccountTargetArgs),
     /// Save the secret a profile's account derives its one-time passwords from, read from stdin, and
@@ -1007,12 +1043,9 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             )
             .await)
         }
-        Commands::News => Ok(drive(
-            &core,
-            Command::Frontier(FrontierQuery::News),
-            event_format,
-        )
-        .await),
+        Commands::News => {
+            Ok(drive(&core, Command::Frontier(FrontierQuery::News), event_format).await)
+        }
         Commands::Banners => Ok(drive(
             &core,
             Command::Frontier(FrontierQuery::Banners),
@@ -1074,7 +1107,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             }
         },
         Commands::Import { action } => match action {
-            ImportCommand::Xivlauncher(args) => import_xivlauncher(&core, args),
+            ImportCommand::Xivlauncher(args) => import_xivlauncher(&core, args, event_format).await,
         },
         Commands::SupportBundle(args) => {
             if args.contents {
@@ -1097,6 +1130,26 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         .ok_or_else(|| format!("invalid fact {fact:?}; expected NAME=VALUE"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            if matches!(event_format, EventFormat::Json) {
+                let mut wrote_bundle = false;
+                let status = drive_observing(
+                    &core,
+                    Command::SupportBundle { facts },
+                    event_format,
+                    |event| {
+                        if let Event::SupportBundle(bundle) = event {
+                            bundle.write_to(&args.output)?;
+                            wrote_bundle = true;
+                        }
+                        Ok(())
+                    },
+                )
+                .await?;
+                if status == ExitCode::SUCCESS && !wrote_bundle {
+                    return Err("support-bundle flow succeeded without an archive".into());
+                }
+                return Ok(status);
+            }
             core.create_support_bundle(&args.output, profile, facts)?;
             println!("{}", args.output.display());
             Ok(ExitCode::SUCCESS)
@@ -1111,15 +1164,14 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::FirstRun { action } => match action {
-            None | Some(FirstRunAction::Show) => {
-                let checkpoint = core.first_run().await?;
-                println!("next\t{:?}", apogee_core::first_incomplete(&checkpoint));
-                println!("checkpoint\t{checkpoint:#?}");
-                Ok(ExitCode::SUCCESS)
-            }
+            None | Some(FirstRunAction::Show) => Ok(drive(
+                &core,
+                Command::FirstRun(FirstRunRequest::Read),
+                event_format,
+            )
+            .await),
             Some(FirstRunAction::Advance(args)) => {
-                let transition = serde_json::from_str(&args.transition_json)
-                    .map_err(|error| format!("invalid first-run transition JSON: {error}"))?;
+                let transition = parse_first_run_transition(&args.transition_json)?;
                 Ok(drive(
                     &core,
                     Command::FirstRun(FirstRunRequest::Advance(transition)),
@@ -1216,18 +1268,8 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             println!("usable   {}", report.is_usable());
             Ok(())
         }
-        SecretsCommand::Unlock => {
-            core.unlock_secrets_file()?;
-            println!("opened the secret file for this process");
-            Ok(())
-        }
         SecretsCommand::CreateFile => {
             ensure_secrets_file(core)?;
-            Ok(())
-        }
-        SecretsCommand::Seal => {
-            core.seal_secrets_file();
-            println!("forgot the cached secret-file key");
             Ok(())
         }
         SecretsCommand::Save(args) => {
@@ -2174,6 +2216,21 @@ fn build_core() -> Result<Core, CliError> {
 
 /// Run `cmd`, printing each event and wiring Ctrl-C to a targeted shutdown of the game.
 async fn drive(core: &Core, cmd: Command, event_format: EventFormat) -> ExitCode {
+    match drive_observing(core, cmd, event_format, |_| Ok(())).await {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn drive_observing(
+    core: &Core,
+    cmd: Command,
+    event_format: EventFormat,
+    mut observe: impl FnMut(&Event) -> Result<(), CliError>,
+) -> Result<ExitCode, CliError> {
     let cancel = CancellationToken::new();
     let on_signal = cancel.clone();
     tokio::spawn(async move {
@@ -2185,6 +2242,7 @@ async fn drive(core: &Core, cmd: Command, event_format: EventFormat) -> ExitCode
     let mut stream = core.execute_cancellable(cmd, cancel);
     let mut outcome = None;
     let mut malformed = false;
+    let mut observer_error = None;
     while let Some(event) = stream.next().await {
         if outcome.is_some() {
             malformed = true;
@@ -2194,15 +2252,23 @@ async fn drive(core: &Core, cmd: Command, event_format: EventFormat) -> ExitCode
         {
             malformed = true;
         }
+        if observer_error.is_none()
+            && let Err(error) = observe(&event)
+        {
+            observer_error = Some(error);
+        }
         match event_format {
             EventFormat::Human => println!("{}", render(&event)),
             EventFormat::Json => println!("{}", render_event_json(&event)),
         }
     }
-    match (outcome, malformed) {
+    if let Some(error) = observer_error {
+        return Err(error);
+    }
+    Ok(match (outcome, malformed) {
         (Some(RunOutcome::Succeeded | RunOutcome::Cancelled), false) => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
-    }
+    })
 }
 
 /// Edit the public fields of an account without replacing secret policy or delivery metadata.
@@ -2912,7 +2978,10 @@ fn render(event: &Event) -> String {
         Event::Addon(addon) => render_addon(addon),
         Event::Setup(setup) => render_setup(setup),
         Event::Frontier(data) => render_frontier(data),
-        Event::FirstRun(checkpoint) => format!("first-run: {checkpoint:#?}"),
+        Event::FirstRun(checkpoint) => format!(
+            "first-run next: {:?}\ncheckpoint: {checkpoint:#?}",
+            apogee_core::first_incomplete(checkpoint)
+        ),
         Event::Import(data) => format!("import: {data:#?}"),
         Event::SupportBundle(data) => format!("support bundle: {} bytes", data.bytes().len()),
         Event::Prefix(report) => render_health(report),
@@ -3005,7 +3074,11 @@ fn print_catalog_rows(rows: &[CatalogViewEntry]) {
     }
 }
 
-fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliError> {
+async fn import_xivlauncher(
+    core: &Core,
+    args: XivImportArgs,
+    event_format: EventFormat,
+) -> Result<ExitCode, CliError> {
     let scan = if let Some(path) = args.path {
         core.scan_xivlauncher(path)?
     } else {
@@ -3024,28 +3097,41 @@ fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliE
         }
         found.ok_or("no XIVLauncher configuration was found in the known locations")?
     };
-    println!("source\t{}", scan.source.display());
-    for finding in &scan.findings {
-        match &finding.result {
-            ImportFindingResult::Candidate(candidate) => println!(
-                "candidate\t{}\t{}\t{:?}\totp={}\tnever-store={}\tgame={}",
-                finding.id.as_str(),
-                candidate.sqex_id,
-                candidate.kind,
-                candidate.use_otp,
-                candidate.never_store,
-                candidate
-                    .game_path
-                    .as_deref()
-                    .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
-            ),
-            ImportFindingResult::Skipped(issue) => println!(
-                "skipped\t{}\t{:?}\t{:?}",
-                finding.id.as_str(),
-                finding.location,
-                issue
-            ),
-            _ => println!("skipped\t{}\tunknown", finding.id.as_str()),
+    if matches!(event_format, EventFormat::Human) {
+        println!("source\t{}", scan.source.display());
+        for finding in &scan.findings {
+            match &finding.result {
+                ImportFindingResult::Candidate(candidate) => println!(
+                    "candidate\t{}\t{}\t{:?}\totp={}\tnever-store={}\tgame={}",
+                    finding.id.as_str(),
+                    candidate.sqex_id,
+                    candidate.kind,
+                    candidate.use_otp,
+                    candidate.never_store,
+                    candidate
+                        .game_path
+                        .as_deref()
+                        .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
+                ),
+                ImportFindingResult::Skipped(issue) => println!(
+                    "skipped\t{}\t{:?}\t{:?}",
+                    finding.id.as_str(),
+                    finding.location,
+                    issue
+                ),
+                _ => println!("skipped\t{}\tunknown", finding.id.as_str()),
+            }
+        }
+    }
+    if matches!(event_format, EventFormat::Json) {
+        let status = drive(
+            core,
+            Command::ImportXivLauncher(ImportXivLauncher::Scan(scan.source.clone())),
+            event_format,
+        )
+        .await;
+        if status != ExitCode::SUCCESS || args.dry_run {
+            return Ok(status);
         }
     }
     if args.dry_run {
@@ -3065,6 +3151,14 @@ fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliE
             args.accepted,
         )
     };
+    if matches!(event_format, EventFormat::Json) {
+        return Ok(drive(
+            core,
+            Command::ImportXivLauncher(ImportXivLauncher::Apply(plan)),
+            event_format,
+        )
+        .await);
+    }
     let report = core.apply_xivlauncher(&plan)?;
     println!("applied\t{}", report.applied.len());
     Ok(ExitCode::SUCCESS)
@@ -3342,8 +3436,18 @@ mod tests {
     #[derive(Deserialize)]
     struct ParityRow {
         ipc: String,
+        #[serde(default)]
         cli: Vec<Vec<String>>,
+        #[serde(default)]
+        operations: Vec<ParityOperation>,
         shell_local: Option<String>,
+        equivalence: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ParityOperation {
+        shell: String,
+        cli: Vec<Vec<String>>,
         equivalence: String,
     }
 
@@ -3355,25 +3459,46 @@ mod tests {
 
         for row in manifest.commands {
             assert!(!row.equivalence.trim().is_empty(), "{}", row.ipc);
-            if row.cli.is_empty() {
+            let route_kinds = usize::from(!row.cli.is_empty())
+                + usize::from(!row.operations.is_empty())
+                + usize::from(row.shell_local.is_some());
+            assert_eq!(
+                route_kinds, 1,
+                "{} claims multiple parity mechanisms",
+                row.ipc
+            );
+            if let Some(reason) = row.shell_local {
                 assert!(
-                    row.shell_local
-                        .as_deref()
-                        .is_some_and(|reason| !reason.trim().is_empty()),
-                    "{} has neither a CLI route nor a shell-local justification",
+                    !reason.trim().is_empty(),
+                    "{} has an empty shell-local justification",
                     row.ipc
                 );
                 continue;
             }
-            assert!(
-                row.shell_local.is_none(),
-                "{} claims both route kinds",
-                row.ipc
-            );
-            for route in row.cli {
+            let routes = row
+                .cli
+                .into_iter()
+                .chain(row.operations.into_iter().flat_map(|operation| {
+                    assert!(!operation.shell.trim().is_empty(), "{}", row.ipc);
+                    assert!(
+                        !operation.equivalence.trim().is_empty(),
+                        "{}",
+                        operation.shell
+                    );
+                    assert!(!operation.cli.is_empty(), "{}", operation.shell);
+                    operation.cli
+                }));
+            for route in routes {
                 let argv = std::iter::once("apogee-cli").chain(route.iter().map(String::as_str));
                 let parsed = Cli::try_parse_from(argv);
                 let valid = match &parsed {
+                    Ok(Cli {
+                        command:
+                            Some(Commands::FirstRun {
+                                action: Some(FirstRunAction::Advance(args)),
+                            }),
+                        ..
+                    }) => parse_first_run_transition(&args.transition_json).is_ok(),
                     Ok(_) => true,
                     Err(error) => matches!(
                         error.kind(),
@@ -3390,6 +3515,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn event_json_is_a_global_command_output_switch() {
+        let cli = Cli::try_parse_from([
+            "apogee-cli",
+            "first-run",
+            "--events-json",
+            "advance",
+            "--transition-json",
+            r#"{"kind":"confirm_legibility","value":{"gpu":null,"driver":null,"session":"unknown","render_tier":0}}"#,
+        ])
+        .expect("global output switch parses after the command name");
+
+        assert!(cli.events_json);
+    }
+
+    #[test]
+    fn first_run_transition_json_stays_a_cli_owned_wire_shape() {
+        let transition = parse_first_run_transition(
+            r#"{"kind":"confirm_legibility","value":{"gpu":"NVIDIA","driver":"560.1","session":"wayland","render_tier":1}}"#,
+        )
+        .expect("the documented transition shape parses");
+
+        assert!(matches!(
+            transition,
+            FirstRunTransition::ConfirmLegibility(LegibilityReading {
+                gpu: Some(gpu),
+                driver: Some(driver),
+                session: apogee_core::SessionType::Wayland,
+                render_tier: 1,
+            }) if gpu == "NVIDIA" && driver == "560.1"
+        ));
+    }
+
+    #[test]
+    fn first_run_transition_json_rejects_backend_owned_readings() {
+        let error = parse_first_run_transition(r#"{"kind":"record_runners","value":[]}"#)
+            .expect_err("runner discovery belongs to core");
+
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     /// Every reader that takes a typed answer hands back a buffer that erases itself.

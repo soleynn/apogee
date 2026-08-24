@@ -1,0 +1,65 @@
+{
+  "state": {
+    "kind": "state",
+    "code": "state-patches-pending",
+    "state": {
+      "kind": "patchesPending",
+      "count": 7,
+      "bytes": 4096
+    }
+  },
+  "progress": {
+    "kind": "progress",
+    "code": "event-progress",
+    "completed": 64,
+    "total": 128,
+    "recoveries": {
+      "retries": 1,
+      "rotations": 2,
+      "stalls": 3,
+      "blocksRefetched": 4,
+      "sourcesDropped": 5,
+      "demoted": true
+    }
+  },
+  "firstRun": {
+    "kind": "firstRun",
+    "code": "event-first-run",
+    "firstRun": {
+      "legibility": null,
+      "import": {
+        "state": "discoveryPending"
+      },
+      "account": null,
+      "gameCandidates": [],
+      "game": null,
+      "credentialBackends": [],
+      "credential": null,
+      "runners": [],
+      "runnerAndPrefix": null,
+      "ready": {
+        "state": "pending"
+      }
+    }
+  },
+  "notice": {
+    "kind": "notice",
+    "code": "notice-clock-skew",
+    "notice": {
+      "kind": "clockSkew",
+      "seconds": -45
+    }
+  },
+  "error": {
+    "kind": "error",
+    "code": "err-launch",
+    "error": {
+      "kind": "launch"
+    }
+  },
+  "outcome": {
+    "kind": "outcome",
+    "code": "event-outcome-cancelled",
+    "outcome": "cancelled"
+  }
+}
