@@ -56,6 +56,8 @@ pub enum CoreError {
     NoProfile(Uuid),
     #[error("no account with id {0}")]
     NoAccount(Uuid),
+    #[error("profile removal changed while awaiting confirmation for {profile}")]
+    RemovalPlanChanged { profile: Uuid },
     #[error("the account password is not valid text")]
     InvalidCredential,
     #[error("import from {path:?} failed: {detail}")]

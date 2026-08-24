@@ -270,6 +270,8 @@ enum SecretsCommand {
     Totp(TargetArgs),
     /// Delete every secret stored for a profile's account.
     Forget(TargetArgs),
+    /// Delete one stored secret for a profile's account.
+    Delete(DeleteSecretArgs),
     /// Stop keeping a profile's account password, or start again. Turning it on deletes whatever is
     /// already stored.
     NeverStore(NeverStoreArgs),
@@ -321,6 +323,31 @@ struct NeverStoreArgs {
     /// Whether to keep nothing for the account.
     #[arg(long)]
     on: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SecretKindChoice {
+    Password,
+    Totp,
+}
+
+impl From<SecretKindChoice> for SecretKind {
+    fn from(value: SecretKindChoice) -> Self {
+        match value {
+            SecretKindChoice::Password => Self::Password,
+            SecretKindChoice::Totp => Self::TotpSecret,
+        }
+    }
+}
+
+#[derive(Args)]
+struct DeleteSecretArgs {
+    /// Profile id or unique name.
+    #[arg(long)]
+    profile: String,
+    /// Which write-only secret to delete.
+    #[arg(long, value_enum)]
+    kind: SecretKindChoice,
 }
 
 #[derive(Args)]
@@ -996,22 +1023,19 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
+        SecretsCommand::Delete(args) => {
+            let account = resolve_profile(core, &args.profile)?.account;
+            core.delete_secret(account, args.kind.into())?;
+            println!("deleted the selected secret for account {account}");
+            Ok(())
+        }
         SecretsCommand::NeverStore(args) => {
             let id = resolve_profile(core, &args.profile)?.account;
-            // Sweep before recording the choice. A user who asks the launcher to stop keeping a
-            // password means the one it already has, and a run that saved the flag and then failed
-            // to sweep would report success over a password still in the store.
-            if args.on
-                && let Some(left) = secrets_left_behind(core.forget_secrets(id)?)
+            if let Some(sweep) = core.set_never_store(id, args.on)?
+                && let Some(left) = secrets_left_behind(sweep)
             {
                 println!("{left}");
             }
-            // Read after the sweep. A sweep rewrites the record itself (an account deriving its own
-            // codes goes back to being asked for one), so a copy taken beforehand would put that
-            // back when this saves.
-            let mut account = core.account(id)?;
-            account.never_store = args.on;
-            core.save_account(&account)?;
             if args.on {
                 println!("account {id} will be asked for its password every time");
             } else {
@@ -1960,14 +1984,14 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
             let plan = core.plan_removal(profile.id)?;
             if args.dry_run {
                 println!("would remove profile {}", profile.id);
-                if let Some(account) = plan.account_removed {
+                if let Some(account) = plan.account_removed() {
                     println!("would remove account {account} and its stored secrets");
                 } else {
                     println!("would keep the shared account and its stored secrets");
                 }
                 return Ok(());
             }
-            let removal = core.remove_profile(profile.id)?;
+            let removal = core.remove_profile(plan)?;
             println!("removed profile {}", profile.id);
             if let Some(account) = removal.account_removed {
                 println!("removed account {account}");
