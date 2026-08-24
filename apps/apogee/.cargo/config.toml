@@ -1,0 +1,5 @@
+[env]
+# The frontend consumes generated DTO declarations directly. Byte counts stay numbers because every
+# launcher size is far below JavaScript's exact-integer ceiling and the UI performs arithmetic on them.
+TS_RS_EXPORT_DIR = { value = "src/generated", relative = true }
+TS_RS_LARGE_INT = "number"

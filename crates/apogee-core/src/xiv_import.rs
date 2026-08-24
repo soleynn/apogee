@@ -214,6 +214,25 @@ pub struct ImportPlan {
     pub accepted: BTreeSet<ImportFindingId>,
 }
 
+impl ImportPlan {
+    /// Rebuild a selection returned by a presentation boundary.
+    ///
+    /// Apply still rescans the source and validates both the fingerprint and selectable finding ids;
+    /// this constructor only restores their opaque wire values without exposing their newtypes.
+    #[must_use]
+    pub fn from_selection_parts(
+        source: PathBuf,
+        fingerprint: String,
+        accepted: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            source,
+            fingerprint: ImportFingerprint(fingerprint),
+            accepted: accepted.into_iter().map(ImportFindingId).collect(),
+        }
+    }
+}
+
 /// Whether an imported entity was created or matched an existing deterministic duplicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -928,6 +947,25 @@ mod tests {
             plan.accepted.iter().next().expect("accepted id").clone()
         );
         assert_ne!(changed.fingerprint, plan.fingerprint);
+    }
+
+    #[test]
+    fn selection_parts_restore_only_opaque_plan_values() {
+        let plan = ImportPlan::from_selection_parts(
+            PathBuf::from("source"),
+            "fingerprint".to_owned(),
+            ["finding-b".to_owned(), "finding-a".to_owned()],
+        );
+
+        assert_eq!(plan.source, Path::new("source"));
+        assert_eq!(plan.fingerprint.as_str(), "fingerprint");
+        assert_eq!(
+            plan.accepted
+                .iter()
+                .map(ImportFindingId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["finding-a", "finding-b"]
+        );
     }
 
     #[test]

@@ -2,9 +2,10 @@
 
 The launcher's window: a Rust binary under `src-tauri/` that owns the window and the commands the
 page invokes, and a Svelte frontend under `src/` that renders them. It holds no launcher rules. Its
-Rust half initializes `apogee-core`, accepts the primary `PatchAndPlay` request, and relays the typed
-event stream—including its final outcome—over a Tauri channel. The frontend still only renders the
-startup snapshot; binding the run stream to screens is separate presentation work.
+Rust half initializes `apogee-core`, accepts every async command in its current public surface, and
+relays the complete typed event stream—including its final outcome—over one Tauri channel per run.
+The frontend still only renders the startup snapshot; binding those streams to screens is separate
+presentation work.
 
 ## Layout
 
@@ -14,6 +15,7 @@ startup snapshot; binding the run stream to screens is separate presentation wor
 | `src-tauri/src/command.rs` | Write-only IPC request DTOs converted directly into core commands. |
 | `src-tauri/src/dto.rs` | Shell-owned event wire format keyed by core's stable codes. |
 | `src-tauri/src/supervisor.rs` | Run lifetime, cancellation, and bounded-rate channel forwarding. |
+| `src/generated/` | TypeScript command and event declarations generated from the Rust DTO trees. |
 | `src-tauri/build.rs` | Two lines, pinned byte-for-byte by `scripts/audit.sh`. |
 | `src-tauri/tauri.conf.json` | Window, identifier, and where the frontend bundle is read from. |
 | `src-tauri/capabilities/` | What the window may reach. |

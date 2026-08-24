@@ -23,8 +23,8 @@ use tauri::Manager;
 use tauri::ipc::Channel;
 
 use command::CommandDto;
-use dto::EventDto;
-use supervisor::Runs;
+use dto::EventWireDto;
+use supervisor::{RunAdmissionError, RunClass, Runs};
 
 /// The first thing the frontend asks for.
 #[derive(Serialize)]
@@ -104,18 +104,35 @@ impl ShellError {
 #[tauri::command]
 async fn execute(
     state: tauri::State<'_, ShellState>,
-    run_id: Uuid,
     command: CommandDto,
-    on_event: Channel<EventDto>,
-) -> Result<(), ShellError> {
+    on_event: Channel<EventWireDto>,
+) -> Result<Uuid, ShellError> {
+    // Consume credential bytes before touching any other state, so the IPC allocation is guarded by
+    // core's write-only Secret for the rest of the command body.
+    let command = command
+        .into_core()
+        .map_err(|_| ShellError::new("shell.command.invalid"))?;
+    let class = RunClass::for_command(&command);
     let core = state.ready_core()?;
+    let run_id = Uuid::new_v4();
     let cancel = state
         .runs
-        .start(run_id)
-        .map_err(|_| ShellError::new("shell.run.duplicate"))?;
-    supervisor::drive(core.as_ref(), command.into_core(), cancel, &on_event).await;
-    state.runs.finish(run_id);
-    Ok(())
+        .start(run_id, class)
+        .map_err(run_admission_error)?;
+    let runs = state.runs.clone();
+    tauri::async_runtime::spawn(async move {
+        supervisor::drive(core.as_ref(), command, cancel, &on_event).await;
+        runs.finish(run_id);
+    });
+    Ok(run_id)
+}
+
+fn run_admission_error(error: RunAdmissionError) -> ShellError {
+    match error {
+        RunAdmissionError::Duplicate => ShellError::new("shell.run.duplicate"),
+        RunAdmissionError::Busy => ShellError::new("shell.run.busy"),
+        RunAdmissionError::Unavailable => ShellError::new("shell.state.unavailable"),
+    }
 }
 
 /// Ask a running core command to stop at its cancellation boundary.

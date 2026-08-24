@@ -1,16 +1,18 @@
 //! Run lifetime, cancellation, and forwarding from core streams to shell channels.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apogee_core::{Command, Core, Event, PatchProgress, Repo, SetupEvent, Uuid};
+use apogee_core::{
+    Command, Core, Event, FirstRunRequest, ImportXivLauncher, PatchProgress, Repo, SetupEvent, Uuid,
+};
 use tauri::ipc::Channel;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::dto::EventDto;
+use crate::dto::{EventDto, EventWireDto};
 
 pub(crate) trait Driver {
     fn execute_cancellable(
@@ -34,11 +36,18 @@ pub(crate) trait EventSink {
     fn send(&self, event: EventDto);
 }
 
-impl EventSink for Channel<EventDto> {
+impl EventSink for Channel<EventWireDto> {
     fn send(&self, event: EventDto) {
-        // A webview going away must not abandon an in-flight patch. Keep draining until core emits
-        // its outcome; window-close coordination cancels the token explicitly.
-        let _ = Channel::send(self, event);
+        // Losing the receiver is not itself a cancellation request. Keep draining until core emits
+        // its outcome; the lifecycle owner decides separately when a run should stop.
+        let wire = match event {
+            EventDto::Unknown { code } => EventWireDto::Unknown(crate::dto::UnknownEventDto {
+                kind: "unknown".to_owned(),
+                code: code.to_owned(),
+            }),
+            known => EventWireDto::Known(known),
+        };
+        let _ = Channel::send(self, wire);
     }
 }
 
@@ -49,7 +58,8 @@ where
     S: EventSink + ?Sized,
 {
     let mut events = driver.execute_cancellable(command, cancel);
-    let mut pending = BTreeMap::new();
+    let mut pending = HashMap::new();
+    let mut observed = 0_u64;
     let mut flush = tokio::time::interval(Duration::from_millis(100));
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // An interval's first tick is immediate. Consume it so a progress frame gets one complete
@@ -61,7 +71,8 @@ where
             event = events.next() => {
                 let Some(event) = event else { break };
                 if let Some(key) = progress_key(&event) {
-                    pending.insert(key, event);
+                    observed = observed.saturating_add(1);
+                    pending.insert(key, (observed, event));
                 } else {
                     flush_pending(&mut pending, sink);
                     sink.send(EventDto::from(&event));
@@ -73,7 +84,7 @@ where
     flush_pending(&mut pending, sink);
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ProgressKey {
     General,
     Patch { phase: u8, repo: String, index: u32 },
@@ -108,24 +119,73 @@ fn repo_label(repo: Repo) -> String {
     }
 }
 
-fn flush_pending<S: EventSink + ?Sized>(pending: &mut BTreeMap<ProgressKey, Event>, sink: &S) {
-    for (_, event) in std::mem::take(pending) {
+fn flush_pending<S: EventSink + ?Sized>(
+    pending: &mut HashMap<ProgressKey, (u64, Event)>,
+    sink: &S,
+) {
+    let mut events: Vec<_> = pending.drain().map(|(_, event)| event).collect();
+    events.sort_unstable_by_key(|(observed, _)| *observed);
+    for (_, event) in events {
         sink.send(EventDto::from(&event));
     }
 }
 
 /// The cancellation tokens for runs the shell has started.
-#[derive(Default)]
-pub(crate) struct Runs(Mutex<HashMap<Uuid, CancellationToken>>);
+#[derive(Clone, Default)]
+pub(crate) struct Runs(Arc<Mutex<HashMap<Uuid, ActiveRun>>>);
+
+struct ActiveRun {
+    cancel: CancellationToken,
+    class: RunClass,
+}
+
+/// Flows without profile or checkpoint persistence may overlap; every writer owns one mutation slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunClass {
+    ReadOnly,
+    Exclusive,
+}
+
+impl RunClass {
+    pub(crate) fn for_command(command: &Command) -> Self {
+        match command {
+            Command::Frontier(_) | Command::SupportBundle { .. } => Self::ReadOnly,
+            Command::FirstRun(FirstRunRequest::Read)
+            | Command::ImportXivLauncher(ImportXivLauncher::Scan(_)) => Self::ReadOnly,
+            _ => Self::Exclusive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunAdmissionError {
+    Duplicate,
+    Busy,
+    Unavailable,
+}
 
 impl Runs {
-    pub(crate) fn start(&self, id: Uuid) -> Result<CancellationToken, ()> {
-        let mut runs = self.0.lock().map_err(|_| ())?;
+    pub(crate) fn start(
+        &self,
+        id: Uuid,
+        class: RunClass,
+    ) -> Result<CancellationToken, RunAdmissionError> {
+        let mut runs = self.0.lock().map_err(|_| RunAdmissionError::Unavailable)?;
         if runs.contains_key(&id) {
-            return Err(());
+            return Err(RunAdmissionError::Duplicate);
+        }
+        if class == RunClass::Exclusive && runs.values().any(|run| run.class == RunClass::Exclusive)
+        {
+            return Err(RunAdmissionError::Busy);
         }
         let cancel = CancellationToken::new();
-        runs.insert(id, cancel.clone());
+        runs.insert(
+            id,
+            ActiveRun {
+                cancel: cancel.clone(),
+                class,
+            },
+        );
         Ok(cancel)
     }
 
@@ -137,10 +197,10 @@ impl Runs {
 
     pub(crate) fn cancel(&self, id: Uuid) -> Result<bool, ()> {
         let runs = self.0.lock().map_err(|_| ())?;
-        let Some(cancel) = runs.get(&id) else {
+        let Some(run) = runs.get(&id) else {
             return Ok(false);
         };
-        cancel.cancel();
+        run.cancel.cancel();
         Ok(true)
     }
 }
@@ -149,7 +209,7 @@ impl Runs {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use apogee_core::{FlowState, OtpSource, PasswordSource, Progress, RunOutcome};
+    use apogee_core::{FlowState, OtpSource, PasswordSource, RunOutcome};
 
     use super::*;
     use crate::command::{CommandDto, OtpSourceDto, PasswordSourceDto, SecretBytes};
@@ -210,7 +270,7 @@ mod tests {
 
         drive(
             &driver,
-            request.into_core(),
+            request.into_core().unwrap_or(Command::Launch { profile }),
             CancellationToken::new(),
             &sink,
         )
@@ -244,11 +304,11 @@ mod tests {
             _command: Command,
             _cancel: CancellationToken,
         ) -> Pin<Box<dyn Stream<Item = Event> + Send + '_>> {
-            let progress = (0..100_000).map(|completed| {
-                Event::Progress(Progress {
-                    completed,
-                    total: 100_000,
-                    ..Progress::default()
+            let progress = (0..100_000).map(|bytes_done| {
+                Event::Patch(PatchProgress::Applying {
+                    repo: Repo::Game,
+                    index: 7,
+                    bytes_done,
                 })
             });
             Box::pin(tokio_stream::iter(
@@ -274,11 +334,26 @@ mod tests {
             Ok(events) => events,
             Err(poisoned) => poisoned.into_inner(),
         };
-        assert_eq!(events.len(), 2);
+        let apply_frames = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    EventDto::Patch {
+                        patch: crate::dto::PatchDto::Applying { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(apply_frames <= 11);
         assert!(matches!(
             events.first(),
-            Some(EventDto::Progress {
-                completed: 99_999,
+            Some(EventDto::Patch {
+                patch: crate::dto::PatchDto::Applying {
+                    bytes_done: 99_999,
+                    ..
+                },
                 ..
             })
         ));
@@ -289,5 +364,123 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    struct InterleavedProgress;
+
+    impl Driver for InterleavedProgress {
+        fn execute_cancellable(
+            &self,
+            _command: Command,
+            _cancel: CancellationToken,
+        ) -> Pin<Box<dyn Stream<Item = Event> + Send + '_>> {
+            Box::pin(tokio_stream::iter([
+                Event::Patch(PatchProgress::Applying {
+                    repo: Repo::Game,
+                    index: 1,
+                    bytes_done: 1,
+                }),
+                Event::Patch(PatchProgress::Applying {
+                    repo: Repo::Boot,
+                    index: 2,
+                    bytes_done: 2,
+                }),
+                Event::Patch(PatchProgress::Applying {
+                    repo: Repo::Game,
+                    index: 1,
+                    bytes_done: 3,
+                }),
+                Event::Outcome(RunOutcome::Succeeded),
+            ]))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn coalesced_keys_keep_their_latest_values_and_observation_order() {
+        let sink = VecSink::default();
+        drive(
+            &InterleavedProgress,
+            Command::Launch {
+                profile: Uuid::nil(),
+            },
+            CancellationToken::new(),
+            &sink,
+        )
+        .await;
+
+        let events = match sink.0.lock() {
+            Ok(events) => events,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [
+                EventDto::Patch {
+                    patch: crate::dto::PatchDto::Applying {
+                        repo,
+                        index: 2,
+                        bytes_done: 2
+                    },
+                    ..
+                },
+                EventDto::Patch {
+                    patch: crate::dto::PatchDto::Applying {
+                        repo: game_repo,
+                        index: 1,
+                        bytes_done: 3
+                    },
+                    ..
+                },
+                EventDto::Outcome {
+                    outcome: OutcomeDto::Succeeded,
+                    ..
+                }
+            ] if repo == "boot" && game_repo == "game"
+        ));
+    }
+
+    #[test]
+    fn read_only_runs_overlap_but_mutations_own_one_slot() {
+        let runs = Runs::default();
+        let read_one = Uuid::new_v4();
+        let read_two = Uuid::new_v4();
+        let exclusive_one = Uuid::new_v4();
+        let exclusive_two = Uuid::new_v4();
+
+        assert!(runs.start(read_one, RunClass::ReadOnly).is_ok());
+        assert!(runs.start(read_two, RunClass::ReadOnly).is_ok());
+        assert!(runs.start(exclusive_one, RunClass::Exclusive).is_ok());
+        assert_eq!(
+            runs.start(exclusive_two, RunClass::Exclusive).err(),
+            Some(RunAdmissionError::Busy)
+        );
+        assert_eq!(
+            runs.start(read_one, RunClass::ReadOnly).err(),
+            Some(RunAdmissionError::Duplicate)
+        );
+
+        runs.finish(exclusive_one);
+        assert!(runs.start(exclusive_two, RunClass::Exclusive).is_ok());
+    }
+
+    #[test]
+    fn a_profile_check_is_admitted_as_a_writer_of_profile_status() {
+        let command = Command::Prefix {
+            profile: Uuid::nil(),
+            action: apogee_core::PrefixAction::Check,
+        };
+
+        assert_eq!(RunClass::for_command(&command), RunClass::Exclusive);
+    }
+
+    #[test]
+    fn cancellation_reaches_the_registered_token() {
+        let runs = Runs::default();
+        let run_id = Uuid::new_v4();
+        let token = runs.start(run_id, RunClass::Exclusive).unwrap_or_default();
+
+        assert_eq!(runs.cancel(run_id), Ok(true));
+        assert!(token.is_cancelled());
+        assert_eq!(runs.cancel(Uuid::new_v4()), Ok(false));
     }
 }
