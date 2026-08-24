@@ -13,6 +13,7 @@
 mod command;
 mod direct;
 mod dto;
+mod mutation;
 mod passphrase;
 mod secrets;
 mod supervisor;
@@ -62,6 +63,7 @@ struct ShellState {
     startup: OnceCell<StartupDto>,
     direct_reads: Arc<Semaphore>,
     passphrases: Arc<passphrase::PromptBroker>,
+    removal_plans: Arc<mutation::RemovalPlans>,
     runs: Runs,
 }
 
@@ -75,6 +77,7 @@ impl Default for ShellState {
             startup: OnceCell::new(),
             direct_reads: Arc::new(Semaphore::new(4)),
             passphrases: Arc::new(passphrase::PromptBroker::default()),
+            removal_plans: Arc::new(mutation::RemovalPlans::default()),
             runs: Runs::default(),
         }
     }
@@ -313,6 +316,19 @@ fn main() -> ExitCode {
             secrets::remove_secrets_file,
             secrets::seal_secrets_file,
             secrets::answer_passphrase_prompt,
+            mutation::update_account,
+            mutation::update_profile,
+            mutation::update_settings,
+            mutation::store_password,
+            mutation::import_totp_secret,
+            mutation::use_pushed_codes,
+            mutation::disable_pushed_codes,
+            mutation::delete_secret,
+            mutation::forget_secrets,
+            mutation::set_never_store,
+            mutation::plan_profile_removal,
+            mutation::cancel_profile_removal,
+            mutation::remove_profile,
             execute,
             cancel
         ])

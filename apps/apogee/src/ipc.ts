@@ -16,6 +16,22 @@ import type { StartupDto } from './generated/Startup';
 import type { PassphrasePromptDto } from './generated/PassphrasePrompt';
 import type { SecretsFileRemovalDto } from './generated/SecretsFileRemoval';
 import type { SecretsFileStatusDto } from './generated/SecretsFileStatus';
+import type { AccountDto } from './generated/AccountDto';
+import type { DeleteSecretRequestDto } from './generated/DeleteSecretRequest';
+import type { DisablePushedCodesRequestDto } from './generated/DisablePushedCodesRequest';
+import type { ForgetSecretsRequestDto } from './generated/ForgetSecretsRequest';
+import type { ForgetSecretsResultDto } from './generated/ForgetSecretsResult';
+import type { NeverStoreResultDto } from './generated/NeverStoreResult';
+import type { ProfileDto } from './generated/ProfileDto';
+import type { ProfileRemovalDto } from './generated/ProfileRemoval';
+import type { ProfileRemovalPlanDto } from './generated/ProfileRemovalPlan';
+import type { RemoveProfileRequestDto } from './generated/RemoveProfileRequest';
+import type { SetNeverStoreRequestDto } from './generated/SetNeverStoreRequest';
+import type { SettingsDto } from './generated/SettingsDto';
+import type { TotpImportResultDto } from './generated/TotpImportResult';
+import type { UpdateAccountRequestDto } from './generated/UpdateAccountRequest';
+import type { UpdateProfileRequestDto } from './generated/UpdateProfileRequest';
+import type { UpdateSettingsRequestDto } from './generated/UpdateSettingsRequest';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -226,6 +242,79 @@ export function removeSecretsFile(confirmed: boolean): Promise<SecretsFileRemova
 /** Erases this process's cached derived key immediately. */
 export function sealSecretsFile(): Promise<SecretsFileStatusDto> {
   return invokeIpc<SecretsFileStatusDto>('seal_secrets_file');
+}
+
+/** Updates only the editable account fields; secret policy remains core-owned. */
+export function updateAccount(request: UpdateAccountRequestDto): Promise<AccountDto> {
+  return invokeIpc<AccountDto>('update_account', { request });
+}
+
+/** Updates the path-free profile fields while preserving ownership and filesystem selections. */
+export function updateProfile(request: UpdateProfileRequestDto): Promise<ProfileDto> {
+  return invokeIpc<ProfileDto>('update_profile', { request });
+}
+
+/** Persists the complete launcher settings record after core validation. */
+export function updateSettings(request: UpdateSettingsRequestDto): Promise<SettingsDto> {
+  return invokeIpc<SettingsDto>('update_settings', { request });
+}
+
+/** Stores a password once and erases the caller's byte buffer after dispatch. */
+export function storePassword(account: string, password: number[]): Promise<void> {
+  return invokeWithErasedBuffers<void>('store_password', {
+    request: { account, password },
+  }, [password]);
+}
+
+/** Imports a generator secret without retaining its byte buffer in frontend state. */
+export function importTotpSecret(account: string, secret: number[]): Promise<TotpImportResultDto> {
+  return invokeWithErasedBuffers<TotpImportResultDto>('import_totp_secret', {
+    request: { account, secret },
+  }, [secret]);
+}
+
+/** Enables listener delivery only after the exact typed acknowledgment. */
+export function usePushedCodes(account: string, confirmation: string): Promise<AccountDto> {
+  return invokeIpc<AccountDto>('use_pushed_codes', {
+    request: { account, confirmation },
+  });
+}
+
+/** Returns an account from listener delivery to typed codes. */
+export function disablePushedCodes(request: DisablePushedCodesRequestDto): Promise<AccountDto> {
+  return invokeIpc<AccountDto>('disable_pushed_codes', { request });
+}
+
+/** Deletes one write-only secret after an inline confirmation. */
+export function deleteSecret(request: DeleteSecretRequestDto): Promise<AccountDto> {
+  return invokeIpc<AccountDto>('delete_secret', { request });
+}
+
+/** Sweeps every stored secret for an account after confirmation. */
+export function forgetSecrets(
+  request: ForgetSecretsRequestDto,
+): Promise<ForgetSecretsResultDto> {
+  return invokeIpc<ForgetSecretsResultDto>('forget_secrets', { request });
+}
+
+/** Changes an account's keep-nothing policy through core's ordered sweep contract. */
+export function setNeverStore(request: SetNeverStoreRequestDto): Promise<NeverStoreResultDto> {
+  return invokeIpc<NeverStoreResultDto>('set_never_store', { request });
+}
+
+/** Opens one opaque, single-use profile-removal decision. */
+export function planProfileRemoval(profile: string): Promise<ProfileRemovalPlanDto> {
+  return invokeIpc<ProfileRemovalPlanDto>('plan_profile_removal', { profile });
+}
+
+/** Invalidates the matching pending profile-removal decision. */
+export function cancelProfileRemoval(requestId: string): Promise<boolean> {
+  return invokeIpc<boolean>('cancel_profile_removal', { requestId });
+}
+
+/** Consumes the exact plan the confirmation displayed. */
+export function removeProfile(request: RemoveProfileRequestDto): Promise<ProfileRemovalDto> {
+  return invokeIpc<ProfileRemovalDto>('remove_profile', { request });
 }
 
 /** Reads the core-selected action for one profile without deriving readiness in the frontend. */
