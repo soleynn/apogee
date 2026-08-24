@@ -7,8 +7,6 @@ use apogee_core::{
 use serde::Serialize;
 use ts_rs::TS;
 
-use super::path::PathDto;
-
 /// The result of scanning or applying one import source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(
@@ -25,8 +23,16 @@ pub(crate) enum ImportDto {
 
 impl From<&ImportData> for ImportDto {
     fn from(data: &ImportData) -> Self {
+        Self::from_observed(data, None)
+    }
+}
+
+impl ImportDto {
+    pub(crate) fn from_observed(data: &ImportData, scan_id: Option<apogee_core::Uuid>) -> Self {
         match data {
-            ImportData::Scan(scan) => Self::Scan(ImportScanDto::from(scan)),
+            ImportData::Scan(scan) => scan_id.map_or(Self::Unknown, |id| {
+                Self::Scan(ImportScanDto::from_observed(scan, id))
+            }),
             ImportData::Applied(report) => Self::Applied(ImportApplyReportDto::from(report)),
             _ => Self::Unknown,
         }
@@ -36,16 +42,17 @@ impl From<&ImportData> for ImportDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportScanDto {
-    source: PathDto,
-    fingerprint: String,
+    #[ts(type = "string")]
+    scan: apogee_core::Uuid,
+    source: String,
     findings: Vec<ImportFindingDto>,
 }
 
-impl From<&ImportScan> for ImportScanDto {
-    fn from(scan: &ImportScan) -> Self {
+impl ImportScanDto {
+    fn from_observed(scan: &ImportScan, id: apogee_core::Uuid) -> Self {
         Self {
-            source: PathDto::from(scan.source.as_path()),
-            fingerprint: scan.fingerprint.as_str().to_owned(),
+            scan: id,
+            source: scan.source.to_string_lossy().into_owned(),
             findings: scan.findings.iter().map(ImportFindingDto::from).collect(),
         }
     }
@@ -125,7 +132,7 @@ pub(super) struct ImportCandidateDto {
     account_kind: AccountKindDto,
     use_otp: bool,
     never_store: bool,
-    game_path: Option<PathDto>,
+    game_path: Option<String>,
 }
 
 impl From<&ImportCandidate> for ImportCandidateDto {
@@ -135,7 +142,10 @@ impl From<&ImportCandidate> for ImportCandidateDto {
             account_kind: AccountKindDto::from(&candidate.kind),
             use_otp: candidate.use_otp,
             never_store: candidate.never_store,
-            game_path: candidate.game_path.as_deref().map(PathDto::from),
+            game_path: candidate
+                .game_path
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
         }
     }
 }

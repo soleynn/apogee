@@ -72,6 +72,7 @@ macro_rules! ipc_surface {
             navigation::reveal,
             navigation::activity_log,
             navigation::save_support_bundle,
+            navigation::pick_folder,
             execute,
             cancel,
         }
@@ -287,7 +288,7 @@ async fn execute(
     // Consume credential bytes before touching any other state, so the IPC allocation is guarded by
     // core's write-only Secret for the rest of the command body.
     let command = command
-        .into_core()
+        .into_core(&state.navigation)
         .map_err(|_| IpcErrorDto::shell("shell.command.invalid"))?;
     let class = RunClass::for_command(&command);
     // The first store snapshot is the bootstrap boundary. No mutating flow starts before it has read

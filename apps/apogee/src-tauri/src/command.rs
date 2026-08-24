@@ -1,10 +1,8 @@
 //! The shell-owned request shape and its one-way conversion into core commands.
 
-use std::path::PathBuf;
-
 use apogee_core::{
-    Command, FirstRunRequest, FirstRunTransition, FrontierQuery, ImportPlan, ImportXivLauncher,
-    OtpSource, PasswordSource, PrefixAction, Repo, Uuid,
+    Command, FirstRunRequest, FirstRunTransition, FrontierQuery, ImportXivLauncher, OtpSource,
+    PasswordSource, PrefixAction, Uuid,
 };
 use serde::Deserialize;
 use ts_rs::TS;
@@ -14,8 +12,8 @@ use crate::dto::first_run::{
     GameCandidateDto, GameChoiceDto, ImportDecisionDto, LegibilityDto, ReadyActionDto,
     RunnerAndPrefixChoiceDto, RunnerReadingDto,
 };
-use crate::dto::path::PathDto;
 use crate::dto::secrets::SecretBytes;
+use crate::navigation::NavigationState;
 
 /// Where the core should get the account password for this run.
 #[derive(Deserialize, TS)]
@@ -58,7 +56,8 @@ impl OtpSourceDto {
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 #[ts(export, export_to = "Command.ts")]
 pub(crate) enum CommandDto {
@@ -93,7 +92,6 @@ pub(crate) enum CommandDto {
     Repair {
         #[ts(type = "string")]
         profile: Uuid,
-        local_indexes: Vec<LocalIndexDto>,
     },
     Prefix {
         #[ts(type = "string")]
@@ -117,7 +115,10 @@ pub(crate) enum CommandDto {
 }
 
 impl CommandDto {
-    pub(crate) fn into_core(self) -> Result<Command, CommandDtoError> {
+    pub(crate) fn into_core(
+        self,
+        navigation: &NavigationState,
+    ) -> Result<Command, CommandDtoError> {
         Ok(match self {
             Self::Login {
                 profile,
@@ -156,22 +157,18 @@ impl CommandDto {
                 password: password.into_core(),
                 otp: otp.into_core(),
             },
-            Self::Repair {
+            Self::Repair { profile } => Command::Repair {
                 profile,
-                local_indexes,
-            } => Command::Repair {
-                profile,
-                local_indexes: local_indexes
-                    .into_iter()
-                    .map(LocalIndexDto::into_core)
-                    .collect::<Result<Vec<_>, _>>()?,
+                local_indexes: Vec::new(),
             },
             Self::Prefix { profile, action } => Command::Prefix {
                 profile,
                 action: action.into_core(),
             },
             Self::FirstRun { request } => Command::FirstRun(request.into_core()?),
-            Self::ImportXivLauncher { request } => Command::ImportXivLauncher(request.into_core()?),
+            Self::ImportXivLauncher { request } => {
+                Command::ImportXivLauncher(request.into_core(navigation)?)
+            }
             Self::Frontier { query } => Command::Frontier(query.into_core()),
             Self::SupportBundle { profile, facts } => Command::SupportBundle {
                 profile,
@@ -187,43 +184,8 @@ impl CommandDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandDtoError {
     UnsupportedFirstRunValue,
-    UnsupportedPathEncoding,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LocalIndexDto {
-    repo: RepoDto,
-    path: PathDto,
-}
-
-impl LocalIndexDto {
-    fn into_core(self) -> Result<(Repo, PathBuf), CommandDtoError> {
-        Ok((
-            self.repo.into_core(),
-            self.path
-                .into_path()
-                .map_err(|_| CommandDtoError::UnsupportedPathEncoding)?,
-        ))
-    }
-}
-
-#[derive(Deserialize, TS)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub(crate) enum RepoDto {
-    Boot,
-    Game,
-    Expansion { number: u8 },
-}
-
-impl RepoDto {
-    fn into_core(self) -> Repo {
-        match self {
-            Self::Boot => Repo::Boot,
-            Self::Game => Repo::Game,
-            Self::Expansion { number } => Repo::Expansion(number),
-        }
-    }
+    UnknownFolder,
+    UnknownImportScan,
 }
 
 #[derive(Deserialize, TS)]
@@ -343,41 +305,33 @@ impl FirstRunTransitionDto {
 }
 
 #[derive(Deserialize, TS)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum ImportXivLauncherDto {
-    Scan { path: PathDto },
-    Apply { plan: ImportPlanDto },
+    Scan {
+        #[ts(type = "string")]
+        folder: Uuid,
+    },
+    Apply {
+        #[ts(type = "string")]
+        scan: Uuid,
+        accepted: Vec<String>,
+    },
 }
 
 impl ImportXivLauncherDto {
-    fn into_core(self) -> Result<ImportXivLauncher, CommandDtoError> {
+    fn into_core(self, navigation: &NavigationState) -> Result<ImportXivLauncher, CommandDtoError> {
         Ok(match self {
-            Self::Scan { path } => ImportXivLauncher::Scan(
-                path.into_path()
-                    .map_err(|_| CommandDtoError::UnsupportedPathEncoding)?,
+            Self::Scan { folder } => ImportXivLauncher::Scan(
+                navigation
+                    .folder(folder)
+                    .ok_or(CommandDtoError::UnknownFolder)?,
             ),
-            Self::Apply { plan } => ImportXivLauncher::Apply(plan.into_core()?),
+            Self::Apply { scan, accepted } => ImportXivLauncher::Apply(
+                navigation
+                    .import_plan(scan, accepted)
+                    .ok_or(CommandDtoError::UnknownImportScan)?,
+            ),
         })
-    }
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ImportPlanDto {
-    source: PathDto,
-    fingerprint: String,
-    accepted: Vec<String>,
-}
-
-impl ImportPlanDto {
-    fn into_core(self) -> Result<ImportPlan, CommandDtoError> {
-        Ok(ImportPlan::from_selection_parts(
-            self.source
-                .into_path()
-                .map_err(|_| CommandDtoError::UnsupportedPathEncoding)?,
-            self.fingerprint,
-            self.accepted,
-        ))
     }
 }
 
@@ -463,14 +417,16 @@ mod tests {
 
     const PROFILE: &str = "00000000-0000-0000-0000-000000000000";
 
-    fn parse(json: &str) -> Option<Command> {
+    fn parse(json: &str, navigation: &NavigationState) -> Option<Command> {
         serde_json::from_str::<CommandDto>(json)
             .ok()
-            .and_then(|command| command.into_core().ok())
+            .and_then(|command| command.into_core(navigation).ok())
     }
 
     #[test]
     fn every_command_arm_accepts_the_shell_wire_shape() {
+        let navigation = NavigationState::default();
+        let folder = navigation.register_folder("import-root".into()).id();
         let commands = [
             format!(
                 r#"{{"kind":"login","profile":"{PROFILE}","password":{{"kind":"stored"}},"otp":{{"kind":"totp"}}}}"#
@@ -485,20 +441,21 @@ mod tests {
             format!(
                 r#"{{"kind":"install","profile":"{PROFILE}","password":{{"kind":"stored"}},"otp":{{"kind":"totp"}}}}"#
             ),
-            format!(
-                r#"{{"kind":"repair","profile":"{PROFILE}","localIndexes":[{{"repo":{{"kind":"expansion","number":2}},"path":{{"display":"index.apzi","value":{{"kind":"utf8","value":"index.apzi"}}}}}}]}}"#
-            ),
+            format!(r#"{{"kind":"repair","profile":"{PROFILE}"}}"#),
             format!(
                 r#"{{"kind":"prefix","profile":"{PROFILE}","action":{{"kind":"recreate","backupConfig":true}}}}"#
             ),
             r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"confirmLegibility","value":{"gpu":null,"driver":null,"session":"wayland","renderTier":1}}}}"#.to_owned(),
-            r#"{"kind":"importXivLauncher","request":{"kind":"scan","path":{"display":"import-root","value":{"kind":"utf8","value":"import-root"}}}}"#.to_owned(),
+            format!(r#"{{"kind":"importXivLauncher","request":{{"kind":"scan","folder":"{folder}"}}}}"#),
             r#"{"kind":"frontier","query":{"kind":"gate","wait":true}}"#.to_owned(),
             r#"{"kind":"supportBundle","facts":[{"name":"render_tier","value":"1"}]}"#.to_owned(),
         ];
 
         for command in commands {
-            assert!(parse(&command).is_some(), "did not accept {command}");
+            assert!(
+                parse(&command, &navigation).is_some(),
+                "did not accept {command}"
+            );
         }
     }
 
@@ -506,7 +463,7 @@ mod tests {
     fn unsupported_first_run_fallbacks_are_rejected_before_core() {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"saveAccount","value":{"squareEnixId":"person","kind":"unknown","neverSavePassword":true,"steamClient":"notRequired"}}}}"#;
 
-        assert!(parse(command).is_none());
+        assert!(parse(command, &NavigationState::default()).is_none());
     }
 
     #[test]
@@ -514,11 +471,23 @@ mod tests {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"recordRunners","value":[]}}}"#;
 
         assert!(matches!(
-            parse(command),
+            parse(command, &NavigationState::default()),
             Some(Command::FirstRun(FirstRunRequest::Advance(
                 FirstRunTransition::RecordRunners(readings)
             ))) if readings.is_empty()
         ));
+    }
+
+    #[test]
+    fn repair_and_import_reject_frontend_paths() {
+        let repair = format!(
+            r#"{{"kind":"repair","profile":"{PROFILE}","localIndexes":[{{"path":"index.apzi"}}]}}"#
+        );
+        let import =
+            r#"{"kind":"importXivLauncher","request":{"kind":"scan","path":"import-root"}}"#;
+
+        assert!(serde_json::from_str::<CommandDto>(&repair).is_err());
+        assert!(serde_json::from_str::<CommandDto>(import).is_err());
     }
 
     #[test]

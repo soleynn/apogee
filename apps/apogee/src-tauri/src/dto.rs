@@ -23,7 +23,7 @@ use ts_rs::TS;
 pub(crate) use error::{CoreErrorDto, IpcErrorDto};
 use first_run::FirstRunDto;
 use frontier::FrontierDto;
-use import::ImportDto;
+pub(crate) use import::ImportDto;
 
 /// One frame sent to the webview.
 ///

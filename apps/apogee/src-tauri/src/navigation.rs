@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use apogee_core::{Core, SupportBundleData, Uuid};
+use apogee_core::{Core, ImportPlan, ImportScan, SupportBundleData, Uuid};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 use ts_rs::TS;
@@ -55,11 +55,30 @@ pub(crate) struct ActivityEntryDto {
     code: &'static str,
 }
 
+/// One folder selected by a native dialog, represented by a process-local capability id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "FolderSelection.ts")]
+pub(crate) struct FolderSelectionDto {
+    #[ts(type = "string")]
+    id: Uuid,
+    display: String,
+}
+
+impl FolderSelectionDto {
+    #[cfg(test)]
+    pub(crate) fn id(&self) -> Uuid {
+        self.id
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct NavigationState(Arc<Mutex<Registry>>);
 
 #[derive(Default)]
 struct Registry {
+    folders: HashMap<Uuid, PathBuf>,
+    import_scans: HashMap<Uuid, ImportScan>,
     evidence: HashMap<(Uuid, Uuid), PathBuf>,
     pending_support_bundle: Option<SupportBundleData>,
     support_bundle: Option<PathBuf>,
@@ -68,6 +87,33 @@ struct Registry {
 }
 
 impl NavigationState {
+    pub(crate) fn register_folder(&self, path: PathBuf) -> FolderSelectionDto {
+        let id = Uuid::new_v4();
+        let display = path.to_string_lossy().into_owned();
+        self.lock().folders.insert(id, path);
+        FolderSelectionDto { id, display }
+    }
+
+    pub(crate) fn folder(&self, id: Uuid) -> Option<PathBuf> {
+        self.lock().folders.get(&id).cloned()
+    }
+
+    pub(crate) fn register_import_scan(&self, scan: ImportScan) -> Uuid {
+        let id = Uuid::new_v4();
+        self.lock().import_scans.insert(id, scan);
+        id
+    }
+
+    pub(crate) fn import_plan(&self, id: Uuid, accepted: Vec<String>) -> Option<ImportPlan> {
+        let registry = self.lock();
+        let scan = registry.import_scans.get(&id)?;
+        Some(ImportPlan::from_selection_parts(
+            scan.source.clone(),
+            scan.fingerprint.as_str().to_owned(),
+            accepted,
+        ))
+    }
+
     pub(crate) fn register_evidence(&self, run: Uuid, path: PathBuf) -> Uuid {
         let addon = Uuid::new_v4();
         let mut registry = self.lock();
@@ -359,6 +405,26 @@ pub(crate) async fn save_support_bundle(
     .await?
 }
 
+/// Ask the native shell for a directory and retain its real path behind an opaque id.
+#[tauri::command]
+pub(crate) async fn pick_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ShellState>,
+) -> Result<Option<FolderSelectionDto>, IpcErrorDto> {
+    let navigation = state.navigation.clone();
+    run_blocking(move || {
+        let Some(folder) = app.dialog().file().blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = folder.into_path().map_err(|error| {
+            tracing::warn!(%error, "folder picker returned an unsupported path");
+            IpcErrorDto::shell("shell.folder.invalid")
+        })?;
+        Ok(Some(navigation.register_folder(path)))
+    })
+    .await?
+}
+
 fn publish_support_bundle(
     bundle: &SupportBundleData,
     folder: &Path,
@@ -578,5 +644,43 @@ mod tests {
         assert!(publish_support_bundle(&bundle, &published, &navigation).is_err());
         assert_eq!(navigation.support_bundle(), Some(previous));
         assert!(destination.is_file());
+    }
+
+    #[tokio::test]
+    async fn folder_and_import_capabilities_are_process_local() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let source = temporary.path().join("import-source");
+        std::fs::create_dir(&source).unwrap();
+        let navigation = NavigationState::default();
+        let selection = navigation.register_folder(source.clone());
+        assert_eq!(navigation.folder(selection.id()), Some(source.clone()));
+        assert_eq!(
+            NavigationState::default().folder(selection.id()),
+            None,
+            "a selection from another process registry must be stale"
+        );
+
+        let core = Core::new(apogee_core::CoreConfig::with_base(temporary.path())).unwrap();
+        let mut events = core.execute(apogee_core::Command::ImportXivLauncher(
+            apogee_core::ImportXivLauncher::Scan(source.clone()),
+        ));
+        let scan = loop {
+            match events.next().await {
+                Some(apogee_core::Event::Import(apogee_core::ImportData::Scan(scan))) => {
+                    break scan;
+                }
+                Some(_) => {}
+                None => panic!("import flow ended without a scan"),
+            }
+        };
+        let scan_id = navigation.register_import_scan(scan);
+        let plan = navigation.import_plan(scan_id, Vec::new()).unwrap();
+        assert_eq!(plan.source, source);
+        assert!(
+            NavigationState::default()
+                .import_plan(scan_id, Vec::new())
+                .is_none(),
+            "a scan from another process registry must be stale"
+        );
     }
 }

@@ -20,6 +20,7 @@ import {
   importTotpSecret,
   nextAction,
   openLink,
+  pickFolder,
   onPassphrasePrompt,
   planProfileRemoval,
   removeProfile,
@@ -76,11 +77,13 @@ describe('confined host actions', () => {
     await reveal(target);
     await activityLog();
     await saveSupportBundle();
+    await pickFolder();
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'open_link', { rowId: 'row-id' });
     expect(invoke).toHaveBeenNthCalledWith(2, 'reveal', { target });
     expect(invoke).toHaveBeenNthCalledWith(3, 'activity_log');
     expect(invoke).toHaveBeenNthCalledWith(4, 'save_support_bundle');
+    expect(invoke).toHaveBeenNthCalledWith(5, 'pick_folder');
   });
 });
 

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apogee_core::{
-    AddonEvent, Command, Core, Event, FirstRunRequest, FrontierData, ImportXivLauncher,
+    AddonEvent, Command, Core, Event, FirstRunRequest, FrontierData, ImportData, ImportXivLauncher,
     PatchProgress, Repo, SetupEvent, StableCode, Uuid,
 };
 use tauri::ipc::Channel;
@@ -132,6 +132,13 @@ fn observe_event<A: AssetRegistrar + ?Sized>(
         Event::SupportBundle(bundle) => {
             navigation.set_pending_support_bundle(bundle.clone());
             EventDto::from(event)
+        }
+        Event::Import(import @ ImportData::Scan(scan)) => {
+            let scan_id = navigation.register_import_scan(scan.clone());
+            EventDto::Import {
+                code: event.code(),
+                import: crate::dto::ImportDto::from_observed(import, Some(scan_id)),
+            }
         }
         _ => EventDto::from(event),
     }
@@ -440,6 +447,7 @@ mod tests {
             drove_patch_and_play: AtomicBool::new(false),
         };
         let sink = VecSink::default();
+        let navigation = NavigationState::default();
         let request = CommandDto::PatchAndPlay {
             profile,
             password: PasswordSourceDto::Provided(SecretBytes::new(b"password".to_vec())),
@@ -448,10 +456,12 @@ mod tests {
 
         drive(
             &driver,
-            request.into_core().unwrap_or(Command::Launch { profile }),
+            request
+                .into_core(&navigation)
+                .unwrap_or(Command::Launch { profile }),
             CancellationToken::new(),
             Uuid::new_v4(),
-            &NavigationState::default(),
+            &navigation,
             &NoAssets,
             &sink,
         )

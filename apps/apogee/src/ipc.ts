@@ -34,6 +34,7 @@ import type { UpdateProfileRequestDto } from './generated/UpdateProfileRequest';
 import type { UpdateSettingsRequestDto } from './generated/UpdateSettingsRequest';
 import type { ActivityEntryDto } from './generated/ActivityEntry';
 import type { RevealTargetDto } from './generated/RevealTarget';
+import type { FolderSelectionDto } from './generated/FolderSelection';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -372,6 +373,11 @@ export function activityLog(): Promise<ActivityEntryDto[]> {
 /** Publishes the pending redacted archive under a native folder choice. */
 export function saveSupportBundle(): Promise<boolean> {
   return invokeIpc<boolean>('save_support_bundle');
+}
+
+/** Opens a native directory picker and retains the path behind a process-local id. */
+export function pickFolder(): Promise<FolderSelectionDto | null> {
+  return invokeIpc<FolderSelectionDto | null>('pick_folder');
 }
 
 /** Selects the structured corrupt-store recovery fields from any invoke rejection. */

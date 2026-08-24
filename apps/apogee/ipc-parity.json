@@ -183,6 +183,12 @@
       "equivalence": "Publish core's same redacted archive without exposing its bytes or an arbitrary destination path to the webview."
     },
     {
+      "ipc": "pick_folder",
+      "cli": [],
+      "shell_local": "The desktop uses a native chooser to mint a process-local folder capability; terminal paths come from argv under the controlling user's direct input.",
+      "equivalence": "Input transport only; commands consuming the selection still execute through the same core operation."
+    },
+    {
       "ipc": "execute",
       "operations": [
         {"shell": "login", "cli": [["login", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate one profile with the same password and one-time-password sources."},
