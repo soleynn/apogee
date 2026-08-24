@@ -1122,7 +1122,9 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
                 println!("  it protects a copy of the file taken off this machine, no more");
                 println!("  anything running as you can read the file and watch you type");
                 println!("  a forgotten passphrase means the saved passwords are gone");
-                println!("  the passphrase is asked for once per run of the launcher");
+                println!(
+                    "  the derived key is forgotten after five idle minutes, so expect another prompt"
+                );
                 if !confirmed("encrypt")? {
                     println!("left alone");
                     return Ok(());
