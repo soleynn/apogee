@@ -36,6 +36,7 @@ import type { ActivityEntryDto } from './generated/ActivityEntry';
 import type { RevealTargetDto } from './generated/RevealTarget';
 import type { FolderSelectionDto } from './generated/FolderSelection';
 import type { SteamInstallDto } from './generated/SteamInstall';
+import type { RenderStatusDto } from './generated/RenderStatus';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -70,6 +71,7 @@ export class IpcFailure extends Error {
 
 const ACTIVE_PROFILE_KEY = 'apogee.activeProfile';
 const PASSPHRASE_REQUEST_EVENT = 'passphrase-request';
+const QUIT_DURING_RUN_EVENT = 'quit-during-run-request';
 
 const knownEventKinds = new Set([
   'state',
@@ -384,6 +386,31 @@ export function saveSupportBundle(): Promise<boolean> {
 /** Opens a native directory picker and retains the path behind a process-local id. */
 export function pickFolder(): Promise<FolderSelectionDto | null> {
   return invokeIpc<FolderSelectionDto | null>('pick_folder');
+}
+
+/** Reads native renderer facts without trusting browser-supplied environment values. */
+export function renderStatus(): Promise<RenderStatusDto> {
+  return invokeIpc<RenderStatusDto>('render_status');
+}
+
+/** Acknowledges that the webview completed two animation frames. */
+export function renderOk(): Promise<void> {
+  return invokeIpc<void>('render_ok');
+}
+
+/** Records the person's distinct confirmation that the current window is legible. */
+export function confirmRender(): Promise<void> {
+  return invokeIpc<void>('confirm_render');
+}
+
+/** Subscribes to the one native close request that needs a stop-and-resume confirmation. */
+export function onQuitDuringRun(handler: () => void): Promise<UnlistenFn> {
+  return listen<void>(QUIT_DURING_RUN_EVENT, () => handler());
+}
+
+/** Declines the pending close or cancels and drains every active operation before closing. */
+export function answerCloseRequest(confirmed: boolean): Promise<boolean> {
+  return invokeIpc<boolean>('answer_close_request', { confirmed });
 }
 
 /** Selects the structured corrupt-store recovery fields from any invoke rejection. */

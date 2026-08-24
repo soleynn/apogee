@@ -15,7 +15,7 @@ use apogee_secrets::Secret;
 use uuid::Uuid;
 
 use crate::error::CoreError;
-use crate::{FirstRunCheckpoint, FirstRunTransition, ImportApplyReport, ImportPlan, ImportScan};
+use crate::{FirstRunAction, FirstRunCheckpoint, ImportApplyReport, ImportPlan, ImportScan};
 
 /// A request from a shell to the core.
 ///
@@ -100,7 +100,7 @@ pub enum Command {
 #[non_exhaustive]
 pub enum FirstRunRequest {
     Read,
-    Advance(FirstRunTransition),
+    Advance(FirstRunAction),
 }
 
 /// Preview or apply an XIVLauncher configuration import.

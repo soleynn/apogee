@@ -13,9 +13,11 @@
 mod command;
 mod direct;
 mod dto;
+mod lifecycle;
 mod mutation;
 mod navigation;
 mod passphrase;
+mod render;
 mod secrets;
 mod supervisor;
 
@@ -74,6 +76,10 @@ macro_rules! ipc_surface {
             navigation::activity_log,
             navigation::save_support_bundle,
             navigation::pick_folder,
+            render::render_status,
+            render::render_ok,
+            render::confirm_render,
+            lifecycle::answer_close_request,
             execute,
             cancel,
         }
@@ -127,12 +133,20 @@ struct ShellState {
     direct_reads: Arc<Semaphore>,
     passphrases: Arc<passphrase::PromptBroker>,
     removal_plans: Arc<mutation::RemovalPlans>,
+    lifecycle: lifecycle::CloseController,
     navigation: navigation::NavigationState,
+    render: render::RenderMonitor,
     runs: Runs,
 }
 
 impl Default for ShellState {
     fn default() -> Self {
+        Self::new(render::RenderMonitor::disabled())
+    }
+}
+
+impl ShellState {
+    fn new(render: render::RenderMonitor) -> Self {
         Self {
             core: Mutex::new(CoreStatus::Starting),
             core_ready: Notify::new(),
@@ -142,13 +156,12 @@ impl Default for ShellState {
             direct_reads: Arc::new(Semaphore::new(4)),
             passphrases: Arc::new(passphrase::PromptBroker::default()),
             removal_plans: Arc::new(mutation::RemovalPlans::default()),
+            lifecycle: lifecycle::CloseController::default(),
             navigation: navigation::NavigationState::default(),
+            render,
             runs: Runs::default(),
         }
     }
-}
-
-impl ShellState {
     #[cfg(test)]
     fn install_core(&self, core: Result<Core, apogee_core::CoreError>) {
         self.install_core_result(core.map_err(|error| IpcErrorDto::core(&error)));
@@ -323,6 +336,7 @@ fn run_admission_error(error: RunAdmissionError) -> IpcErrorDto {
     match error {
         RunAdmissionError::Duplicate => IpcErrorDto::shell("shell.run.duplicate"),
         RunAdmissionError::Busy => IpcErrorDto::shell("shell.run.busy"),
+        RunAdmissionError::Draining => IpcErrorDto::shell("shell.run.draining"),
         RunAdmissionError::Unavailable => IpcErrorDto::shell("shell.state.unavailable"),
     }
 }
@@ -337,6 +351,19 @@ async fn cancel(state: tauri::State<'_, ShellState>, run_id: Uuid) -> Result<boo
 }
 
 fn main() -> ExitCode {
+    let render = match render::preflight() {
+        Ok(render::RenderPreflight::Continue(render)) => render,
+        Ok(render::RenderPreflight::Exit(code)) => return code,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "Apogee render tier {}; use --safe-render if the window is unreadable.",
+        render.tier()
+    );
+
     // The context macro builds the window's context on a thread of its own, for the larger stack,
     // and ends the process itself if that thread panics. Nothing here can reach around that, so the
     // one lint the table denies is carved out over the one statement that expands the macro. It is
@@ -348,15 +375,21 @@ fn main() -> ExitCode {
     )]
     let context = tauri::generate_context!();
 
-    match tauri::Builder::default()
+    let setup_render = render.clone();
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(ShellState::default())
-        .setup(|app| {
+        .on_window_event(lifecycle::on_window_event)
+        .manage(ShellState::new(render.clone()))
+        .setup(move |app| {
             let handle = app.handle().clone();
             let state = app.state::<ShellState>();
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title(&setup_render.title())?;
+            }
+            setup_render.start(handle.clone());
             let passphrase = Arc::new(passphrase::WebviewPassphrase::new(
                 Arc::clone(&state.passphrases),
                 Arc::new(TauriPromptEmitter {
@@ -381,16 +414,40 @@ fn main() -> ExitCode {
             Ok(())
         })
         .invoke_handler(ipc_surface!(tauri_handler))
-        .run(context)
-    {
-        Ok(()) => ExitCode::SUCCESS,
+        .run(context);
+
+    let code = match result {
+        Ok(()) => {
+            if let Err(error) = render.record_window_closed() {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         // A return code rather than a panic: the builder fails on a window that cannot be created,
         // which is the condition the render fallback reads to try the next way of drawing one.
         Err(error) => {
             eprintln!("{error}");
+            if let Err(render_error) = render.record_builder_failure() {
+                eprintln!("{render_error}");
+            }
             ExitCode::FAILURE
         }
+    };
+
+    if render.retry_requested() {
+        #[cfg(unix)]
+        match render.retry_exec() {
+            Ok(render::RenderPreflight::Exit(retry_code)) => return retry_code,
+            Ok(render::RenderPreflight::Continue(_)) => return ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
+    code
 }
 
 #[cfg(test)]

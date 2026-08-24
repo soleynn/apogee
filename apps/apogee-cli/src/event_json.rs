@@ -392,6 +392,7 @@ fn news_row_value(row: &apogee_core::NewsRow) -> Value {
 
 fn first_run_value(checkpoint: &apogee_core::FirstRunCheckpoint) -> Value {
     json!({
+        "position": first_run_position_value(checkpoint.position),
         "legibility": checkpoint.legibility.as_ref().map(legibility_value),
         "import": first_run_import_state_value(&checkpoint.import),
         "account": checkpoint.account.as_ref().map(account_choice_value),
@@ -407,6 +408,29 @@ fn first_run_value(checkpoint: &apogee_core::FirstRunCheckpoint) -> Value {
         "runnerAndPrefix": checkpoint.runner_and_prefix.as_ref().map(runner_and_prefix_value),
         "ready": ready_state_value(&checkpoint.ready),
     })
+}
+
+fn first_run_position_value(position: apogee_core::FirstRunPosition) -> Value {
+    match position {
+        apogee_core::FirstRunPosition::Step(step) => json!({
+            "kind": "step",
+            "value": match step {
+                apogee_core::FirstRunStep::Legibility => "legibility",
+                apogee_core::FirstRunStep::Import => "import",
+                apogee_core::FirstRunStep::Account => "account",
+                apogee_core::FirstRunStep::Game => "game",
+                apogee_core::FirstRunStep::CredentialBackend => "credentialBackend",
+                apogee_core::FirstRunStep::RunnerAndPrefix => "runnerAndPrefix",
+                apogee_core::FirstRunStep::Ready => "ready",
+                _ => "unknown",
+            },
+        }),
+        apogee_core::FirstRunPosition::WaitingForImportDiscovery => {
+            json!({ "kind": "waitingForImportDiscovery" })
+        }
+        apogee_core::FirstRunPosition::Complete => json!({ "kind": "complete" }),
+        _ => json!({ "kind": "unknown" }),
+    }
 }
 
 fn legibility_value(reading: &apogee_core::LegibilityReading) -> Value {
@@ -505,6 +529,10 @@ fn game_candidate_state_value(state: &apogee_core::GameCandidateState) -> Value 
             "state": "needsUpdate",
             "value": patch_reading_value(*reading),
         }),
+        apogee_core::GameCandidateState::Installed { installed_bytes } => json!({
+            "state": "installed",
+            "value": { "installedBytes": installed_bytes },
+        }),
         apogee_core::GameCandidateState::NotAGame => json!({ "state": "notAGame" }),
         apogee_core::GameCandidateState::Unreadable { code } => json!({
             "state": "unreadable",
@@ -550,6 +578,7 @@ fn existing_game_state_value(state: apogee_core::ExistingGameState) -> Value {
             "state": "needsUpdate",
             "value": patch_reading_value(reading),
         }),
+        apogee_core::ExistingGameState::UpdateUnknown => json!({ "state": "updateUnknown" }),
         _ => json!({ "state": "unknown" }),
     }
 }
@@ -654,6 +683,7 @@ fn ready_action_value(action: apogee_core::ReadyAction) -> Value {
             "action": "updateAndPlay",
             "value": patch_reading_value(reading),
         }),
+        apogee_core::ReadyAction::CheckAndPlay => json!({ "action": "checkAndPlay" }),
         apogee_core::ReadyAction::InstallAndPlay { bytes } => json!({
             "action": "installAndPlay",
             "value": { "bytes": bytes },

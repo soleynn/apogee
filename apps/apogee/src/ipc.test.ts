@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IpcFailure,
   activityLog,
+  answerCloseRequest,
   cancelPassphrase,
   cancel,
   changeSecretsFilePassphrase,
@@ -22,9 +23,13 @@ import {
   openLink,
   pickFolder,
   onPassphrasePrompt,
+  onQuitDuringRun,
   planProfileRemoval,
   removeProfile,
   removeSecretsFile,
+  renderOk,
+  renderStatus,
+  confirmRender,
   reveal,
   resolvedSetup,
   runnerCatalog,
@@ -85,6 +90,41 @@ describe('confined host actions', () => {
     expect(invoke).toHaveBeenNthCalledWith(3, 'activity_log');
     expect(invoke).toHaveBeenNthCalledWith(4, 'save_support_bundle');
     expect(invoke).toHaveBeenNthCalledWith(5, 'pick_folder');
+  });
+});
+
+describe('renderer acknowledgements', () => {
+  it('keeps machine and human confirmation as separate native messages', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await renderStatus();
+    await renderOk();
+    await confirmRender();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'render_status');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'render_ok');
+    expect(invoke).toHaveBeenNthCalledWith(3, 'confirm_render');
+  });
+});
+
+describe('close interception', () => {
+  it('keeps the ambient request separate from the confirmed drain answer', async () => {
+    let receive: (() => void) | undefined;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation((_name, handler) => {
+      receive = () => handler({ payload: undefined } as never);
+      return Promise.resolve(unlisten);
+    });
+    const requested = vi.fn();
+    vi.mocked(invoke).mockResolvedValue(true);
+
+    await expect(onQuitDuringRun(requested)).resolves.toBe(unlisten);
+    receive?.();
+    await expect(answerCloseRequest(true)).resolves.toBe(true);
+
+    expect(requested).toHaveBeenCalledOnce();
+    expect(listen).toHaveBeenCalledWith('quit-during-run-request', expect.any(Function));
+    expect(invoke).toHaveBeenCalledWith('answer_close_request', { confirmed: true });
   });
 });
 

@@ -221,6 +221,10 @@ fn context_with_otp(
         steam,
         otp,
         secrets: Arc::clone(&h.secrets) as Arc<dyn SecretStore + Send + Sync>,
+        sealed_file: Arc::new(apogee_secrets::EncryptedFile::open(
+            h._store_dir.path().join("first-run-secrets.age"),
+            Arc::new(apogee_secrets::Unprompted),
+        )),
         store: h.store.clone(),
         clock: Arc::new(move || now),
         game_tick: host::game_tick,
@@ -314,6 +318,8 @@ async fn streamed_first_run_read_matches_the_direct_core_reading() {
     let direct = crate::composition::read_first_run_checkpoint(
         ctx.store.clone(),
         ctx.runtime.clone(),
+        ctx.secrets.clone(),
+        ctx.sealed_file.clone(),
         CancellationToken::new(),
     )
     .await
@@ -326,6 +332,219 @@ async fn streamed_first_run_read_matches_the_direct_core_reading() {
     });
 
     assert_eq!(streamed, Some(&direct));
+}
+
+fn first_run_checkpoint(events: &[Event]) -> &crate::FirstRunCheckpoint {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::FirstRun(checkpoint) => Some(checkpoint.as_ref()),
+            _ => None,
+        })
+        .expect("first-run checkpoint event")
+}
+
+#[tokio::test]
+async fn first_run_actions_publish_core_derived_machine_and_game_facts() {
+    let h = harness(false);
+    let transport = || Arc::new(FixtureTransport::new([]));
+    let launch = || Arc::new(FakeLaunchBackend::exiting());
+
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::ConfirmLegibility,
+        )),
+    )
+    .await;
+    let checkpoint = first_run_checkpoint(&events);
+    assert!(checkpoint.legibility.is_some());
+    assert_eq!(checkpoint.legibility.as_ref().unwrap().render_tier, None);
+    assert_eq!(
+        checkpoint.position,
+        crate::FirstRunPosition::WaitingForImportDiscovery
+    );
+
+    let mut checkpoint = checkpoint.clone();
+    checkpoint.import = crate::ImportState::NoneFound;
+    crate::first_run::refresh_position(&mut checkpoint);
+    h.store.save_first_run(&checkpoint).unwrap();
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::SaveAccount(crate::FirstRunAccountInput {
+                square_enix_id: "first-run-user".to_owned(),
+                kind: crate::FirstRunAccountKind::Standard,
+                never_save_password: true,
+            }),
+        )),
+    )
+    .await;
+    let checkpoint = first_run_checkpoint(&events);
+    let account_id = checkpoint.account_id.expect("materialized account id");
+    let account = h.store.load_account(account_id).unwrap();
+    assert_eq!(account.sqex_id, "first-run-user");
+    assert!(account.never_store);
+    assert_eq!(
+        checkpoint.account.as_ref().unwrap().steam_client,
+        crate::SteamClientReading::NotRequired
+    );
+
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::InspectGame {
+                path: h._game.path().to_path_buf(),
+            },
+        )),
+    )
+    .await;
+    assert!(matches!(
+        &first_run_checkpoint(&events).game_candidates[0].state,
+        crate::GameCandidateState::Installed { installed_bytes } if *installed_bytes > 0
+    ));
+
+    let events = run(
+        context(&h, transport(), launch(), NOW),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::SelectExistingGame {
+                path: h._game.path().to_path_buf(),
+            },
+        )),
+    )
+    .await;
+    let checkpoint = first_run_checkpoint(&events);
+    assert!(matches!(
+        checkpoint.game,
+        Some(crate::GameChoice::Existing {
+            state: crate::ExistingGameState::UpdateUnknown,
+            ..
+        })
+    ));
+    let profile = h
+        .store
+        .load_profile(checkpoint.profile_id.expect("materialized profile id"))
+        .unwrap();
+    assert_eq!(profile.account, account_id);
+    assert_eq!(profile.game_path, h._game.path());
+}
+
+#[tokio::test]
+async fn first_run_install_and_runner_actions_materialize_a_launchable_profile() {
+    let h = harness(false);
+    let install = TempDir::new().unwrap();
+    let account = h.store.load_account(h.account).unwrap();
+    let mut checkpoint = crate::FirstRunCheckpoint {
+        legibility: Some(crate::LegibilityReading {
+            gpu: None,
+            driver: None,
+            session: crate::SessionType::Unknown,
+            render_tier: None,
+        }),
+        import: crate::ImportState::NoneFound,
+        account: Some(crate::AccountChoice {
+            square_enix_id: account.sqex_id.clone(),
+            kind: crate::FirstRunAccountKind::Standard,
+            never_save_password: account.never_store,
+            steam_client: crate::SteamClientReading::NotRequired,
+        }),
+        account_id: Some(account.id),
+        ..crate::FirstRunCheckpoint::default()
+    };
+    crate::first_run::refresh_position(&mut checkpoint);
+    h.store.save_first_run(&checkpoint).unwrap();
+
+    let transport = || Arc::new(FixtureTransport::new([]));
+    let events = run(
+        context(
+            &h,
+            transport(),
+            Arc::new(FakeLaunchBackend::exiting()),
+            NOW,
+        ),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::SelectInstallLocation {
+                path: install.path().to_path_buf(),
+            },
+        )),
+    )
+    .await;
+    let checkpoint = first_run_checkpoint(&events);
+    assert!(matches!(
+        checkpoint.game,
+        Some(crate::GameChoice::Install {
+            approximate_bytes: None,
+            exact_download_bytes: None,
+            ..
+        })
+    ));
+    assert!(checkpoint.profile_id.is_some());
+
+    let events = run(
+        context(
+            &h,
+            transport(),
+            Arc::new(FakeLaunchBackend::exiting()),
+            NOW,
+        ),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::SelectCredential(crate::CredentialChoice::DoNotSave),
+        )),
+    )
+    .await;
+    assert_eq!(
+        first_run_checkpoint(&events).position,
+        crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+    );
+    assert_eq!(
+        h.store.load_settings().unwrap().secret_backend,
+        SecretBackend::Nothing
+    );
+
+    let mut checkpoint = h.store.load_first_run().unwrap();
+    let runner = crate::FirstRunRunnerSelection::SystemWine {
+        version: Some("test-wine".to_owned()),
+    };
+    checkpoint.runners = vec![crate::RunnerReading {
+        selection: runner.clone(),
+        version: Some("test-wine".to_owned()),
+        recommended: false,
+        available: true,
+    }];
+    h.store.save_first_run(&checkpoint).unwrap();
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let events = run(
+        context(&h, transport(), launch.clone(), NOW),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::SelectRunner(runner),
+        )),
+    )
+    .await;
+    let checkpoint = first_run_checkpoint(&events);
+    assert_eq!(
+        checkpoint.position,
+        crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+    );
+    assert_eq!(launch.prepared().len(), 1);
+
+    let events = run(
+        context(
+            &h,
+            transport(),
+            Arc::new(FakeLaunchBackend::exiting()),
+            NOW,
+        ),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::StartReady,
+        )),
+    )
+    .await;
+    let checkpoint = first_run_checkpoint(&events);
+    assert_eq!(checkpoint.position, crate::FirstRunPosition::Complete);
+    assert_eq!(
+        checkpoint.ready,
+        crate::ReadyState::Started(crate::ReadyAction::InstallAndPlay { bytes: None })
+    );
 }
 
 fn states(events: &[Event]) -> Vec<FlowState> {

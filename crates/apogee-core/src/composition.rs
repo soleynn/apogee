@@ -873,20 +873,11 @@ impl Core {
         read_first_run_checkpoint(
             self.store.clone(),
             self.runtime.clone(),
+            self.secrets.shared(),
+            self.sealed_file.clone(),
             CancellationToken::new(),
         )
         .await
-    }
-
-    /// Apply and persist one validated first-run transition.
-    pub fn advance_first_run(
-        &self,
-        change: crate::FirstRunTransition,
-    ) -> Result<crate::FirstRunCheckpoint, CoreError> {
-        let checkpoint = self.store.load_first_run()?;
-        let next = crate::first_run::transition(&checkpoint, change)?;
-        self.store.save_first_run(&next)?;
-        Ok(next)
     }
 
     fn system_report_input(
@@ -1621,6 +1612,7 @@ impl Core {
             steam: self.steam.clone(),
             otp: self.otp.clone(),
             secrets: self.secrets.shared(),
+            sealed_file: self.sealed_file.clone(),
             store: self.store.clone(),
             clock: self.clock.clone(),
             game_tick: host::game_tick,
@@ -1710,6 +1702,8 @@ fn system_report_input_from_profile(
 pub(crate) async fn read_first_run_checkpoint(
     store: Store,
     runtime: Runtime,
+    secrets: Arc<dyn apogee_secrets::SecretStore + Send + Sync>,
+    sealed_file: Arc<EncryptedFile>,
     cancel: CancellationToken,
 ) -> Result<crate::FirstRunCheckpoint, CoreError> {
     let read_store = store.clone();
@@ -1741,7 +1735,7 @@ pub(crate) async fn read_first_run_checkpoint(
                 .collect();
             crate::first_run::transition(
                 &checkpoint,
-                crate::FirstRunTransition::RecordImportDiscovery(candidates),
+                crate::first_run::FirstRunTransition::RecordImportDiscovery(candidates),
             )
             .map_err(CoreError::from)
             .map_err(Box::new)
@@ -1789,6 +1783,23 @@ pub(crate) async fn read_first_run_checkpoint(
             available: system_version.is_some(),
         });
     }
+    if checkpoint.credential_backends.is_empty()
+        && matches!(
+            crate::first_incomplete(&checkpoint),
+            crate::FirstRunPosition::Step(crate::FirstRunStep::CredentialBackend)
+                | crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+                | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+        )
+    {
+        checkpoint.credential_backends = blocking_read("first-run credential backends", move || {
+            Ok(first_run_credential_backends(
+                &secrets.probe(),
+                &sealed_file,
+            ))
+        })
+        .await?;
+    }
+    crate::first_run::refresh_position(&mut checkpoint);
     blocking_read("first-run save", move || {
         store
             .save_first_run(&checkpoint)
@@ -1797,6 +1808,58 @@ pub(crate) async fn read_first_run_checkpoint(
         Ok(checkpoint)
     })
     .await
+}
+
+fn first_run_credential_backends(
+    active: &BackendReport,
+    sealed_file: &EncryptedFile,
+) -> Vec<crate::CredentialBackendReading> {
+    use apogee_secrets::{Backend, FileState};
+
+    let mut readings = Vec::new();
+    let backend = match active.backend {
+        Backend::SecretService => Some(crate::CredentialBackend::SecretService),
+        Backend::WindowsCredentialManager => {
+            Some(crate::CredentialBackend::WindowsCredentialManager)
+        }
+        Backend::EncryptedFile => Some(crate::CredentialBackend::EncryptedFile),
+        _ => None,
+    };
+    if let Some(backend) = backend {
+        let state = if active.is_usable() {
+            crate::CredentialBackendState::Ready
+        } else {
+            crate::CredentialBackendState::Unavailable {
+                code: crate::StableCode::code(&active.state).to_owned(),
+            }
+        };
+        readings.push(crate::CredentialBackendReading { backend, state });
+    }
+    if !readings
+        .iter()
+        .any(|reading| reading.backend == crate::CredentialBackend::EncryptedFile)
+    {
+        let state = match sealed_file.inspect() {
+            FileState::Absent | FileState::Sealed { .. } if !sealed_file.is_open() => {
+                crate::CredentialBackendState::NeedsPassphrase
+            }
+            FileState::Sealed { .. } => crate::CredentialBackendState::Ready,
+            FileState::Unreadable => crate::CredentialBackendState::Unavailable {
+                code: "secrets-file-unreadable".to_owned(),
+            },
+            FileState::Foreign => crate::CredentialBackendState::Unavailable {
+                code: "secrets-file-foreign".to_owned(),
+            },
+            _ => crate::CredentialBackendState::Unavailable {
+                code: "secrets-file-unknown".to_owned(),
+            },
+        };
+        readings.push(crate::CredentialBackendReading {
+            backend: crate::CredentialBackend::EncryptedFile,
+            state,
+        });
+    }
+    readings
 }
 
 fn system_wine_version() -> Option<String> {

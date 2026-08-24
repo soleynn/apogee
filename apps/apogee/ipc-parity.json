@@ -194,6 +194,30 @@
       "equivalence": "Input transport only; commands consuming the selection still execute through the same core operation."
     },
     {
+      "ipc": "render_status",
+      "cli": [],
+      "shell_local": "The native desktop binary exposes the same pre-window facts with `apogee --render-report`; apogee-cli has no renderer to inspect.",
+      "equivalence": "The current native render tier, probe facts, reason, and escalation count."
+    },
+    {
+      "ipc": "render_ok",
+      "cli": [],
+      "shell_local": "The desktop webview acknowledges that two animation frames rendered; a terminal has no webview process to acknowledge.",
+      "equivalence": "Renderer-lifetime transport only; it changes no launcher domain record."
+    },
+    {
+      "ipc": "confirm_render",
+      "cli": [],
+      "shell_local": "A person confirms that the desktop window is legible; a terminal does not select or test a graphical renderer.",
+      "equivalence": "Renderer-lifetime confirmation only; the native probe supplies every reported fact."
+    },
+    {
+      "ipc": "answer_close_request",
+      "cli": [],
+      "shell_local": "The desktop owns a close box and may have several concurrent runs to drain; the terminal owns one foreground process and handles interruption directly.",
+      "equivalence": "Window-lifetime transport only; confirmed shutdown cancels the same core tokens and waits for their streams to end."
+    },
+    {
       "ipc": "execute",
       "operations": [
         {"shell": "login", "cli": [["login", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate one profile with the same password and one-time-password sources."},

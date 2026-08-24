@@ -202,12 +202,16 @@ fn flush_pending<S: EventSink + ?Sized>(
 
 /// The cancellation tokens for runs the shell has started.
 #[derive(Clone, Default)]
-pub(crate) struct Runs(Arc<Mutex<RunState>>);
+pub(crate) struct Runs {
+    state: Arc<Mutex<RunState>>,
+    changed: Arc<tokio::sync::Notify>,
+}
 
 #[derive(Default)]
 struct RunState {
     active: HashMap<Uuid, ActiveRun>,
     direct_mutation: bool,
+    draining: bool,
 }
 
 struct ActiveRun {
@@ -237,6 +241,7 @@ impl RunClass {
 pub(crate) enum RunAdmissionError {
     Duplicate,
     Busy,
+    Draining,
     Unavailable,
 }
 
@@ -256,11 +261,13 @@ impl RunLease {
 
 impl Drop for RunLease {
     fn drop(&mut self) {
-        let mut state = match self.runs.0.lock() {
+        let mut state = match self.runs.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
         state.active.remove(&self.id);
+        drop(state);
+        self.runs.changed.notify_waiters();
     }
 }
 
@@ -271,17 +278,25 @@ pub(crate) struct MutationLease {
 
 impl Drop for MutationLease {
     fn drop(&mut self) {
-        let mut state = match self.runs.0.lock() {
+        let mut state = match self.runs.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
         state.direct_mutation = false;
+        drop(state);
+        self.runs.changed.notify_waiters();
     }
 }
 
 impl Runs {
     pub(crate) fn start(&self, id: Uuid, class: RunClass) -> Result<RunLease, RunAdmissionError> {
-        let mut state = self.0.lock().map_err(|_| RunAdmissionError::Unavailable)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RunAdmissionError::Unavailable)?;
+        if state.draining {
+            return Err(RunAdmissionError::Draining);
+        }
         if state.active.contains_key(&id) {
             return Err(RunAdmissionError::Duplicate);
         }
@@ -310,7 +325,13 @@ impl Runs {
     }
 
     pub(crate) fn start_mutation(&self) -> Result<MutationLease, RunAdmissionError> {
-        let mut state = self.0.lock().map_err(|_| RunAdmissionError::Unavailable)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RunAdmissionError::Unavailable)?;
+        if state.draining {
+            return Err(RunAdmissionError::Draining);
+        }
         if state.direct_mutation
             || state
                 .active
@@ -324,12 +345,64 @@ impl Runs {
     }
 
     pub(crate) fn cancel(&self, id: Uuid) -> Result<bool, ()> {
-        let state = self.0.lock().map_err(|_| ())?;
+        let state = self.state.lock().map_err(|_| ())?;
         let Some(run) = state.active.get(&id) else {
             return Ok(false);
         };
         run.cancel.cancel();
         Ok(true)
+    }
+
+    /// Freeze admission when a close request finds work. The freeze is reversible until the person
+    /// confirms; this closes the race where a new write could start after the cancellation snapshot.
+    pub(crate) fn begin_close(&self) -> Result<bool, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if state.active.is_empty() && !state.direct_mutation {
+            return Ok(false);
+        }
+        state.draining = true;
+        Ok(true)
+    }
+
+    /// Resume normal admission after the close confirmation is declined.
+    pub(crate) fn resume(&self) -> Result<(), ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        state.draining = false;
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// Cancel every streamed flow while leaving direct blocking mutations to finish normally.
+    pub(crate) fn cancel_all(&self) -> Result<usize, ()> {
+        let tokens = {
+            let mut state = self.state.lock().map_err(|_| ())?;
+            state.draining = true;
+            state
+                .active
+                .values()
+                .map(|run| run.cancel.clone())
+                .collect::<Vec<_>>()
+        };
+        for token in &tokens {
+            token.cancel();
+        }
+        Ok(tokens.len())
+    }
+
+    /// Wait until every streamed lease and the direct-mutation lease have been released.
+    pub(crate) async fn wait_empty(&self) -> Result<(), ()> {
+        loop {
+            let changed = self.changed.notified();
+            let empty = {
+                let state = self.state.lock().map_err(|_| ())?;
+                state.active.is_empty() && !state.direct_mutation
+            };
+            if empty {
+                return Ok(());
+            }
+            changed.await;
+        }
     }
 }
 
@@ -829,5 +902,73 @@ mod tests {
 
         assert_eq!(runs.cancel(run_id), Ok(false));
         assert!(runs.start_mutation().is_ok());
+    }
+
+    #[test]
+    fn close_freezes_admission_before_cancelling_every_stream() {
+        let runs = Runs::default();
+        let read = runs
+            .start(Uuid::new_v4(), RunClass::ReadOnly)
+            .unwrap_or_else(|_| unreachable!("the read must be admitted"));
+        let write = runs
+            .start(Uuid::new_v4(), RunClass::Exclusive)
+            .unwrap_or_else(|_| unreachable!("the write must be admitted"));
+        let read_token = read.cancellation();
+        let write_token = write.cancellation();
+
+        assert_eq!(runs.begin_close(), Ok(true));
+        assert_eq!(
+            runs.start(Uuid::new_v4(), RunClass::ReadOnly).err(),
+            Some(RunAdmissionError::Draining)
+        );
+        assert_eq!(runs.start_mutation().err(), Some(RunAdmissionError::Draining));
+        assert!(!read_token.is_cancelled());
+        assert!(!write_token.is_cancelled());
+
+        assert_eq!(runs.cancel_all(), Ok(2));
+        assert!(read_token.is_cancelled());
+        assert!(write_token.is_cancelled());
+    }
+
+    #[test]
+    fn declining_close_resumes_admission_without_cancelling_work() {
+        let runs = Runs::default();
+        let lease = runs
+            .start(Uuid::new_v4(), RunClass::ReadOnly)
+            .unwrap_or_else(|_| unreachable!("the read must be admitted"));
+        let token = lease.cancellation();
+
+        assert_eq!(runs.begin_close(), Ok(true));
+        assert_eq!(runs.resume(), Ok(()));
+        assert!(
+            runs.start(Uuid::new_v4(), RunClass::ReadOnly).is_ok(),
+            "a declined close must reopen admission"
+        );
+        assert!(!token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_streams_and_blocking_mutations_without_a_lost_wakeup() {
+        let runs = Runs::default();
+        let stream = runs
+            .start(Uuid::new_v4(), RunClass::ReadOnly)
+            .unwrap_or_else(|_| unreachable!("the read must be admitted"));
+        let mutation = runs
+            .start_mutation()
+            .unwrap_or_else(|_| unreachable!("the mutation must be admitted"));
+        assert_eq!(runs.begin_close(), Ok(true));
+        assert_eq!(runs.cancel_all(), Ok(1));
+
+        let waiting_runs = runs.clone();
+        let waiter = tokio::spawn(async move { waiting_runs.wait_empty().await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "the mutation lease still owns work");
+        drop(mutation);
+        assert_eq!(waiter.await, Ok(Ok(())));
+
+        assert_eq!(runs.wait_empty().await, Ok(()));
     }
 }

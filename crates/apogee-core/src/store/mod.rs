@@ -211,10 +211,15 @@ impl Migrate for StatusRecord {
 }
 
 impl Migrate for FirstRunCheckpoint {
-    const CURRENT_VERSION: u32 = 1;
+    const CURRENT_VERSION: u32 = 2;
 
-    fn migrate_step(from: u32, _value: serde_json::Value) -> Result<serde_json::Value, String> {
-        Err(format!("no migration from schema version {from}"))
+    fn migrate_step(from: u32, value: serde_json::Value) -> Result<serde_json::Value, String> {
+        match from {
+            // Machine-derived identities and optional size/readability facts all deserialize from
+            // the prior shape through serde defaults and Option's ordinary representation.
+            1 => Ok(value),
+            other => Err(format!("no migration from schema version {other}")),
+        }
     }
 }
 
@@ -498,11 +503,13 @@ impl Store {
     }
 
     pub(crate) fn load_first_run(&self) -> Result<FirstRunCheckpoint, StoreError> {
-        match self.load(&self.first_run_file()) {
-            Ok(checkpoint) => Ok(checkpoint),
-            Err(StoreError::NotFound { .. }) => Ok(FirstRunCheckpoint::default()),
-            Err(other) => Err(other),
-        }
+        let mut checkpoint = match self.load(&self.first_run_file()) {
+            Ok(checkpoint) => checkpoint,
+            Err(StoreError::NotFound { .. }) => FirstRunCheckpoint::default(),
+            Err(other) => return Err(other),
+        };
+        crate::first_run::refresh_position(&mut checkpoint);
+        Ok(checkpoint)
     }
 
     /// This install's own identifier: a random value minted on the first read and kept from then
