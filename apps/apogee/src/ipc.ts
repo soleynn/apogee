@@ -1,4 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 import type { CommandDto } from './generated/Command';
 import type { BundlePartDto } from './generated/BundlePart';
@@ -11,6 +13,9 @@ import type { SecretsReportDto } from './generated/SecretsReport';
 import type { NextActionDto } from './generated/NextAction';
 import type { ResolvedSetupDto } from './generated/ResolvedSetup';
 import type { StartupDto } from './generated/Startup';
+import type { PassphrasePromptDto } from './generated/PassphrasePrompt';
+import type { SecretsFileRemovalDto } from './generated/SecretsFileRemoval';
+import type { SecretsFileStatusDto } from './generated/SecretsFileStatus';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -44,6 +49,7 @@ export class IpcFailure extends Error {
 }
 
 const ACTIVE_PROFILE_KEY = 'apogee.activeProfile';
+const PASSPHRASE_REQUEST_EVENT = 'passphrase-request';
 
 const knownEventKinds = new Set([
   'state',
@@ -87,6 +93,18 @@ function normalizeFailure(raw: unknown): IpcFailure {
 function invokeIpc<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const pending = args === undefined ? invoke<T>(command) : invoke<T>(command, args);
   return pending.catch((error: unknown) => Promise.reject(normalizeFailure(error)));
+}
+
+function invokeWithErasedBuffers<T>(
+  command: string,
+  args: Record<string, unknown>,
+  buffers: number[][],
+): Promise<T> {
+  try {
+    return invokeIpc<T>(command, args);
+  } finally {
+    for (const buffer of buffers) buffer.fill(0);
+  }
 }
 
 function localStorageOrUndefined(): Storage | undefined {
@@ -143,6 +161,71 @@ export function selectActiveProfile(
 /** Probes credential-backend health independently from the local startup snapshot. */
 export function secretsReport(): Promise<SecretsReportDto> {
   return invokeIpc<SecretsReportDto>('secrets_report');
+}
+
+/** Subscribes before an operation can ask for the sealed-file passphrase. */
+export function onPassphrasePrompt(
+  handler: (prompt: PassphrasePromptDto) => void,
+): Promise<UnlistenFn> {
+  return listen<PassphrasePromptDto>(PASSPHRASE_REQUEST_EVENT, (event) => handler(event.payload));
+}
+
+/** Answers one ambient prompt and erases the caller's byte buffer immediately after dispatch. */
+export function submitPassphrase(requestId: string, passphrase: number[]): Promise<boolean> {
+  return invokeWithErasedBuffers<boolean>('answer_passphrase_prompt', {
+    requestId,
+    answer: { kind: 'submit', passphrase },
+  }, [passphrase]);
+}
+
+/** Cancels one ambient prompt without sending secret material. */
+export function cancelPassphrase(requestId: string): Promise<boolean> {
+  return invokeIpc<boolean>('answer_passphrase_prompt', {
+    requestId,
+    answer: { kind: 'cancel' },
+  });
+}
+
+/** Reads the sealed credential file's header and in-process open state. */
+export function secretsFileStatus(): Promise<SecretsFileStatusDto> {
+  return invokeIpc<SecretsFileStatusDto>('secrets_file_status');
+}
+
+/** Prompts through the ambient bridge and primes the active encrypted backend. */
+export function unlockSecretsFile(): Promise<SecretsFileStatusDto> {
+  return invokeIpc<SecretsFileStatusDto>('unlock_secrets_file');
+}
+
+/** Creates an empty sealed credential file after explicit confirmation. */
+export function createSecretsFile(
+  passphrase: number[],
+  confirmed: boolean,
+): Promise<SecretsFileStatusDto> {
+  return invokeWithErasedBuffers<SecretsFileStatusDto>('create_secrets_file', {
+    request: { confirmed, passphrase },
+  }, [passphrase]);
+}
+
+/** Re-seals the credential file and erases both inbound buffers after dispatch. */
+export function changeSecretsFilePassphrase(
+  current: number[],
+  replacement: number[],
+): Promise<SecretsFileStatusDto> {
+  return invokeWithErasedBuffers<SecretsFileStatusDto>('change_secrets_file_passphrase', {
+    request: { current, replacement },
+  }, [current, replacement]);
+}
+
+/** Removes the sealed file only when the caller carries an explicit confirmation. */
+export function removeSecretsFile(confirmed: boolean): Promise<SecretsFileRemovalDto> {
+  return invokeIpc<SecretsFileRemovalDto>('remove_secrets_file', {
+    request: { confirmed },
+  });
+}
+
+/** Erases this process's cached derived key immediately. */
+export function sealSecretsFile(): Promise<SecretsFileStatusDto> {
+  return invokeIpc<SecretsFileStatusDto>('seal_secrets_file');
 }
 
 /** Reads the core-selected action for one profile without deriving readiness in the frontend. */

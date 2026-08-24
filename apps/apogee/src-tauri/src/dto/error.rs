@@ -1,6 +1,6 @@
 //! Explicitly selected error fields safe to send to the webview.
 
-use apogee_core::{CoreError, StableCode, StoreError};
+use apogee_core::{CoreError, SecretsError, StableCode, StoreError};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -54,7 +54,9 @@ pub(crate) enum CoreErrorDto {
         variable: String,
         reason: &'static str,
     },
-    Secrets,
+    Secrets {
+        secrets: SecretsErrorDto,
+    },
     Otp,
     Crypto,
     NoSteam,
@@ -103,7 +105,9 @@ impl From<&CoreError> for CoreErrorDto {
                 variable: var.clone(),
                 reason,
             },
-            CoreError::Secrets(_) => Self::Secrets,
+            CoreError::Secrets(secrets) => Self::Secrets {
+                secrets: SecretsErrorDto::from(secrets),
+            },
             CoreError::Otp(_) => Self::Otp,
             CoreError::Crypto(_) => Self::Crypto,
             CoreError::NoSteam => Self::NoSteam,
@@ -125,6 +129,43 @@ impl From<&CoreError> for CoreErrorDto {
             CoreError::Repair { .. } => Self::Repair,
             CoreError::FrontierLink { id } => Self::FrontierLink { id: id.clone() },
             CoreError::Unavailable { command } => Self::Unavailable { command },
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// The actionable secret-store condition without filesystem, provider, or fixed internal details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SecretsErrorDto {
+    Locked,
+    NoBackend,
+    Denied,
+    NoCollection,
+    Ambiguous,
+    WrongPassphrase,
+    Corrupt,
+    NotStoring,
+    Empty,
+    Backend,
+    Io,
+    Unknown,
+}
+
+impl From<&SecretsError> for SecretsErrorDto {
+    fn from(error: &SecretsError) -> Self {
+        match error {
+            SecretsError::Locked => Self::Locked,
+            SecretsError::NoBackend => Self::NoBackend,
+            SecretsError::Denied => Self::Denied,
+            SecretsError::NoCollection => Self::NoCollection,
+            SecretsError::Ambiguous => Self::Ambiguous,
+            SecretsError::WrongPassphrase => Self::WrongPassphrase,
+            SecretsError::Corrupt { .. } => Self::Corrupt,
+            SecretsError::NotStoring => Self::NotStoring,
+            SecretsError::Empty => Self::Empty,
+            SecretsError::Backend { .. } => Self::Backend,
+            SecretsError::Io(_) => Self::Io,
             _ => Self::Unknown,
         }
     }
@@ -195,5 +236,38 @@ mod tests {
         assert!(json.contains(r#""display":"profiles.json""#));
         assert!(json.contains(r#""display":"profiles.json.corrupt""#));
         assert!(!json.contains("planted-secret"));
+    }
+
+    #[test]
+    fn secret_failures_keep_the_condition_and_drop_every_detail() {
+        let cases = [
+            (
+                SecretsError::WrongPassphrase,
+                r#"{"kind":"secrets","secrets":"wrongPassphrase"}"#,
+            ),
+            (
+                SecretsError::Corrupt {
+                    detail: "token=planted-secret",
+                },
+                r#"{"kind":"secrets","secrets":"corrupt"}"#,
+            ),
+            (
+                SecretsError::Backend {
+                    step: "send planted-secret",
+                },
+                r#"{"kind":"secrets","secrets":"backend"}"#,
+            ),
+            (
+                SecretsError::Io(std::io::Error::other("planted-secret")),
+                r#"{"kind":"secrets","secrets":"io"}"#,
+            ),
+        ];
+
+        for (secrets, expected) in cases {
+            let json = serde_json::to_string(&CoreErrorDto::from(&CoreError::Secrets(secrets)))
+                .unwrap_or_default();
+            assert_eq!(json, expected);
+            assert!(!json.contains("planted-secret"));
+        }
     }
 }
