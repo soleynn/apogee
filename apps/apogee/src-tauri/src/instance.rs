@@ -1,8 +1,8 @@
 //! Linux single-instance ownership and activation forwarding.
 //!
 //! The desktop owns a file lock rather than a session-bus name. A later process sends one bounded
-//! datagram to the owner and exits, while a renderer re-exec carries the already-held descriptor
-//! forward so there is no ownership gap.
+//! request to the owner and exits only after the window action is acknowledged, while a renderer
+//! re-exec carries the already-held descriptor forward so there is no ownership gap.
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -24,21 +24,36 @@ pub(crate) struct InstanceGuard {
 }
 
 impl InstanceGuard {
-    pub(crate) fn reexec_environment(&self) -> Option<(&'static str, OsString)> {
+    pub(crate) fn reexec_environment(
+        &self,
+    ) -> Result<Option<(&'static str, OsString)>, InstanceError> {
         #[cfg(target_os = "linux")]
         {
-            self.inner.as_ref().map(|guard| {
-                (
-                    INHERITED_FD_ENV,
-                    OsString::from(guard.inherited_fd().to_string()),
-                )
-            })
+            self.inner
+                .as_ref()
+                .map(|guard| {
+                    guard.set_inheritable(true)?;
+                    Ok((
+                        INHERITED_FD_ENV,
+                        OsString::from(guard.inherited_fd().to_string()),
+                    ))
+                })
+                .transpose()
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            None
+            Ok(None)
         }
+    }
+
+    pub(crate) fn seal_inheritance(&self) -> Result<(), InstanceError> {
+        #[cfg(target_os = "linux")]
+        if let Some(guard) = &self.inner {
+            return guard.set_inheritable(false);
+        }
+
+        Ok(())
     }
 
     pub(crate) fn start(&self, app: tauri::AppHandle) -> Result<(), InstanceError> {
@@ -107,10 +122,11 @@ pub(crate) fn preflight() -> Result<InstancePreflight, InstanceError> {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs::{self, File};
-    use std::io;
+    use std::io::{self, Read, Write};
+    use std::net::Shutdown;
     use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    use std::os::unix::net::UnixDatagram;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -118,8 +134,8 @@ mod linux {
     use std::time::Duration;
 
     use gtk::prelude::GtkWindowExt;
-    use rustix::fs::{FlockOperation, Mode, OFlags};
-    use rustix::io::FdFlags;
+    use nix::fcntl::{fcntl, flock, FcntlArg, FdFlag, FlockArg};
+    use rustix::fs::{Mode, OFlags};
     use serde::{Deserialize, Serialize};
     use tauri::{Emitter, Manager, UserAttentionType};
 
@@ -128,16 +144,32 @@ mod linux {
     const LOCK_NAME: &str = "apogee.lock";
     const SOCKET_NAME: &str = "apogee.sock";
     const ATTENTION_EVENT: &str = "instance-attention-requested";
-    const MAX_DATAGRAM_BYTES: usize = 4_096;
+    const MAX_REQUEST_BYTES: usize = 4_096;
     const MAX_TOKEN_BYTES: usize = 1_024;
     const FORWARD_ATTEMPTS: usize = 50;
     const FORWARD_RETRY_DELAY: Duration = Duration::from_millis(20);
     const LISTENER_POLL: Duration = Duration::from_millis(100);
+    const CONNECTION_TIMEOUT: Duration = Duration::from_millis(250);
+    const ACTIVATION_ACK: u8 = 0x06;
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    enum ActivationKind {
+        Xdg,
+        Desktop,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct ActivationToken {
+        kind: ActivationKind,
+        value: String,
+    }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct ActivationPayload {
-        activation_token: Option<String>,
+        activation_token: Option<ActivationToken>,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,7 +209,8 @@ mod linux {
         // unsafe code and is unnecessary.
         _lock_file: Option<File>,
         inherited_fd: RawFd,
-        socket: UnixDatagram,
+        lock_path: PathBuf,
+        socket: UnixListener,
         socket_path: PathBuf,
         socket_identity: FileIdentity,
         running: Arc<AtomicBool>,
@@ -188,6 +221,10 @@ mod linux {
     impl LinuxGuard {
         pub(super) fn inherited_fd(&self) -> RawFd {
             self.inherited_fd
+        }
+
+        pub(super) fn set_inheritable(&self, inheritable: bool) -> Result<(), InstanceError> {
+            set_fd_inheritable(&self.lock_path, self.inherited_fd, inheritable)
         }
 
         pub(super) fn start(&self, app: tauri::AppHandle) -> Result<(), InstanceError> {
@@ -210,10 +247,10 @@ mod linux {
                     ));
                 }
             };
-            if let Err(source) = listener.set_read_timeout(Some(LISTENER_POLL)) {
+            if let Err(source) = listener.set_nonblocking(true) {
                 self.started.store(false, Ordering::Release);
                 return Err(io_error(
-                    "set the instance socket timeout",
+                    "make the instance socket nonblocking",
                     &self.socket_path,
                     source,
                 ));
@@ -281,6 +318,7 @@ mod linux {
         if let Some(raw_fd) = inherited {
             let inherited_fd = parse_inherited_fd(&raw_fd)?;
             validate_inherited_fd(&paths.lock, inherited_fd)?;
+            set_fd_inheritable(&paths.lock, inherited_fd, false)?;
             let guard = bind_owner(paths, None, inherited_fd)?;
             return Ok(InstancePreflight::Continue(InstanceGuard {
                 inner: Some(guard),
@@ -300,15 +338,8 @@ mod linux {
             )
         })?;
         let lock_file = File::from(owned_fd);
-        match rustix::fs::flock(&lock_file, FlockOperation::NonBlockingLockExclusive) {
+        match flock(lock_file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
             Ok(()) => {
-                rustix::io::fcntl_setfd(&lock_file, FdFlags::empty()).map_err(|source| {
-                    io_error(
-                        "make the instance lock inheritable",
-                        &paths.lock,
-                        io::Error::from(source),
-                    )
-                })?;
                 let inherited_fd = lock_file.as_raw_fd();
                 let guard = bind_owner(paths, Some(lock_file), inherited_fd)?;
                 Ok(InstancePreflight::Continue(InstanceGuard {
@@ -316,8 +347,8 @@ mod linux {
                 }))
             }
             Err(source)
-                if source == rustix::io::Errno::AGAIN
-                    || source == rustix::io::Errno::WOULDBLOCK =>
+                if source == nix::errno::Errno::EAGAIN
+                    || source == nix::errno::Errno::EWOULDBLOCK =>
             {
                 forward_with_retry(
                     &paths.socket,
@@ -341,7 +372,7 @@ mod linux {
         inherited_fd: RawFd,
     ) -> Result<LinuxGuard, InstanceError> {
         remove_stale_socket(&paths.socket)?;
-        let socket = UnixDatagram::bind(&paths.socket)
+        let socket = UnixListener::bind(&paths.socket)
             .map_err(|source| io_error("bind the instance socket", &paths.socket, source))?;
         if let Err(source) = fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600)) {
             let _ = fs::remove_file(&paths.socket);
@@ -357,6 +388,7 @@ mod linux {
         Ok(LinuxGuard {
             _lock_file: lock_file,
             inherited_fd,
+            lock_path: paths.lock.clone(),
             socket,
             socket_path: paths.socket.clone(),
             socket_identity,
@@ -395,7 +427,29 @@ mod linux {
         if descriptor != lock {
             return Err(InstanceError::InvalidInheritedDescriptor);
         }
-        Ok(())
+        flock(inherited_fd, FlockArg::LockExclusiveNonblock)
+            .map_err(|_| InstanceError::InvalidInheritedDescriptor)
+    }
+
+    fn set_fd_inheritable(
+        lock_path: &Path,
+        inherited_fd: RawFd,
+        inheritable: bool,
+    ) -> Result<(), InstanceError> {
+        let flags = if inheritable {
+            FdFlag::empty()
+        } else {
+            FdFlag::FD_CLOEXEC
+        };
+        fcntl(inherited_fd, FcntlArg::F_SETFD(flags))
+            .map(|_| ())
+            .map_err(|source| {
+                io_error(
+                    "set the instance lock inheritance",
+                    lock_path,
+                    io::Error::from(source),
+                )
+            })
     }
 
     fn activation_from_environment() -> ActivationPayload {
@@ -408,11 +462,16 @@ mod linux {
         xdg: Option<std::ffi::OsString>,
         desktop: Option<std::ffi::OsString>,
     ) -> ActivationPayload {
-        let activation_token = [xdg, desktop]
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.into_string().ok())
-            .find(|value| valid_token(value));
+        let activation_token = [
+            (ActivationKind::Xdg, xdg),
+            (ActivationKind::Desktop, desktop),
+        ]
+        .into_iter()
+        .filter_map(|(kind, value)| {
+            let value = value?.into_string().ok()?;
+            valid_token(&value).then_some(ActivationToken { kind, value })
+        })
+        .next();
         ActivationPayload { activation_token }
     }
 
@@ -422,7 +481,7 @@ mod linux {
 
     fn encode_activation(payload: &ActivationPayload) -> Result<Vec<u8>, InstanceError> {
         let encoded = serde_json::to_vec(payload).map_err(InstanceError::Encode)?;
-        if encoded.len() <= MAX_DATAGRAM_BYTES {
+        if encoded.len() <= MAX_REQUEST_BYTES {
             return Ok(encoded);
         }
 
@@ -433,12 +492,17 @@ mod linux {
     }
 
     fn decode_activation(bytes: &[u8]) -> Option<ActivationPayload> {
-        if bytes.len() > MAX_DATAGRAM_BYTES {
+        if bytes.len() > MAX_REQUEST_BYTES {
             return None;
         }
         serde_json::from_slice::<ActivationPayload>(bytes)
             .ok()
-            .filter(|payload| payload.activation_token.as_deref().is_none_or(valid_token))
+            .filter(|payload| {
+                payload
+                    .activation_token
+                    .as_ref()
+                    .is_none_or(|token| valid_token(&token.value))
+            })
     }
 
     fn forward_with_retry(
@@ -447,17 +511,10 @@ mod linux {
         attempts: usize,
         retry_delay: Duration,
     ) -> Result<(), InstanceError> {
-        let sender = UnixDatagram::unbound().map_err(InstanceError::ActivationUnavailable)?;
         let mut last_error = None;
         for attempt in 0..attempts {
-            match sender.send_to(payload, socket_path) {
-                Ok(sent) if sent == payload.len() => return Ok(()),
-                Ok(_) => {
-                    last_error = Some(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "the activation datagram was incomplete",
-                    ));
-                }
+            match forward_once(socket_path, payload) {
+                Ok(()) => return Ok(()),
                 Err(source) => last_error = Some(source),
             }
             if attempt + 1 < attempts {
@@ -471,28 +528,58 @@ mod linux {
         ))
     }
 
-    fn listen(socket: UnixDatagram, running: Arc<AtomicBool>, app: tauri::AppHandle) {
-        let mut buffer = [0_u8; MAX_DATAGRAM_BYTES + 1];
+    fn forward_once(socket_path: &Path, payload: &[u8]) -> io::Result<()> {
+        let mut stream = UnixStream::connect(socket_path)?;
+        stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
+        stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
+        stream.write_all(payload)?;
+        stream.shutdown(Shutdown::Write)?;
+        let mut acknowledgement = [0_u8; 1];
+        stream.read_exact(&mut acknowledgement)?;
+        if acknowledgement[0] != ACTIVATION_ACK {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the instance activation acknowledgement was invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn handle_connection<F>(mut stream: UnixStream, activate: F) -> io::Result<()>
+    where
+        F: FnOnce(ActivationPayload) -> bool,
+    {
+        stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
+        stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
+        let mut request = Vec::with_capacity(MAX_REQUEST_BYTES.min(512));
+        stream
+            .by_ref()
+            .take((MAX_REQUEST_BYTES + 1) as u64)
+            .read_to_end(&mut request)?;
+        let Some(payload) = decode_activation(&request) else {
+            return Ok(());
+        };
+        if activate(payload) {
+            stream.write_all(&[ACTIVATION_ACK])?;
+        }
+        Ok(())
+    }
+
+    fn listen(socket: UnixListener, running: Arc<AtomicBool>, app: tauri::AppHandle) {
         while running.load(Ordering::Acquire) {
-            match socket.recv(&mut buffer) {
-                Ok(received) => {
-                    let Some(payload) = decode_activation(&buffer[..received]) else {
-                        continue;
-                    };
-                    let app = app.clone();
-                    if let Err(error) = app.clone().run_on_main_thread(move || {
-                        present(&app, payload.activation_token.as_deref());
-                    }) {
-                        tracing::warn!(%error, "could not schedule instance activation");
+            match socket.accept() {
+                Ok((stream, _)) => {
+                    if let Err(error) =
+                        handle_connection(stream, |payload| schedule_activation(&app, payload))
+                    {
+                        tracing::warn!(%error, "could not handle instance activation");
                     }
                 }
                 Err(error)
                     if matches!(
                         error.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) => {}
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => thread::sleep(LISTENER_POLL),
                 Err(error) => {
                     tracing::warn!(%error, "instance activation listener stopped");
                     break;
@@ -501,31 +588,54 @@ mod linux {
         }
     }
 
-    fn present(app: &tauri::AppHandle, activation_token: Option<&str>) {
+    fn schedule_activation(app: &tauri::AppHandle, payload: ActivationPayload) -> bool {
+        let (completed, completion) = std::sync::mpsc::sync_channel(1);
+        let app = app.clone();
+        if let Err(error) = app.clone().run_on_main_thread(move || {
+            let _ = completed.send(present(&app, payload.activation_token.as_ref()));
+        }) {
+            tracing::warn!(%error, "could not schedule instance activation");
+            return false;
+        }
+        completion.recv_timeout(CONNECTION_TIMEOUT).unwrap_or(false)
+    }
+
+    fn present(app: &tauri::AppHandle, activation_token: Option<&ActivationToken>) -> bool {
         let Some(window) = app.get_webview_window("main") else {
             tracing::warn!("instance activation arrived before the main window existed");
-            return;
+            return false;
         };
 
-        if let Some(token) = activation_token {
+        if let Some(ActivationToken {
+            kind: ActivationKind::Desktop,
+            value,
+        }) = activation_token
+        {
             match window.gtk_window() {
                 Ok(native) => {
-                    native.set_startup_id(token);
+                    native.set_startup_id(value);
                     native.present();
+                    return true;
                 }
                 Err(error) => {
                     tracing::warn!(%error, "could not present the main window with its activation token");
                 }
             }
-            return;
         }
 
+        if let Err(error) = window.show() {
+            tracing::warn!(%error, "could not show the main window");
+        }
+        if let Err(error) = window.unminimize() {
+            tracing::warn!(%error, "could not unminimize the main window");
+        }
         if let Err(error) = window.request_user_attention(Some(UserAttentionType::Critical)) {
             tracing::warn!(%error, "could not request attention for the main window");
         }
         if let Err(error) = window.emit(ATTENTION_EVENT, ()) {
             tracing::warn!(%error, "could not publish the instance attention request");
         }
+        true
     }
 
     fn io_error(operation: &'static str, path: &Path, source: io::Error) -> InstanceError {
@@ -553,13 +663,25 @@ mod linux {
                 Some(OsString::from("xdg-token")),
                 Some(OsString::from("desktop-token")),
             );
-            assert_eq!(payload.activation_token.as_deref(), Some("xdg-token"));
+            assert_eq!(
+                payload.activation_token,
+                Some(ActivationToken {
+                    kind: ActivationKind::Xdg,
+                    value: "xdg-token".to_owned(),
+                })
+            );
         }
 
         #[test]
         fn desktop_startup_id_is_the_fallback() {
             let payload = activation_from_values(None, Some(OsString::from("desktop-token")));
-            assert_eq!(payload.activation_token.as_deref(), Some("desktop-token"));
+            assert_eq!(
+                payload.activation_token,
+                Some(ActivationToken {
+                    kind: ActivationKind::Desktop,
+                    value: "desktop-token".to_owned(),
+                })
+            );
         }
 
         #[test]
@@ -568,14 +690,28 @@ mod linux {
                 activation_from_values(Some(OsString::from("x".repeat(MAX_TOKEN_BYTES + 1))), None);
             assert_eq!(payload.activation_token, None);
             let encoded = encode_activation(&payload)?;
-            assert!(encoded.len() <= MAX_DATAGRAM_BYTES);
+            assert!(encoded.len() <= MAX_REQUEST_BYTES);
             assert_eq!(decode_activation(&encoded), Some(payload));
             Ok(())
         }
 
         #[test]
+        fn payload_round_trip_preserves_token_kind() -> TestResult {
+            for kind in [ActivationKind::Xdg, ActivationKind::Desktop] {
+                let payload = ActivationPayload {
+                    activation_token: Some(ActivationToken {
+                        kind,
+                        value: "token".to_owned(),
+                    }),
+                };
+                assert_eq!(decode_activation(&encode_activation(&payload)?), Some(payload));
+            }
+            Ok(())
+        }
+
+        #[test]
         fn decoder_rejects_oversized_or_unexpected_input() {
-            assert_eq!(decode_activation(&vec![b'x'; MAX_DATAGRAM_BYTES + 1]), None);
+            assert_eq!(decode_activation(&vec![b'x'; MAX_REQUEST_BYTES + 1]), None);
             assert_eq!(
                 decode_activation(br#"{"activationToken":null,"path":"/tmp"}"#),
                 None
@@ -599,21 +735,31 @@ mod linux {
             };
 
             let expected = ActivationPayload {
-                activation_token: Some("activation-token".to_owned()),
+                activation_token: Some(ActivationToken {
+                    kind: ActivationKind::Xdg,
+                    value: "activation-token".to_owned(),
+                }),
             };
-            let second = preflight_at(&paths, None, expected.clone())?;
-            assert!(matches!(second, InstancePreflight::Exit(code) if code == ExitCode::SUCCESS));
-
             let guard = first
                 .inner
                 .as_ref()
                 .ok_or_else(|| io::Error::other("the Linux guard is absent"))?;
-            guard
-                .socket
-                .set_read_timeout(Some(Duration::from_secs(1)))?;
-            let mut buffer = [0_u8; MAX_DATAGRAM_BYTES + 1];
-            let received = guard.socket.recv(&mut buffer)?;
-            assert_eq!(decode_activation(&buffer[..received]), Some(expected));
+            let listener = guard.socket.try_clone()?;
+            let (observed, received) = std::sync::mpsc::sync_channel(1);
+            let receiver = thread::spawn(move || -> io::Result<()> {
+                let (stream, _) = listener.accept()?;
+                handle_connection(stream, |payload| {
+                    let _ = observed.send(payload);
+                    true
+                })
+            });
+
+            let second = preflight_at(&paths, None, expected.clone())?;
+            assert!(matches!(second, InstancePreflight::Exit(code) if code == ExitCode::SUCCESS));
+            receiver
+                .join()
+                .map_err(|_| io::Error::other("the activation receiver stopped unexpectedly"))??;
+            assert_eq!(received.recv_timeout(Duration::from_secs(1))?, expected);
             assert!(paths.socket.exists());
             Ok(())
         }
@@ -622,15 +768,26 @@ mod linux {
         fn forwarding_retries_while_a_reexec_rebinds_the_socket() -> TestResult {
             let temporary = TempDir::new()?;
             let socket_path = temporary.path().join(SOCKET_NAME);
-            let payload = br#"{"activationToken":"token"}"#.to_vec();
+            let expected = ActivationPayload {
+                activation_token: Some(ActivationToken {
+                    kind: ActivationKind::Desktop,
+                    value: "token".to_owned(),
+                }),
+            };
+            let payload = encode_activation(&expected)?;
             let receiver_path = socket_path.clone();
-            let receiver = thread::spawn(move || -> io::Result<Vec<u8>> {
+            let receiver = thread::spawn(move || -> io::Result<ActivationPayload> {
                 thread::sleep(Duration::from_millis(40));
-                let socket = UnixDatagram::bind(receiver_path)?;
-                socket.set_read_timeout(Some(Duration::from_secs(1)))?;
-                let mut buffer = [0_u8; MAX_DATAGRAM_BYTES + 1];
-                let received = socket.recv(&mut buffer)?;
-                Ok(buffer[..received].to_vec())
+                let socket = UnixListener::bind(receiver_path)?;
+                let (stream, _) = socket.accept()?;
+                let (sent, received) = std::sync::mpsc::sync_channel(1);
+                handle_connection(stream, |payload| {
+                    let _ = sent.send(payload);
+                    true
+                })?;
+                received
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(io::Error::other)
             });
 
             forward_with_retry(
@@ -642,7 +799,41 @@ mod linux {
             let received = receiver
                 .join()
                 .map_err(|_| io::Error::other("the delayed receiver stopped unexpectedly"))??;
-            assert_eq!(received, payload);
+            assert_eq!(received, expected);
+            Ok(())
+        }
+
+        #[test]
+        fn forwarding_retries_when_the_old_socket_does_not_acknowledge() -> TestResult {
+            let temporary = TempDir::new()?;
+            let socket_path = temporary.path().join(SOCKET_NAME);
+            let first = UnixListener::bind(&socket_path)?;
+            let replacement_path = socket_path.clone();
+            let receiver = thread::spawn(move || -> io::Result<usize> {
+                let (stream, _) = first.accept()?;
+                handle_connection(stream, |_| false)?;
+                drop(first);
+                fs::remove_file(&replacement_path)?;
+
+                let replacement = UnixListener::bind(&replacement_path)?;
+                let (stream, _) = replacement.accept()?;
+                handle_connection(stream, |_| true)?;
+                Ok(2)
+            });
+            let payload = encode_activation(&ActivationPayload {
+                activation_token: None,
+            })?;
+
+            forward_with_retry(
+                &socket_path,
+                &payload,
+                FORWARD_ATTEMPTS,
+                FORWARD_RETRY_DELAY,
+            )?;
+            let attempts = receiver
+                .join()
+                .map_err(|_| io::Error::other("the replacement receiver stopped unexpectedly"))??;
+            assert_eq!(attempts, 2);
             Ok(())
         }
 
@@ -673,10 +864,66 @@ mod linux {
         }
 
         #[test]
+        fn inherited_descriptor_is_open_only_for_renderer_exec() -> TestResult {
+            let temporary = TempDir::new()?;
+            let paths = InstancePaths::from_runtime_dir(temporary.path().to_path_buf());
+            let first = preflight_at(
+                &paths,
+                None,
+                ActivationPayload {
+                    activation_token: None,
+                },
+            )?;
+            let InstancePreflight::Continue(first) = first else {
+                return Err(io::Error::other("the first launch did not own the instance").into());
+            };
+            let guard = first
+                .inner
+                .as_ref()
+                .ok_or_else(|| io::Error::other("the Linux guard is absent"))?;
+            let flags = || -> Result<FdFlag, nix::errno::Errno> {
+                fcntl(guard.inherited_fd(), FcntlArg::F_GETFD).map(FdFlag::from_bits_truncate)
+            };
+
+            assert!(flags()?.contains(FdFlag::FD_CLOEXEC));
+            assert!(first.reexec_environment()?.is_some());
+            assert!(!flags()?.contains(FdFlag::FD_CLOEXEC));
+            first.seal_inheritance()?;
+            assert!(flags()?.contains(FdFlag::FD_CLOEXEC));
+            Ok(())
+        }
+
+        #[test]
+        fn same_file_descriptor_without_the_owned_lock_is_rejected() -> TestResult {
+            let temporary = TempDir::new()?;
+            let paths = InstancePaths::from_runtime_dir(temporary.path().to_path_buf());
+            let first = preflight_at(
+                &paths,
+                None,
+                ActivationPayload {
+                    activation_token: None,
+                },
+            )?;
+            let InstancePreflight::Continue(first) = first else {
+                return Err(io::Error::other("the first launch did not own the instance").into());
+            };
+            let socket_identity = FileIdentity::read(&paths.socket)?;
+            let forged = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&paths.lock)?;
+
+            assert!(validate_inherited_fd(&paths.lock, forged.as_raw_fd()).is_err());
+            assert_eq!(FileIdentity::read(&paths.socket)?, socket_identity);
+            drop(first);
+            Ok(())
+        }
+
+        #[test]
         fn stale_socket_is_removed_only_after_lock_ownership() -> TestResult {
             let temporary = TempDir::new()?;
             let paths = InstancePaths::from_runtime_dir(temporary.path().to_path_buf());
-            let stale = UnixDatagram::bind(&paths.socket)?;
+            let stale = UnixListener::bind(&paths.socket)?;
             drop(stale);
 
             let first = preflight_at(
@@ -734,6 +981,6 @@ mod tests {
     #[test]
     fn unsupported_platform_is_a_no_op() {
         let guard = InstanceGuard::disabled();
-        assert!(guard.reexec_environment().is_none());
+        assert!(matches!(guard.reexec_environment(), Ok(None)));
     }
 }

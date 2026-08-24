@@ -418,6 +418,7 @@ mod tests {
             FlowState::RecreatingPrefix,
             FlowState::Launching,
             FlowState::Running,
+            FlowState::Detached,
             FlowState::SupervisingAddons,
             FlowState::Exited,
             FlowState::Cancelled,

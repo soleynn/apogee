@@ -73,8 +73,11 @@ name = "apogee"
 version = "0.0.0"
 dependencies = [
  "apogee-core",
+ "gtk",
+ "nix",
  "open",
  "rfd",
+ "rustix",
  "serde",
  "serde_json",
  "tauri",
@@ -2969,6 +2972,17 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nix"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
+dependencies = [
+ "bitflags 1.3.2",
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "nom"

@@ -677,6 +677,62 @@ mod tests {
         ));
     }
 
+    struct DetachedLaunch;
+
+    impl Driver for DetachedLaunch {
+        fn execute_cancellable(
+            &self,
+            _command: Command,
+            _cancel: CancellationToken,
+        ) -> Pin<Box<dyn Stream<Item = Event> + Send + '_>> {
+            Box::pin(tokio_stream::iter([
+                Event::State(FlowState::Running),
+                Event::State(FlowState::Detached),
+                Event::Outcome(RunOutcome::Succeeded),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn detached_launch_requests_shell_close_after_forwarding_the_outcome() {
+        let sink = VecSink::default();
+        let close = drive(
+            &DetachedLaunch,
+            Command::Launch {
+                profile: Uuid::nil(),
+            },
+            CancellationToken::new(),
+            Uuid::new_v4(),
+            &NavigationState::default(),
+            &NoAssets,
+            &sink,
+        )
+        .await;
+
+        assert!(close);
+        let events = match sink.0.lock() {
+            Ok(events) => events,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [
+                EventDto::State {
+                    state: StateDto::Running,
+                    ..
+                },
+                EventDto::State {
+                    state: StateDto::Detached,
+                    ..
+                },
+                EventDto::Outcome {
+                    outcome: OutcomeDto::Succeeded,
+                    ..
+                }
+            ]
+        ));
+    }
+
     struct ProgressBurst;
 
     impl Driver for ProgressBurst {

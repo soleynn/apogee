@@ -18,6 +18,7 @@ const SAFE_RENDER_ENV: &str = "APOGEE_SAFE_RENDER";
 const MACHINE_TIMEOUT: Duration = Duration::from_secs(2);
 const HUMAN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_TIER: u8 = 3;
+#[cfg(any(unix, test))]
 const MAX_ESCALATIONS: u8 = 3;
 
 #[cfg(unix)]
@@ -143,6 +144,7 @@ impl RenderProbe {
         )
     }
 
+    #[cfg(any(unix, test))]
     const fn starting_tier(&self) -> u8 {
         if self.proprietary_nvidia {
             match self.session {
@@ -168,6 +170,7 @@ impl RenderTier {
         self.0
     }
 
+    #[cfg(any(unix, test))]
     fn variables(self) -> Vec<(&'static str, &'static str)> {
         let mut vars = vec![("GTK_THEME", "Adwaita:dark")];
         if self.0 >= 1 {
@@ -225,12 +228,14 @@ fn parse_tier(value: &OsStr) -> Result<RenderTier, RenderError> {
     Ok(tier)
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderPlan {
     Launch { tier: RenderTier, escalations: u8 },
     Terminal,
 }
 
+#[cfg(any(unix, test))]
 fn plan(
     previous: Option<&RenderRecord>,
     starting_tier: RenderTier,
@@ -269,7 +274,9 @@ pub(crate) enum RenderPreflight {
     Exit(ExitCode),
 }
 
-pub(crate) fn preflight() -> Result<RenderPreflight, RenderError> {
+pub(crate) fn preflight(
+    reexec_environment: Option<(&'static str, OsString)>,
+) -> Result<RenderPreflight, RenderError> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let overrides = RenderOverrides::parse(&args, std::env::var_os(SAFE_RENDER_ENV).as_deref())?;
     let path = render_path()?;
@@ -310,12 +317,19 @@ pub(crate) fn preflight() -> Result<RenderPreflight, RenderError> {
                     escalations,
                 };
                 save_record(&path, &record)?;
-                exec_tier(tier, &args)
+                exec_tier(
+                    tier,
+                    &args,
+                    reexec_environment
+                        .as_ref()
+                        .map(|(name, value)| (*name, value.as_os_str())),
+                )
             }
         }
     }
     #[cfg(not(unix))]
     {
+        let _ = reexec_environment;
         let tier = RenderTier(0);
         let record = RenderRecord {
             attempted: tier.value(),
@@ -398,7 +412,11 @@ fn save_record(path: &Path, record: &RenderRecord) -> Result<(), RenderError> {
 }
 
 #[cfg(unix)]
-fn exec_tier(tier: RenderTier, args: &[OsString]) -> Result<RenderPreflight, RenderError> {
+fn exec_tier(
+    tier: RenderTier,
+    args: &[OsString],
+    reexec_environment: Option<(&str, &OsStr)>,
+) -> Result<RenderPreflight, RenderError> {
     use std::os::unix::process::CommandExt;
 
     let executable = std::env::current_exe().map_err(|source| RenderError::Exec {
@@ -411,6 +429,9 @@ fn exec_tier(tier: RenderTier, args: &[OsString]) -> Result<RenderPreflight, Ren
         command.env_remove(variable);
     }
     command.env(RENDER_MARKER, tier.value().to_string());
+    if let Some((name, value)) = reexec_environment {
+        command.env(name, value);
+    }
     for (name, value) in tier.variables() {
         command.env(name, value);
     }
@@ -693,7 +714,7 @@ impl RenderMonitor {
         drop(state);
         save_record(&path, &record)?;
         let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-        exec_tier(tier, &args)
+        exec_tier(tier, &args, None)
     }
 
     fn machine_missing(&self) -> bool {

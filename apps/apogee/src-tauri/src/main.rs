@@ -13,6 +13,7 @@
 mod command;
 mod direct;
 mod dto;
+mod instance;
 mod lifecycle;
 mod mutation;
 mod navigation;
@@ -25,7 +26,7 @@ use std::future::Future;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use apogee_core::{Core, CoreConfig, Uuid};
+use apogee_core::{Command, Core, CoreConfig, Uuid};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
@@ -363,7 +364,22 @@ async fn cancel(state: tauri::State<'_, ShellState>, run_id: Uuid) -> Result<boo
 }
 
 fn main() -> ExitCode {
-    let render = match render::preflight() {
+    let instance = match instance::preflight() {
+        Ok(instance::InstancePreflight::Continue(instance)) => instance,
+        Ok(instance::InstancePreflight::Exit(code)) => return code,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let reexec_environment = match instance.reexec_environment() {
+        Ok(environment) => environment,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let render = match render::preflight(reexec_environment) {
         Ok(render::RenderPreflight::Continue(render)) => render,
         Ok(render::RenderPreflight::Exit(code)) => return code,
         Err(error) => {
@@ -371,10 +387,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Err(error) = instance.seal_inheritance() {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
     println!(
         "Apogee render tier {}; use --safe-render if the window is unreadable.",
         render.tier()
     );
+    let instance = Arc::new(instance);
 
     // The context macro builds the window's context on a thread of its own, for the larger stack,
     // and ends the process itself if that thread panics. Nothing here can reach around that, so the
@@ -394,9 +415,12 @@ fn main() -> ExitCode {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .on_window_event(lifecycle::on_window_event)
+        .manage(Arc::clone(&instance))
         .manage(ShellState::new(render.clone()))
         .setup(move |app| {
             let handle = app.handle().clone();
+            app.state::<Arc<instance::InstanceGuard>>()
+                .start(handle.clone())?;
             let state = app.state::<ShellState>();
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(&setup_render.title())?;
@@ -450,12 +474,18 @@ fn main() -> ExitCode {
 
     if render.retry_requested() {
         #[cfg(unix)]
-        match render.retry_exec() {
-            Ok(render::RenderPreflight::Exit(retry_code)) => return retry_code,
-            Ok(render::RenderPreflight::Continue(_)) => return ExitCode::FAILURE,
-            Err(error) => {
+        {
+            if let Err(error) = instance.reexec_environment() {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
+            }
+            match render.retry_exec() {
+                Ok(render::RenderPreflight::Exit(retry_code)) => return retry_code,
+                Ok(render::RenderPreflight::Continue(_)) => return ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
@@ -520,6 +550,14 @@ mod tests {
                 && !permission.ends_with(":default")
         }));
         Ok(())
+    }
+
+    #[test]
+    fn release_manifest_does_not_enable_the_web_inspector() {
+        assert!(
+            !include_str!("../Cargo.toml").contains("\"devtools\""),
+            "the release-only Tauri devtools feature must stay disabled"
+        );
     }
 
     #[derive(Deserialize)]

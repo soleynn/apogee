@@ -6,7 +6,8 @@ Rust half initializes `apogee-core`, accepts every async command in its current 
 returns the local store snapshot after initialization, probes credential health independently, and
 exposes core-owned status, setup, catalog, and diagnostic reads. It relays the complete typed event
 stream—including its final outcome—over one Tauri channel per run.
-The frontend still only renders the startup snapshot; binding those streams to screens is separate
+The frontend currently renders the startup recovery state, renderer legibility check, and
+quit-during-work confirmation; binding the full event stream to the launcher screens remains
 presentation work.
 
 ## Layout
@@ -19,6 +20,11 @@ presentation work.
 | `src-tauri/src/dto.rs` | Shell-owned event wire format keyed by core's stable codes. |
 | `src-tauri/src/dto/read.rs` | Shell-owned status, catalog, setup, and diagnostic read formats. |
 | `src-tauri/src/dto/store.rs` | Secret-free persisted records and defaults returned at startup. |
+| `src-tauri/src/instance.rs` | Linux process ownership and activation forwarding without a bus name. |
+| `src-tauri/src/lifecycle.rs` | Close interception, cancellation, draining, and detach handling. |
+| `src-tauri/src/navigation.rs` | Opaque link, path, and first-run capabilities held outside the webview. |
+| `src-tauri/src/passphrase.rs` | Bounded native-to-webview passphrase prompt bridge. |
+| `src-tauri/src/render.rs` | Early renderer probing, tier persistence, re-exec, and legibility proof. |
 | `src-tauri/src/supervisor.rs` | Run lifetime, cancellation, and bounded-rate channel forwarding. |
 | `src/generated/` | TypeScript command and event declarations generated from the Rust DTO trees. |
 | `src-tauri/build.rs` | Two lines, pinned byte-for-byte by `scripts/audit.sh`. |
@@ -69,6 +75,5 @@ To run it: `npm run tauri dev` (starts Vite on port 1420, then the window agains
 ## Not yet done
 
 - The icons under `src-tauri/icons/` are placeholders.
-- `tauri.conf.json` sets no content security policy and the capability file grants the built-in
-  default set. Narrowing both is separate work.
-- Nothing here is packaged, localized, or driven by a test that opens a real window.
+- The full launcher presentation, localization catalog, packaging, and real-window smoke coverage
+  are still being built.

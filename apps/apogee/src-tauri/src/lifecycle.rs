@@ -148,9 +148,10 @@ pub(crate) async fn close_after_launch(
         tracing::error!("could not drain work after the game detached");
         return;
     }
-    if let Some(window) = app.get_webview_window("main")
-        && window.destroy().is_err()
-    {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if window.destroy().is_err() {
         tracing::error!("could not close the launcher after the game detached");
     }
 }

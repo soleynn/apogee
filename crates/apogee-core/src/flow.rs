@@ -843,7 +843,9 @@ fn observe_status(store: &Store, profile: Uuid, event: &Event) -> Result<(), Sto
         Event::State(State::PatchesPending { .. }) => Some(StoredDisposition::PatchesPending),
         Event::State(State::VersionNotServiced) => Some(StoredDisposition::VersionNotServiced),
         Event::State(State::Cancelled) => Some(StoredDisposition::Cancelled),
-        Event::State(State::Running | State::Exited) => Some(StoredDisposition::Current),
+        Event::State(State::Running | State::Detached | State::Exited) => {
+            Some(StoredDisposition::Current)
+        }
         Event::Error(error) => Some(StoredDisposition::Failed {
             code: crate::StableCode::code(error).to_owned(),
         }),

@@ -140,6 +140,7 @@ fn state_value(state: &FlowState) -> Value {
         FlowState::RecreatingPrefix => json!({ "kind": "recreatingPrefix" }),
         FlowState::Launching => json!({ "kind": "launching" }),
         FlowState::Running => json!({ "kind": "running" }),
+        FlowState::Detached => json!({ "kind": "detached" }),
         FlowState::SupervisingAddons => json!({ "kind": "supervisingAddons" }),
         FlowState::Exited => json!({ "kind": "exited" }),
         FlowState::Cancelled => json!({ "kind": "cancelled" }),
@@ -1010,14 +1011,17 @@ mod tests {
             bytes: 4096,
         }));
         let outcome = render_event_json(&Event::Outcome(RunOutcome::Cancelled));
+        let detached = render_event_json(&Event::State(FlowState::Detached));
         let state: Value = serde_json::from_str(&state).unwrap_or(Value::Null);
         let outcome: Value = serde_json::from_str(&outcome).unwrap_or(Value::Null);
+        let detached: Value = serde_json::from_str(&detached).unwrap_or(Value::Null);
 
         assert_eq!(state["state"]["kind"], "patchesPending");
         assert_eq!(state["state"]["count"], 7);
         assert_eq!(state["state"]["bytes"], 4096);
         assert_eq!(outcome["outcome"], "cancelled");
         assert_eq!(outcome["code"], "event-outcome-cancelled");
+        assert_eq!(detached["state"]["kind"], "detached");
     }
 
     #[test]
