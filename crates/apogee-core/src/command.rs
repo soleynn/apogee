@@ -456,6 +456,9 @@ pub enum FlowState {
     Launching,
     /// The game process is running.
     Running,
+    /// The game is running and core has determined that this launcher has no remaining teardown
+    /// work, so a shell may end its own lifetime without ending the game.
+    Detached,
     /// Detaching after launch was requested, but this launch has companion teardown to perform, so
     /// the launcher stays attached. Without this the launcher would simply appear to hang.
     SupervisingAddons,

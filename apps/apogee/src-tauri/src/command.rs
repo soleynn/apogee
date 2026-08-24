@@ -1,15 +1,16 @@
 //! The shell-owned request shape and its one-way conversion into core commands.
 
 use apogee_core::{
-    Command, FirstRunRequest, FirstRunTransition, FrontierQuery, GameChoice, ImportDecision,
+    Command, FirstRunAccountInput, FirstRunAction, FirstRunRequest, FrontierQuery, ImportDecision,
     ImportXivLauncher, OtpSource, PasswordSource, PrefixAction, Uuid,
 };
 use serde::Deserialize;
 use ts_rs::TS;
 
-use crate::dto::first_run::{AccountChoiceDto, CredentialChoiceDto, LegibilityDto, ReadyActionDto};
+use crate::dto::first_run::{CredentialChoiceDto, FirstRunAccountKindDto};
 use crate::dto::secrets::SecretBytes;
 use crate::navigation::NavigationState;
+use crate::render::RenderMonitor;
 
 /// Where the core should get the account password for this run.
 #[derive(Deserialize, TS)]
@@ -106,7 +107,6 @@ pub(crate) enum CommandDto {
     SupportBundle {
         #[ts(type = "string | null")]
         profile: Option<Uuid>,
-        facts: Vec<CallerFactDto>,
     },
 }
 
@@ -114,6 +114,7 @@ impl CommandDto {
     pub(crate) fn into_core(
         self,
         navigation: &NavigationState,
+        render: &RenderMonitor,
     ) -> Result<Command, CommandDtoError> {
         Ok(match self {
             Self::Login {
@@ -161,17 +162,16 @@ impl CommandDto {
                 profile,
                 action: action.into_core(),
             },
-            Self::FirstRun { request } => Command::FirstRun(request.into_core(navigation)?),
+            Self::FirstRun { request } => {
+                Command::FirstRun(request.into_core(navigation, render)?)
+            }
             Self::ImportXivLauncher { request } => {
                 Command::ImportXivLauncher(request.into_core(navigation)?)
             }
             Self::Frontier { query } => Command::Frontier(query.into_core()),
-            Self::SupportBundle { profile, facts } => Command::SupportBundle {
+            Self::SupportBundle { profile } => Command::SupportBundle {
                 profile,
-                facts: facts
-                    .into_iter()
-                    .map(|fact| (fact.name, fact.value))
-                    .collect(),
+                facts: render.support_facts(),
             },
         })
     }
@@ -218,15 +218,19 @@ impl PrefixActionDto {
 )]
 pub(crate) enum FirstRunRequestDto {
     Read,
-    Advance(FirstRunTransitionDto),
+    Advance(FirstRunActionDto),
 }
 
 impl FirstRunRequestDto {
-    fn into_core(self, navigation: &NavigationState) -> Result<FirstRunRequest, CommandDtoError> {
+    fn into_core(
+        self,
+        navigation: &NavigationState,
+        render: &RenderMonitor,
+    ) -> Result<FirstRunRequest, CommandDtoError> {
         Ok(match self {
             Self::Read => FirstRunRequest::Read,
-            Self::Advance(transition) => {
-                FirstRunRequest::Advance(transition.into_core(navigation)?)
+            Self::Advance(action) => {
+                FirstRunRequest::Advance(action.into_core(navigation, render)?)
             }
         })
     }
@@ -240,40 +244,89 @@ impl FirstRunRequestDto {
     rename_all = "camelCase",
     deny_unknown_fields
 )]
-pub(crate) enum FirstRunTransitionDto {
-    ConfirmLegibility(LegibilityDto),
+pub(crate) enum FirstRunActionDto {
+    ConfirmLegibility,
     DecideImport(FirstRunImportDecisionDto),
-    SaveAccount(AccountChoiceDto),
-    SelectGame(FirstRunGameChoiceDto),
+    SaveAccount(FirstRunAccountInputDto),
+    InspectGame {
+        #[ts(type = "string")]
+        folder: Uuid,
+    },
+    SelectExistingGame {
+        #[ts(type = "string")]
+        candidate: Uuid,
+    },
+    SelectInstallLocation {
+        #[ts(type = "string")]
+        folder: Uuid,
+    },
     SelectCredential(CredentialChoiceDto),
-    StartReady(ReadyActionDto),
+    SelectRunner {
+        #[ts(type = "string")]
+        candidate: Uuid,
+    },
+    ContinueWithoutPrefix,
+    StartReady,
 }
 
-impl FirstRunTransitionDto {
+impl FirstRunActionDto {
     fn into_core(
         self,
         navigation: &NavigationState,
-    ) -> Result<FirstRunTransition, CommandDtoError> {
+        render: &RenderMonitor,
+    ) -> Result<FirstRunAction, CommandDtoError> {
         let unsupported = || CommandDtoError::UnsupportedFirstRunValue;
         Ok(match self {
-            Self::ConfirmLegibility(reading) => {
-                FirstRunTransition::ConfirmLegibility(reading.into_core().ok_or_else(unsupported)?)
+            Self::ConfirmLegibility => {
+                FirstRunAction::ConfirmLegibility(render.legibility_reading())
             }
             Self::DecideImport(decision) => {
-                FirstRunTransition::DecideImport(decision.into_core(navigation)?)
+                FirstRunAction::DecideImport(decision.into_core(navigation)?)
             }
-            Self::SaveAccount(account) => {
-                FirstRunTransition::SaveAccount(account.into_core().ok_or_else(unsupported)?)
-            }
-            Self::SelectGame(game) => FirstRunTransition::SelectGame(game.into_core(navigation)?),
-            Self::SelectCredential(credential) => FirstRunTransition::SelectCredential(
+            Self::SaveAccount(account) => FirstRunAction::SaveAccount(FirstRunAccountInput {
+                square_enix_id: account.square_enix_id,
+                kind: account.kind.into_core().ok_or_else(unsupported)?,
+                never_save_password: account.never_save_password,
+            }),
+            Self::InspectGame { folder } => FirstRunAction::InspectGame {
+                path: navigation
+                    .folder(folder)
+                    .ok_or(CommandDtoError::UnknownFolder)?,
+            },
+            Self::SelectExistingGame { candidate } => FirstRunAction::SelectExistingGame {
+                path: navigation
+                    .first_run_game(candidate)
+                    .and_then(|choice| match choice {
+                        apogee_core::GameChoice::Existing { path, .. } => Some(path),
+                        _ => None,
+                    })
+                    .ok_or(CommandDtoError::UnknownFirstRunSelection)?,
+            },
+            Self::SelectInstallLocation { folder } => FirstRunAction::SelectInstallLocation {
+                path: navigation
+                    .folder(folder)
+                    .ok_or(CommandDtoError::UnknownFolder)?,
+            },
+            Self::SelectCredential(credential) => FirstRunAction::SelectCredential(
                 credential.into_core().ok_or_else(unsupported)?,
             ),
-            Self::StartReady(action) => {
-                FirstRunTransition::StartReady(action.into_core().ok_or_else(unsupported)?)
-            }
+            Self::SelectRunner { candidate } => FirstRunAction::SelectRunner(
+                navigation
+                    .first_run_runner(candidate)
+                    .ok_or(CommandDtoError::UnknownFirstRunSelection)?,
+            ),
+            Self::ContinueWithoutPrefix => FirstRunAction::ContinueWithoutPrefix,
+            Self::StartReady => FirstRunAction::StartReady,
         })
     }
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FirstRunAccountInputDto {
+    square_enix_id: String,
+    kind: FirstRunAccountKindDto,
+    never_save_password: bool,
 }
 
 #[derive(Deserialize, TS)]
@@ -298,47 +351,6 @@ impl FirstRunImportDecisionDto {
                 .first_run_import(candidate)
                 .ok_or(CommandDtoError::UnknownFirstRunSelection),
             Self::Skip => Ok(ImportDecision::Skip),
-        }
-    }
-}
-
-#[derive(Deserialize, TS)]
-#[serde(
-    tag = "choice",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub(crate) enum FirstRunGameChoiceDto {
-    Existing {
-        #[ts(type = "string")]
-        candidate: Uuid,
-    },
-    Install {
-        #[ts(type = "string")]
-        folder: Uuid,
-        approximate_bytes: u64,
-        exact_download_bytes: u64,
-    },
-}
-
-impl FirstRunGameChoiceDto {
-    fn into_core(self, navigation: &NavigationState) -> Result<GameChoice, CommandDtoError> {
-        match self {
-            Self::Existing { candidate } => navigation
-                .first_run_game(candidate)
-                .ok_or(CommandDtoError::UnknownFirstRunSelection),
-            Self::Install {
-                folder,
-                approximate_bytes,
-                exact_download_bytes,
-            } => Ok(GameChoice::Install {
-                path: navigation
-                    .folder(folder)
-                    .ok_or(CommandDtoError::UnknownFolder)?,
-                approximate_bytes,
-                exact_download_bytes,
-            }),
         }
     }
 }
@@ -392,13 +404,6 @@ impl FrontierQueryDto {
     }
 }
 
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CallerFactDto {
-    name: String,
-    value: String,
-}
-
 /// Every leaf operation the generic `execute` IPC command accepts.
 ///
 /// The inventory is derived from the same generated discriminants the webview uses. Adding a
@@ -422,7 +427,7 @@ pub(crate) fn operation_ids() -> std::collections::BTreeSet<String> {
             .map(|kind| format!("firstRun.{kind}")),
     );
     operations.extend(
-        tagged_kinds::<FirstRunTransitionDto>()
+        tagged_kinds::<FirstRunActionDto>()
             .into_iter()
             .map(|kind| format!("firstRun.advance.{kind}")),
     );
@@ -457,9 +462,10 @@ mod tests {
     const PROFILE: &str = "00000000-0000-0000-0000-000000000000";
 
     fn parse(json: &str, navigation: &NavigationState) -> Option<Command> {
+        let render = RenderMonitor::disabled();
         serde_json::from_str::<CommandDto>(json)
             .ok()
-            .and_then(|command| command.into_core(navigation).ok())
+            .and_then(|command| command.into_core(navigation, &render).ok())
     }
 
     #[test]
@@ -484,10 +490,10 @@ mod tests {
             format!(
                 r#"{{"kind":"prefix","profile":"{PROFILE}","action":{{"kind":"recreate","backupConfig":true}}}}"#
             ),
-            r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"confirmLegibility","value":{"gpu":null,"driver":null,"session":"wayland","renderTier":1}}}}"#.to_owned(),
+            r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"confirmLegibility"}}}"#.to_owned(),
             format!(r#"{{"kind":"importXivLauncher","request":{{"kind":"scan","folder":"{folder}"}}}}"#),
             r#"{"kind":"frontier","query":{"kind":"gate","wait":true}}"#.to_owned(),
-            r#"{"kind":"supportBundle","facts":[{"name":"render_tier","value":"1"}]}"#.to_owned(),
+            r#"{"kind":"supportBundle"}"#.to_owned(),
         ];
 
         for command in commands {
@@ -515,7 +521,7 @@ mod tests {
     #[test]
     fn first_run_paths_must_be_process_local_capabilities() {
         let import = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"decideImport","value":{"choice":"import","path":"candidate"}}}}"#;
-        let game = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"selectGame","value":{"choice":"existing","path":"game","state":{"state":"current"}}}}}"#;
+        let game = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"selectExistingGame","value":{"path":"game"}}}}"#;
 
         assert!(parse(import, &NavigationState::default()).is_none());
         assert!(parse(game, &NavigationState::default()).is_none());
@@ -548,22 +554,19 @@ mod tests {
             r#"{{"kind":"firstRun","request":{{"kind":"advance","value":{{"kind":"decideImport","value":{{"choice":"import","candidate":"{import}"}}}}}}}}"#
         );
         let game_command = format!(
-            r#"{{"kind":"firstRun","request":{{"kind":"advance","value":{{"kind":"selectGame","value":{{"choice":"existing","candidate":"{game}"}}}}}}}}"#
+            r#"{{"kind":"firstRun","request":{{"kind":"advance","value":{{"kind":"selectExistingGame","value":{{"candidate":"{game}"}}}}}}}}"#
         );
 
         assert!(matches!(
             parse(&import_command, &navigation),
             Some(Command::FirstRun(FirstRunRequest::Advance(
-                FirstRunTransition::DecideImport(ImportDecision::Import(path))
+                FirstRunAction::DecideImport(ImportDecision::Import(path))
             ))) if path == import_path
         ));
         assert!(matches!(
             parse(&game_command, &navigation),
             Some(Command::FirstRun(FirstRunRequest::Advance(
-                FirstRunTransition::SelectGame(GameChoice::Existing {
-                    path,
-                    state: apogee_core::ExistingGameState::Current,
-                })
+                FirstRunAction::SelectExistingGame { path }
             ))) if path == game_path
         ));
     }
@@ -589,13 +592,13 @@ mod tests {
         assert!(operations.contains("firstRun.advance.confirmLegibility"));
         assert!(operations.contains("importXivLauncher.apply"));
         assert!(operations.contains("frontier.gate"));
-        assert_eq!(operations.len(), 23);
+        assert_eq!(operations.len(), 27);
     }
 
     #[test]
     fn generated_command_contract_contains_no_path_type() {
         let declaration = CommandDto::decl(&ts_rs::Config::default());
-        let first_run = FirstRunTransitionDto::decl(&ts_rs::Config::default());
+        let first_run = FirstRunActionDto::decl(&ts_rs::Config::default());
         let import = ImportXivLauncherDto::decl(&ts_rs::Config::default());
 
         assert!(!declaration.contains("PathDto"));

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use apogee_core::{
-    Core, ExistingGameState, FirstRunCheckpoint, FirstRunImportCandidate, GameCandidate,
-    GameCandidateState, GameChoice, ImportDecision, ImportPlan, ImportScan, SupportBundleData,
-    Uuid,
+    Core, ExistingGameState, FirstRunCheckpoint, FirstRunImportCandidate,
+    FirstRunRunnerSelection, GameCandidate, GameCandidateState, GameChoice, ImportDecision,
+    ImportPlan, ImportScan, SupportBundleData, Uuid,
 };
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
@@ -85,6 +85,7 @@ struct Registry {
     import_scans: HashMap<Uuid, ImportScan>,
     first_run_imports: HashMap<Uuid, FirstRunImportCandidate>,
     first_run_games: HashMap<Uuid, GameCandidate>,
+    first_run_runners: HashMap<Uuid, FirstRunRunnerSelection>,
     evidence: HashMap<(Uuid, Uuid), PathBuf>,
     pending_support_bundle: Option<SupportBundleData>,
     support_bundle: Option<PathBuf>,
@@ -100,6 +101,7 @@ struct Registry {
 pub(crate) struct FirstRunSnapshot {
     import_ids: Vec<Uuid>,
     game_ids: Vec<Uuid>,
+    runner_ids: Vec<Uuid>,
 }
 
 impl FirstRunSnapshot {
@@ -109,6 +111,10 @@ impl FirstRunSnapshot {
 
     pub(crate) fn game_id(&self, index: usize) -> Option<Uuid> {
         self.game_ids.get(index).copied()
+    }
+
+    pub(crate) fn runner_id(&self, index: usize) -> Option<Uuid> {
+        self.runner_ids.get(index).copied()
     }
 }
 
@@ -144,6 +150,7 @@ impl NavigationState {
         let mut registry = self.lock();
         registry.first_run_imports.clear();
         registry.first_run_games.clear();
+        registry.first_run_runners.clear();
 
         let import_candidates = match &checkpoint.import {
             apogee_core::ImportState::Candidates(candidates) => candidates.as_slice(),
@@ -163,9 +170,19 @@ impl NavigationState {
             game_ids.push(id);
         }
 
+        let mut runner_ids = Vec::with_capacity(checkpoint.runners.len());
+        for reading in &checkpoint.runners {
+            let id = Uuid::new_v4();
+            registry
+                .first_run_runners
+                .insert(id, reading.selection.clone());
+            runner_ids.push(id);
+        }
+
         FirstRunSnapshot {
             import_ids,
             game_ids,
+            runner_ids,
         }
     }
 
@@ -182,6 +199,7 @@ impl NavigationState {
         let state = match candidate.state {
             GameCandidateState::Current { .. } => ExistingGameState::Current,
             GameCandidateState::NeedsUpdate(reading) => ExistingGameState::NeedsUpdate(reading),
+            GameCandidateState::Installed { .. } => ExistingGameState::UpdateUnknown,
             GameCandidateState::NotAGame | GameCandidateState::Unreadable { .. } => return None,
             _ => return None,
         };
@@ -189,6 +207,10 @@ impl NavigationState {
             path: candidate.path.clone(),
             state,
         })
+    }
+
+    pub(crate) fn first_run_runner(&self, id: Uuid) -> Option<FirstRunRunnerSelection> {
+        self.lock().first_run_runners.get(&id).cloned()
     }
 
     #[cfg(test)]

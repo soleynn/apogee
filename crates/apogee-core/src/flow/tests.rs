@@ -353,7 +353,12 @@ async fn first_run_actions_publish_core_derived_machine_and_game_facts() {
     let events = run(
         context(&h, transport(), launch(), NOW),
         Command::FirstRun(FirstRunRequest::Advance(
-            crate::FirstRunAction::ConfirmLegibility,
+            crate::FirstRunAction::ConfirmLegibility(crate::LegibilityReading {
+                gpu: None,
+                driver: None,
+                session: crate::SessionType::Unknown,
+                render_tier: None,
+            }),
         )),
     )
     .await;
@@ -512,6 +517,54 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
         available: true,
     }];
     h.store.save_first_run(&checkpoint).unwrap();
+    let retry_checkpoint = checkpoint.clone();
+    let events = run(
+        context(
+            &h,
+            transport(),
+            Arc::new(FakeLaunchBackend::failing_while_preparing()),
+            NOW,
+        ),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::SelectRunner(runner.clone()),
+        )),
+    )
+    .await;
+    let failed = first_run_checkpoint(&events);
+    assert_eq!(
+        failed.position,
+        crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+    );
+    assert_eq!(
+        failed.prefix_failure,
+        Some(crate::PrefixFailure {
+            runner: runner.clone(),
+            code: "err-launch".to_owned(),
+        })
+    );
+    assert!(errors(&events).is_empty(), "failure must be a retryable reading");
+
+    let events = run(
+        context(
+            &h,
+            transport(),
+            Arc::new(FakeLaunchBackend::exiting()),
+            NOW,
+        ),
+        Command::FirstRun(FirstRunRequest::Advance(
+            crate::FirstRunAction::ContinueWithoutPrefix,
+        )),
+    )
+    .await;
+    assert!(matches!(
+        first_run_checkpoint(&events).runner_and_prefix,
+        Some(crate::RunnerAndPrefixChoice {
+            prefix: crate::PrefixOutcome::ContinueWithoutPrefix { .. },
+            ..
+        })
+    ));
+
+    h.store.save_first_run(&retry_checkpoint).unwrap();
     let launch = Arc::new(FakeLaunchBackend::exiting());
     let events = run(
         context(&h, transport(), launch.clone(), NOW),
@@ -544,6 +597,10 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
     assert_eq!(
         checkpoint.ready,
         crate::ReadyState::Started(crate::ReadyAction::InstallAndPlay { bytes: None })
+    );
+    assert!(
+        states(&events).contains(&FlowState::NeedsPassword),
+        "the ready action must enter the real install-and-play flow: {events:?}"
     );
 }
 
@@ -2516,7 +2573,8 @@ async fn close_after_launch_detaches_without_supervising() {
         [
             FlowState::PreparingPrefix,
             FlowState::Launching,
-            FlowState::Running
+            FlowState::Running,
+            FlowState::Detached,
         ]
     );
     assert!(
@@ -2821,7 +2879,8 @@ async fn close_after_launch_still_detaches_when_nothing_is_owed() {
         [
             FlowState::PreparingPrefix,
             FlowState::Launching,
-            FlowState::Running
+            FlowState::Running,
+            FlowState::Detached,
         ]
     );
     assert!(!addons.calls().contains(&AddonCall::GameClosed));

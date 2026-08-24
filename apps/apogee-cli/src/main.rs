@@ -274,6 +274,7 @@ enum FirstRunActionInput {
     SelectInstallLocation { path: PathBuf },
     SelectCredential(CredentialChoice),
     SelectRunner(FirstRunRunnerSelection),
+    ContinueWithoutPrefix,
     StartReady,
 }
 
@@ -298,7 +299,23 @@ impl From<FirstRunAccountInputDto> for FirstRunAccountInput {
 impl From<FirstRunActionInput> for CoreFirstRunAction {
     fn from(value: FirstRunActionInput) -> Self {
         match value {
-            FirstRunActionInput::ConfirmLegibility => Self::ConfirmLegibility,
+            FirstRunActionInput::ConfirmLegibility => {
+                let session = if cfg!(windows) {
+                    apogee_core::SessionType::Windows
+                } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                    apogee_core::SessionType::Wayland
+                } else if std::env::var_os("DISPLAY").is_some() {
+                    apogee_core::SessionType::X11
+                } else {
+                    apogee_core::SessionType::Unknown
+                };
+                Self::ConfirmLegibility(apogee_core::LegibilityReading {
+                    gpu: None,
+                    driver: None,
+                    session,
+                    render_tier: None,
+                })
+            }
             FirstRunActionInput::DecideImport(decision) => Self::DecideImport(decision),
             FirstRunActionInput::SaveAccount(account) => Self::SaveAccount(account.into()),
             FirstRunActionInput::InspectGame { path } => Self::InspectGame { path },
@@ -310,6 +327,7 @@ impl From<FirstRunActionInput> for CoreFirstRunAction {
                 Self::SelectCredential(credential)
             }
             FirstRunActionInput::SelectRunner(runner) => Self::SelectRunner(runner),
+            FirstRunActionInput::ContinueWithoutPrefix => Self::ContinueWithoutPrefix,
             FirstRunActionInput::StartReady => Self::StartReady,
         }
     }
@@ -3590,7 +3608,13 @@ mod tests {
         let action = parse_first_run_action(r#"{"kind":"confirm_legibility"}"#)
             .expect("the documented action shape parses");
 
-        assert!(matches!(action, CoreFirstRunAction::ConfirmLegibility));
+        assert!(matches!(
+            action,
+            CoreFirstRunAction::ConfirmLegibility(apogee_core::LegibilityReading {
+                render_tier: None,
+                ..
+            })
+        ));
     }
 
     #[test]

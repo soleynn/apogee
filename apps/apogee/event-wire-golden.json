@@ -76,6 +76,10 @@
     "kind": "firstRun",
     "code": "event-first-run",
     "firstRun": {
+      "position": {
+        "state": "step",
+        "value": "legibility"
+      },
       "legibility": null,
       "import": {
         "state": "discoveryPending"
@@ -86,6 +90,7 @@
       "credentialBackends": [],
       "credential": null,
       "runners": [],
+      "prefixFailure": null,
       "runnerAndPrefix": null,
       "ready": {
         "state": "pending"

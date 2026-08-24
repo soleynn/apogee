@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 const RENDER_FILE: &str = "render.json";
+#[cfg(unix)]
 const RENDER_MARKER: &str = "APOGEE_RENDER_TIER";
 const SAFE_RENDER_ENV: &str = "APOGEE_SAFE_RENDER";
 const MACHINE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -19,6 +20,7 @@ const HUMAN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_TIER: u8 = 3;
 const MAX_ESCALATIONS: u8 = 3;
 
+#[cfg(unix)]
 const TIER_VARIABLES: &[&str] = &[
     "__NV_DISABLE_EXPLICIT_SYNC",
     "WEBKIT_DISABLE_DMABUF_RENDERER",
@@ -44,6 +46,7 @@ pub(crate) enum RenderError {
     },
     #[error("render tier {value:?} is not one of 0, 1, 2, or 3")]
     InvalidTier { value: OsString },
+    #[cfg(unix)]
     #[error("the render child marker does not match the persisted attempt")]
     MarkerMismatch,
     #[cfg(unix)]
@@ -133,16 +136,22 @@ struct RenderProbe {
 
 impl RenderProbe {
     fn from_host() -> Self {
-        probe_with(Path::new("/sys"), |name| std::env::var_os(name))
+        probe_with(
+            Path::new("/sys"),
+            |name| std::env::var_os(name),
+            |path| fs::read_link(path).ok(),
+        )
     }
 
     const fn starting_tier(&self) -> u8 {
-        if !self.proprietary_nvidia {
-            0
-        } else if matches!(self.session, RenderSessionType::Wayland) {
-            1
+        if self.proprietary_nvidia {
+            match self.session {
+                RenderSessionType::Wayland => 1,
+                RenderSessionType::X11 => 2,
+                RenderSessionType::Windows | RenderSessionType::Unknown => 0,
+            }
         } else {
-            2
+            0
         }
     }
 }
@@ -307,7 +316,7 @@ pub(crate) fn preflight() -> Result<RenderPreflight, RenderError> {
     }
     #[cfg(not(unix))]
     {
-        let tier = overrides.forced.unwrap_or(RenderTier(0));
+        let tier = RenderTier(0);
         let record = RenderRecord {
             attempted: tier.value(),
             confirmed: Some(tier.value()),
@@ -640,7 +649,11 @@ impl RenderMonitor {
     }
 
     pub(crate) fn record_window_closed(&self) -> Result<(), RenderError> {
-        if self.lock().requires_human {
+        let state = self.lock();
+        let failed = state.retry_requested;
+        let requires_human = state.requires_human;
+        drop(state);
+        if requires_human && !failed {
             self.record_failure(RenderReason::WindowClosed)?;
         }
         Ok(())
@@ -759,9 +772,10 @@ pub(crate) async fn confirm_render(
         .map_err(|_| crate::IpcErrorDto::shell("shell.render.persist-failed"))
 }
 
-fn probe_with<F>(sys_root: &Path, env: F) -> RenderProbe
+fn probe_with<F, L>(sys_root: &Path, env: F, read_link: L) -> RenderProbe
 where
     F: Fn(&str) -> Option<OsString>,
+    L: Fn(&Path) -> Option<PathBuf>,
 {
     let session = session_type(&env);
     let mut proprietary_nvidia = false;
@@ -778,8 +792,7 @@ where
                 continue;
             }
             let driver = entry.path().join("device/driver");
-            let is_nvidia = fs::read_link(driver)
-                .ok()
+            let is_nvidia = read_link(&driver)
                 .and_then(|path| path.file_name().map(OsStr::to_owned))
                 .is_some_and(|name| name == "nvidia");
             if is_nvidia {
@@ -821,6 +834,7 @@ where
         Some(value) if value.eq_ignore_ascii_case("wayland") => RenderSessionType::Wayland,
         Some(value) if value.eq_ignore_ascii_case("x11") => RenderSessionType::X11,
         _ if env("WAYLAND_DISPLAY").is_some() => RenderSessionType::Wayland,
+        _ if env("DISPLAY").is_some() => RenderSessionType::X11,
         _ => RenderSessionType::Unknown,
     }
 }
@@ -867,7 +881,7 @@ mod tests {
     fn starting_tier_uses_every_nvidia_session_rule() {
         assert_eq!(probe(RenderSessionType::Wayland, true).starting_tier(), 1);
         assert_eq!(probe(RenderSessionType::X11, true).starting_tier(), 2);
-        assert_eq!(probe(RenderSessionType::Unknown, true).starting_tier(), 2);
+        assert_eq!(probe(RenderSessionType::Unknown, true).starting_tier(), 0);
         assert_eq!(probe(RenderSessionType::Wayland, false).starting_tier(), 0);
     }
 
@@ -959,42 +973,27 @@ mod tests {
         let drm = sys.join("class/drm");
         fs::create_dir_all(drm.join("card0/device")).unwrap();
         fs::create_dir_all(drm.join("card1/device")).unwrap();
-        fs::create_dir_all(sys.join("drivers/nouveau")).unwrap();
-        fs::create_dir_all(sys.join("drivers/nvidia")).unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(
-                sys.join("drivers/nouveau"),
-                drm.join("card0/device/driver"),
-            )
-            .unwrap();
-            std::os::unix::fs::symlink(sys.join("drivers/nvidia"), drm.join("card1/device/driver"))
-                .unwrap();
-        }
-        #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_dir(
-                sys.join("drivers/nouveau"),
-                drm.join("card0/device/driver"),
-            )
-            .unwrap();
-            std::os::windows::fs::symlink_dir(
-                sys.join("drivers/nvidia"),
-                drm.join("card1/device/driver"),
-            )
-            .unwrap();
-        }
         fs::write(drm.join("card1/device/device"), "0x1234\n").unwrap();
         fs::create_dir_all(sys.join("module/nvidia")).unwrap();
         fs::write(sys.join("module/nvidia/version"), "555.42\n").unwrap();
 
-        let observed = probe_with(sys, |name| {
-            (name == "XDG_SESSION_TYPE").then(|| OsString::from("wayland"))
-        });
+        let observed = probe_with(
+            sys,
+            |name| (name == "XDG_SESSION_TYPE").then(|| OsString::from("wayland")),
+            |path| {
+                if path.ends_with("card0/device/driver") {
+                    Some(PathBuf::from("nouveau"))
+                } else if path.ends_with("card1/device/driver") {
+                    Some(PathBuf::from("nvidia"))
+                } else {
+                    None
+                }
+            },
+        );
         assert!(observed.proprietary_nvidia);
         assert_eq!(observed.gpu.as_deref(), Some("NVIDIA 0x1234"));
         assert_eq!(observed.driver.as_deref(), Some("555.42"));
-        assert_eq!(observed.starting_tier(), 1);
+        assert_eq!(observed.starting_tier(), if cfg!(windows) { 0 } else { 1 });
     }
 
     #[test]

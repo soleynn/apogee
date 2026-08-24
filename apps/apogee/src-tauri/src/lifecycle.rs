@@ -123,13 +123,36 @@ pub(crate) async fn answer_close_request(
         .await
         .map_err(|_| IpcErrorDto::shell("shell.close.unavailable"))?;
     if close {
-        if let Some(window) = app.get_window("main") {
+        if let Some(window) = app.get_webview_window("main") {
             window
                 .destroy()
                 .map_err(|_| IpcErrorDto::shell("shell.close.failed"))?;
         }
     }
     Ok(close)
+}
+
+/// Honor core's detach decision without a second prompt: cancel unrelated shell work, wait for its
+/// terminal frames, and only then destroy the window while leaving the game process alone.
+pub(crate) async fn close_after_launch(
+    app: tauri::AppHandle,
+    runs: Runs,
+    prompts: std::sync::Arc<PromptBroker>,
+) {
+    if runs.cancel_all().is_err() {
+        tracing::error!("could not freeze work after the game detached");
+        return;
+    }
+    prompts.cancel_all();
+    if runs.wait_empty().await.is_err() {
+        tracing::error!("could not drain work after the game detached");
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main")
+        && window.destroy().is_err()
+    {
+        tracing::error!("could not close the launcher after the game detached");
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +233,6 @@ mod tests {
         assert!(token.is_cancelled(), "the token must fire before drain waits");
         assert!(!answer.is_finished());
         drop(lease);
-        assert_eq!(answer.await, Ok(Ok(true)));
+        assert_eq!(answer.await.expect("close answer task"), Ok(true));
     }
 }

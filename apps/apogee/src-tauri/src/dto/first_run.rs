@@ -3,10 +3,10 @@
 use apogee_core::{
     AccountChoice, CredentialBackend, CredentialBackendReading, CredentialBackendState,
     CredentialChoice, ExistingGameState, FirstRunAccountKind, FirstRunCheckpoint,
-    FirstRunImportCandidate, FirstRunImportSource, FirstRunRunnerSelection, GameCandidate,
-    GameCandidateState, GameChoice, ImportDecision, ImportState, LegibilityReading, PatchReading,
-    PrefixOutcome, ReadyAction, ReadyState, RunnerAndPrefixChoice, RunnerReading, SessionType,
-    SteamClientReading, Uuid,
+    FirstRunImportCandidate, FirstRunImportSource, FirstRunPosition, FirstRunRunnerSelection,
+    FirstRunStep, GameCandidate, GameCandidateState, GameChoice, ImportDecision, ImportState,
+    LegibilityReading, PatchReading, PrefixFailure, PrefixOutcome, ReadyAction, ReadyState,
+    RunnerAndPrefixChoice, RunnerReading, SessionType, SteamClientReading, Uuid,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -18,6 +18,7 @@ use crate::navigation::FirstRunSnapshot;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FirstRunDto {
+    position: FirstRunPositionDto,
     legibility: Option<LegibilityDto>,
     import: ImportStateDto,
     account: Option<AccountChoiceDto>,
@@ -26,6 +27,7 @@ pub(crate) struct FirstRunDto {
     credential_backends: Vec<CredentialBackendReadingDto>,
     credential: Option<CredentialChoiceDto>,
     runners: Vec<RunnerReadingDto>,
+    prefix_failure: Option<PrefixFailureDto>,
     runner_and_prefix: Option<RunnerAndPrefixChoiceDto>,
     ready: ReadyStateDto,
 }
@@ -42,6 +44,7 @@ impl FirstRunDto {
         snapshot: Option<&FirstRunSnapshot>,
     ) -> Self {
         Self {
+            position: FirstRunPositionDto::from(checkpoint.position),
             legibility: checkpoint.legibility.as_ref().map(LegibilityDto::from),
             import: ImportStateDto::from_observed(&checkpoint.import, snapshot),
             account: checkpoint.account.as_ref().map(AccountChoiceDto::from),
@@ -69,8 +72,15 @@ impl FirstRunDto {
             runners: checkpoint
                 .runners
                 .iter()
-                .map(RunnerReadingDto::from)
+                .enumerate()
+                .map(|(index, reading)| {
+                    RunnerReadingDto::from_observed(
+                        reading,
+                        snapshot.and_then(|value| value.runner_id(index)),
+                    )
+                })
                 .collect(),
+            prefix_failure: checkpoint.prefix_failure.as_ref().map(PrefixFailureDto::from),
             runner_and_prefix: checkpoint
                 .runner_and_prefix
                 .as_ref()
@@ -80,13 +90,82 @@ impl FirstRunDto {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PrefixFailureDto {
+    runner: FirstRunRunnerSelectionDto,
+    code: String,
+}
+
+impl From<&PrefixFailure> for PrefixFailureDto {
+    fn from(failure: &PrefixFailure) -> Self {
+        Self {
+            runner: FirstRunRunnerSelectionDto::from(&failure.runner),
+            code: failure.code.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "state",
+    content = "value",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum FirstRunPositionDto {
+    Step(FirstRunStepDto),
+    WaitingForImportDiscovery,
+    Complete,
+    Unknown,
+}
+
+impl From<FirstRunPosition> for FirstRunPositionDto {
+    fn from(position: FirstRunPosition) -> Self {
+        match position {
+            FirstRunPosition::Step(step) => Self::Step(FirstRunStepDto::from(step)),
+            FirstRunPosition::WaitingForImportDiscovery => Self::WaitingForImportDiscovery,
+            FirstRunPosition::Complete => Self::Complete,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum FirstRunStepDto {
+    Legibility,
+    Import,
+    Account,
+    Game,
+    CredentialBackend,
+    RunnerAndPrefix,
+    Ready,
+    Unknown,
+}
+
+impl From<FirstRunStep> for FirstRunStepDto {
+    fn from(step: FirstRunStep) -> Self {
+        match step {
+            FirstRunStep::Legibility => Self::Legibility,
+            FirstRunStep::Import => Self::Import,
+            FirstRunStep::Account => Self::Account,
+            FirstRunStep::Game => Self::Game,
+            FirstRunStep::CredentialBackend => Self::CredentialBackend,
+            FirstRunStep::RunnerAndPrefix => Self::RunnerAndPrefix,
+            FirstRunStep::Ready => Self::Ready,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LegibilityDto {
     gpu: Option<String>,
     driver: Option<String>,
     session: SessionTypeDto,
-    render_tier: u8,
+    render_tier: Option<u8>,
 }
 
 impl From<&LegibilityReading> for LegibilityDto {
@@ -100,18 +179,7 @@ impl From<&LegibilityReading> for LegibilityDto {
     }
 }
 
-impl LegibilityDto {
-    pub(crate) fn into_core(self) -> Option<LegibilityReading> {
-        Some(LegibilityReading {
-            gpu: self.gpu,
-            driver: self.driver,
-            session: self.session.into_core()?,
-            render_tier: self.render_tier,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(super) enum SessionTypeDto {
     Wayland,
@@ -128,17 +196,6 @@ impl From<SessionType> for SessionTypeDto {
             SessionType::Windows => Self::Windows,
             SessionType::Unknown => Self::Unknown,
             _ => Self::Unknown,
-        }
-    }
-}
-
-impl SessionTypeDto {
-    fn into_core(self) -> Option<SessionType> {
-        match self {
-            Self::Wayland => Some(SessionType::Wayland),
-            Self::X11 => Some(SessionType::X11),
-            Self::Windows => Some(SessionType::Windows),
-            Self::Unknown => Some(SessionType::Unknown),
         }
     }
 }
@@ -269,20 +326,9 @@ impl From<&AccountChoice> for AccountChoiceDto {
     }
 }
 
-impl AccountChoiceDto {
-    pub(crate) fn into_core(self) -> Option<AccountChoice> {
-        Some(AccountChoice {
-            square_enix_id: self.square_enix_id,
-            kind: self.kind.into_core()?,
-            never_save_password: self.never_save_password,
-            steam_client: self.steam_client.into_core()?,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub(super) enum FirstRunAccountKindDto {
+pub(crate) enum FirstRunAccountKindDto {
     Standard,
     Steam,
     FreeTrial,
@@ -301,7 +347,7 @@ impl From<FirstRunAccountKind> for FirstRunAccountKindDto {
 }
 
 impl FirstRunAccountKindDto {
-    fn into_core(self) -> Option<FirstRunAccountKind> {
+    pub(crate) fn into_core(self) -> Option<FirstRunAccountKind> {
         match self {
             Self::Standard => Some(FirstRunAccountKind::Standard),
             Self::Steam => Some(FirstRunAccountKind::Steam),
@@ -327,17 +373,6 @@ impl From<SteamClientReading> for SteamClientReadingDto {
             SteamClientReading::Missing => Self::Missing,
             SteamClientReading::NotRequired => Self::NotRequired,
             _ => Self::Unknown,
-        }
-    }
-}
-
-impl SteamClientReadingDto {
-    fn into_core(self) -> Option<SteamClientReading> {
-        match self {
-            Self::Present => Some(SteamClientReading::Present),
-            Self::Missing => Some(SteamClientReading::Missing),
-            Self::NotRequired => Some(SteamClientReading::NotRequired),
-            Self::Unknown => None,
         }
     }
 }
@@ -371,6 +406,7 @@ impl GameCandidateDto {
 pub(super) enum GameCandidateStateDto {
     Current { installed_bytes: u64 },
     NeedsUpdate(PatchReadingDto),
+    Installed { installed_bytes: u64 },
     NotAGame,
     Unreadable { code: String },
     Unknown,
@@ -385,6 +421,9 @@ impl From<&GameCandidateState> for GameCandidateStateDto {
             GameCandidateState::NeedsUpdate(reading) => {
                 Self::NeedsUpdate(PatchReadingDto::from(*reading))
             }
+            GameCandidateState::Installed { installed_bytes } => Self::Installed {
+                installed_bytes: *installed_bytes,
+            },
             GameCandidateState::NotAGame => Self::NotAGame,
             GameCandidateState::Unreadable { code } => Self::Unreadable { code: code.clone() },
             _ => Self::Unknown,
@@ -408,15 +447,6 @@ impl From<PatchReading> for PatchReadingDto {
     }
 }
 
-impl PatchReadingDto {
-    fn into_core(self) -> PatchReading {
-        PatchReading {
-            count: self.count,
-            bytes: self.bytes,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(
     tag = "choice",
@@ -431,8 +461,8 @@ pub(crate) enum GameChoiceDto {
     },
     Install {
         path: PathDto,
-        approximate_bytes: u64,
-        exact_download_bytes: u64,
+        approximate_bytes: Option<u64>,
+        exact_download_bytes: Option<u64>,
     },
     Unknown,
 }
@@ -468,6 +498,7 @@ impl From<&GameChoice> for GameChoiceDto {
 pub(crate) enum ExistingGameStateDto {
     Current,
     NeedsUpdate(PatchReadingDto),
+    UpdateUnknown,
     Unknown,
 }
 
@@ -478,6 +509,7 @@ impl From<ExistingGameState> for ExistingGameStateDto {
             ExistingGameState::NeedsUpdate(reading) => {
                 Self::NeedsUpdate(PatchReadingDto::from(reading))
             }
+            ExistingGameState::UpdateUnknown => Self::UpdateUnknown,
             _ => Self::Unknown,
         }
     }
@@ -592,15 +624,18 @@ impl CredentialChoiceDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunnerReadingDto {
+    #[ts(type = "string")]
+    id: Uuid,
     selection: FirstRunRunnerSelectionDto,
     version: Option<String>,
     recommended: bool,
     available: bool,
 }
 
-impl From<&RunnerReading> for RunnerReadingDto {
-    fn from(reading: &RunnerReading) -> Self {
+impl RunnerReadingDto {
+    fn from_observed(reading: &RunnerReading, id: Option<Uuid>) -> Self {
         Self {
+            id: id.unwrap_or_else(Uuid::nil),
             selection: FirstRunRunnerSelectionDto::from(&reading.selection),
             version: reading.version.clone(),
             recommended: reading.recommended,
@@ -709,7 +744,8 @@ impl From<&ReadyState> for ReadyStateDto {
 pub(crate) enum ReadyActionDto {
     Play,
     UpdateAndPlay(PatchReadingDto),
-    InstallAndPlay { bytes: u64 },
+    CheckAndPlay,
+    InstallAndPlay { bytes: Option<u64> },
     Unknown,
 }
 
@@ -720,19 +756,9 @@ impl From<ReadyAction> for ReadyActionDto {
             ReadyAction::UpdateAndPlay(reading) => {
                 Self::UpdateAndPlay(PatchReadingDto::from(reading))
             }
+            ReadyAction::CheckAndPlay => Self::CheckAndPlay,
             ReadyAction::InstallAndPlay { bytes } => Self::InstallAndPlay { bytes },
             _ => Self::Unknown,
-        }
-    }
-}
-
-impl ReadyActionDto {
-    pub(crate) fn into_core(self) -> Option<ReadyAction> {
-        match self {
-            Self::Play => Some(ReadyAction::Play),
-            Self::UpdateAndPlay(reading) => Some(ReadyAction::UpdateAndPlay(reading.into_core())),
-            Self::InstallAndPlay { bytes } => Some(ReadyAction::InstallAndPlay { bytes }),
-            Self::Unknown => None,
         }
     }
 }
@@ -745,6 +771,10 @@ mod tests {
     fn an_empty_checkpoint_keeps_every_pending_state_explicit() {
         let dto = FirstRunDto::from(&FirstRunCheckpoint::default());
 
+        assert_eq!(
+            dto.position,
+            FirstRunPositionDto::Step(FirstRunStepDto::Legibility)
+        );
         assert_eq!(dto.legibility, None);
         assert_eq!(dto.import, ImportStateDto::DiscoveryPending);
         assert_eq!(dto.ready, ReadyStateDto::Pending);

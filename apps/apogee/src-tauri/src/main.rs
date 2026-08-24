@@ -301,9 +301,15 @@ async fn execute(
 ) -> Result<Uuid, IpcErrorDto> {
     // Consume credential bytes before touching any other state, so the IPC allocation is guarded by
     // core's write-only Secret for the rest of the command body.
-    let command = command
-        .into_core(&state.navigation)
+    let mut command = command
+        .into_core(&state.navigation, &state.render)
         .map_err(|_| IpcErrorDto::shell("shell.command.invalid"))?;
+    if let Command::SupportBundle { facts, .. } = &mut command
+        && let Some(window) = app.get_webview_window("main")
+        && let Ok(scale) = window.scale_factor()
+    {
+        facts.push(("window_scale".to_owned(), scale.to_string()));
+    }
     let class = RunClass::for_command(&command);
     // The first store snapshot is the bootstrap boundary. No mutating flow starts before it has read
     // a single pre-flow view of every startup record.
@@ -316,8 +322,11 @@ async fn execute(
     let cancel = lease.cancellation();
     let navigation = state.navigation.clone();
     let assets = app.asset_protocol_scope();
+    let close_app = app.clone();
+    let close_runs = state.runs.clone();
+    let close_prompts = Arc::clone(&state.passphrases);
     tauri::async_runtime::spawn(async move {
-        supervisor::drive(
+        let close = supervisor::drive(
             core.as_ref(),
             command,
             cancel,
@@ -328,6 +337,9 @@ async fn execute(
         )
         .await;
         drop(lease);
+        if close {
+            lifecycle::close_after_launch(close_app, close_runs, close_prompts).await;
+        }
     });
     Ok(run_id)
 }

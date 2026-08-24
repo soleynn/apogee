@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apogee_core::{
-    AddonEvent, Command, Core, Event, FirstRunRequest, FrontierData, ImportData, ImportXivLauncher,
-    PatchProgress, Repo, SetupEvent, StableCode, Uuid,
+    AddonEvent, Command, Core, Event, FirstRunRequest, FlowState, FrontierData, ImportData,
+    ImportXivLauncher, PatchProgress, Repo, SetupEvent, StableCode, Uuid,
 };
 use tauri::ipc::Channel;
 use tokio_stream::{Stream, StreamExt};
@@ -74,7 +74,8 @@ pub(crate) async fn drive<D, S, A>(
     navigation: &NavigationState,
     assets: &A,
     sink: &S,
-) where
+) -> bool
+where
     D: Driver + ?Sized,
     S: EventSink + ?Sized,
     A: AssetRegistrar + ?Sized,
@@ -83,6 +84,7 @@ pub(crate) async fn drive<D, S, A>(
     let mut pending = HashMap::new();
     let mut observed = 0_u64;
     let mut flush = tokio::time::interval(Duration::from_millis(100));
+    let mut close_requested = false;
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // An interval's first tick is immediate. Consume it so a progress frame gets one complete
     // coalescing window rather than depending on which branch `select!` happens to poll first.
@@ -92,6 +94,7 @@ pub(crate) async fn drive<D, S, A>(
         tokio::select! {
             event = events.next() => {
                 let Some(event) = event else { break };
+                close_requested |= matches!(event, Event::State(FlowState::Detached));
                 if let Some(key) = progress_key(&event) {
                     observed = observed.saturating_add(1);
                     pending.insert(key, (observed, event));
@@ -104,6 +107,7 @@ pub(crate) async fn drive<D, S, A>(
         }
     }
     flush_pending(&mut pending, sink);
+    close_requested
 }
 
 fn observe_event<A: AssetRegistrar + ?Sized>(
@@ -229,7 +233,12 @@ pub(crate) enum RunClass {
 impl RunClass {
     pub(crate) fn for_command(command: &Command) -> Self {
         match command {
-            Command::Frontier(_) | Command::SupportBundle { .. } => Self::ReadOnly,
+            Command::Frontier(_)
+            | Command::SupportBundle { .. }
+            | Command::Prefix {
+                action: apogee_core::PrefixAction::Check,
+                ..
+            } => Self::ReadOnly,
             Command::FirstRun(FirstRunRequest::Read)
             | Command::ImportXivLauncher(ImportXivLauncher::Scan(_)) => Self::ReadOnly,
             _ => Self::Exclusive,
@@ -638,7 +647,7 @@ mod tests {
         drive(
             &driver,
             request
-                .into_core(&navigation)
+                .into_core(&navigation, &crate::render::RenderMonitor::disabled())
                 .unwrap_or(Command::Launch { profile }),
             CancellationToken::new(),
             Uuid::new_v4(),
@@ -867,13 +876,13 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_check_is_admitted_as_a_writer_of_profile_status() {
+    fn a_profile_check_can_overlap_other_read_only_work() {
         let command = Command::Prefix {
             profile: Uuid::nil(),
             action: apogee_core::PrefixAction::Check,
         };
 
-        assert_eq!(RunClass::for_command(&command), RunClass::Exclusive);
+        assert_eq!(RunClass::for_command(&command), RunClass::ReadOnly);
     }
 
     #[test]
@@ -967,7 +976,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished(), "the mutation lease still owns work");
         drop(mutation);
-        assert_eq!(waiter.await, Ok(Ok(())));
+        assert_eq!(waiter.await.expect("drain waiter task"), Ok(()));
 
         assert_eq!(runs.wait_empty().await, Ok(()));
     }

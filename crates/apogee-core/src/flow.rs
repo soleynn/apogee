@@ -44,6 +44,7 @@ use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo
 use crate::status::{PendingPatch, PendingRepo, StatusRecord, StoredDisposition, StoredPending};
 use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
+use crate::StableCode;
 
 /// The most register→patch rounds a single flow will attempt before giving up. The normal chain is
 /// at most three (boot patch → game patch → current); the cap only guards against a server that keeps
@@ -256,8 +257,8 @@ async fn first_run(
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
-    let checkpoint = match request {
-        FirstRunRequest::Read => {
+    let (checkpoint, start) = match request {
+        FirstRunRequest::Read => (
             crate::composition::read_first_run_checkpoint(
                 ctx.store.clone(),
                 ctx.runtime.clone(),
@@ -265,13 +266,46 @@ async fn first_run(
                 Arc::clone(&ctx.sealed_file),
                 cancel.clone(),
             )
-            .await?
-        }
+            .await?,
+            false,
+        ),
         FirstRunRequest::Advance(action) => {
-            advance_first_run(ctx, action, tx, cancel).await?
+            let start = matches!(action, crate::FirstRunAction::StartReady);
+            (advance_first_run(ctx, action, tx, cancel).await?, start)
         }
     };
     let _ = tx.send(Event::FirstRun(Box::new(checkpoint)));
+    if start {
+        let checkpoint = ctx.store.load_first_run()?;
+        let profile = checkpoint.profile_id.ok_or_else(|| CoreError::Init {
+            detail: "first-run profile identity is missing".to_owned(),
+        })?;
+        let action = match checkpoint.ready {
+            crate::ReadyState::Started(action) => action,
+            crate::ReadyState::Pending => {
+                return Err(CoreError::Init {
+                    detail: "first-run final action was not persisted".to_owned(),
+                });
+            }
+        };
+        let mode = match action {
+            crate::ReadyAction::InstallAndPlay { .. } => InstallMode::FromNothing,
+            crate::ReadyAction::Play
+            | crate::ReadyAction::UpdateAndPlay(_)
+            | crate::ReadyAction::CheckAndPlay => InstallMode::Update,
+        };
+        play(
+            ctx,
+            profile,
+            PasswordSource::Stored,
+            OtpSource::Totp,
+            mode,
+            true,
+            tx,
+            cancel,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -285,9 +319,9 @@ async fn advance_first_run(
 
     let checkpoint = ctx.store.load_first_run()?;
     let next = match action {
-        crate::FirstRunAction::ConfirmLegibility => crate::first_run::transition(
+        crate::FirstRunAction::ConfirmLegibility(reading) => crate::first_run::transition(
             &checkpoint,
-            Transition::ConfirmLegibility(native_legibility_reading()),
+            Transition::ConfirmLegibility(reading),
         )?,
         crate::FirstRunAction::DecideImport(decision) => {
             crate::first_run::transition(&checkpoint, Transition::DecideImport(decision))?
@@ -378,15 +412,8 @@ async fn advance_first_run(
         }
         crate::FirstRunAction::SelectRunner(runner) => {
             let selected_runner = runner.clone();
-            let choice = crate::RunnerAndPrefixChoice {
-                runner,
-                prefix: crate::PrefixOutcome::Ready,
-            };
-            // Validate the choice before changing a migrated checkpoint or touching the runtime.
-            let mut next = crate::first_run::transition(
-                &checkpoint,
-                Transition::FinishRunnerAndPrefix(choice),
-            )?;
+            crate::first_run::validate_runner_selection(&checkpoint, &selected_runner)?;
+            let mut next = checkpoint.clone();
             materialize_first_run_identities(ctx, &mut next)?;
             let profile_id = next.profile_id.ok_or_else(|| CoreError::Init {
                 detail: "first-run profile identity is missing".to_owned(),
@@ -404,8 +431,37 @@ async fn advance_first_run(
                 }
             };
             ctx.store.save_profile(&profile)?;
-            create_prefix(ctx, &profile, tx, cancel).await?;
-            next
+            match create_prefix(ctx, &profile, tx, cancel).await {
+                Ok(()) => crate::first_run::transition(
+                    &next,
+                    Transition::FinishRunnerAndPrefix(crate::RunnerAndPrefixChoice {
+                        runner,
+                        prefix: crate::PrefixOutcome::Ready,
+                    }),
+                )?,
+                Err(error) if is_cancellation(&error) => return Err(error),
+                Err(error) => {
+                    next.prefix_failure = Some(crate::PrefixFailure {
+                        runner,
+                        code: error.code().to_owned(),
+                    });
+                    crate::first_run::refresh_position(&mut next);
+                    next
+                }
+            }
+        }
+        crate::FirstRunAction::ContinueWithoutPrefix => {
+            let failure = checkpoint
+                .prefix_failure
+                .clone()
+                .ok_or(crate::FirstRunTransitionError::NoFailedPrefixAttempt)?;
+            crate::first_run::transition(
+                &checkpoint,
+                Transition::FinishRunnerAndPrefix(crate::RunnerAndPrefixChoice {
+                    runner: failure.runner,
+                    prefix: crate::PrefixOutcome::ContinueWithoutPrefix { code: failure.code },
+                }),
+            )?
         }
         crate::FirstRunAction::StartReady => {
             let action = crate::ready_action(&checkpoint).ok_or_else(|| CoreError::Init {
@@ -480,24 +536,6 @@ fn directory_bytes(root: &std::path::Path) -> u64 {
         }
     }
     total
-}
-
-fn native_legibility_reading() -> crate::LegibilityReading {
-    let session = if cfg!(windows) {
-        crate::SessionType::Windows
-    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        crate::SessionType::Wayland
-    } else if std::env::var_os("DISPLAY").is_some() {
-        crate::SessionType::X11
-    } else {
-        crate::SessionType::Unknown
-    };
-    crate::LegibilityReading {
-        gpu: None,
-        driver: None,
-        session,
-        render_tier: None,
-    }
 }
 
 fn installed_steam_client(kind: crate::FirstRunAccountKind) -> crate::SteamClientReading {
@@ -1886,6 +1924,7 @@ async fn launch_game(
     // with companions still to stop would leave them running with nothing left that knows about them.
     if settings.close_after_launch {
         if !addons.has_work() {
+            emit(tx, FlowState::Detached);
             return Ok(());
         }
         emit(tx, FlowState::SupervisingAddons);

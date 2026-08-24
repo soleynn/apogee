@@ -77,8 +77,9 @@ pub use first_run::{
     FirstRunCheckpoint,
     FirstRunImportCandidate, FirstRunImportSource, FirstRunPosition, FirstRunRunnerSelection,
     FirstRunStep, FirstRunTransitionError, GameCandidate, GameCandidateState,
-    GameChoice, ImportDecision, ImportState, LegibilityReading, PatchReading, PrefixOutcome,
-    ReadyAction, ReadyState, RunnerAndPrefixChoice, RunnerReading, SessionType, SteamClientReading,
+    GameChoice, ImportDecision, ImportState, LegibilityReading, PatchReading, PrefixFailure,
+    PrefixOutcome, ReadyAction, ReadyState, RunnerAndPrefixChoice, RunnerReading, SessionType,
+    SteamClientReading,
     first_incomplete, ready_action,
 };
 pub use model::{

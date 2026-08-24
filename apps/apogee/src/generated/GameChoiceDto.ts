@@ -2,4 +2,4 @@
 import type { ExistingGameStateDto } from "./ExistingGameStateDto";
 import type { PathDto } from "./PathDto";
 
-export type GameChoiceDto = { "choice": "existing", "value": { path: PathDto, state: ExistingGameStateDto, } } | { "choice": "install", "value": { path: PathDto, approximateBytes: number, exactDownloadBytes: number, } } | { "choice": "unknown" };
+export type GameChoiceDto = { "choice": "existing", "value": { path: PathDto, state: ExistingGameStateDto, } } | { "choice": "install", "value": { path: PathDto, approximateBytes: number | null, exactDownloadBytes: number | null, } } | { "choice": "unknown" };

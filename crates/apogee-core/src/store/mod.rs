@@ -211,13 +211,22 @@ impl Migrate for StatusRecord {
 }
 
 impl Migrate for FirstRunCheckpoint {
-    const CURRENT_VERSION: u32 = 2;
+    const CURRENT_VERSION: u32 = 3;
 
     fn migrate_step(from: u32, value: serde_json::Value) -> Result<serde_json::Value, String> {
         match from {
             // Machine-derived identities and optional size/readability facts all deserialize from
             // the prior shape through serde defaults and Option's ordinary representation.
             1 => Ok(value),
+            2 => {
+                let mut value = value;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| "first-run payload is not a JSON object".to_owned())?
+                    .entry("prefix_failure")
+                    .or_insert(serde_json::Value::Null);
+                Ok(value)
+            }
             other => Err(format!("no migration from schema version {other}")),
         }
     }

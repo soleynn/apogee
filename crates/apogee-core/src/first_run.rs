@@ -247,6 +247,13 @@ pub struct RunnerAndPrefixChoice {
     pub prefix: PrefixOutcome,
 }
 
+/// A prefix attempt that failed and is waiting for an explicit retry-or-continue decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixFailure {
+    pub runner: FirstRunRunnerSelection,
+    pub code: String,
+}
+
 /// Prefix preparation either succeeds or continues with an explicit degraded state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
@@ -299,6 +306,8 @@ pub struct FirstRunCheckpoint {
     pub credential_backends: Vec<CredentialBackendReading>,
     pub credential: Option<CredentialChoice>,
     pub runners: Vec<RunnerReading>,
+    #[serde(default)]
+    pub prefix_failure: Option<PrefixFailure>,
     pub runner_and_prefix: Option<RunnerAndPrefixChoice>,
     #[serde(default)]
     pub ready: ReadyState,
@@ -308,7 +317,7 @@ pub struct FirstRunCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FirstRunAction {
-    ConfirmLegibility,
+    ConfirmLegibility(LegibilityReading),
     DecideImport(ImportDecision),
     SaveAccount(FirstRunAccountInput),
     InspectGame { path: PathBuf },
@@ -316,6 +325,7 @@ pub enum FirstRunAction {
     SelectInstallLocation { path: PathBuf },
     SelectCredential(CredentialChoice),
     SelectRunner(FirstRunRunnerSelection),
+    ContinueWithoutPrefix,
     StartReady,
 }
 
@@ -356,6 +366,8 @@ pub enum FirstRunTransitionError {
     CredentialBackendNotReady { backend: CredentialBackend },
     #[error("runner is not available: {runner:?}")]
     RunnerNotAvailable { runner: FirstRunRunnerSelection },
+    #[error("there is no failed prefix attempt to continue from")]
+    NoFailedPrefixAttempt,
     #[error("ready action does not match the verified game state")]
     ReadyActionMismatch,
 }
@@ -492,15 +504,8 @@ pub fn transition(
         FirstRunTransition::FinishRunnerAndPrefix(choice)
             if position == FirstRunPosition::Step(FirstRunStep::RunnerAndPrefix) =>
         {
-            let available = next
-                .runners
-                .iter()
-                .any(|reading| reading.selection == choice.runner && reading.available);
-            if !available {
-                return Err(FirstRunTransitionError::RunnerNotAvailable {
-                    runner: choice.runner,
-                });
-            }
+            validate_runner_selection(&next, &choice.runner)?;
+            next.prefix_failure = None;
             next.runner_and_prefix = Some(choice);
         }
         FirstRunTransition::StartReady(action)
@@ -515,6 +520,23 @@ pub fn transition(
     }
     refresh_position(&mut next);
     Ok(next)
+}
+
+pub(crate) fn validate_runner_selection(
+    checkpoint: &FirstRunCheckpoint,
+    runner: &FirstRunRunnerSelection,
+) -> Result<(), FirstRunTransitionError> {
+    let available = checkpoint
+        .runners
+        .iter()
+        .any(|reading| &reading.selection == runner && reading.available);
+    if available {
+        Ok(())
+    } else {
+        Err(FirstRunTransitionError::RunnerNotAvailable {
+            runner: runner.clone(),
+        })
+    }
 }
 
 fn validate_game_choice(
