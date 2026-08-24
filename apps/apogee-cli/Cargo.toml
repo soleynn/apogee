@@ -13,6 +13,8 @@ tokio-util.workspace = true
 clap.workspace = true
 tracing-subscriber.workspace = true
 rpassword.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 # The prompt readers here are where a password or a one-time code exists as plain text on its way
 # into a `Secret`, so the buffer typed into is an erased one. A `String` left to drop is a copy
 # nothing further down can reach.
@@ -34,8 +36,6 @@ wine-integration = ["fixtures"]
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 tempfile.workspace = true
 # The hermetic patch e2e: a chaos server serves a real patch chain the CLI downloads and applies.
 apogee-test-support = { path = "../../crates/apogee-test-support" }

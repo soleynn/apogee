@@ -13,14 +13,15 @@ use std::process::ExitCode;
 
 use apogee_core::{
     ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
-    Core, CoreConfig, Deviation, Event, ExternalAddon, FileState, FlowState,
+    Core, CoreConfig, Deviation, Event, ExternalAddon, FileState, FirstRunRequest, FlowState,
     ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery,
     Gamescope, GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource,
     LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
     NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
     PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
     RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
-    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
+    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, StableCode, SyncChoice, Trigger,
+    Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -46,8 +47,17 @@ struct Cli {
     /// Print the stable presentation-code inventory, one identifier per line.
     #[arg(long, global = true, hide = true)]
     dump_codes: bool,
+    /// Render core command events as one stable JSON object per line.
+    #[arg(long, global = true)]
+    events_json: bool,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Clone, Copy)]
+enum EventFormat {
+    Human,
+    Json,
 }
 
 /// The environment variable read when `--log` is absent, so a filter can be set for a session or for
@@ -139,8 +149,11 @@ enum Commands {
     SupportBundle(SupportBundleArgs),
     /// Print the core-owned public diagnostic report.
     SystemReport(OptionalTargetArgs),
-    /// Print the resumable initial-setup checkpoint and its next required step.
-    FirstRun,
+    /// Read or advance the resumable initial-setup checkpoint.
+    FirstRun {
+        #[command(subcommand)]
+        action: Option<FirstRunAction>,
+    },
     /// Verify the install against its signed block indexes and re-fetch only what is broken.
     Repair(RepairArgs),
     /// Frame-consistency analysis over MangoHud frametime logs.
@@ -221,6 +234,22 @@ enum ImportCommand {
     Xivlauncher(XivImportArgs),
 }
 
+#[derive(Subcommand)]
+enum FirstRunAction {
+    /// Print the checkpoint and its next required step.
+    Show,
+    /// Apply one core-validated transition encoded as JSON.
+    Advance(FirstRunAdvanceArgs),
+}
+
+#[derive(Args)]
+struct FirstRunAdvanceArgs {
+    /// A serialized FirstRunTransition. The current checkpoint still validates its position and
+    /// every selected candidate before anything is persisted.
+    #[arg(long)]
+    transition_json: String,
+}
+
 #[derive(Args)]
 struct XivImportArgs {
     /// Data directory containing accountsList.json and launcherConfigV3.json.
@@ -228,10 +257,16 @@ struct XivImportArgs {
     /// Print the complete finding set without writing accepted rows.
     #[arg(long)]
     dry_run: bool,
+    /// Accept only this candidate id. Repeat to select several; omitted accepts every candidate.
+    #[arg(long = "accept")]
+    accepted: Vec<String>,
 }
 
 #[derive(Args)]
 struct SupportBundleArgs {
+    /// Print the stable disclosure list without creating an archive.
+    #[arg(long)]
+    contents: bool,
     /// Refuse to overwrite this output archive if it already exists.
     #[arg(long, default_value = "apogee-support.zip")]
     output: PathBuf,
@@ -262,6 +297,8 @@ enum SettingsCommand {
 
 #[derive(Subcommand)]
 enum AccountAction {
+    /// List every stored account, including one not yet attached to a profile.
+    List,
     /// Change the login id, licence kind, or one-time-password use for an existing account.
     Edit(AccountEditArgs),
 }
@@ -288,6 +325,8 @@ enum SecretsCommand {
     Status,
     /// Open the sealed secret file for this process without reading or changing a stored secret.
     Unlock,
+    /// Create the sealed secret file without changing which backend future writes use.
+    CreateFile,
     /// Forget this process's cached sealed-file key immediately.
     Seal,
     /// Save a profile's account password, read from the terminal.
@@ -891,6 +930,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         return steam_without_store(action);
     }
 
+    let event_format = if cli.events_json {
+        EventFormat::Json
+    } else {
+        EventFormat::Human
+    };
     let command = cli.command.ok_or("a command is required")?;
     let core = build_core()?;
     match command {
@@ -916,12 +960,13 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     password,
                     otp,
                 },
+                event_format,
             )
             .await)
         }
         Commands::Launch(args) => {
             let profile = resolve_profile(&core, &args.profile)?.id;
-            Ok(drive(&core, Command::Launch { profile }).await)
+            Ok(drive(&core, Command::Launch { profile }, event_format).await)
         }
         Commands::Play(args) => {
             let (profile, password, otp) = gather(&core, &args)?;
@@ -932,6 +977,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     password,
                     otp,
                 },
+                event_format,
             )
             .await)
         }
@@ -944,6 +990,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     password,
                     otp,
                 },
+                event_format,
             )
             .await)
         }
@@ -956,14 +1003,26 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     password,
                     otp,
                 },
+                event_format,
             )
             .await)
         }
-        Commands::News => Ok(drive(&core, Command::Frontier(FrontierQuery::News)).await),
-        Commands::Banners => Ok(drive(&core, Command::Frontier(FrontierQuery::Banners)).await),
+        Commands::News => Ok(drive(
+            &core,
+            Command::Frontier(FrontierQuery::News),
+            event_format,
+        )
+        .await),
+        Commands::Banners => Ok(drive(
+            &core,
+            Command::Frontier(FrontierQuery::Banners),
+            event_format,
+        )
+        .await),
         Commands::Gate(args) => Ok(drive(
             &core,
             Command::Frontier(FrontierQuery::Gate { wait: args.wait }),
+            event_format,
         )
         .await),
         Commands::Setup { action } => match action {
@@ -1018,6 +1077,12 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             ImportCommand::Xivlauncher(args) => import_xivlauncher(&core, args),
         },
         Commands::SupportBundle(args) => {
+            if args.contents {
+                for part in apogee_core::support_bundle_contents() {
+                    println!("{}", part.file_name());
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
             let profile = args
                 .profile
                 .as_deref()
@@ -1045,12 +1110,24 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             print!("{}", core.system_report(profile)?);
             Ok(ExitCode::SUCCESS)
         }
-        Commands::FirstRun => {
-            let checkpoint = core.first_run().await?;
-            println!("next\t{:?}", apogee_core::first_incomplete(&checkpoint));
-            println!("checkpoint\t{checkpoint:#?}");
-            Ok(ExitCode::SUCCESS)
-        }
+        Commands::FirstRun { action } => match action {
+            None | Some(FirstRunAction::Show) => {
+                let checkpoint = core.first_run().await?;
+                println!("next\t{:?}", apogee_core::first_incomplete(&checkpoint));
+                println!("checkpoint\t{checkpoint:#?}");
+                Ok(ExitCode::SUCCESS)
+            }
+            Some(FirstRunAction::Advance(args)) => {
+                let transition = serde_json::from_str(&args.transition_json)
+                    .map_err(|error| format!("invalid first-run transition JSON: {error}"))?;
+                Ok(drive(
+                    &core,
+                    Command::FirstRun(FirstRunRequest::Advance(transition)),
+                    event_format,
+                )
+                .await)
+            }
+        },
         Commands::Repair(args) => {
             let profile = resolve_profile(&core, &args.profile)?.id;
             let local_indexes = parse_local_indexes(&args.local_index)?;
@@ -1060,6 +1137,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     profile,
                     local_indexes,
                 },
+                event_format,
             )
             .await)
         }
@@ -1088,7 +1166,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             settings(&core, action)?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Prefix { action } => prefix(&core, action).await,
+        Commands::Prefix { action } => prefix(&core, action, event_format).await,
         #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
     }
@@ -1129,10 +1207,8 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             let report = core.secrets_report();
             println!("backend  {:?}", report.backend);
             println!("state    {:?}", report.state);
-            if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
-                println!("file     {}", core.secrets_path().display());
-                println!("at path  {:?}", core.secrets_file_state());
-            }
+            println!("file     {}", core.secrets_path().display());
+            println!("at path  {:?}", core.secrets_file_state());
             match &report.sandbox {
                 Some(sandbox) => println!("sandbox  {sandbox:?}"),
                 None => println!("sandbox  none"),
@@ -1143,6 +1219,10 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
         SecretsCommand::Unlock => {
             core.unlock_secrets_file()?;
             println!("opened the secret file for this process");
+            Ok(())
+        }
+        SecretsCommand::CreateFile => {
+            ensure_secrets_file(core)?;
             Ok(())
         }
         SecretsCommand::Seal => {
@@ -1288,50 +1368,8 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
     let mut settings = core.settings()?;
     let chosen = SecretBackend::from(choice);
 
-    if chosen == SecretBackend::EncryptedFile {
-        match core.secrets_file_state() {
-            FileState::Sealed { work } => {
-                println!(
-                    "using the secret file already at {} ({} KiB over {} passes)",
-                    core.secrets_path().display(),
-                    work.memory_kib(),
-                    work.passes()
-                );
-            }
-            FileState::Absent => {
-                println!("a secret file is weaker than a platform credential store, not stronger:");
-                println!("  it protects a copy of the file taken off this machine, no more");
-                println!("  anything running as you can read the file and watch you type");
-                println!("  a forgotten passphrase means the saved passwords are gone");
-                println!(
-                    "  the derived key is forgotten after five idle minutes, so expect another prompt"
-                );
-                if !confirmed("encrypt")? {
-                    println!("left alone");
-                    return Ok(());
-                }
-                let passphrase = read_new_passphrase()?;
-                core.create_secrets_file(Consent::granted(), &passphrase)?;
-                println!("created {}", core.secrets_path().display());
-            }
-            FileState::Unreadable => {
-                return Err(format!(
-                    "something at {} cannot be read",
-                    core.secrets_path().display()
-                )
-                .into());
-            }
-            // Anything else at the path, including a condition a later build reports, is refused
-            // rather than created over: the one thing that must never happen here is overwriting a
-            // store whose passphrase this run does not have.
-            _ => {
-                return Err(format!(
-                    "something at {} is not a secret file this build can open",
-                    core.secrets_path().display()
-                )
-                .into());
-            }
-        }
+    if chosen == SecretBackend::EncryptedFile && !ensure_secrets_file(core)? {
+        return Ok(());
     }
 
     settings.secret_backend = chosen;
@@ -1346,6 +1384,53 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
     }
     println!("takes effect on the next run; nothing already saved was moved or deleted");
     Ok(())
+}
+
+/// Ensure the sealed file exists, returning false only when creation was explicitly declined.
+fn ensure_secrets_file(core: &Core) -> Result<bool, CliError> {
+    match core.secrets_file_state() {
+        FileState::Sealed { work } => {
+            println!(
+                "using the secret file already at {} ({} KiB over {} passes)",
+                core.secrets_path().display(),
+                work.memory_kib(),
+                work.passes()
+            );
+        }
+        FileState::Absent => {
+            println!("a secret file is weaker than a platform credential store, not stronger:");
+            println!("  it protects a copy of the file taken off this machine, no more");
+            println!("  anything running as you can read the file and watch you type");
+            println!("  a forgotten passphrase means the saved passwords are gone");
+            println!(
+                "  the derived key is forgotten after five idle minutes, so expect another prompt"
+            );
+            if !confirmed("encrypt")? {
+                println!("left alone");
+                return Ok(false);
+            }
+            let passphrase = read_new_passphrase()?;
+            core.create_secrets_file(Consent::granted(), &passphrase)?;
+            println!("created {}", core.secrets_path().display());
+        }
+        FileState::Unreadable => {
+            return Err(format!(
+                "something at {} cannot be read",
+                core.secrets_path().display()
+            )
+            .into());
+        }
+        // Anything else at the path, including a condition a later build reports, is refused rather
+        // than created over: creation must never overwrite a store this build cannot open.
+        _ => {
+            return Err(format!(
+                "something at {} is not a secret file this build can open",
+                core.secrets_path().display()
+            )
+            .into());
+        }
+    }
+    Ok(true)
 }
 
 /// The launcher's own preferences, read and written whole.
@@ -1510,7 +1595,11 @@ fn render_gpu(gpu: &GpuSelect) -> String {
 
 /// Working on a profile's prefix. The destructive one confirms first: it discards everything
 /// installed into the prefix, including the settings the game keeps there.
-async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError> {
+async fn prefix(
+    core: &Core,
+    action: PrefixCommand,
+    event_format: EventFormat,
+) -> Result<ExitCode, CliError> {
     let (target, act) = match &action {
         PrefixCommand::Create(args) => (&args.profile, PrefixAction::Create),
         PrefixCommand::Health(args) => (&args.profile, PrefixAction::Check),
@@ -1550,6 +1639,7 @@ async fn prefix(core: &Core, action: PrefixCommand) -> Result<ExitCode, CliError
             profile,
             action: act,
         },
+        event_format,
     )
     .await)
 }
@@ -2083,7 +2173,7 @@ fn build_core() -> Result<Core, CliError> {
 }
 
 /// Run `cmd`, printing each event and wiring Ctrl-C to a targeted shutdown of the game.
-async fn drive(core: &Core, cmd: Command) -> ExitCode {
+async fn drive(core: &Core, cmd: Command, event_format: EventFormat) -> ExitCode {
     let cancel = CancellationToken::new();
     let on_signal = cancel.clone();
     tokio::spawn(async move {
@@ -2104,7 +2194,10 @@ async fn drive(core: &Core, cmd: Command) -> ExitCode {
         {
             malformed = true;
         }
-        println!("{}", render(&event));
+        match event_format {
+            EventFormat::Human => println!("{}", render(&event)),
+            EventFormat::Json => println!("{}", render_event_json(&event)),
+        }
     }
     match (outcome, malformed) {
         (Some(RunOutcome::Succeeded | RunOutcome::Cancelled), false) => ExitCode::SUCCESS,
@@ -2115,6 +2208,20 @@ async fn drive(core: &Core, cmd: Command) -> ExitCode {
 /// Edit the public fields of an account without replacing secret policy or delivery metadata.
 fn account(core: &Core, action: AccountAction) -> Result<(), CliError> {
     match action {
+        AccountAction::List => {
+            for account in core.accounts()? {
+                println!(
+                    "{}  user={}  kind={:?}  otp={}  delivery={:?}  never-store={}",
+                    account.id,
+                    account.sqex_id,
+                    account.kind,
+                    account.use_otp,
+                    account.otp_delivery,
+                    account.never_store
+                );
+            }
+            Ok(())
+        }
         AccountAction::Edit(args) => {
             let mut account = resolve_account(core, &args.target)?;
             apply_account_edit(&mut account, &args)?;
@@ -2944,12 +3051,20 @@ fn import_xivlauncher(core: &Core, args: XivImportArgs) -> Result<ExitCode, CliE
     if args.dry_run {
         return Ok(ExitCode::SUCCESS);
     }
-    let accepted = scan
-        .findings
-        .iter()
-        .filter(|finding| matches!(finding.result, ImportFindingResult::Candidate(_)))
-        .map(|finding| finding.id.clone());
-    let plan = scan.plan(accepted)?;
+    let plan = if args.accepted.is_empty() {
+        let accepted = scan
+            .findings
+            .iter()
+            .filter(|finding| matches!(finding.result, ImportFindingResult::Candidate(_)))
+            .map(|finding| finding.id.clone());
+        scan.plan(accepted)?
+    } else {
+        apogee_core::ImportPlan::from_selection_parts(
+            scan.source.clone(),
+            scan.fingerprint.as_str().to_owned(),
+            args.accepted,
+        )
+    };
     let report = core.apply_xivlauncher(&plan)?;
     println!("applied\t{}", report.applied.len());
     Ok(ExitCode::SUCCESS)
@@ -3258,8 +3373,16 @@ mod tests {
             for route in row.cli {
                 let argv = std::iter::once("apogee-cli").chain(route.iter().map(String::as_str));
                 let parsed = Cli::try_parse_from(argv);
+                let valid = match &parsed {
+                    Ok(_) => true,
+                    Err(error) => matches!(
+                        error.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                    ),
+                };
                 assert!(
-                    parsed.is_ok(),
+                    valid,
                     "{} maps to an invalid CLI route {:?}: {:?}",
                     row.ipc,
                     route,

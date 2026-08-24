@@ -3,11 +3,13 @@
     {
       "ipc": "startup",
       "cli": [
+        ["--version"],
+        ["account", "list"],
         ["profile", "list"],
         ["settings", "show"],
-        ["secrets", "status"]
+        ["settings", "defaults"]
       ],
-      "equivalence": "The desktop composes the same public profile, account, settings, and secret-backend readings that the terminal exposes separately."
+      "equivalence": "The desktop composes the same version, public profile and account rows, stored settings, and defaults that the terminal exposes as separate readings."
     },
     {
       "ipc": "secrets_report",
@@ -46,8 +48,8 @@
     },
     {
       "ipc": "support_bundle_contents",
-      "cli": [["support-bundle", "--output", "apogee-support.zip"]],
-      "equivalence": "The terminal creates the same core-owned redacted bundle whose contents the desktop previews."
+      "cli": [["support-bundle", "--contents"]],
+      "equivalence": "Print the same stable core-owned disclosure list without creating an archive."
     },
     {
       "ipc": "secrets_file_status",
@@ -61,8 +63,8 @@
     },
     {
       "ipc": "create_secrets_file",
-      "cli": [["secrets", "backend", "--to", "file"]],
-      "equivalence": "Selecting the sealed backend creates the file after the same confirmation and passphrase decisions when it is absent."
+      "cli": [["secrets", "create-file"]],
+      "equivalence": "Create the sealed file after the same confirmation and passphrase decisions without changing the selected backend."
     },
     {
       "ipc": "change_secrets_file_passphrase",
@@ -97,8 +99,12 @@
     },
     {
       "ipc": "update_settings",
-      "cli": [["settings", "set", "--language", "en-US"]],
-      "equivalence": "Persist launcher-wide settings through core validation."
+      "cli": [
+        ["settings", "set", "--language", "en-US"],
+        ["secrets", "backend", "--to", "platform"],
+        ["otp", "listener", "--bind", "127.0.0.1"]
+      ],
+      "equivalence": "Persist launcher-wide settings through core validation; security-sensitive backend and listener fields retain their dedicated terminal decisions."
     },
     {
       "ipc": "store_password",
@@ -165,7 +171,9 @@
         ["prefix", "fix", "--profile", "00000000-0000-0000-0000-000000000001"],
         ["prefix", "recreate", "--profile", "00000000-0000-0000-0000-000000000001", "--yes", "--backup-config"],
         ["first-run"],
+        ["first-run", "advance", "--transition-json", "{\"kind\":\"confirm_legibility\",\"value\":{\"gpu\":null,\"driver\":null,\"session\":\"unknown\",\"render_tier\":0}}"],
         ["import", "xivlauncher", "--dry-run"],
+        ["import", "xivlauncher", "--accept", "account:0"],
         ["news"],
         ["banners"],
         ["gate"],
