@@ -5,7 +5,9 @@ use std::sync::Arc;
 use apogee_core::{Core, Uuid};
 
 use crate::dto::IpcErrorDto;
-use crate::dto::read::{BundlePartDto, CatalogEntryDto, NextActionDto, ResolvedSetupDto};
+use crate::dto::read::{
+    BundlePartDto, CatalogEntryDto, NextActionDto, ResolvedSetupDto, SteamInstallDto,
+};
 use crate::dto::store::DefaultsDto;
 use crate::{ShellState, run_blocking};
 
@@ -99,6 +101,25 @@ pub(super) async fn support_bundle_contents() -> Result<Vec<BundlePartDto>, IpcE
         .into_iter()
         .map(BundlePartDto::from)
         .collect())
+}
+
+/// Discover user-owned Steam roots without exposing registration mutations to the webview.
+#[tauri::command]
+pub(super) async fn steam_installs() -> Result<Vec<SteamInstallDto>, IpcErrorDto> {
+    run_blocking(steam_install_rows).await
+}
+
+#[cfg(unix)]
+fn steam_install_rows() -> Vec<SteamInstallDto> {
+    apogee_core::steam_installs()
+        .iter()
+        .map(SteamInstallDto::from)
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn steam_install_rows() -> Vec<SteamInstallDto> {
+    Vec::new()
 }
 
 #[cfg(test)]

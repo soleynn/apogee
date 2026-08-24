@@ -48,6 +48,7 @@ macro_rules! ipc_surface {
             direct::dxvk_catalog,
             direct::system_report,
             direct::support_bundle_contents,
+            direct::steam_installs,
             secrets::secrets_file_status,
             secrets::unlock_secrets_file,
             secrets::create_secrets_file,
@@ -539,6 +540,25 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn compatibility_tool_mutations_are_not_webview_commands() {
+        assert!(
+            IPC_HANDLER_PATHS
+                .iter()
+                .any(|handler| handler.ends_with("steam_installs"))
+        );
+        assert!(
+            !IPC_HANDLER_PATHS
+                .iter()
+                .any(|handler| handler.contains("install_compat_tool"))
+        );
+        assert!(
+            !IPC_HANDLER_PATHS
+                .iter()
+                .any(|handler| handler.contains("remove_compat_tool"))
+        );
     }
 
     #[tokio::test]

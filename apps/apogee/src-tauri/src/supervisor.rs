@@ -140,6 +140,13 @@ fn observe_event<A: AssetRegistrar + ?Sized>(
                 import: crate::dto::ImportDto::from_observed(import, Some(scan_id)),
             }
         }
+        Event::FirstRun(checkpoint) => EventDto::FirstRun {
+            code: event.code(),
+            first_run: Box::new(crate::dto::first_run::FirstRunDto::from_observed(
+                checkpoint,
+                Some(navigation),
+            )),
+        },
         _ => EventDto::from(event),
     }
 }
@@ -429,6 +436,59 @@ mod tests {
         let json = serde_json::to_string(&addon).unwrap_or_default();
         assert!(!json.contains(&evidence.to_string_lossy().into_owned()));
         assert!(!json.contains("evidence"));
+    }
+
+    #[test]
+    fn observation_mints_process_local_first_run_candidate_ids() {
+        let navigation = NavigationState::default();
+        let import_path = std::path::PathBuf::from("private/import");
+        let game_path = std::path::PathBuf::from("private/game");
+        let checkpoint = apogee_core::FirstRunCheckpoint {
+            import: apogee_core::ImportState::Candidates(vec![
+                apogee_core::FirstRunImportCandidate {
+                    path: import_path.clone(),
+                    source: apogee_core::FirstRunImportSource::Core,
+                },
+            ]),
+            game_candidates: vec![apogee_core::GameCandidate {
+                path: game_path.clone(),
+                state: apogee_core::GameCandidateState::Current {
+                    installed_bytes: 42,
+                },
+            }],
+            ..apogee_core::FirstRunCheckpoint::default()
+        };
+
+        let event = observe_event(
+            &Event::FirstRun(Box::new(checkpoint)),
+            Uuid::new_v4(),
+            &navigation,
+            &NoAssets,
+        );
+        let json = serde_json::to_value(event).unwrap_or_default();
+        let import_id = json["firstRun"]["import"]["value"][0]["id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("opaque import candidate id");
+        let game_id = json["firstRun"]["gameCandidates"][0]["id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("opaque game candidate id");
+
+        assert!(matches!(
+            navigation.first_run_import(import_id),
+            Some(apogee_core::ImportDecision::Import(path)) if path == import_path
+        ));
+        assert!(matches!(
+            navigation.first_run_game(game_id),
+            Some(apogee_core::GameChoice::Existing { path, .. }) if path == game_path
+        ));
+        assert!(
+            NavigationState::default()
+                .first_run_import(import_id)
+                .is_none()
+        );
+        assert!(NavigationState::default().first_run_game(game_id).is_none());
     }
 
     impl EventSink for VecSink {

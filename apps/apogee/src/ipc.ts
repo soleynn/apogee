@@ -35,6 +35,7 @@ import type { UpdateSettingsRequestDto } from './generated/UpdateSettingsRequest
 import type { ActivityEntryDto } from './generated/ActivityEntry';
 import type { RevealTargetDto } from './generated/RevealTarget';
 import type { FolderSelectionDto } from './generated/FolderSelection';
+import type { SteamInstallDto } from './generated/SteamInstall';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -353,6 +354,11 @@ export function systemReport(profile: string | null = null): Promise<string> {
 /** Reads core's ordered preview of the entries included in a support archive. */
 export function supportBundleContents(): Promise<BundlePartDto[]> {
   return invokeIpc<BundlePartDto[]>('support_bundle_contents');
+}
+
+/** Reads user-owned Steam roots and compatibility-tool status without exposing mutations. */
+export function steamInstalls(): Promise<SteamInstallDto[]> {
+  return invokeIpc<SteamInstallDto[]>('steam_installs');
 }
 
 /** Opens only the ordinary HTTPS URL behind a row id issued by this core process. */

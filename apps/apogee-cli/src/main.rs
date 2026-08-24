@@ -205,7 +205,6 @@ enum Commands {
         action: PrefixCommand,
     },
     /// Start a profile from the Steam interface, on a handheld or anywhere else without a desktop.
-    #[cfg(unix)]
     Steam {
         #[command(subcommand)]
         action: SteamAction,
@@ -565,7 +564,6 @@ struct PrefixRecreateArgs {
     backup_config: bool,
 }
 
-#[cfg(unix)]
 #[derive(Subcommand)]
 enum SteamAction {
     /// Say what this machine is and whether Steam has been told about any profile.
@@ -978,7 +976,6 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     // Reading what the machine is, and withdrawing a registration, are answerable without the store.
     // They have to be: the environment a game session hands a program is minimal, and these are the
     // two commands worth running when a launch from that session has gone wrong.
-    #[cfg(unix)]
     if let Some(Commands::Steam { action }) = &cli.command
         && !matches!(action, SteamAction::Register(_))
     {
@@ -1238,7 +1235,6 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Prefix { action } => prefix(&core, action, event_format).await,
-        #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
     }
 }
@@ -1843,6 +1839,20 @@ fn steam_without_store(action: &SteamAction) -> Result<ExitCode, CliError> {
     }
 }
 
+#[cfg(not(unix))]
+fn steam_without_store(action: &SteamAction) -> Result<ExitCode, CliError> {
+    match action {
+        SteamAction::Status => {
+            println!("steam: compatibility-tool discovery is unavailable on this platform");
+            Ok(ExitCode::SUCCESS)
+        }
+        SteamAction::Unregister => {
+            Err("steam compatibility-tool registration is unavailable on this platform".into())
+        }
+        SteamAction::Register(_) => Ok(ExitCode::SUCCESS),
+    }
+}
+
 /// The machine, in the words a user would use for it rather than the name of a variant.
 ///
 /// The model a future handheld reports is a model this build has no name for, and saying so beats
@@ -1897,6 +1907,11 @@ fn steam_register(core: &Core, action: SteamAction) -> Result<ExitCode, CliError
     println!("runs: {}", written.command);
     println!("restart steam for it to appear in the compatibility tool list");
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(not(unix))]
+fn steam_register(_core: &Core, _action: SteamAction) -> Result<ExitCode, CliError> {
+    Err("steam compatibility-tool registration is unavailable on this platform".into())
 }
 
 /// The Steam installation to act on: the first one found, since the search is ordered by how

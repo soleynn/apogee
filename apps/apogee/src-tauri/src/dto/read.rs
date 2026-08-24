@@ -7,7 +7,35 @@ use apogee_core::{
 use serde::Serialize;
 use ts_rs::TS;
 
+use super::path::PathDto;
 use super::store::GpuSelectDto;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "SteamInstall.ts")]
+pub(crate) struct SteamInstallDto {
+    path: PathDto,
+    confined: bool,
+    compat_tool_installed: bool,
+}
+
+#[cfg(unix)]
+impl From<&apogee_core::SteamInstall> for SteamInstallDto {
+    fn from(install: &apogee_core::SteamInstall) -> Self {
+        Self::new(&install.path, install.confined)
+    }
+}
+
+#[cfg(unix)]
+impl SteamInstallDto {
+    fn new(path: &std::path::Path, confined: bool) -> Self {
+        Self {
+            path: PathDto::from(path),
+            confined,
+            compat_tool_installed: apogee_core::installed_compat_tool(path).is_some(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -279,6 +307,33 @@ impl From<BundlePart> for BundlePartDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_install_keeps_path_confinement_and_registration_status() {
+        let install = SteamInstallDto {
+            path: PathDto::from(std::path::Path::new("steam-root")),
+            confined: true,
+            compat_tool_installed: false,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&install).unwrap_or_default(),
+            r#"{"path":{"display":"steam-root","value":{"kind":"utf8","value":"steam-root"}},"confined":true,"compatToolInstalled":false}"#
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn steam_install_projection_reads_the_actual_registration() {
+        let root = tempfile::TempDir::new().expect("temporary Steam root");
+        assert!(!SteamInstallDto::new(root.path(), false).compat_tool_installed);
+
+        apogee_core::CompatTool::new(root.path().join("apogee-cli"), Vec::new())
+            .install(root.path())
+            .expect("compatibility-tool registration");
+
+        assert!(SteamInstallDto::new(root.path(), false).compat_tool_installed);
+    }
 
     #[test]
     fn next_action_keeps_every_decision_field() {

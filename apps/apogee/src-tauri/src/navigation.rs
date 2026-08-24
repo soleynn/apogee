@@ -4,7 +4,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use apogee_core::{Core, ImportPlan, ImportScan, SupportBundleData, Uuid};
+use apogee_core::{
+    Core, ExistingGameState, FirstRunImportCandidate, GameCandidate, GameCandidateState,
+    GameChoice, ImportDecision, ImportPlan, ImportScan, SupportBundleData, Uuid,
+};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 use ts_rs::TS;
@@ -79,6 +82,8 @@ pub(crate) struct NavigationState(Arc<Mutex<Registry>>);
 struct Registry {
     folders: HashMap<Uuid, PathBuf>,
     import_scans: HashMap<Uuid, ImportScan>,
+    first_run_imports: HashMap<Uuid, FirstRunImportCandidate>,
+    first_run_games: HashMap<Uuid, GameCandidate>,
     evidence: HashMap<(Uuid, Uuid), PathBuf>,
     pending_support_bundle: Option<SupportBundleData>,
     support_bundle: Option<PathBuf>,
@@ -112,6 +117,40 @@ impl NavigationState {
             scan.fingerprint.as_str().to_owned(),
             accepted,
         ))
+    }
+
+    pub(crate) fn register_first_run_import(&self, candidate: FirstRunImportCandidate) -> Uuid {
+        let id = Uuid::new_v4();
+        self.lock().first_run_imports.insert(id, candidate);
+        id
+    }
+
+    pub(crate) fn first_run_import(&self, id: Uuid) -> Option<ImportDecision> {
+        self.lock()
+            .first_run_imports
+            .get(&id)
+            .map(|candidate| ImportDecision::Import(candidate.path.clone()))
+    }
+
+    pub(crate) fn register_first_run_game(&self, candidate: GameCandidate) -> Uuid {
+        let id = Uuid::new_v4();
+        self.lock().first_run_games.insert(id, candidate);
+        id
+    }
+
+    pub(crate) fn first_run_game(&self, id: Uuid) -> Option<GameChoice> {
+        let registry = self.lock();
+        let candidate = registry.first_run_games.get(&id)?;
+        let state = match candidate.state {
+            GameCandidateState::Current { .. } => ExistingGameState::Current,
+            GameCandidateState::NeedsUpdate(reading) => ExistingGameState::NeedsUpdate(reading),
+            GameCandidateState::NotAGame | GameCandidateState::Unreadable { .. } => return None,
+            _ => return None,
+        };
+        Some(GameChoice::Existing {
+            path: candidate.path.clone(),
+            state,
+        })
     }
 
     pub(crate) fn register_evidence(&self, run: Uuid, path: PathBuf) -> Uuid {
@@ -651,6 +690,7 @@ mod tests {
         let temporary = tempfile::TempDir::new().unwrap();
         let source = temporary.path().join("import-source");
         std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("accountsList.json"), b"[]").unwrap();
         let navigation = NavigationState::default();
         let selection = navigation.register_folder(source.clone());
         assert_eq!(navigation.folder(selection.id()), Some(source.clone()));

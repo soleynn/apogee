@@ -36,6 +36,7 @@ import {
   setNeverStore,
   storePassword,
   startup,
+  steamInstalls,
   supportBundleContents,
   submitPassphrase,
   systemReport,
@@ -384,16 +385,18 @@ describe('direct core reads', () => {
     expect(invoke).toHaveBeenNthCalledWith(3, 'dxvk_catalog', { profile: 'profile-id' });
   });
 
-  it('uses independent methods for catalogs, defaults, and support previews', async () => {
+  it('uses independent methods for catalogs, defaults, support previews, and Steam status', async () => {
     vi.mocked(invoke).mockResolvedValue([]);
 
     await runnerCatalog();
     await defaults();
     await supportBundleContents();
+    await steamInstalls();
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'runner_catalog');
     expect(invoke).toHaveBeenNthCalledWith(2, 'defaults');
     expect(invoke).toHaveBeenNthCalledWith(3, 'support_bundle_contents');
+    expect(invoke).toHaveBeenNthCalledWith(4, 'steam_installs');
   });
 
   it('requests core-composed reports with an optional profile only', async () => {

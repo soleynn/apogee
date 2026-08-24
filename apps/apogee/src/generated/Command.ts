@@ -3,7 +3,6 @@ import type { CallerFactDto } from "./CallerFactDto";
 import type { FirstRunRequestDto } from "./FirstRunRequestDto";
 import type { FrontierQueryDto } from "./FrontierQueryDto";
 import type { ImportXivLauncherDto } from "./ImportXivLauncherDto";
-import type { LocalIndexDto } from "./LocalIndexDto";
 import type { OtpSourceDto } from "./OtpSourceDto";
 import type { PasswordSourceDto } from "./PasswordSourceDto";
 import type { PrefixActionDto } from "./PrefixActionDto";
@@ -11,4 +10,4 @@ import type { PrefixActionDto } from "./PrefixActionDto";
 /**
  * Commands accepted from the webview. Each arm only converts shape; all decisions remain in core.
  */
-export type CommandDto = { "kind": "login", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "launch", profile: string, } | { "kind": "patchAndPlay", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "patch", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "install", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "repair", profile: string, localIndexes: Array<LocalIndexDto>, } | { "kind": "prefix", profile: string, action: PrefixActionDto, } | { "kind": "firstRun", request: FirstRunRequestDto, } | { "kind": "importXivLauncher", request: ImportXivLauncherDto, } | { "kind": "frontier", query: FrontierQueryDto, } | { "kind": "supportBundle", profile: string | null, facts: Array<CallerFactDto>, };
+export type CommandDto = { "kind": "login", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "launch", profile: string, } | { "kind": "patchAndPlay", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "patch", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "install", profile: string, password: PasswordSourceDto, otp: OtpSourceDto, } | { "kind": "repair", profile: string, } | { "kind": "prefix", profile: string, action: PrefixActionDto, } | { "kind": "firstRun", request: FirstRunRequestDto, } | { "kind": "importXivLauncher", request: ImportXivLauncherDto, } | { "kind": "frontier", query: FrontierQueryDto, } | { "kind": "supportBundle", profile: string | null, facts: Array<CallerFactDto>, };
