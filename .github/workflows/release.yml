@@ -42,7 +42,7 @@ jobs:
           fi
       - name: Generate release notes
         id: git-cliff
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: ${{ steps.tag.outputs.cliff_args }}
@@ -50,7 +50,7 @@ jobs:
       # for each target so the release carries self-contained archives plus sha256 sidecars.
       - name: Set up Rust
         if: steps.tag.outputs.prerelease == 'false'
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master # zizmor: ignore[ref-version-mismatch]
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master # zizmor: ignore[ref-version-mismatch]
         with:
           toolchain: "1.97.0"
           targets: x86_64-pc-windows-gnu
