@@ -64,6 +64,11 @@ pub enum CoreError {
     RunnerUnsupported { profile: Uuid, runner: String },
     #[error("no account with id {0}")]
     NoAccount(Uuid),
+    /// A profile write would let code run beside the game that the stored profile does not, and the
+    /// caller did not carry the user's consent for it. `what` is the program switch or the companion
+    /// row's program that needs it. Nothing was written.
+    #[error("turning on {what} for profile {profile} needs the user's consent")]
+    ConsentRequired { profile: Uuid, what: String },
     #[error("profile removal changed while awaiting confirmation for {profile}")]
     RemovalPlanChanged { profile: Uuid },
     #[error("the account password is not valid text")]

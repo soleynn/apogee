@@ -907,11 +907,118 @@ impl Core {
     /// # Errors
     /// Returns [`CoreError::NoAccount`] if the profile points at no stored account, or a
     /// [`CoreError::Store`] if the profile cannot be written.
+    ///
+    /// Refused with [`CoreError::ConsentRequired`], writing nothing, when the write would newly let
+    /// code run beside the game: a companion program switched on, or a companion row of the user's own
+    /// that is new, changed, or switched back on. Those go through [`Core::save_profile_with_consent`].
+    /// Anything else, including switching any of them off, needs no consent.
     pub fn save_profile(&self, profile: &Profile) -> Result<(), CoreError> {
+        let stored = match self.store.load_profile(profile.id) {
+            Ok(stored) => stored,
+            // A new profile is checked against one that runs nothing beside the game.
+            Err(StoreError::NotFound { .. }) => Profile {
+                launch: crate::LaunchSettings::default(),
+                external: Vec::new(),
+                ..profile.clone()
+            },
+            Err(other) => return Err(other.into()),
+        };
+        if let Some(what) = crate::program::consent_needed(&stored, profile) {
+            return Err(CoreError::ConsentRequired {
+                profile: profile.id,
+                what,
+            });
+        }
+        self.write_profile(profile)
+    }
+
+    /// Persist `profile` with the user's consent to whatever it newly runs beside the game.
+    ///
+    /// # Errors
+    /// As [`Core::save_profile`], less the consent refusal.
+    pub fn save_profile_with_consent(
+        &self,
+        profile: &Profile,
+        // Taken by value and never read. Holding one is the whole of what it proves, and consuming it
+        // stops a caller keeping one around to authorize a second write with.
+        _consent: crate::ProgramConsent,
+    ) -> Result<(), CoreError> {
+        self.write_profile(profile)
+    }
+
+    fn write_profile(&self, profile: &Profile) -> Result<(), CoreError> {
         self.store.save_profile(profile).map_err(|e| match e {
             StoreError::NotFound { .. } => CoreError::NoAccount(profile.account),
             other => other.into(),
         })
+    }
+
+    /// Switch `program` on for `profile`, with the user's consent. Nothing is installed or contacted:
+    /// the next launch or prefix repair is what installs it.
+    ///
+    /// # Errors
+    /// [`CoreError::NoProfile`] if there is no such profile, or the store's own failure.
+    pub fn enable_program(
+        &self,
+        profile: Uuid,
+        program: crate::ProgramName,
+        consent: crate::ProgramConsent,
+    ) -> Result<Profile, CoreError> {
+        let mut record = stored_profile(&self.store, profile)?;
+        program.set(&mut record.launch, true);
+        self.save_profile_with_consent(&record, consent)?;
+        Ok(record)
+    }
+
+    /// Switch `program` off for `profile`. Nothing is deleted: it is no longer installed, gated,
+    /// fetched or started, and its files stay in the prefix, so switching it back on is free.
+    ///
+    /// # Errors
+    /// [`CoreError::NoProfile`] if there is no such profile, or the store's own failure.
+    pub fn disable_program(
+        &self,
+        profile: Uuid,
+        program: crate::ProgramName,
+    ) -> Result<Profile, CoreError> {
+        let mut record = stored_profile(&self.store, profile)?;
+        program.set(&mut record.launch, false);
+        self.write_profile(&record)?;
+        Ok(record)
+    }
+
+    /// Each program's switch on `profile`, with what the signed catalog says about it.
+    ///
+    /// Reads the hosted catalog and falls back to the last one that verified, as a launch does. A row
+    /// is `None` when neither is usable or the catalog carries none for that program, which is not an
+    /// error: the switch is still the profile's to report.
+    ///
+    /// # Errors
+    /// [`CoreError::NoProfile`] if there is no such profile, or the store's own failure.
+    pub async fn program_settings(
+        &self,
+        profile: Uuid,
+    ) -> Result<Vec<crate::ProgramSetting>, CoreError> {
+        let store = self.store.clone();
+        let record = blocking_read("program profile", move || {
+            stored_profile(&store, profile).map_err(Box::new)
+        })
+        .await?;
+        // The catalog's own narration (an unreachable host, a fallback to the cached copy) has no
+        // stream to go to here; it is logged by the layer, and a missing row is the report.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let rows = self
+            .addons
+            .program_rows(&CancellationToken::new(), &tx)
+            .await
+            .unwrap_or_default();
+        Ok(crate::ProgramName::ALL
+            .into_iter()
+            .map(|program| crate::ProgramSetting {
+                program,
+                enabled: program.is_on(&record.launch),
+                row: rows.iter().find(|row| row.program == program).cloned(),
+            })
+            .collect())
     }
 
     /// Delete the profile with `id`.
@@ -1840,6 +1947,55 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let core = Core::new(CoreConfig::with_base(dir.path())).unwrap();
         (dir, core)
+    }
+
+    /// Turning a companion on through the plain write is refused and writes nothing; the consented
+    /// write lands, and switching it off again needs nothing. A new profile that arrives with one on
+    /// is refused the same way, so creating a profile is not a way around the question.
+    #[test]
+    fn a_companion_switched_on_without_consent_is_refused_and_nothing_is_written() {
+        let (_dir, core) = core();
+        let account = Account::new("me", AccountKind::Standard);
+        core.save_account(&account).unwrap();
+        let mut profile = Profile::new(
+            "Main",
+            account.id,
+            "/games/ffxiv".into(),
+            crate::RunnerSelection::Unchosen,
+        );
+        let mut arriving_on = profile.clone();
+        arriving_on.launch.act = true;
+        assert!(matches!(
+            core.save_profile(&arriving_on),
+            Err(CoreError::ConsentRequired { ref what, .. }) if what == "act"
+        ));
+        assert!(matches!(
+            core.profile(profile.id),
+            Err(CoreError::NoProfile(_))
+        ));
+
+        core.save_profile(&profile).unwrap();
+        profile.launch.xivalexander = true;
+        assert!(matches!(
+            core.save_profile(&profile),
+            Err(CoreError::ConsentRequired { ref what, .. }) if what == "xivalexander"
+        ));
+        assert!(!core.profile(profile.id).unwrap().launch.xivalexander);
+
+        let on = core
+            .enable_program(
+                profile.id,
+                crate::ProgramName::Xivalexander,
+                crate::ProgramConsent::granted(),
+            )
+            .unwrap();
+        assert!(on.launch.xivalexander);
+        // A shell round-tripping the stored profile unchanged is not refused.
+        core.save_profile(&on).unwrap();
+        let off = core
+            .disable_program(profile.id, crate::ProgramName::Xivalexander)
+            .unwrap();
+        assert!(!off.launch.xivalexander);
     }
 
     #[tokio::test(flavor = "current_thread")]

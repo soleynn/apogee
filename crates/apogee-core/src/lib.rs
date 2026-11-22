@@ -21,6 +21,7 @@ mod host;
 mod launch;
 mod model;
 mod patch;
+mod program;
 mod redirect;
 mod setup;
 mod status;
@@ -85,6 +86,7 @@ pub use model::{
     PrefixSelection, Profile, Region, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
     SecretBackend, Settings,
 };
+pub use program::{ProgramConsent, ProgramName, ProgramRow, ProgramSetting, ProgramTier};
 pub use setup::{Provenance, ResolvedSetup, SetupValue};
 pub use sqex_proto::Transport;
 pub use status::{NextAction, NextCommand, NextVerb, PendingReading};

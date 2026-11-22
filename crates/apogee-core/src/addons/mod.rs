@@ -204,6 +204,14 @@ pub(crate) trait AddonBackend: Send + Sync {
         events: &UnboundedSender<Event>,
     ) -> Option<Vec<String>>;
 
+    /// The catalog's rows for the curated programs, for a status report. Reads the hosted catalog
+    /// and falls back to the last verified one, as a launch does; `None` is neither being usable.
+    async fn program_rows(
+        &self,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Option<Vec<crate::ProgramRow>>;
+
     /// Start the profile's companions for a game that is already running: the curated `programs`
     /// that passed their gates first, then the user's own `addons`.
     ///

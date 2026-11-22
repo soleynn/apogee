@@ -241,6 +241,14 @@ impl AddonBackend for FakeAddons {
         self.missing.clone()
     }
 
+    async fn program_rows(
+        &self,
+        _cancel: &CancellationToken,
+        _events: &UnboundedSender<Event>,
+    ) -> Option<Vec<crate::ProgramRow>> {
+        None
+    }
+
     async fn start(
         &self,
         game_pid: i32,

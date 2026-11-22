@@ -20,9 +20,9 @@ use apogee_core::{
     ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
     ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand, NextVerb, Notice,
     OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction, PrefixReport,
-    Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID,
-    STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep, SecretsError,
-    Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
+    Profile, ProgramConsent, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection,
+    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
+    SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -2495,7 +2495,8 @@ async fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
                 None => None,
             };
             apply_profile_edit(&mut profile, &args, runner)?;
-            core.save_profile(&profile)?;
+            // The user typed every flag on this line, including any that turns a companion on.
+            core.save_profile_with_consent(&profile, ProgramConsent::granted())?;
             println!("updated profile {} \"{}\"", profile.id, profile.name);
             Ok(())
         }
@@ -2933,7 +2934,7 @@ fn addon(core: &Core, action: AddonAction) -> Result<(), CliError> {
                 profile.external.len()
             );
             profile.external.push(addon);
-            core.save_profile(&profile)?;
+            core.save_profile_with_consent(&profile, ProgramConsent::granted())?;
             Ok(())
         }
         AddonAction::Remove(args) => {
@@ -2956,7 +2957,7 @@ fn set_enabled(core: &Core, args: &AddonIndexArgs, on: bool) -> Result<(), CliEr
         .ok_or_else(|| out_of_range(args.index))?;
     addon.set_enabled(on);
     let program = addon.program().display().to_string();
-    core.save_profile(&profile)?;
+    core.save_profile_with_consent(&profile, ProgramConsent::granted())?;
     println!("{} tool {program}", if on { "enabled" } else { "disabled" });
     Ok(())
 }

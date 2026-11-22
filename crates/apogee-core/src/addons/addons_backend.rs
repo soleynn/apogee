@@ -141,6 +141,23 @@ impl AddonBackend for AddonsBackend {
         missing
     }
 
+    async fn program_rows(
+        &self,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Option<Vec<crate::ProgramRow>> {
+        let (setup, relay) = relay_setup(events);
+        let manifest = self.catalog_manifest(cancel, &setup).await;
+        finish(setup, relay).await;
+        let manifest = manifest?;
+        Some(
+            crate::ProgramName::ALL
+                .into_iter()
+                .filter_map(|name| crate::program::row(manifest.rows(), name))
+                .collect(),
+        )
+    }
+
     async fn start(
         &self,
         game_pid: i32,

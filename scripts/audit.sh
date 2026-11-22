@@ -255,7 +255,7 @@ hits=$(grep -rnE 'XChaCha20Poly1305|Argon2|getrandom::' crates/apogee-secrets/sr
 #    creating a store on the user's behalf, which is the silent fallback the design refuses. The crate
 #    that defines the token is exempt, because its own tests construct one; `apps/` is where the
 #    layers that can actually ask a user live, so it is not scanned.
-hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^crates/apogee-secrets/src/' | grep -v 'ListenerConsent::granted' || true)
+hits=$(grep -rn 'Consent::granted' crates/*/src --include='*.rs'   | grep -v '^crates/apogee-secrets/src/' | grep -v 'ListenerConsent::granted' | grep -v 'ProgramConsent::granted' || true)
 [ -z "$hits" ] || report "a library mints its own fallback-store consent" "$hits"
 
 # 8b. The same rule for the other thing only a user may ask for: opening a port on their network while
@@ -275,6 +275,25 @@ hits=$(find_src crates -path '*/src/*' -name '*.rs' -not -name 'tests.rs' \
   | while read -r f; do scan_source "$f"; done \
   | grep 'ListenerConsent::granted' || true)
 [ -z "$hits" ] || report "a library opens a network port on the user's behalf" "$hits"
+
+# 8c. The same rule for running a third-party program beside the game. Switching a companion on, or
+#    adding or enabling a row of the user's own, takes a token with one constructor, and a library
+#    minting its own would be granting that program the launcher's access on the user's behalf. Scanned
+#    like 8b, so inline test modules are skipped; the module that defines the token is exempt. The
+#    desktop shell has no native confirmation to mint one from yet, so it may not mint one at all: a
+#    shell that could would be one IPC call away from granting it with nobody asked. The terminal mints
+#    it at command dispatch, where the user typed the command.
+hits=$(find_src crates -path '*/src/*' -name '*.rs' -not -name 'tests.rs' \
+  -not -path 'crates/apogee-core/src/program.rs' \
+  | sort \
+  | while read -r f; do scan_source "$f"; done \
+  | grep 'ProgramConsent::granted' || true)
+[ -z "$hits" ] || report "a library grants a program the launcher's access on the user's behalf" "$hits"
+hits=$(find_src apps/apogee/src-tauri/src -name '*.rs' -not -name 'tests.rs' \
+  | sort \
+  | while read -r f; do scan_source "$f"; done \
+  | grep 'ProgramConsent::granted' || true)
+[ -z "$hits" ] || report "the desktop shell grants a program access without a native confirmation" "$hits"
 
 # 9. The Keychain store attaches no backend without its `keychain` feature: without it the crate
 #    compiles to a shell that supports no operation. Dropping the feature from the Apple dependency
