@@ -76,3 +76,31 @@ fn a_malformed_log_fails_loudly() {
     assert!(!out.status.success(), "should fail on a malformed log");
     assert!(stdout.contains("error"), "no error reported:\n{stdout}");
 }
+
+#[test]
+fn json_reports_every_log_and_keeps_a_failure_beside_the_successes() {
+    let home = tempdir().unwrap();
+    let logs = tempdir().unwrap();
+    fs::write(logs.path().join("a_good.csv"), FRAMETIME_CSV).unwrap();
+    fs::write(logs.path().join("b_bad.csv"), "not a mangohud log\n").unwrap();
+
+    let out = run_bench(
+        home.path(),
+        &[logs.path().as_os_str(), std::ffi::OsStr::new("--json")],
+    )
+    .unwrap();
+    assert!(!out.status.success(), "a bad log still fails the run");
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let report = &rows[0]["report"];
+    assert_eq!(report["all_frames"]["frame_count"], 3);
+    // The 33 ms frame is the slowest of three, so it is both percentiles.
+    assert_eq!(report["measured"]["p99_ms"], 33.0);
+    assert_eq!(report["measured"]["stalls_over_50ms"]["count"], 0);
+    // No telemetry columns: the clock flag is unknown, not a pass.
+    assert!(report["validity"]["clock_dipped"].is_null());
+    assert!(rows[1]["error"].is_string());
+    assert!(rows[1].get("report").is_none());
+}
