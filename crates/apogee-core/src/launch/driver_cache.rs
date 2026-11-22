@@ -14,12 +14,14 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// The directory beside the prefix's `dxvk_cache` that holds the driver caches.
-const CACHE_DIR: &str = "driver_cache";
-/// The file beside [`CACHE_DIR`] recording which driver filled it.
-const STAMP_FILE: &str = "driver_cache.version";
+fn cache_root(prefix: &Path) -> PathBuf {
+    prefix.join("driver_cache")
+}
 
-/// The NVIDIA cache size limit, in bytes: 10 GiB, so the cap is never what evicts FFXIV's cache.
-const NVIDIA_CACHE_SIZE: &str = "10737418240";
+/// The file beside [`cache_root`] recording which driver filled it.
+fn stamp_path(prefix: &Path) -> PathBuf {
+    prefix.join("driver_cache.version")
+}
 
 /// A late-bound read of the installed GPU driver's version, `None` when there is nothing to read.
 /// Kept as a seam so the invalidation rule is testable without the host's driver.
@@ -42,8 +44,8 @@ pub(crate) fn nvidia_driver_version() -> Option<String> {
 /// Mesa keys its own entries by driver build, so there is nothing to invalidate, and a recorded
 /// NVIDIA version still says what the `nv` half was filled by if that driver comes back.
 pub(crate) fn prepare(prefix: &Path, driver: Option<&str>) -> Option<PathBuf> {
-    let root = prefix.join(CACHE_DIR);
-    let stamp = prefix.join(STAMP_FILE);
+    let root = cache_root(prefix);
+    let stamp = stamp_path(prefix);
     if let Some(driver) = driver {
         let recorded = std::fs::read_to_string(&stamp).ok();
         // A missing record with a cache present is a cache of unknown origin, so it is emptied too.
@@ -88,7 +90,8 @@ pub(crate) fn env(root: &Path) -> [(&'static str, String); 4] {
             "__GL_SHADER_DISK_CACHE_PATH",
             root.join("nv").to_string_lossy().into_owned(),
         ),
-        ("__GL_SHADER_DISK_CACHE_SIZE", NVIDIA_CACHE_SIZE.to_owned()),
+        // 10 GiB, so the size cap is never what evicts the game's cache.
+        ("__GL_SHADER_DISK_CACHE_SIZE", "10737418240".to_owned()),
         // Asks the driver not to trim the cache toward its default size. Not every driver honours
         // it; the size limit above is what actually keeps the cache whole.
         ("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1".to_owned()),
@@ -120,7 +123,7 @@ mod tests {
         assert!(root.join("nv").is_dir() && root.join("mesa").is_dir());
         assert!(prefix.path().join("dxvk_cache/entry").exists());
         assert_eq!(
-            std::fs::read_to_string(prefix.path().join(STAMP_FILE)).unwrap(),
+            std::fs::read_to_string(stamp_path(prefix.path())).unwrap(),
             "NVRM 595.84"
         );
     }
@@ -137,7 +140,7 @@ mod tests {
     #[test]
     fn an_unrecorded_cache_is_emptied_once_a_driver_is_known() {
         let prefix = tempfile::tempdir().unwrap();
-        fill(&prefix.path().join(CACHE_DIR).join("nv"));
+        fill(&cache_root(prefix.path()).join("nv"));
         let root = prepare(prefix.path(), Some("NVRM 595.84")).unwrap();
         assert!(!root.join("nv/entry").exists());
     }
@@ -161,7 +164,7 @@ mod tests {
         let prefix = tempfile::tempdir().unwrap();
         let root = prepare(prefix.path(), Some("NVRM 595.84")).unwrap();
         fill(&root.join("nv"));
-        std::fs::write(prefix.path().join(STAMP_FILE), "NVRM 595.84\n").unwrap();
+        std::fs::write(stamp_path(prefix.path()), "NVRM 595.84\n").unwrap();
         prepare(prefix.path(), Some("NVRM 595.84")).unwrap();
         assert!(root.join("nv/entry").exists());
     }
@@ -169,7 +172,7 @@ mod tests {
     #[test]
     fn a_cache_root_that_cannot_be_a_directory_sets_nothing() {
         let prefix = tempfile::tempdir().unwrap();
-        std::fs::write(prefix.path().join(CACHE_DIR), b"not a directory").unwrap();
+        std::fs::write(cache_root(prefix.path()), b"not a directory").unwrap();
         // With no driver known nothing removes the file, so the cache cannot be created.
         assert!(prepare(prefix.path(), None).is_none());
     }
