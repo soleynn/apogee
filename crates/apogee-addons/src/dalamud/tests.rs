@@ -435,3 +435,79 @@ fn a_file_the_map_names_and_the_tree_lacks_is_a_filesystem_failure() {
         "the error the filesystem raised is the one carried: {source}"
     );
 }
+
+/// A row that names its hosts confines what the distribution's answers can send a download to: a URL
+/// on another host, or the right host over plain HTTP, is refused before anything connects, and a
+/// row that names none admits what it always did. The list itself is checked when the row is read.
+#[test]
+fn a_download_off_the_rows_hosts_is_refused_before_it_is_fetched() {
+    let row = |hosts: &str, distribution: &str| {
+        format!(
+            r#"{{ "version": 1, "injectables": [
+                {{ "name": "Dalamud", "kind": "dalamud", "distribution": "{distribution}",
+                   "tier": "first_class", "allowed_hosts": {hosts} }} ] }}"#
+        )
+    };
+    let confined = ComponentManifest::from_json_bytes(
+        row(
+            r#"["KAMORI.goats.dev"]"#,
+            "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
+        )
+        .as_bytes(),
+    )
+    .expect("parses");
+    let dalamud = Dalamud::new(
+        DalamudPaths::under("/nonexistent"),
+        Fetcher::builder().build().expect("fetcher"),
+        &VerifiedManifest::minted_for_tests(confined),
+        DalamudConfig::default(),
+    )
+    .expect("row");
+    assert!(
+        dalamud
+            .absolute("https://kamori.goats.dev/File/Get/abc")
+            .is_ok()
+    );
+    for refused in [
+        "https://kamori.goats.dev.evil.invalid/File/Get/abc",
+        "https://evil.invalid/File/Get/abc",
+        "http://kamori.goats.dev/File/Get/abc",
+        "https://user@evil.invalid/kamori.goats.dev",
+    ] {
+        assert!(
+            matches!(
+                dalamud.absolute(refused),
+                Err(AddonError::HostNotAllowed { .. })
+            ),
+            "{refused}"
+        );
+    }
+    let (open, _prefix) = dalamud_for_any_host();
+    assert!(open.absolute("https://anywhere.invalid/x").is_ok());
+
+    for (hosts, distribution) in [
+        // A list that cannot admit its own pointer.
+        (
+            r#"["elsewhere.invalid"]"#,
+            "https://kamori.goats.dev/VersionInfo",
+        ),
+        (
+            r#"["kamori.goats.dev:443"]"#,
+            "https://kamori.goats.dev/VersionInfo",
+        ),
+        (r#"[""]"#, "https://kamori.goats.dev/VersionInfo"),
+        // A pointer fetched with no pin is fetched over TLS or not at all.
+        ("[]", "http://kamori.goats.dev/VersionInfo"),
+    ] {
+        assert!(
+            ComponentManifest::from_json_bytes(row(hosts, distribution).as_bytes()).is_err(),
+            "{hosts} {distribution}"
+        );
+    }
+}
+
+fn dalamud_for_any_host() -> (Dalamud, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (dalamud, _) = dalamud(dir.path(), "wine");
+    (dalamud, dir)
+}

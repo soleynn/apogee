@@ -226,6 +226,13 @@ frozen!(
             },
             "act was checked in \"/tmp/a\", but the game is running in \"/tmp/b\"",
         ),
+        AddonError::HostNotAllowed { .. } => (
+            AddonError::HostNotAllowed {
+                injectable: "Dalamud".to_owned(),
+                url: url::Url::parse("https://elsewhere.invalid/latest.zip").expect("url"),
+            },
+            "Dalamud: https://elsewhere.invalid/latest.zip is not on a host its catalog row allows",
+        ),
         AddonError::Cancelled => (AddonError::Cancelled, "cancelled"),
         AddonError::Unsupported { .. } => (
             AddonError::Unsupported {

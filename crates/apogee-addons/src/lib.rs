@@ -281,6 +281,19 @@ pub enum AddonError {
         /// The pointer as published.
         pointer: Url,
     },
+    /// A distribution named a download on a host its row does not allow, or not over TLS.
+    ///
+    /// Refused before anything connects. Its own variant rather than a distribution that answered
+    /// with something unreadable: the answer read fine, and what it asks for is a fetch somewhere the
+    /// signed row says this companion's bytes never come from.
+    #[error("{injectable}: {url} is not on a host its catalog row allows")]
+    #[non_exhaustive]
+    HostNotAllowed {
+        /// The companion whose distribution named it.
+        injectable: String,
+        /// The URL as served.
+        url: Url,
+    },
     /// A companion could not be put into the game.
     #[error("injection of {injectable} failed ({tier} tier)")]
     Inject {

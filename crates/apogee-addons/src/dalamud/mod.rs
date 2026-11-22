@@ -275,6 +275,8 @@ pub struct Dalamud {
     endpoints: Option<Endpoints>,
     tier: SupportTier,
     caveats: Vec<String>,
+    /// The hosts a download the distribution names may go to; empty admits any.
+    allowed_hosts: Vec<String>,
     config: DalamudConfig,
 }
 
@@ -315,6 +317,7 @@ impl Dalamud {
             endpoints: Endpoints::derive(&entry.distribution),
             tier: entry.tier.clone(),
             caveats: entry.caveats.clone(),
+            allowed_hosts: entry.allowed_hosts.clone(),
             config,
         })
     }
@@ -743,14 +746,29 @@ impl Dalamud {
 
     /// One URL the distribution served, parsed at the point of use so a response that is not a URL is
     /// this crate's typed error rather than a deserializer's.
-    // `&self` for the calling convention every sibling helper in this impl shares, not because this
-    // one reads `self`.
-    #[allow(clippy::unused_self)]
+    ///
+    /// When the row names the hosts its downloads may go to, a URL on any other host, or not over
+    /// TLS, is refused here, before anything connects to it: the distribution's own answer is what
+    /// names the download, so without this a substituted answer could send the injector's fetch
+    /// anywhere.
     fn absolute(&self, raw: &str) -> Result<Url> {
-        Url::parse(raw).map_err(|source| AddonError::Distribution {
+        let url = Url::parse(raw).map_err(|source| AddonError::Distribution {
             injectable: DALAMUD.to_owned(),
             source: Box::new(source),
-        })
+        })?;
+        if !self.allowed_hosts.is_empty() {
+            let admitted = url.scheme() == "https"
+                && url
+                    .host_str()
+                    .is_some_and(|host| self.allowed_hosts.iter().any(|a| a == host));
+            if !admitted {
+                return Err(AddonError::HostNotAllowed {
+                    injectable: DALAMUD.to_owned(),
+                    url,
+                });
+            }
+        }
+        Ok(url)
     }
 
     /// One file that proves a tree wrong, in the taxonomy's own terms: a file that could not be read is

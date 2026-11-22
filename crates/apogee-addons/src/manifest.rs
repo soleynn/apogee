@@ -483,6 +483,10 @@ pub struct InjectableEntry {
     pub tier: SupportTier,
     /// Things the user should know before enabling it, beyond what the tier says.
     pub caveats: Vec<String>,
+    /// The hosts its distribution may send a download to, lowercased. Empty for a row that names
+    /// none, which leaves every URL the distribution serves admitted as it was before rows could name
+    /// them; a row that names any confines the release and asset downloads to them.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// One step of a verb.
@@ -705,6 +709,8 @@ struct RawInjectable {
     note: Option<String>,
     #[serde(default)]
     caveats: Vec<String>,
+    #[serde(default)]
+    allowed_hosts: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -870,12 +876,48 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
         _ => return Err(unknown(&raw.name, "injectable kind", raw.kind)),
     };
     let tier = parse_tier(&raw.name, &raw.tier, raw.note)?;
+    let distribution = parse_url(&raw.name, &raw.distribution)?;
+    // Over TLS only: the pointer is fetched with no pin, so the transport is all that stands between
+    // it and whoever is on the path.
+    if distribution.scheme() != "https" {
+        return Err(ManifestError::BadUrl {
+            component: raw.name,
+            url: raw.distribution,
+        });
+    }
+    let mut allowed_hosts = Vec::with_capacity(raw.allowed_hosts.len());
+    for host in &raw.allowed_hosts {
+        let lower = host.to_ascii_lowercase();
+        let well_formed = !lower.is_empty()
+            && lower.len() <= 253
+            && !lower.starts_with(['.', '-'])
+            && lower
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-'));
+        if !well_formed {
+            return Err(unknown(&raw.name, "allowed host", host.as_str()));
+        }
+        allowed_hosts.push(lower);
+    }
+    // A list that does not admit the row's own pointer is a row that could never be fetched.
+    if !allowed_hosts.is_empty()
+        && !distribution
+            .host_str()
+            .is_some_and(|host| allowed_hosts.iter().any(|a| a == host))
+    {
+        return Err(unknown(
+            &raw.name,
+            "distribution host",
+            distribution.host_str().unwrap_or_default(),
+        ));
+    }
     Ok(InjectableEntry {
-        distribution: parse_url(&raw.name, &raw.distribution)?,
+        distribution,
         name: raw.name,
         kind,
         tier,
         caveats: raw.caveats,
+        allowed_hosts,
     })
 }
 
