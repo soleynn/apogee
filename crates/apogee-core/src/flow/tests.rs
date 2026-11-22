@@ -240,6 +240,7 @@ fn context_with_otp(
         computer_id: host::computer_id(&h.store),
         prefixes_dir: h.prefixes.path().to_path_buf(),
         desktop_dir: None,
+        desktop_config_dir: None,
         backups_dir: h.backups.path().to_path_buf(),
         frontier: crate::frontier::FrontierAssets::new(
             apogee_fetch::Fetcher::builder().build().unwrap(),

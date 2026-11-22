@@ -89,6 +89,8 @@ pub(crate) struct FlowContext {
     pub(crate) prefixes_dir: std::path::PathBuf,
     /// The desktop's data home for the game's taskbar identity, `None` to leave the desktop alone.
     pub(crate) desktop_dir: Option<std::path::PathBuf>,
+    /// The desktop's configuration home for the overlay window rule, `None` to leave it alone.
+    pub(crate) desktop_config_dir: Option<std::path::PathBuf>,
     pub(crate) backups_dir: std::path::PathBuf,
     pub(crate) frontier: crate::frontier::FrontierAssets,
 }
@@ -1960,6 +1962,23 @@ async fn launch_game(
         tokio::task::spawn_blocking(move || {
             if let Err(error) = crate::launch::desktop::ensure(&home, &exe, class) {
                 tracing::warn!(%error, "the game's taskbar icon was not installed");
+            }
+        });
+    }
+    let on_kde = std::env::var("XDG_CURRENT_DESKTOP")
+        .is_ok_and(|desktop| desktop.split(':').any(|d| d.eq_ignore_ascii_case("KDE")));
+    if let Some(home) = ctx
+        .desktop_config_dir
+        .clone()
+        .filter(|_| on_kde && profile.launch.act)
+    {
+        // ACT's overlays are the only windows that must sit above the game.
+        let class = crate::launch::desktop::window_class(prepared.runner);
+        tokio::task::spawn_blocking(move || {
+            match crate::launch::kwin::ensure_overlay_rule(&home, class) {
+                Ok(true) => crate::launch::kwin::reload(),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "the overlay window rule was not installed"),
             }
         });
     }
