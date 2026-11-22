@@ -87,6 +87,8 @@ pub(crate) struct FlowContext {
     pub(crate) driver_version: crate::launch::driver_cache::DriverVersionSource,
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
+    /// The desktop's data home for the game's taskbar identity, `None` to leave the desktop alone.
+    pub(crate) desktop_dir: Option<std::path::PathBuf>,
     pub(crate) backups_dir: std::path::PathBuf,
     pub(crate) frontier: crate::frontier::FrontierAssets,
 }
@@ -1950,6 +1952,17 @@ async fn launch_game(
         .prepare(&PrefixRequest::try_from(profile)?, &prefix_dir, cancel, tx)
         .await?;
 
+    if let Some(home) = ctx.desktop_dir.clone() {
+        // Off the launch's path: it reads the executable once, and a desktop that cannot be told
+        // about the game is no reason to hold or fail the launch.
+        let exe = game_dir.join("ffxiv_dx11.exe");
+        let class = crate::launch::desktop::window_class(prepared.runner);
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::launch::desktop::ensure(&home, &exe, class) {
+                tracing::warn!(%error, "the game's taskbar icon was not installed");
+            }
+        });
+    }
     let steam = is_steam(account);
     let driver_cache = match prepared.prefix.as_ref() {
         Some(prefix) => prepare_driver_cache(prefix.path().to_path_buf(), ctx.driver_version).await,

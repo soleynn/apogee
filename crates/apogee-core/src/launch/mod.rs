@@ -18,6 +18,7 @@ use crate::command::Event;
 use crate::error::CoreError;
 use crate::model::{Profile, RunnerSelection};
 
+pub(crate) mod desktop;
 pub(crate) mod driver_cache;
 pub(crate) mod runtime_backend;
 
