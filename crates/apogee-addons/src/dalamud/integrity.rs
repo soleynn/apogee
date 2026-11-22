@@ -15,6 +15,9 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use apogee_fetch::{DigestPin, HexPins};
+use url::Url;
+
 use super::wire::HashManifest;
 
 /// Which digest a manifest's values are.
@@ -81,6 +84,22 @@ pub(crate) fn resolve(root: &Path, key: &str) -> PathBuf {
         path.push(part);
     }
     path
+}
+
+/// The sha256 a content-addressed URL names, when it names one: a last path segment that is exactly
+/// 64 hex digits, as the distribution's file host serves every download it hands out.
+///
+/// A URL shaped any other way names nothing, and the download is checked by what the distribution
+/// publishes beside it instead.
+pub(crate) fn content_address(url: &Url) -> Option<[u8; 32]> {
+    let last = url.path_segments()?.next_back()?;
+    match DigestPin::from_hex(HexPins {
+        blake3: None,
+        sha256: Some(last),
+    })? {
+        DigestPin::Sha256(digest) => Some(digest),
+        _ => None,
+    }
 }
 
 /// Why a tree is not the tree its digest map describes.
@@ -176,6 +195,44 @@ mod tests {
         let digest = payload_md5(&root);
         assert!(first_fault(&root, &manifest(r"sub\thing.dll", &digest), Digest::Md5).is_none());
         assert!(first_fault(&root, &manifest("sub/thing.dll", &digest), Digest::Md5).is_none());
+    }
+
+    /// The distribution's file host addresses every download by the sha256 of its bytes, in the last
+    /// path segment. Only that exact shape names a digest; anything near it names nothing, so a URL
+    /// that merely looks hashed is never held to a digest it does not carry.
+    #[test]
+    fn only_a_last_segment_of_exactly_64_hex_digits_is_a_content_address() {
+        let hex = "3f0d8b64d2ed7c868b57541c81f5308692eb69bb856517fa3d14955fd056e815";
+        let url = |raw: &str| Url::parse(raw).expect("url");
+        let digest = content_address(&url(&format!("https://kamori.goats.dev/File/Get/{hex}")))
+            .expect("a content address");
+        assert_eq!(digest[0], 0x3f);
+        assert_eq!(digest[31], 0x15);
+        assert_eq!(
+            content_address(&url(&format!(
+                "https://h.example/File/Get/{}",
+                hex.to_uppercase()
+            ))),
+            Some(digest),
+            "case does not change the digest"
+        );
+        assert_eq!(
+            content_address(&url(&format!("https://h.example/File/Get/{hex}?x=1"))),
+            Some(digest),
+            "a query is not part of the path"
+        );
+        for raw in [
+            format!("https://h.example/File/Get/{hex}/"),
+            format!("https://h.example/{hex}/latest.zip"),
+            format!("https://h.example/File/Get/{}", &hex[..63]),
+            format!("https://h.example/File/Get/{hex}0"),
+            format!("https://h.example/File/Get/{}g", &hex[..63]),
+            format!("https://h.example/File/Get/{hex}.zip"),
+            "https://h.example/Dalamud/Release/Runtime/DotNet/10.0.14".to_owned(),
+            "https://h.example".to_owned(),
+        ] {
+            assert_eq!(content_address(&url(&raw)), None, "{raw}");
+        }
     }
 
     /// There is no per-file repair, so one bad file means the version comes down again.

@@ -704,11 +704,16 @@ impl Dalamud {
                 .await
                 .map_err(|source| self.io_failed("stage a download", parent, source))?;
         }
-        // No content pin: the distribution versions these itself and the digest maps beside them are
-        // what authenticates the bytes. Every hop of every redirect is held to the row's hosts, and the
-        // fetcher refuses plain http either way.
-        let spec = DownloadSpec::builder(url.clone(), dest, Validator::None)
-            .allow_unverified()
+        // No pin of this launcher's own: the distribution versions these itself. A URL its file host
+        // addresses by content names its own sha256, and the fetcher holds the bytes to it before they
+        // are published, ahead of the digest maps, which are upstream's own and not collision
+        // resistant. Anything else is authenticated by those maps alone. Every hop of every redirect is
+        // held to the row's hosts, and the fetcher refuses plain http either way.
+        let builder = integrity::content_address(url).map_or_else(
+            || DownloadSpec::builder(url.clone(), dest, Validator::None).allow_unverified(),
+            |digest| DownloadSpec::builder(url.clone(), dest, Validator::Sha256(digest)),
+        );
+        let spec = builder
             .allowed_hosts(self.allowed_hosts.iter().cloned())
             .build()?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();

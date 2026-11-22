@@ -634,3 +634,54 @@ async fn a_redirect_onto_the_rows_hosts_is_followed() -> Result<(), Box<dyn Erro
     assert!(dalamud.installed().is_some());
     Ok(())
 }
+
+/// A release named by its content's sha256, as the real file host names every download, is held to
+/// that digest. The archive served here is intact and its own digest map agrees with every file in
+/// it, so the address is the only thing that can refuse it.
+#[tokio::test]
+async fn a_content_addressed_archive_must_hash_to_its_address() -> Result<(), Box<dyn Error>> {
+    use sha2::{Digest as _, Sha256};
+
+    let digest = Sha256::digest(release_zip("")?);
+    let address: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let wrong = "0".repeat(64);
+    for (path, admitted) in [(&address, true), (&wrong, false)] {
+        let root = tempfile::tempdir()?;
+        let dist = Distribution::start_shaped(Shape {
+            asset_version: 432,
+            release_path: Some(format!("File/Get/{path}")),
+            ..Shape::default()
+        })
+        .await?;
+        let dalamud = dalamud(root.path(), &dist)?;
+        let prefix = prefix(&root.path().join("prefix"))?;
+
+        let outcome = dalamud
+            .ensure(&prefix, &CancellationToken::new(), &SetupEvents::none())
+            .await;
+
+        if admitted {
+            outcome?;
+        } else {
+            let err = outcome
+                .err()
+                .ok_or("bytes that are not their address were accepted")?;
+            assert!(
+                matches!(
+                    &err,
+                    apogee_addons::AddonError::IntegrityMismatch { expected, got, .. }
+                        if *expected == wrong && *got == address
+                ),
+                "got {err:?}"
+            );
+            assert!(
+                !paths(root.path())
+                    .addon
+                    .join(format!("Hooks/{ASSEMBLY_VERSION}/Dalamud.Injector.exe"))
+                    .exists(),
+                "an archive that failed its address was extracted"
+            );
+        }
+    }
+    Ok(())
+}
