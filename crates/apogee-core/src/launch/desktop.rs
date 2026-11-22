@@ -12,9 +12,15 @@ use std::path::{Path, PathBuf};
 
 use apogee_runtime::RunnerKind;
 
-/// The basename the icon and the desktop entry are installed under.
+/// The basename the game's icon and desktop entry are installed under.
 fn identity() -> &'static str {
     "apogee-ffxiv"
+}
+
+/// The basename ACT's icon and desktop entry are installed under, and the desktop file the window
+/// rule names for ACT's windows.
+pub(crate) fn act_identity() -> &'static str {
+    "apogee-act"
 }
 
 /// The class the game's windows carry under `runner`: Proton's, from the game id the runtime launches
@@ -34,38 +40,59 @@ pub(crate) fn window_class(runner: Option<RunnerKind>) -> &'static str {
 /// # Errors
 /// Whatever reading the executable or writing the files raised.
 pub(crate) fn ensure(data_home: &Path, game_exe: &Path, class: &str) -> std::io::Result<()> {
+    install(
+        data_home,
+        identity(),
+        game_exe,
+        &format!(
+            "[Desktop Entry]\nType=Application\nName=FINAL FANTASY XIV\nComment=Launched by Apogee\n\
+             Icon={}\nExec=apogee\nStartupWMClass={class}\nNoDisplay=true\n",
+            identity()
+        ),
+    )
+}
+
+/// Install ACT's icon (once, from `act_exe`) and its desktop entry, which the window rule gives ACT's
+/// windows so it has a taskbar entry of its own. The entry names no class: the rule assigns it.
+///
+/// # Errors
+/// As [`ensure`].
+pub(crate) fn ensure_act(data_home: &Path, act_exe: &Path) -> std::io::Result<()> {
+    install(
+        data_home,
+        act_identity(),
+        act_exe,
+        &format!(
+            "[Desktop Entry]\nType=Application\nName=Advanced Combat Tracker\n\
+             Comment=Started by Apogee beside the game\nIcon={}\nExec=apogee\nNoDisplay=true\n",
+            act_identity()
+        ),
+    )
+}
+
+fn install(data_home: &Path, name: &str, exe: &Path, entry: &str) -> std::io::Result<()> {
     let icon_dir = data_home.join("icons/hicolor");
     let installed = ["256x256", "128x128", "64x64", "48x48", "32x32"]
         .iter()
-        .any(|size| icon_path(&icon_dir, size).is_file());
+        .any(|size| icon_path(&icon_dir, size, name).is_file());
     if !installed {
-        let exe = read_capped(game_exe, MAX_EXE_BYTES)?;
-        let Some((size, png)) = largest_png_icon(&exe) else {
-            return Err(std::io::Error::other(
-                "the game executable carries no PNG icon",
-            ));
+        let bytes = read_capped(exe, MAX_EXE_BYTES)?;
+        let Some((size, png)) = largest_png_icon(&bytes) else {
+            return Err(std::io::Error::other("the executable carries no PNG icon"));
         };
-        write_replacing(&icon_path(&icon_dir, &format!("{size}x{size}")), png)?;
+        write_replacing(&icon_path(&icon_dir, &format!("{size}x{size}"), name), png)?;
     }
-    let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=FINAL FANTASY XIV\nComment=Launched by Apogee\n\
-         Icon={}\nExec=apogee\nStartupWMClass={class}\nNoDisplay=true\n",
-        identity()
-    );
     let path = data_home
         .join("applications")
-        .join(format!("{}.desktop", identity()));
+        .join(format!("{name}.desktop"));
     if std::fs::read(&path).ok().as_deref() != Some(entry.as_bytes()) {
         write_replacing(&path, entry.as_bytes())?;
     }
     Ok(())
 }
 
-fn icon_path(icon_dir: &Path, size: &str) -> PathBuf {
-    icon_dir
-        .join(size)
-        .join("apps")
-        .join(format!("{}.png", identity()))
+fn icon_path(icon_dir: &Path, size: &str, name: &str) -> PathBuf {
+    icon_dir.join(size).join("apps").join(format!("{name}.png"))
 }
 
 /// Larger than any build of the game's executable has been, so a corrupt or substituted file is
@@ -295,6 +322,27 @@ mod tests {
         assert!(largest_png_icon(&far).is_none());
         assert!(largest_png_icon(b"not an executable").is_none());
         assert!(png_edge(&png(48)[..20]).is_none());
+    }
+
+    /// ACT's entry carries ACT's own icon under its own name, and names no class: the window rule
+    /// assigns it.
+    #[test]
+    fn acts_entry_has_its_own_icon_and_no_class() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = home.path().join("act.exe");
+        std::fs::write(&exe, image(&[png(48), png(256)])).unwrap();
+        ensure_act(home.path(), &exe).unwrap();
+        assert_eq!(
+            std::fs::read(
+                home.path()
+                    .join("icons/hicolor/256x256/apps/apogee-act.png")
+            )
+            .unwrap(),
+            png(256)
+        );
+        let text =
+            std::fs::read_to_string(home.path().join("applications/apogee-act.desktop")).unwrap();
+        assert!(text.contains("Icon=apogee-act\n") && !text.contains("StartupWMClass"));
     }
 
     #[test]

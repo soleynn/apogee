@@ -6,23 +6,42 @@
 //! forcing them into KWin's overlay layer fixes that. Every window in the game's session shares one
 //! class, and overlay titles are free text, so the rule matches that class and excludes the two
 //! windows that must stay ordinary, the game's and ACT's main window, by title. ACT's own dialogs float
-//! above the game too, which is harmless. The rule is merged into the user's rules file as its own
-//! group, leaving every rule of theirs as it was.
+//! above the game too, which is harmless.
+//!
+//! A second rule gives ACT a taskbar entry of its own. A taskbar groups windows by their desktop
+//! file, and with one class for the whole session ACT would otherwise sit inside the game's entry, so
+//! that clicking the game's entry could bring up ACT. The rule names a desktop file of ACT's own for
+//! every window in the session but the game's (overlays carry no taskbar entry, so it changes nothing
+//! for them).
+//!
+//! Both rules are merged into the user's rules file as groups of their own, leaving every rule of
+//! theirs as it was.
 
 use std::path::Path;
 
-/// The group the rule is kept under, and its entry in `[General] rules`.
-fn group() -> &'static str {
-    "apogee-overlays"
-}
-
-fn rule_body(class: &str) -> String {
-    format!(
-        "Description=Apogee: ACT overlays above the game\n\
-         wmclass={class}\nwmclassmatch=1\n\
-         title=^(?!FINAL FANTASY XIV$)(?!Advanced Combat Tracker).+$\ntitlematch=3\n\
-         layer=overlay\nlayerrule=2\n"
-    )
+/// Each rule's group, which is also its entry in `[General] rules`, and its body, for `class`.
+fn rules(class: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "apogee-overlays",
+            format!(
+                "Description=Apogee: ACT overlays above the game\n\
+                 wmclass={class}\nwmclassmatch=1\n\
+                 title=^(?!FINAL FANTASY XIV$)(?!Advanced Combat Tracker).+$\ntitlematch=3\n\
+                 layer=overlay\nlayerrule=2\n"
+            ),
+        ),
+        (
+            "apogee-act",
+            format!(
+                "Description=Apogee: ACT in a taskbar entry of its own\n\
+                 wmclass={class}\nwmclassmatch=1\n\
+                 title=^(?!FINAL FANTASY XIV$).+$\ntitlematch=3\n\
+                 desktopfile={}\ndesktopfilerule=2\n",
+                crate::launch::desktop::act_identity()
+            ),
+        ),
+    ]
 }
 
 /// Make `kwinrulesrc` under `config_home` hold the overlay rule for `class`, and return whether it
@@ -48,7 +67,7 @@ pub(crate) fn ensure_overlay_rule(config_home: &Path, class: &str) -> std::io::R
     Ok(true)
 }
 
-/// `current` with the overlay rule in place: the group replaced or appended, and listed once in
+/// `current` with the rules in place: each group replaced or appended, and listed once in
 /// `[General] rules` with `count` matching the list.
 fn merged(current: &str, class: &str) -> String {
     let mut sections: Vec<(String, Vec<String>)> = vec![(String::new(), Vec::new())];
@@ -60,7 +79,8 @@ fn merged(current: &str, class: &str) -> String {
             lines.push(line.to_owned());
         }
     }
-    sections.retain(|(name, _)| name != group());
+    let ours = rules(class);
+    sections.retain(|(name, _)| !ours.iter().any(|(group, _)| name == group));
     let at = if let Some(at) = sections.iter().position(|(name, _)| name == "General") {
         at
     } else {
@@ -68,29 +88,28 @@ fn merged(current: &str, class: &str) -> String {
         1
     };
     let general = &mut sections[at].1;
-    let mut rules: Vec<String> = general
+    let mut listed: Vec<String> = general
         .iter()
         .find_map(|line| line.trim().strip_prefix("rules="))
         .map(|list| {
             list.split(',')
                 .map(str::trim)
-                .filter(|id| !id.is_empty() && *id != group())
+                .filter(|id| !id.is_empty() && !ours.iter().any(|(group, _)| id == group))
                 .map(str::to_owned)
                 .collect()
         })
         .unwrap_or_default();
-    rules.push(group().to_owned());
+    listed.extend(ours.iter().map(|(group, _)| (*group).to_owned()));
     general.retain(|line| {
         let key = line.trim();
         !key.starts_with("rules=") && !key.starts_with("count=")
     });
     general.retain(|line| !line.trim().is_empty());
-    general.insert(0, format!("count={}", rules.len()));
-    general.insert(1, format!("rules={}", rules.join(",")));
-    sections.push((
-        group().to_owned(),
-        rule_body(class).lines().map(str::to_owned).collect(),
-    ));
+    general.insert(0, format!("count={}", listed.len()));
+    general.insert(1, format!("rules={}", listed.join(",")));
+    for (group, body) in ours {
+        sections.push((group.to_owned(), body.lines().map(str::to_owned).collect()));
+    }
 
     let mut out = String::new();
     for (name, lines) in &sections {
@@ -162,7 +181,7 @@ mod tests {
     fn the_rule_joins_the_users_rules_and_leaves_theirs_alone() {
         let out = merged(users(), "steam_app_apogee");
         assert!(
-            out.contains("count=2\nrules=act-overlays-on-top,apogee-overlays\n"),
+            out.contains("count=3\nrules=act-overlays-on-top,apogee-overlays,apogee-act\n"),
             "{out}"
         );
         assert!(out.contains("[act-overlays-on-top]\nDescription=mine\nwmclass=steam_app_0\n"));
@@ -180,15 +199,17 @@ mod tests {
         let old = merged(users(), "steam_app_0");
         let out = merged(&old, "steam_app_apogee");
         assert_eq!(out.matches("[apogee-overlays]").count(), 1);
+        assert_eq!(out.matches("[apogee-act]").count(), 1);
+        assert!(out.contains("desktopfile=apogee-act\ndesktopfilerule=2\n"));
         assert!(
             out.contains("wmclass=steam_app_apogee\n")
                 && !out.contains("wmclass=steam_app_0\nwmclassmatch")
         );
-        assert!(out.contains("count=2\n"));
+        assert!(out.contains("count=3\n"));
 
         let fresh = merged("", "steam_app_apogee");
         assert!(
-            fresh.starts_with("[General]\ncount=1\nrules=apogee-overlays\n"),
+            fresh.starts_with("[General]\ncount=2\nrules=apogee-overlays,apogee-act\n"),
             "{fresh}"
         );
     }
