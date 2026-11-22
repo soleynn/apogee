@@ -406,46 +406,89 @@ impl LaunchBackend for RuntimeLauncher {
         events: &UnboundedSender<Event>,
     ) -> Result<Box<dyn GameHandle>, CoreError> {
         let progress = relay_progress(events);
-        if let Some(prefix) = plan.prefix() {
-            end_leftover_session(&self.runtime, prefix).await;
-        }
+        end_leftover_session(&self.runtime, &plan).await;
         let session = self.runtime.launch(plan, cancel, &progress).await?;
         Ok(Box::new(RuntimeGameHandle { session }))
     }
 }
 
-/// End a wine session still running in `prefix` with no game in it, before a new launch.
+/// End a wine session still running in the plan's prefix, with no game in it, before a new launch.
 ///
 /// A program that outlived its game, or a crash, can leave the prefix's session up. Under umu a launch
 /// that lets programs join it would join that session's container rather than start its own, and the
-/// game never appears where the launch looks for it. A session with the game still in it is left
-/// alone: that launch is refused elsewhere, and stopping a running game is never this function's call.
-async fn end_leftover_session(runtime: &Runtime, prefix: &apogee_runtime::Prefix) {
-    let count = |name: &'static str| async move {
-        apogee_runtime::prefix_processes(prefix, name)
-            .await
-            .map_or(0, |pids| pids.len())
+/// game never appears where the launch looks for it. A session is found two ways, because either can
+/// be hidden: by the prefix's wine server among the processes this launcher can read, and by the
+/// session-bus name umu registers for the prefix's container, which a launcher sandboxed in another
+/// user namespace still sees. The game is looked for by its install, from command lines and working
+/// directories that every namespace can read; when it is running, or that cannot be told, the session
+/// is left alone, since stopping a game is never this function's call.
+async fn end_leftover_session(runtime: &Runtime, plan: &LaunchPlan) {
+    let Some(prefix) = plan.prefix() else {
+        return;
     };
-    if count("wineserver").await == 0 || count("ffxiv_dx11.exe").await > 0 {
+    let game_running = plan
+        .working_dir()
+        .and_then(std::path::Path::parent)
+        .is_none_or(|root| apogee_runtime::game_running(root).unwrap_or(true));
+    if game_running {
+        return;
+    }
+    let bus = session_bus_name(prefix.path());
+    let live = || async {
+        apogee_runtime::prefix_processes(prefix, "wineserver")
+            .await
+            .is_ok_and(|pids| !pids.is_empty())
+            || session_bus_present(&bus).await
+    };
+    if !live().await {
         return;
     }
     tracing::info!("ending a session left running in the prefix before launching");
-    if tokio::time::timeout(
+    match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         runtime.kill_prefix(prefix),
     )
     .await
-    .is_err()
     {
-        tracing::warn!("stopping the leftover session did not finish in time");
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "stopping the leftover session failed"),
+        Err(_) => tracing::warn!("stopping the leftover session did not finish in time"),
     }
     for _ in 0..30 {
-        if count("wineserver").await == 0 {
+        if !live().await {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     tracing::warn!("a session left running in the prefix did not end; launching anyway");
+}
+
+/// The session-bus name umu gives the container of a session in the prefix at `path`: the MD5 of the
+/// resolved prefix path, as umu computes it.
+fn session_bus_name(path: &std::path::Path) -> String {
+    use md5::Digest as _;
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let digest = md5::Md5::digest(resolved.as_os_str().as_encoded_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("com.steampowered.App{hex}")
+}
+
+/// Whether `name` is on the user's session bus. A bus that cannot be asked answers no.
+async fn session_bus_present(name: &str) -> bool {
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("busctl")
+            .args(["--user", "list", "--no-pager", "--no-legend"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .any(|word| word == name)
+            })
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Wraps `apogee-runtime`'s supervised session, normalizing the opaque exit marker to `()`.
@@ -556,6 +599,15 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// The name must be umu's own derivation exactly, or a leftover container is never found.
+    #[test]
+    fn the_session_bus_name_is_umus_md5_of_the_prefix_path() {
+        assert_eq!(
+            session_bus_name(std::path::Path::new("/nonexistent/apogee/prefixes/abc")),
+            "com.steampowered.App7503fbd4681c542e7f0cfa763c212905"
+        );
+    }
 
     /// A download's recovery tally survives the seam into the core event stream.
     ///

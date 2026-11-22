@@ -19,6 +19,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
 url.workspace = true
+md-5.workspace = true
 sha2.workspace = true
 image.workspace = true
 zip.workspace = true
