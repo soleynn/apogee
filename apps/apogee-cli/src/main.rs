@@ -20,9 +20,10 @@ use apogee_core::{
     ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
     ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand, NextVerb, Notice,
     OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction, PrefixReport,
-    Profile, ProgramConsent, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection,
-    STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep,
-    SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
+    Profile, ProgramConsent, ProgramName, ProgramSetting, ProgramTier, Recoveries, Region, Repo,
+    RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
+    SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
+    SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -180,6 +181,11 @@ enum Commands {
     Dalamud {
         #[command(subcommand)]
         action: DalamudAction,
+    },
+    /// Run Dalamud, XivAlexander or ACT with the game, or leave them out.
+    Program {
+        #[command(subcommand)]
+        action: ProgramAction,
     },
     /// Choose where an account's one-time code comes from, and tune the local listener.
     ///
@@ -611,6 +617,45 @@ enum DalamudAction {
     Enable(TargetArgs),
     /// Stop loading it. Nothing is deleted, and nothing contacts its distribution while it is off.
     Disable(TargetArgs),
+}
+
+#[derive(Subcommand)]
+enum ProgramAction {
+    /// Say which programs this profile runs with the game.
+    List(TargetArgs),
+    /// Say what the signed catalog says about one program, and whether this profile runs it.
+    Status(ProgramArgs),
+    /// Run it with the game from the next launch on. It is installed on that launch, or by a prefix
+    /// fix, not now.
+    Enable(ProgramArgs),
+    /// Stop running it. Nothing is deleted, and nothing contacts its sources while it is off.
+    Disable(ProgramArgs),
+}
+
+#[derive(Args)]
+struct ProgramArgs {
+    /// Which program.
+    #[arg(value_enum)]
+    program: ProgramArg,
+    #[command(flatten)]
+    target: TargetArgs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ProgramArg {
+    Dalamud,
+    Xivalexander,
+    Act,
+}
+
+impl From<ProgramArg> for ProgramName {
+    fn from(arg: ProgramArg) -> Self {
+        match arg {
+            ProgramArg::Dalamud => Self::Dalamud,
+            ProgramArg::Xivalexander => Self::Xivalexander,
+            ProgramArg::Act => Self::Act,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1260,6 +1305,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Commands::Dalamud { action } => {
             dalamud(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Program { action } => {
+            program(&core, action).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Otp { action } => {
@@ -1995,6 +2044,107 @@ fn dalamud(core: &Core, action: DalamudAction) -> Result<(), CliError> {
         profile.name
     );
     Ok(())
+}
+
+/// What every program run with the game is granted, said wherever one is described or turned on.
+///
+/// The same sentence for all three: each runs in the game's wine session, and nothing about any one
+/// of them narrows that.
+const TRUST_SENTENCE: &str = "Runs in the game's wine session with the same access to the game, \
+your files and your stored sign-in as Apogee itself.";
+
+/// The program switches, read from and written back to the profile that owns them.
+///
+/// Switching one on or off installs and contacts nothing, exactly like the Dalamud toggle: a launch
+/// or a prefix fix is what installs it. Turning a companion on is the user's consent to run it,
+/// which typing the command is.
+async fn program(core: &Core, action: ProgramAction) -> Result<(), CliError> {
+    match action {
+        ProgramAction::List(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            for name in ProgramName::ALL {
+                println!(
+                    "{}\t{}",
+                    name.key(),
+                    if name.is_on(&profile.launch) {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
+            Ok(())
+        }
+        ProgramAction::Status(args) => {
+            let profile = resolve_profile(core, &args.target.profile)?;
+            let name = ProgramName::from(args.program);
+            let setting = core
+                .program_settings(profile.id)
+                .await?
+                .into_iter()
+                .find(|setting| setting.program == name)
+                .ok_or("the program has no setting on this profile")?;
+            print_program_status(&setting);
+            Ok(())
+        }
+        ProgramAction::Enable(args) => {
+            let profile = resolve_profile(core, &args.target.profile)?;
+            let name = ProgramName::from(args.program);
+            let profile = core.enable_program(profile.id, name, ProgramConsent::granted())?;
+            println!("enabled {} for {}", name.key(), profile.name);
+            println!("{TRUST_SENTENCE}");
+            println!("it is installed on the next launch or prefix fix");
+            Ok(())
+        }
+        ProgramAction::Disable(args) => {
+            let profile = resolve_profile(core, &args.target.profile)?;
+            let name = ProgramName::from(args.program);
+            let profile = core.disable_program(profile.id, name)?;
+            println!("disabled {} for {}", name.key(), profile.name);
+            Ok(())
+        }
+    }
+}
+
+fn print_program_status(setting: &ProgramSetting) {
+    println!(
+        "{} is {}",
+        setting.program.key(),
+        if setting.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!("trust: {TRUST_SENTENCE}");
+    let Some(row) = &setting.row else {
+        println!("catalog: no row could be read for it");
+        return;
+    };
+    match &row.tier {
+        ProgramTier::BestEffort { note } => {
+            println!("tier: best effort");
+            println!("note: {note}");
+        }
+        _ => println!("tier: first class"),
+    }
+    for caveat in &row.caveats {
+        println!("caveat: {caveat}");
+    }
+    if let Some(version) = &row.version {
+        println!("version: {version}");
+    }
+    if !row.game_versions.is_empty() {
+        println!("game versions: {}", row.game_versions.join(", "));
+    }
+    if !row.runners.is_empty() {
+        let runners: Vec<String> = row
+            .runners
+            .iter()
+            .map(|(name, version)| format!("{name} {version}"))
+            .collect();
+        println!("runners: {}", runners.join(", "));
+    }
 }
 
 /// Where an account's one-time code comes from, and where the listener that can receive one sits.
