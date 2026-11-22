@@ -657,10 +657,14 @@ impl Dalamud {
         let bytes = tokio::fs::read(&dest)
             .await
             .map_err(|source| self.io_failed("read a download", &dest, source))?;
-        let parsed = serde_json::from_slice(&bytes).map_err(|source| AddonError::Distribution {
-            injectable: DALAMUD.to_owned(),
-            source: Box::new(source),
-        })?;
+        let distribution =
+            |source: Box<dyn std::error::Error + Send + Sync>| AddonError::Distribution {
+                injectable: DALAMUD.to_owned(),
+                source,
+            };
+        let text = wire::json_text(&bytes).map_err(|source| distribution(Box::new(source)))?;
+        let parsed =
+            serde_json::from_slice(&text).map_err(|source| distribution(Box::new(source)))?;
         let _ = tokio::fs::remove_dir_all(&staging).await;
         Ok(parsed)
     }
