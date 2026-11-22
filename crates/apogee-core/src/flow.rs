@@ -2092,6 +2092,28 @@ async fn launch_game(
     for failure in failures {
         let _ = tx.send(Event::Error(failure));
     }
+    // A program started into the game's container is stopped above through the process that asked the
+    // container to start it, which ends that process and not always the program. Once the game has
+    // exited, whatever is still running in the launch's own tree is ended with it, unless the user
+    // asked for one of their tools to outlive the game.
+    let keep_after_close = profile.external.iter().any(|addon| {
+        addon.enabled()
+            && matches!(
+                addon.trigger(),
+                apogee_addons::Trigger::WithGame {
+                    keep_after_close: true
+                }
+            )
+    });
+    #[cfg(target_os = "linux")]
+    if !keep_after_close
+        && let Some(prefix) = handle.prefix()
+        && !apogee_runtime::game_running(&profile.game_path).unwrap_or(true)
+    {
+        crate::launch::leftover::end_recorded(prefix.path()).await;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = keep_after_close;
     result?;
     emit(tx, FlowState::Exited);
     Ok(())
