@@ -4717,3 +4717,149 @@ async fn a_configured_companion_keeps_no_session_at_rest() {
         "the session was written while a companion is configured"
     );
 }
+
+/// A companion on the profile can reach a listener that admits any source, or take its port first,
+/// so with one configured an unpinned listener is not opened at all: the code is asked for instead,
+/// and nothing is submitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_companion_turns_pushed_codes_off_without_a_pinned_source() {
+    let h = harness_customized(true, |profile| profile.launch.act = true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let events = run(
+        context_otp(&h, transport.clone(), otp_empty(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Notice(Notice::PushedCodesNeedAPinnedSource)))
+    );
+    assert!(states(&events).contains(&FlowState::NeedsOtp));
+    assert!(
+        !states(&events)
+            .iter()
+            .any(|s| matches!(s, FlowState::WaitingForPushedCode { .. })),
+        "a port was opened"
+    );
+    assert_eq!(submitted_otp(&transport), None);
+}
+
+/// A pinned listener still works with a companion configured: the pin is what makes it safe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_listener_stays_on_with_a_companion() {
+    let h = harness_customized(true, |profile| profile.launch.xivalexander = true);
+    listen_on_ephemeral(
+        &h,
+        ListenerSources::Only {
+            addresses: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        },
+    );
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let (task, mut rx) = spawn_run(
+        context_otp(&h, transport.clone(), otp_empty(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        CancellationToken::new(),
+    );
+    let mut events = Vec::new();
+    let waiting = await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the pinned listener was not opened");
+    push_code(listening_port(&waiting).unwrap(), "246810")
+        .await
+        .unwrap();
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+    assert_eq!(submitted_otp(&transport).as_deref(), Some("246810"));
+}
+
+/// Something already holding the listener's port would receive a code pushed now, so the failure
+/// comes with a notice naming the port and saying not to send it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_listener_port_says_not_to_send_the_code() {
+    let h = harness(true);
+    let squatter = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    let mut settings = h.store.load_settings().unwrap_or_default();
+    settings.otp_listener = ListenerSettings {
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+        sources: ListenerSources::Any,
+        wait_seconds: 20,
+    };
+    h.store.save_settings(&settings).unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let events = run(
+        context_otp(&h, transport.clone(), otp_empty(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    let notice = events
+        .iter()
+        .position(|e| matches!(e, Event::Notice(Notice::OtpPortHeld { port: p }) if *p == port))
+        .expect("the held port was not narrated");
+    let error = events
+        .iter()
+        .position(|e| matches!(e, Event::Error(_)))
+        .expect("the bind failure was not reported");
+    assert!(notice < error, "the warning came after the failure");
+    assert_eq!(submitted_otp(&transport), None);
+    drop(squatter);
+}
+
+/// With a companion configured on an account whose secrets sit in the platform keyring, the launch
+/// says so before anything about the launch happens. An account that stores nothing, and a profile
+/// with no companion, are not told.
+#[rstest::rstest]
+#[case(true, false, true)]
+#[case(true, true, false)]
+#[case(false, false, false)]
+#[tokio::test]
+async fn a_companion_on_a_keyring_account_is_narrated_before_the_launch(
+    #[case] companion: bool,
+    #[case] never_store: bool,
+    #[case] narrated: bool,
+) {
+    let h = harness_customized(false, |profile| profile.launch.act = companion);
+    let mut account = h.store.load_account(h.account).unwrap();
+    account.never_store = never_store;
+    h.store.save_account(&account).unwrap();
+    let events = run(
+        program_launch(
+            &h,
+            Arc::new(FakeLaunchBackend::exiting()),
+            Arc::new(FakeAddons::new()),
+        ),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    let notice = events
+        .iter()
+        .position(|e| matches!(e, Event::Notice(Notice::CompanionCanReadKeyring)));
+    assert_eq!(notice.is_some(), narrated, "{events:?}");
+    if let Some(notice) = notice {
+        let preparing = events
+            .iter()
+            .position(|e| matches!(e, Event::State(FlowState::PreparingPrefix)))
+            .unwrap();
+        assert!(notice < preparing);
+    }
+}

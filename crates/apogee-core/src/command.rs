@@ -389,6 +389,25 @@ pub enum Notice {
     /// Raised once per wait, not once per refusal. A notice per refusal is itself a flood, and the
     /// channel a shell reads is unbounded.
     OtpListenerFlood { from: IpAddr, refused: u32 },
+    /// A companion is configured on the launching profile, and this account's password and
+    /// one-time-password seed sit in the platform's credential store, which is unlocked for the whole
+    /// session and readable by anything running in it, the companion included.
+    ///
+    /// Raised before the launch, for an account that keeps its secrets at all. The launch
+    /// goes ahead: the way to narrow this is moving the account's secrets into the passphrase-sealed
+    /// file, which is the user's decision.
+    CompanionCanReadKeyring,
+    /// A companion is configured on the launching profile and the one-time-code listener admits any
+    /// source, so pushed codes are off for this login and the code is asked for instead.
+    ///
+    /// A companion can bind the listener's port or reach it from this machine. Pinning the listener
+    /// to the phone's address is what turns pushed codes back on while a companion is configured.
+    PushedCodesNeedAPinnedSource,
+    /// The one-time-code listener's port is already held by something else on this machine.
+    ///
+    /// Raised beside the failure, because what it means is urgent and is not what the failure says:
+    /// whatever holds `port` would receive a code pushed now, so the code must not be sent.
+    OtpPortHeld { port: u16 },
 }
 
 /// Where a login-to-play flow currently stands. The shell narrates these; none is a failure.

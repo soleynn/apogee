@@ -3531,6 +3531,19 @@ fn render_notice(notice: &Notice) -> String {
             "warning: {from} spent the one-time-code listener's attempt budget while this login \
              waited; {refused} connections were turned away and the login was unaffected"
         ),
+        Notice::CompanionCanReadKeyring => "warning: a companion program is configured on this \
+             profile, and this account's password and one-time-password seed are in the system \
+             keyring, which anything running in this session can read; the passphrase-sealed \
+             secrets file keeps them out of its reach"
+            .to_owned(),
+        Notice::PushedCodesNeedAPinnedSource => "warning: a companion program is configured on \
+             this profile and the one-time-code listener admits any source, so pushed codes are \
+             off for this login; pin the listener to your phone's address to use them"
+            .to_owned(),
+        Notice::OtpPortHeld { port } => format!(
+            "warning: something else on this machine holds port {port}; do not send the code from \
+             your phone, because whatever holds the port would receive it"
+        ),
         _ => "warning: an unrecognized advisory".to_owned(),
     }
 }

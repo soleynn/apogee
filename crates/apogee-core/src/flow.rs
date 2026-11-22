@@ -1239,7 +1239,8 @@ async fn authenticate(
         // pin, which is strictly wider than whatever the user configured, and the state a shell
         // renders carries only the port so nothing would look different.
         let settings = ctx.store.load_settings()?;
-        match wait_for_push(&settings.otp_listener, tx, cancel).await? {
+        let companions = crate::program::companions_configured(profile);
+        match wait_for_push(&settings.otp_listener, companions, tx, cancel).await? {
             Some(code) => Some(code),
             None => return Ok(None),
         }
@@ -1423,11 +1424,22 @@ enum Sourcing<'a> {
 /// [`hold_for`]. The listener is consumed by its own wait, so the port is gone on every path out of
 /// here including the error paths and including a cancel: there is no drop to remember and no early
 /// return to audit.
+///
+/// `companions` is whether a companion is configured on the profile logging in. A companion runs
+/// with the launcher's access on this machine, so it can reach a listener that admits any source,
+/// or take its port first; with one configured, a listener that is not pinned to a source is not
+/// opened, and the code is asked for instead.
 async fn wait_for_push(
     settings: &ListenerSettings,
+    companions: bool,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<Option<Code>, CoreError> {
+    if companions && matches!(settings.sources, ListenerSources::Any) {
+        let _ = tx.send(Event::Notice(Notice::PushedCodesNeedAPinnedSource));
+        emit(tx, FlowState::NeedsOtp);
+        return Ok(None);
+    }
     let Some(cfg) = listener_config(settings) else {
         // A machine configured to admit nobody cannot receive a code, which is the same disposition
         // as an account with no way to produce one. Answered rather than bound: opening a port that
@@ -1435,7 +1447,17 @@ async fn wait_for_push(
         emit(tx, FlowState::NeedsOtp);
         return Ok(None);
     };
-    let listener = Listener::bind(cfg).await?;
+    let listener = match Listener::bind(cfg).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            // Whatever holds the port would receive a code pushed now. Said before the failure,
+            // because the failure reads as "try again" and sending the code is the wrong retry.
+            if let OtpError::ListenerBind { port } = &err {
+                let _ = tx.send(Event::Notice(Notice::OtpPortHeld { port: *port }));
+            }
+            return Err(err.into());
+        }
+    };
     let port = listener.local_addr().port();
     let wait = Duration::from_secs(settings.wait_seconds);
     emit(
@@ -1913,6 +1935,12 @@ async fn launch_game(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let settings = ctx.store.load_settings()?;
+    if crate::program::companions_configured(profile)
+        && settings.secret_backend == crate::model::SecretBackend::Platform
+        && !account.never_store
+    {
+        let _ = tx.send(Event::Notice(Notice::CompanionCanReadKeyring));
+    }
     let game_dir = profile.game_path.join("game");
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
 

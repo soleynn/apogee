@@ -34,6 +34,13 @@ impl StableCode for Event {
             Self::Prefix(_) => "event-prefix",
             Self::Notice(crate::Notice::ClockSkew { .. }) => "notice-clock-skew",
             Self::Notice(crate::Notice::OtpListenerFlood { .. }) => "notice-otp-listener-flood",
+            Self::Notice(crate::Notice::CompanionCanReadKeyring) => {
+                "notice-companion-can-read-keyring"
+            }
+            Self::Notice(crate::Notice::PushedCodesNeedAPinnedSource) => {
+                "notice-pushed-codes-need-a-pinned-source"
+            }
+            Self::Notice(crate::Notice::OtpPortHeld { .. }) => "notice-otp-port-held",
             Self::LaunchProgramExited(_) => "event-launch-program-exited",
             Self::Error(error) => error.code(),
             Self::Outcome(RunOutcome::Succeeded) => "event-outcome-succeeded",
@@ -308,7 +315,10 @@ pub const ALL_CODES: &[&str] = &[
     "health-runner-mismatch",
     "health-unknown",
     "notice-clock-skew",
+    "notice-companion-can-read-keyring",
     "notice-otp-listener-flood",
+    "notice-otp-port-held",
+    "notice-pushed-codes-need-a-pinned-source",
     "preflight-game-running",
     "preflight-not-enough-space",
     "preflight-unknown",

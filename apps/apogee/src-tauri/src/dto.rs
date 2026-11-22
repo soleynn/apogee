@@ -551,6 +551,9 @@ mod tests {
 pub(crate) enum NoticeDto {
     ClockSkew { seconds: i64 },
     OtpListenerFlood { from: String, refused: u32 },
+    CompanionCanReadKeyring,
+    PushedCodesNeedAPinnedSource,
+    OtpPortHeld { port: u16 },
     Unknown,
 }
 
@@ -562,6 +565,9 @@ impl From<&Notice> for NoticeDto {
                 from: from.to_string(),
                 refused: *refused,
             },
+            Notice::CompanionCanReadKeyring => Self::CompanionCanReadKeyring,
+            Notice::PushedCodesNeedAPinnedSource => Self::PushedCodesNeedAPinnedSource,
+            Notice::OtpPortHeld { port } => Self::OtpPortHeld { port: *port },
             _ => Self::Unknown,
         }
     }

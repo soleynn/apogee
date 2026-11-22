@@ -849,6 +849,11 @@ fn notice_value(notice: &Notice) -> Value {
             "from": from.to_string(),
             "refused": refused,
         }),
+        Notice::CompanionCanReadKeyring => json!({ "kind": "companionCanReadKeyring" }),
+        Notice::PushedCodesNeedAPinnedSource => {
+            json!({ "kind": "pushedCodesNeedAPinnedSource" })
+        }
+        Notice::OtpPortHeld { port } => json!({ "kind": "otpPortHeld", "port": port }),
         _ => json!({ "kind": "unknown" }),
     }
 }
