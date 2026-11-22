@@ -136,6 +136,15 @@ fn normalize(raw: &str) -> Result<String, &'static str> {
     Ok(name.to_owned())
 }
 
+/// `ours` appended to `game`'s `WINEDLLOVERRIDES`, so the companion inherits the game's overrides
+/// and adds its own rather than replacing them.
+pub(crate) fn merge_overrides(game: Option<&str>, ours: &str) -> String {
+    match game {
+        Some(game) if !game.is_empty() => format!("{game};{ours}"),
+        _ => ours.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +242,11 @@ mod tests {
             ("WINEDLLOVERRIDES", "mscoree=b;winhttp=n,b"),
         ]);
         assert_eq!(check(&ok, &[]), Ok(()));
+        assert_eq!(
+            merge_overrides(Some("d3d11,dxgi=n"), "winhttp=n"),
+            "d3d11,dxgi=n;winhttp=n"
+        );
+        assert_eq!(merge_overrides(None, "winhttp=n"), "winhttp=n");
         assert!(check(&env(&[("MONO_PATH", "")]), &[]).is_err());
         assert!(check(&env(&[("MONO_PATH", &"a".repeat(5000))]), &[]).is_err());
     }

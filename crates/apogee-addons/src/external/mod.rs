@@ -77,6 +77,7 @@ const STILL_WAITING_AFTER: Duration = Duration::from_secs(30);
 pub struct GameContext {
     pid: i32,
     prefix: Option<Prefix>,
+    launch_env: std::collections::BTreeMap<String, String>,
 }
 
 impl GameContext {
@@ -109,6 +110,7 @@ impl GameContext {
         Ok(Self {
             pid: game_pid,
             prefix: None,
+            launch_env: std::collections::BTreeMap::new(),
         })
     }
 
@@ -150,6 +152,51 @@ impl GameContext {
     #[must_use]
     pub const fn prefix(&self) -> Option<&Prefix> {
         self.prefix.as_ref()
+    }
+
+    /// The same launch, with variables from the game's own environment that a companion started
+    /// inside its prefix must share with it.
+    ///
+    /// What belongs here is what makes a companion a client of the game's wine session rather than
+    /// the start of a second one: the synchronization settings the game was launched with
+    /// (`WINEFSYNC`, `WINEESYNC`), since a client whose settings differ from the server's is a known
+    /// way to hang both, and under Proton `UMU_CONTAINER_NSENTER`, which joins the game's container.
+    /// Never the launch plan's whole environment. A host companion is not given these.
+    ///
+    /// A `WINEDLLOVERRIDES` here is the game's, and a companion's own override list is appended to it
+    /// rather than replacing it; a companion override naming one of these libraries is refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> apogee_addons::Result<()> {
+    /// use apogee_addons::GameContext;
+    /// use std::collections::BTreeMap;
+    ///
+    /// let sync = BTreeMap::from([("WINEFSYNC".to_owned(), "1".to_owned())]);
+    /// let game = GameContext::new(4321)?.with_launch_env(sync);
+    /// assert_eq!(game.launch_env().get("WINEFSYNC").map(String::as_str), Some("1"));
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_launch_env(mut self, env: std::collections::BTreeMap<String, String>) -> Self {
+        self.launch_env = env;
+        self
+    }
+
+    /// The game environment shared with companions in its prefix.
+    #[must_use]
+    pub const fn launch_env(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.launch_env
+    }
+
+    /// The libraries the game's shared environment overrides, which a companion may not override.
+    fn game_overrides(&self) -> Vec<String> {
+        self.launch_env
+            .get("WINEDLLOVERRIDES")
+            .and_then(|value| crate::env_rules::override_names(value).ok())
+            .unwrap_or_default()
     }
 }
 
@@ -197,7 +244,9 @@ pub async fn start(
             });
             continue;
         }
-        if let Err(err) = addon.validate(index, game.prefix().is_some()) {
+        if let Err(err) =
+            addon.validate_against(index, game.prefix().is_some(), &game.game_overrides())
+        {
             report.outcomes.push(AddonOutcome {
                 index,
                 program: program.clone(),
@@ -301,7 +350,7 @@ fn spawn(
             });
         }
     };
-    spec = spec.env(child_env(game));
+    spec = spec.env(child_env(addon, game));
     // A tool that keeps its configuration beside its own binary needs to be started from there.
     if let Some(dir) = addon.program().parent() {
         spec = spec.working_dir(dir);
@@ -317,9 +366,25 @@ fn spawn(
 /// What a companion is told about the launch: the game's process id, and the prefix if there is one.
 ///
 /// Deliberately small and named, so a tool can find the game without the launcher inventing a
-/// substitution language in the argument vector.
-fn child_env(game: &GameContext) -> std::collections::BTreeMap<String, String> {
+/// substitution language in the argument vector. A companion inside the prefix also gets the game's
+/// shared environment and then its own allowlisted variables, its override list appended to the
+/// game's; the launcher's own two variables are set last so nothing can rename the game.
+fn child_env(
+    addon: &ExternalAddon,
+    game: &GameContext,
+) -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
+    if addon.run_in() == RunIn::Prefix && game.prefix().is_some() {
+        env.extend(game.launch_env().clone());
+    }
+    for (key, value) in addon.env() {
+        let value = if key == "WINEDLLOVERRIDES" {
+            crate::env_rules::merge_overrides(env.get(key).map(String::as_str), value)
+        } else {
+            value.clone()
+        };
+        env.insert(key.clone(), value);
+    }
     env.insert("APOGEE_GAME_PID".to_owned(), game.game_pid().to_string());
     if let Some(prefix) = game.prefix() {
         env.insert(
@@ -403,5 +468,67 @@ pub(crate) async fn run_to_completion(
             let _ = companion.stop(session::STOP_GRACE).await;
             Outcome::Cancelled
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// A companion inside the prefix shares the game's session variables, adds its own override list
+    /// behind the game's rather than replacing it, and cannot rename the game: the launcher's own
+    /// variables are written last. A host companion is given none of the game's environment.
+    #[test]
+    fn a_companion_in_the_prefix_joins_the_games_environment_and_cannot_rename_the_game() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prefix = Prefix::for_testing(
+            dir.path(),
+            dir.path().join("runner"),
+            apogee_runtime::RunnerKind::ProtonUmu,
+            "GE-Proton",
+            "11-12",
+        );
+        let game = GameContext::in_prefix(4321, &prefix)
+            .expect("context")
+            .with_launch_env(env(&[
+                ("WINEFSYNC", "1"),
+                ("UMU_CONTAINER_NSENTER", "1"),
+                ("WINEDLLOVERRIDES", "d3d11,dxgi=n"),
+                ("APOGEE_GAME_PID", "1"),
+            ]));
+        let trigger = Trigger::WithGame {
+            keep_after_close: false,
+        };
+        let program = dir.path().join("act.exe");
+        let inside = ExternalAddon::new(&program, vec![], RunIn::Prefix, trigger)
+            .expect("addon")
+            .with_env(env(&[("WINEDLLOVERRIDES", "mscoree=b")]));
+
+        let got = child_env(&inside, &game);
+        assert_eq!(got["WINEFSYNC"], "1");
+        assert_eq!(got["UMU_CONTAINER_NSENTER"], "1");
+        assert_eq!(got["WINEDLLOVERRIDES"], "d3d11,dxgi=n;mscoree=b");
+        assert_eq!(got["APOGEE_GAME_PID"], "4321");
+
+        // The game's own overrides are ones a companion may not name.
+        let clash = inside.with_env(env(&[("WINEDLLOVERRIDES", "mscoree=b;D3D11=b")]));
+        assert!(
+            clash
+                .validate_against(0, true, &game.game_overrides())
+                .is_err()
+        );
+
+        let host = ExternalAddon::new(&program, vec![], RunIn::Host, trigger).expect("addon");
+        let got = child_env(&host, &game);
+        assert!(!got.contains_key("WINEFSYNC") && !got.contains_key("WINEDLLOVERRIDES"));
     }
 }
