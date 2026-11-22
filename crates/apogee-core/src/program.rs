@@ -6,7 +6,7 @@
 //! switch and its row without knowing which of the three is an injectable and which a companion.
 
 use apogee_addons::manifest::InjectableKind;
-use apogee_addons::{ComponentManifest, SupportTier};
+use apogee_addons::{ComponentManifest, ExternalAddon, SupportTier};
 
 use crate::model::{LaunchSettings, Profile};
 
@@ -143,6 +143,16 @@ pub(crate) fn consent_needed(stored: &Profile, next: &Profile) -> Option<String>
         .map(|row| row.program().to_string_lossy().into_owned())
 }
 
+/// Whether any companion is configured on `profile`: a curated program switched on, or a row of the
+/// user's own that is enabled. A companion has the launcher's access to the session, which is what
+/// several launch rules key on.
+pub(crate) fn companions_configured(profile: &Profile) -> bool {
+    ProgramName::ALL
+        .into_iter()
+        .any(|program| program.needs_consent() && program.is_on(&profile.launch))
+        || profile.external.iter().any(ExternalAddon::enabled)
+}
+
 /// The catalog's row for `program`, projected for a report.
 pub(crate) fn row(manifest: &ComponentManifest, program: ProgramName) -> Option<ProgramRow> {
     if program == ProgramName::Dalamud {
@@ -184,7 +194,7 @@ fn tier(tier: &SupportTier) -> ProgramTier {
 mod tests {
     use std::path::PathBuf;
 
-    use apogee_addons::{ExternalAddon, RunIn, Trigger};
+    use apogee_addons::{RunIn, Trigger};
     use uuid::Uuid;
 
     use super::*;

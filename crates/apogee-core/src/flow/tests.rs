@@ -4672,3 +4672,48 @@ async fn prefix_repair_and_check_carry_the_enabled_programs(#[case] action: Pref
         addons.calls()
     );
 }
+
+/// No session at rest while a companion is configured: a cached one is removed before the launch
+/// reads it, so a bare launch has to sign in, and a full sign-in launches from the session it holds
+/// without writing one.
+#[tokio::test]
+async fn a_configured_companion_keeps_no_session_at_rest() {
+    let h = harness(false);
+    // A plain launch first, which caches its session the way every launch without a companion does.
+    run(
+        program_launch(
+            &h,
+            Arc::new(FakeLaunchBackend::exiting()),
+            Arc::new(FakeAddons::new()),
+        ),
+        play_no_otp(h.profile),
+    )
+    .await;
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_some());
+
+    let mut profile = h.store.load_profile(h.profile).unwrap();
+    profile
+        .external
+        .push(prefix_tool("tools/own.sh", RunIn::Host));
+    h.store.save_profile(&profile).unwrap();
+
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, Arc::new(FixtureTransport::new([])), launch.clone(), NOW);
+    let events = run(ctx, Command::Launch { profile: h.profile }).await;
+    assert_eq!(states(&events), [FlowState::NeedsLogin]);
+    assert_eq!(launch.launch_count(), 0);
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_none());
+
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let events = run(
+        program_launch(&h, launch.clone(), Arc::new(FakeAddons::new())),
+        play_no_otp(h.profile),
+    )
+    .await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert_eq!(launch.launch_count(), 1);
+    assert!(
+        h.store.load_uid_cache(h.account).unwrap().is_none(),
+        "the session was written while a companion is configured"
+    );
+}

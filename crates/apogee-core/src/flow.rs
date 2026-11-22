@@ -970,7 +970,7 @@ async fn login(
         } => {
             if pending_patches.is_empty() {
                 let session = build_session(ctx, &auth, &report, unique_id.expose());
-                ctx.store.save_uid_cache(profile.account, &session)?;
+                keep_session(ctx, &profile, &session)?;
                 record_current(ctx, profile.id)?;
             } else {
                 record_pending(ctx, profile.id, &pending_patches, None)?;
@@ -1005,6 +1005,7 @@ async fn play(
     if launch {
         crate::launch::managed_runner(&profile)?;
     }
+    drop_session_at_rest(ctx, &profile)?;
     if mode == InstallMode::Update
         && launch
         && let Some(session) = valid_cached_session(ctx, &profile)?
@@ -1133,6 +1134,7 @@ async fn launch_cached(
     let (profile, account) = resolve(ctx, profile_id)?;
     // A runner it cannot launch outranks a missing session: signing in would not make it startable.
     crate::launch::managed_runner(&profile)?;
+    drop_session_at_rest(ctx, &profile)?;
     match valid_cached_session(ctx, &profile)? {
         Some(session) => launch_game(ctx, &profile, &account, &session, tx, cancel).await,
         None => {
@@ -1586,7 +1588,7 @@ async fn patch_to_current(
             } => {
                 if pending_patches.is_empty() {
                     let session = build_session(ctx, auth, &report, unique_id.expose());
-                    ctx.store.save_uid_cache(profile.account, &session)?;
+                    keep_session(ctx, profile, &session)?;
                     record_current(ctx, profile.id)?;
                     return Ok(Some(session));
                 }
@@ -2017,6 +2019,34 @@ async fn launch_game(
     }
     result?;
     emit(tx, FlowState::Exited);
+    Ok(())
+}
+
+/// Write `session` to the account's session cache, unless a companion is configured on `profile`.
+///
+/// A companion runs with the launcher's own access, and the cached session is a ticket that launches
+/// the game as this account with no sign-in. While anything of the kind is configured there is no
+/// ticket at rest for it to read: the launch uses the session it holds in memory, and the next one
+/// signs in again.
+fn keep_session(
+    ctx: &FlowContext,
+    profile: &Profile,
+    session: &UidCacheEntry,
+) -> Result<(), CoreError> {
+    if crate::program::companions_configured(profile) {
+        return Ok(());
+    }
+    Ok(ctx.store.save_uid_cache(profile.account, session)?)
+}
+
+/// Remove the account's cached session when a companion is configured on `profile`, before anything
+/// else in the flow reads it. One left from before the companion was configured would otherwise be
+/// launched from, and stay at rest for the whole session. A removal that fails stops the run rather
+/// than leaving the ticket where the companion can read it.
+fn drop_session_at_rest(ctx: &FlowContext, profile: &Profile) -> Result<(), CoreError> {
+    if crate::program::companions_configured(profile) {
+        ctx.store.clear_uid_cache(profile.account)?;
+    }
     Ok(())
 }
 
