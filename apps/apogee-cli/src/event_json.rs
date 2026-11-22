@@ -406,6 +406,7 @@ fn first_run_value(checkpoint: &apogee_core::FirstRunCheckpoint) -> Value {
             .collect::<Vec<_>>(),
         "credential": checkpoint.credential.as_ref().map(credential_choice_value),
         "runners": checkpoint.runners.iter().map(runner_reading_value).collect::<Vec<_>>(),
+        "prefixFailure": checkpoint.prefix_failure.as_ref().map(prefix_failure_value),
         "runnerAndPrefix": checkpoint.runner_and_prefix.as_ref().map(runner_and_prefix_value),
         "ready": ready_state_value(&checkpoint.ready),
     })
@@ -414,7 +415,7 @@ fn first_run_value(checkpoint: &apogee_core::FirstRunCheckpoint) -> Value {
 fn first_run_position_value(position: apogee_core::FirstRunPosition) -> Value {
     match position {
         apogee_core::FirstRunPosition::Step(step) => json!({
-            "kind": "step",
+            "state": "step",
             "value": match step {
                 apogee_core::FirstRunStep::Legibility => "legibility",
                 apogee_core::FirstRunStep::Import => "import",
@@ -427,10 +428,10 @@ fn first_run_position_value(position: apogee_core::FirstRunPosition) -> Value {
             },
         }),
         apogee_core::FirstRunPosition::WaitingForImportDiscovery => {
-            json!({ "kind": "waitingForImportDiscovery" })
+            json!({ "state": "waitingForImportDiscovery" })
         }
-        apogee_core::FirstRunPosition::Complete => json!({ "kind": "complete" }),
-        _ => json!({ "kind": "unknown" }),
+        apogee_core::FirstRunPosition::Complete => json!({ "state": "complete" }),
+        _ => json!({ "state": "unknown" }),
     }
 }
 
@@ -646,6 +647,13 @@ fn runner_selection_value(selection: &apogee_core::FirstRunRunnerSelection) -> V
         }),
         _ => json!({ "kind": "unknown" }),
     }
+}
+
+fn prefix_failure_value(failure: &apogee_core::PrefixFailure) -> Value {
+    json!({
+        "runner": runner_selection_value(&failure.runner),
+        "code": failure.code,
+    })
 }
 
 fn runner_and_prefix_value(choice: &apogee_core::RunnerAndPrefixChoice) -> Value {

@@ -23,6 +23,7 @@ import {
   openLink,
   pickFolder,
   onPassphrasePrompt,
+  onInstanceAttention,
   onQuitDuringRun,
   planProfileRemoval,
   removeProfile,
@@ -125,6 +126,24 @@ describe('close interception', () => {
     expect(requested).toHaveBeenCalledOnce();
     expect(listen).toHaveBeenCalledWith('quit-during-run-request', expect.any(Function));
     expect(invoke).toHaveBeenCalledWith('answer_close_request', { confirmed: true });
+  });
+});
+
+describe('single-instance attention', () => {
+  it('reports the attention-only fallback as a distinct ambient event', async () => {
+    let receive: (() => void) | undefined;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation((_name, handler) => {
+      receive = () => handler({ payload: undefined } as never);
+      return Promise.resolve(unlisten);
+    });
+    const highlighted = vi.fn();
+
+    await expect(onInstanceAttention(highlighted)).resolves.toBe(unlisten);
+    receive?.();
+
+    expect(highlighted).toHaveBeenCalledOnce();
+    expect(listen).toHaveBeenCalledWith('instance-attention-requested', expect.any(Function));
   });
 });
 

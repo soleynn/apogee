@@ -143,12 +143,18 @@ pub struct GameCandidate {
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 #[non_exhaustive]
 pub enum GameCandidateState {
-    Current { installed_bytes: u64 },
+    Current {
+        installed_bytes: u64,
+    },
     NeedsUpdate(PatchReading),
     /// A recognizable installation whose update status has not been authenticated yet.
-    Installed { installed_bytes: u64 },
+    Installed {
+        installed_bytes: u64,
+    },
     NotAGame,
-    Unreadable { code: String },
+    Unreadable {
+        code: String,
+    },
 }
 
 /// A verified patch reading used by setup summaries and the ready action.
@@ -481,9 +487,10 @@ pub fn transition(
         {
             next.game_candidates = candidates;
         }
-        FirstRunTransition::SelectGame { choice: game, profile_id }
-            if position == FirstRunPosition::Step(FirstRunStep::Game) =>
-        {
+        FirstRunTransition::SelectGame {
+            choice: game,
+            profile_id,
+        } if position == FirstRunPosition::Step(FirstRunStep::Game) => {
             validate_game_choice(&next, &game)?;
             next.game = Some(game);
             next.profile_id = Some(profile_id);
@@ -942,9 +949,7 @@ mod tests {
         assert_eq!(
             transition(
                 &checkpoint,
-                FirstRunTransition::StartReady(ReadyAction::InstallAndPlay {
-                    bytes: Some(1),
-                })
+                FirstRunTransition::StartReady(ReadyAction::InstallAndPlay { bytes: Some(1) })
             ),
             Err(FirstRunTransitionError::ReadyActionMismatch)
         );

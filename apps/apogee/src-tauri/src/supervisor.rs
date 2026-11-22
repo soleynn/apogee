@@ -986,7 +986,10 @@ mod tests {
             runs.start(Uuid::new_v4(), RunClass::ReadOnly).err(),
             Some(RunAdmissionError::Draining)
         );
-        assert_eq!(runs.start_mutation().err(), Some(RunAdmissionError::Draining));
+        assert_eq!(
+            runs.start_mutation().err(),
+            Some(RunAdmissionError::Draining)
+        );
         assert!(!read_token.is_cancelled());
         assert!(!write_token.is_cancelled());
 

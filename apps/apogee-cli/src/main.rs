@@ -12,18 +12,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent, Core,
-    CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon, FileState, FirstRunAccountInput,
-    FirstRunAccountKind, FirstRunAction as CoreFirstRunAction, FirstRunRequest,
-    FirstRunRunnerSelection, FlowState, ForeignCredentialStore, ForeignKey, ForeignSecretsFile,
-    FrameLog, FrontierData, FrontierQuery, Gamescope, GpuSelect, HealthIssue, Hud, ImportDecision,
-    ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
-    ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand, NextVerb, Notice,
-    OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction, PrefixReport,
-    Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID,
-    STEAM_FREE_TRIAL_APP_ID,
-    Secret, SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
-    SyncChoice, Trigger, Uuid,
+    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
+    Core, CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon, FileState,
+    FirstRunAccountInput, FirstRunAccountKind, FirstRunAction as CoreFirstRunAction,
+    FirstRunRequest, FirstRunRunnerSelection, FlowState, ForeignCredentialStore, ForeignKey,
+    ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, Gamescope, GpuSelect, HealthIssue,
+    Hud, ImportDecision, ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher,
+    LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
+    NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
+    PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
+    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
+    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -323,9 +322,7 @@ impl From<FirstRunActionInput> for CoreFirstRunAction {
             FirstRunActionInput::SelectInstallLocation { path } => {
                 Self::SelectInstallLocation { path }
             }
-            FirstRunActionInput::SelectCredential(credential) => {
-                Self::SelectCredential(credential)
-            }
+            FirstRunActionInput::SelectCredential(credential) => Self::SelectCredential(credential),
             FirstRunActionInput::SelectRunner(runner) => Self::SelectRunner(runner),
             FirstRunActionInput::ContinueWithoutPrefix => Self::ContinueWithoutPrefix,
             FirstRunActionInput::StartReady => Self::StartReady,

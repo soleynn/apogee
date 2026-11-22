@@ -128,13 +128,14 @@ mod linux {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::process::ExitCode;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
     use gtk::prelude::GtkWindowExt;
-    use nix::fcntl::{fcntl, flock, FcntlArg, FdFlag, FlockArg};
+    use nix::fcntl::{FcntlArg, FdFlag, FlockArg, fcntl, flock};
     use rustix::fs::{Mode, OFlags};
     use serde::{Deserialize, Serialize};
     use tauri::{Emitter, Manager, UserAttentionType};
@@ -552,8 +553,7 @@ mod linux {
         stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
         stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
         let mut request = Vec::with_capacity(MAX_REQUEST_BYTES.min(512));
-        stream
-            .by_ref()
+        Read::by_ref(&mut stream)
             .take((MAX_REQUEST_BYTES + 1) as u64)
             .read_to_end(&mut request)?;
         let Some(payload) = decode_activation(&request) else {
@@ -579,7 +579,10 @@ mod linux {
                     if matches!(
                         error.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) => thread::sleep(LISTENER_POLL),
+                    ) =>
+                {
+                    thread::sleep(LISTENER_POLL)
+                }
                 Err(error) => {
                     tracing::warn!(%error, "instance activation listener stopped");
                     break;
@@ -704,7 +707,10 @@ mod linux {
                         value: "token".to_owned(),
                     }),
                 };
-                assert_eq!(decode_activation(&encode_activation(&payload)?), Some(payload));
+                assert_eq!(
+                    decode_activation(&encode_activation(&payload)?),
+                    Some(payload)
+                );
             }
             Ok(())
         }
@@ -938,6 +944,18 @@ mod linux {
             };
             assert!(paths.socket.exists());
 
+            // The listener thread needs an app handle, so answer the second launch's forward here.
+            let owner_socket = first
+                .inner
+                .as_ref()
+                .ok_or_else(|| io::Error::other("the first launch has no instance socket"))?
+                .socket
+                .try_clone()?;
+            let owner = thread::spawn(move || -> io::Result<()> {
+                let (stream, _) = owner_socket.accept()?;
+                handle_connection(stream, |_| true)
+            });
+
             let second = preflight_at(
                 &paths,
                 None,
@@ -946,6 +964,9 @@ mod linux {
                 },
             )?;
             assert!(matches!(second, InstancePreflight::Exit(_)));
+            owner.join().map_err(|_| {
+                io::Error::other("the owner's stand-in listener stopped unexpectedly")
+            })??;
             assert!(paths.socket.exists());
             drop(first);
             assert!(!paths.socket.exists());

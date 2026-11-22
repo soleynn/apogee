@@ -80,7 +80,10 @@ impl FirstRunDto {
                     )
                 })
                 .collect(),
-            prefix_failure: checkpoint.prefix_failure.as_ref().map(PrefixFailureDto::from),
+            prefix_failure: checkpoint
+                .prefix_failure
+                .as_ref()
+                .map(PrefixFailureDto::from),
             runner_and_prefix: checkpoint
                 .runner_and_prefix
                 .as_ref()

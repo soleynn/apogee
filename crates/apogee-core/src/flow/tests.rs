@@ -461,12 +461,7 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
 
     let transport = || Arc::new(FixtureTransport::new([]));
     let events = run(
-        context(
-            &h,
-            transport(),
-            Arc::new(FakeLaunchBackend::exiting()),
-            NOW,
-        ),
+        context(&h, transport(), Arc::new(FakeLaunchBackend::exiting()), NOW),
         Command::FirstRun(FirstRunRequest::Advance(
             crate::FirstRunAction::SelectInstallLocation {
                 path: install.path().to_path_buf(),
@@ -486,12 +481,7 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
     assert!(checkpoint.profile_id.is_some());
 
     let events = run(
-        context(
-            &h,
-            transport(),
-            Arc::new(FakeLaunchBackend::exiting()),
-            NOW,
-        ),
+        context(&h, transport(), Arc::new(FakeLaunchBackend::exiting()), NOW),
         Command::FirstRun(FirstRunRequest::Advance(
             crate::FirstRunAction::SelectCredential(crate::CredentialChoice::DoNotSave),
         )),
@@ -542,15 +532,13 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
             code: "err-launch".to_owned(),
         })
     );
-    assert!(errors(&events).is_empty(), "failure must be a retryable reading");
+    assert!(
+        errors(&events).is_empty(),
+        "failure must be a retryable reading"
+    );
 
     let events = run(
-        context(
-            &h,
-            transport(),
-            Arc::new(FakeLaunchBackend::exiting()),
-            NOW,
-        ),
+        context(&h, transport(), Arc::new(FakeLaunchBackend::exiting()), NOW),
         Command::FirstRun(FirstRunRequest::Advance(
             crate::FirstRunAction::ContinueWithoutPrefix,
         )),
@@ -581,15 +569,8 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
     assert_eq!(launch.prepared().len(), 1);
 
     let events = run(
-        context(
-            &h,
-            transport(),
-            Arc::new(FakeLaunchBackend::exiting()),
-            NOW,
-        ),
-        Command::FirstRun(FirstRunRequest::Advance(
-            crate::FirstRunAction::StartReady,
-        )),
+        context(&h, transport(), Arc::new(FakeLaunchBackend::exiting()), NOW),
+        Command::FirstRun(FirstRunRequest::Advance(crate::FirstRunAction::StartReady)),
     )
     .await;
     let checkpoint = first_run_checkpoint(&events);

@@ -6,6 +6,7 @@
     confirmRender,
     corruptStoreRecovery,
     failureCode,
+    onInstanceAttention,
     onQuitDuringRun,
     renderStatus,
     startup,
@@ -19,15 +20,25 @@
   });
   let renderConfirmed = false;
   let closeRequested = false;
+  let instanceHighlighted = false;
 
   onMount(() => {
-    let unlisten: (() => void) | undefined;
+    let stopClose: (() => void) | undefined;
+    let stopAttention: (() => void) | undefined;
     void onQuitDuringRun(() => {
       closeRequested = true;
     }).then((stop) => {
-      unlisten = stop;
+      stopClose = stop;
     });
-    return () => unlisten?.();
+    void onInstanceAttention(() => {
+      instanceHighlighted = true;
+    }).then((stop) => {
+      stopAttention = stop;
+    });
+    return () => {
+      stopClose?.();
+      stopAttention?.();
+    };
   });
 
   function retryStartup() {
@@ -53,6 +64,9 @@
 />
 
 <main>
+  {#if instanceHighlighted}
+    <p role="status">Another Apogee launch highlighted this window.</p>
+  {/if}
   {#await renderer}
     <p>Checking the window.</p>
   {:then status}

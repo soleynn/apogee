@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
+use crate::StableCode;
 use crate::addons::AddonBackend;
 use crate::command::{
     Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, GateData, ImportData,
@@ -44,7 +45,6 @@ use crate::patch::{PatchBackend, RepairPlan, RepairRepoPlan, classify_repo, repo
 use crate::status::{PendingPatch, PendingRepo, StatusRecord, StoredDisposition, StoredPending};
 use crate::steam::SteamBackend;
 use crate::store::{Store, StoreError, UidCacheEntry};
-use crate::StableCode;
 
 /// The most register→patch rounds a single flow will attempt before giving up. The normal chain is
 /// at most three (boot patch → game patch → current); the cap only guards against a server that keeps
@@ -319,10 +319,9 @@ async fn advance_first_run(
 
     let checkpoint = ctx.store.load_first_run()?;
     let next = match action {
-        crate::FirstRunAction::ConfirmLegibility(reading) => crate::first_run::transition(
-            &checkpoint,
-            Transition::ConfirmLegibility(reading),
-        )?,
+        crate::FirstRunAction::ConfirmLegibility(reading) => {
+            crate::first_run::transition(&checkpoint, Transition::ConfirmLegibility(reading))?
+        }
         crate::FirstRunAction::DecideImport(decision) => {
             crate::first_run::transition(&checkpoint, Transition::DecideImport(decision))?
         }
@@ -350,10 +349,7 @@ async fn advance_first_run(
             let mut candidates = checkpoint.game_candidates.clone();
             candidates.retain(|known| known.path != candidate.path);
             candidates.push(candidate);
-            crate::first_run::transition(
-                &checkpoint,
-                Transition::RecordGameCandidates(candidates),
-            )?
+            crate::first_run::transition(&checkpoint, Transition::RecordGameCandidates(candidates))?
         }
         crate::FirstRunAction::SelectExistingGame { path } => {
             let candidate = checkpoint
@@ -373,7 +369,9 @@ async fn advance_first_run(
                 }
                 crate::GameCandidateState::NotAGame
                 | crate::GameCandidateState::Unreadable { .. } => {
-                    return Err(crate::FirstRunTransitionError::UnusableGameCandidate { path }.into());
+                    return Err(
+                        crate::FirstRunTransitionError::UnusableGameCandidate { path }.into(),
+                    );
                 }
             };
             select_first_run_game(
@@ -664,9 +662,10 @@ fn select_first_run_game(
         .filter(|profile| profile.account == account_id && profile.game_path == path)
         .collect::<Vec<_>>();
     matches.sort_by_key(|profile| profile.id);
-    let profile = matches.into_iter().next().unwrap_or_else(|| {
-        crate::Profile::new(&account.square_enix_id, account_id, path)
-    });
+    let profile = matches
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| crate::Profile::new(&account.square_enix_id, account_id, path));
     let next = crate::first_run::transition(
         &checkpoint,
         crate::first_run::FirstRunTransition::SelectGame {

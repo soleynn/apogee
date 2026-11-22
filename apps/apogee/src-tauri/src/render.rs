@@ -689,7 +689,10 @@ impl RenderMonitor {
     }
 
     #[cfg(unix)]
-    pub(crate) fn retry_exec(&self) -> Result<RenderPreflight, RenderError> {
+    pub(crate) fn retry_exec(
+        &self,
+        reexec_environment: Option<(&'static str, OsString)>,
+    ) -> Result<RenderPreflight, RenderError> {
         let state = self.lock();
         if state.record.attempted >= MAX_TIER || state.record.escalations >= MAX_ESCALATIONS {
             drop(state);
@@ -714,7 +717,13 @@ impl RenderMonitor {
         drop(state);
         save_record(&path, &record)?;
         let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-        exec_tier(tier, &args, None)
+        exec_tier(
+            tier,
+            &args,
+            reexec_environment
+                .as_ref()
+                .map(|(name, value)| (*name, value.as_os_str())),
+        )
     }
 
     fn machine_missing(&self) -> bool {

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use apogee_core::{
-    Core, ExistingGameState, FirstRunCheckpoint, FirstRunImportCandidate,
-    FirstRunRunnerSelection, GameCandidate, GameCandidateState, GameChoice, ImportDecision,
-    ImportPlan, ImportScan, SupportBundleData, Uuid,
+    Core, ExistingGameState, FirstRunCheckpoint, FirstRunImportCandidate, FirstRunRunnerSelection,
+    GameCandidate, GameCandidateState, GameChoice, ImportDecision, ImportPlan, ImportScan,
+    SupportBundleData, Uuid,
 };
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;

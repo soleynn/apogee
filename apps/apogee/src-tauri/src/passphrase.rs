@@ -57,7 +57,11 @@ impl PromptBroker {
 
     /// Cancel every pending native prompt so a shutdown cannot wait for the two-minute timeout.
     pub(crate) fn cancel_all(&self) -> usize {
-        let senders = self.pending().drain().map(|(_, sender)| sender).collect::<Vec<_>>();
+        let senders = self
+            .pending()
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>();
         let count = senders.len();
         for sender in senders {
             let _ = sender.send(None);

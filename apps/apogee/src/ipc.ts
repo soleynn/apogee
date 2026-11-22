@@ -72,6 +72,7 @@ export class IpcFailure extends Error {
 const ACTIVE_PROFILE_KEY = 'apogee.activeProfile';
 const PASSPHRASE_REQUEST_EVENT = 'passphrase-request';
 const QUIT_DURING_RUN_EVENT = 'quit-during-run-request';
+const INSTANCE_ATTENTION_EVENT = 'instance-attention-requested';
 
 const knownEventKinds = new Set([
   'state',
@@ -406,6 +407,11 @@ export function confirmRender(): Promise<void> {
 /** Subscribes to the one native close request that needs a stop-and-resume confirmation. */
 export function onQuitDuringRun(handler: () => void): Promise<UnlistenFn> {
   return listen<void>(QUIT_DURING_RUN_EVENT, () => handler());
+}
+
+/** Reports that another launch highlighted this window without claiming compositor activation. */
+export function onInstanceAttention(handler: () => void): Promise<UnlistenFn> {
+  return listen<void>(INSTANCE_ATTENTION_EVENT, () => handler());
 }
 
 /** Declines the pending close or cancels and drains every active operation before closing. */

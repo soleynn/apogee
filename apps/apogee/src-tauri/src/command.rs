@@ -162,9 +162,7 @@ impl CommandDto {
                 profile,
                 action: action.into_core(),
             },
-            Self::FirstRun { request } => {
-                Command::FirstRun(request.into_core(navigation, render)?)
-            }
+            Self::FirstRun { request } => Command::FirstRun(request.into_core(navigation, render)?),
             Self::ImportXivLauncher { request } => {
                 Command::ImportXivLauncher(request.into_core(navigation)?)
             }
@@ -307,9 +305,9 @@ impl FirstRunActionDto {
                     .folder(folder)
                     .ok_or(CommandDtoError::UnknownFolder)?,
             },
-            Self::SelectCredential(credential) => FirstRunAction::SelectCredential(
-                credential.into_core().ok_or_else(unsupported)?,
-            ),
+            Self::SelectCredential(credential) => {
+                FirstRunAction::SelectCredential(credential.into_core().ok_or_else(unsupported)?)
+            }
             Self::SelectRunner { candidate } => FirstRunAction::SelectRunner(
                 navigation
                     .first_run_runner(candidate)

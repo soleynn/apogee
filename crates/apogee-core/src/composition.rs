@@ -960,10 +960,7 @@ impl Core {
     /// # Errors
     /// As [`Core::profile`].
     pub fn repair_recycler_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
-        Ok(self
-            .profile(id)?
-            .game_path
-            .join("apogee_repair_recycler"))
+        Ok(self.profile(id)?.game_path.join("apogee_repair_recycler"))
     }
 
     /// Every stored account.
@@ -1791,13 +1788,14 @@ pub(crate) async fn read_first_run_checkpoint(
                 | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
         )
     {
-        checkpoint.credential_backends = blocking_read("first-run credential backends", move || {
-            Ok(first_run_credential_backends(
-                &secrets.probe(),
-                &sealed_file,
-            ))
-        })
-        .await?;
+        checkpoint.credential_backends =
+            blocking_read("first-run credential backends", move || {
+                Ok(first_run_credential_backends(
+                    &secrets.probe(),
+                    &sealed_file,
+                ))
+            })
+            .await?;
     }
     crate::first_run::refresh_position(&mut checkpoint);
     blocking_read("first-run save", move || {

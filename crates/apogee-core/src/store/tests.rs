@@ -86,7 +86,9 @@ fn first_run_checkpoint_migrates_without_trusting_a_stored_position() {
         FirstRunPosition::Step(FirstRunStep::Account)
     );
 
-    store.save_first_run(&FirstRunCheckpoint::default()).unwrap();
+    store
+        .save_first_run(&FirstRunCheckpoint::default())
+        .unwrap();
     let raw: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(
         raw["schema_version"],

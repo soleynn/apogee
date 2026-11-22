@@ -122,12 +122,10 @@ pub(crate) async fn answer_close_request(
         .answer(confirmed, &state.runs, &state.passphrases)
         .await
         .map_err(|_| IpcErrorDto::shell("shell.close.unavailable"))?;
-    if close {
-        if let Some(window) = app.get_webview_window("main") {
-            window
-                .destroy()
-                .map_err(|_| IpcErrorDto::shell("shell.close.failed"))?;
-        }
+    if close && let Some(window) = app.get_webview_window("main") {
+        window
+            .destroy()
+            .map_err(|_| IpcErrorDto::shell("shell.close.failed"))?;
     }
     Ok(close)
 }
@@ -165,7 +163,10 @@ mod tests {
     #[test]
     fn close_without_work_is_allowed_without_a_prompt() {
         let controller = CloseController::default();
-        assert_eq!(controller.request(&Runs::default()), Ok(CloseDecision::Allow));
+        assert_eq!(
+            controller.request(&Runs::default()),
+            Ok(CloseDecision::Allow)
+        );
     }
 
     #[test]
@@ -231,7 +232,10 @@ mod tests {
                 .await
         });
         tokio::task::yield_now().await;
-        assert!(token.is_cancelled(), "the token must fire before drain waits");
+        assert!(
+            token.is_cancelled(),
+            "the token must fire before drain waits"
+        );
         assert!(!answer.is_finished());
         drop(lease);
         assert_eq!(answer.await.expect("close answer task"), Ok(true));

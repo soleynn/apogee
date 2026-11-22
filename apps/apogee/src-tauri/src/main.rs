@@ -475,11 +475,14 @@ fn main() -> ExitCode {
     if render.retry_requested() {
         #[cfg(unix)]
         {
-            if let Err(error) = instance.reexec_environment() {
-                eprintln!("{error}");
-                return ExitCode::FAILURE;
-            }
-            match render.retry_exec() {
+            let reexec_environment = match instance.reexec_environment() {
+                Ok(environment) => environment,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match render.retry_exec(reexec_environment) {
                 Ok(render::RenderPreflight::Exit(retry_code)) => return retry_code,
                 Ok(render::RenderPreflight::Continue(_)) => return ExitCode::FAILURE,
                 Err(error) => {
