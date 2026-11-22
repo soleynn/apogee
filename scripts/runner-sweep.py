@@ -533,10 +533,21 @@ def expand(p):
     return Path(os.path.expandvars(os.path.expanduser(str(p))))
 
 
+SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
 def load_config(path):
     cfg = dict(EXAMPLE_CONFIG)
     cfg.update(json.loads(Path(path).read_text()))
     names = [c["name"] for c in cfg["cells"]]
+    # Cell names become directory names that are emptied and deleted, so each must be one plain path
+    # component: no separator, no "..", nothing absolute.
+    for name in names:
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name) or name in (".", ".."):
+            raise SweepError(f"cell name {name!r} must be letters, digits, '.', '_' or '-'")
+    ini = cfg.get("bench_ini")
+    if not isinstance(ini, str) or not SAFE_NAME.fullmatch(ini) or ini in (".", ".."):
+        raise SweepError("bench_ini must be a bare file name inside bench_dir")
     if len(set(names)) != len(names):
         raise SweepError("cell names must be unique")
     for c in cfg["cells"]:
@@ -1439,6 +1450,23 @@ def print_report(r):
 
 
 class SelfTest(unittest.TestCase):
+    def test_a_cell_name_or_ini_that_leaves_its_directory_is_refused(self):
+        import tempfile
+        for bad in ("../x", "/abs", "a/b", "..", ""):
+            for key in ("name", "ini"):
+                cfg = dict(EXAMPLE_CONFIG)
+                cfg["cells"] = [dict(c) for c in EXAMPLE_CONFIG["cells"]]
+                if key == "name":
+                    cfg["cells"][0]["name"] = bad
+                    cfg["aa_control"] = bad
+                else:
+                    cfg["bench_ini"] = bad
+                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                    json.dump(cfg, f)
+                with self.assertRaises(SweepError, msg=f"{key}={bad!r}"):
+                    load_config(f.name)
+                os.unlink(f.name)
+
     def test_wilcoxon_all_one_sign_hits_the_smallest_p(self):
         _, p, n = wilcoxon_signed_rank([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self.assertEqual(n, 10)
