@@ -81,11 +81,12 @@ use crate::launch::Preparation;
 use crate::setup::SetupReport;
 
 pub mod backup;
-mod env_rules;
 pub mod dalamud;
+mod env_rules;
 pub mod external;
 pub mod launch;
 pub mod manifest;
+pub mod program;
 pub mod setup;
 
 #[cfg(test)]
@@ -102,7 +103,8 @@ pub use external::{
     ExternalAddonProblem, GameContext, Outcome, RunIn, Trigger,
 };
 pub use launch::{Contribution, LaunchEdit, Redirect};
-pub use manifest::{ComponentManifest, ManifestError, VerifiedManifest};
+pub use manifest::{ComponentManifest, ManifestError, ProgramEntry, VerifiedManifest};
+pub use program::{ProgramPlan, SkipReason, UpdaterState};
 // Re-exported because `SetupEvent::Downloading` carries one: a consumer that reads the field must be
 // able to name its type without depending on `apogee-fetch` itself.
 pub use apogee_fetch::Recoveries;
@@ -338,6 +340,38 @@ pub enum AddonError {
         verb: String,
         /// A path the verb declared it would produce, that does not exist.
         missing: PathBuf,
+    },
+    /// A path inside a prefix that cannot be written or read safely: a link or a file where a
+    /// directory belongs on the way to it, or a root this prefix cannot resolve.
+    ///
+    /// Its own variant rather than an I/O failure, because nothing failed: the walk refused to go
+    /// where the path leads, which is what stops a planted link from turning a write into the prefix
+    /// into a write outside it.
+    #[error("{what}: {path:?} is not a safe place to use: {reason}")]
+    #[non_exhaustive]
+    UnsafePath {
+        /// What was being set up or checked.
+        what: String,
+        /// Where the walk stopped.
+        path: PathBuf,
+        /// Why.
+        reason: &'static str,
+    },
+    /// A program plan's companions were asked for against a game in a different prefix than the one
+    /// the plan was checked against.
+    ///
+    /// Refused rather than started, because every check the plan holds was made of the files in the
+    /// prefix it names: starting from another would run files nothing checked, outside the game's
+    /// wine session.
+    #[error("{program} was checked in {gated:?}, but the game is running in {game:?}")]
+    #[non_exhaustive]
+    ProgramPrefixMismatch {
+        /// The first program the plan would have started.
+        program: String,
+        /// The prefix the plan was checked against.
+        gated: PathBuf,
+        /// The prefix the game is running in.
+        game: PathBuf,
     },
     /// An external addon entry that cannot be run as written.
     #[error("addon {index} ({program:?}) cannot be run: {reason}")]
@@ -808,6 +842,116 @@ impl Addons {
         prefix: &Prefix,
     ) -> Result<Vec<String>> {
         setup::missing_verbs(manifest, prefix)
+    }
+
+    /// [`Self::apply_setup`], and then the install steps of every program in `enabled`.
+    ///
+    /// The sibling a launch and a prefix repair call when a profile has curated programs on.
+    /// `enabled` names programs by their row names; it is the only thing that puts a program's steps
+    /// into a pass, so a program nobody enabled is never fetched or installed. The base verbs run
+    /// first, then each enabled program's steps in the catalog's row order, each program's together.
+    ///
+    /// A step is installed when the prefix does not record it at the row's version, so a version
+    /// moved in the catalog reinstalls the program on the next pass. A program whose steps are all
+    /// present is recorded in the prefix at that version, which is what [`Self::program_gates`]
+    /// checks before it is started. What each step placed is kept, file by file, under this handle's
+    /// addons root.
+    ///
+    /// # Errors
+    /// As [`Self::apply_setup`]. A step that failed, and an enabled program the catalog carries no
+    /// usable row for, are failures in the returned [`SetupReport`] under their own names.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use apogee_addons::{Addons, SetupEvents, VerifiedManifest};
+    /// # use apogee_runtime::Prefix;
+    /// # use tokio_util::sync::CancellationToken;
+    /// # async fn demo(addons: &Addons, manifest: &VerifiedManifest, prefix: &Prefix)
+    /// #     -> apogee_addons::Result<()> {
+    /// let report = addons
+    ///     .apply_setup_for(manifest, prefix, &["act"], &CancellationToken::new(), &SetupEvents::none())
+    ///     .await?;
+    /// let still_missing = report.failed();
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn apply_setup_for(
+        &self,
+        manifest: &VerifiedManifest,
+        prefix: &Prefix,
+        enabled: &[&str],
+        cancel: &tokio_util::sync::CancellationToken,
+        events: &SetupEvents,
+    ) -> Result<SetupReport> {
+        let scope = setup::ProgramScope {
+            enabled,
+            addons_root: &self.paths.root,
+        };
+        setup::apply_for(
+            &self.runtime,
+            &self.fetcher,
+            manifest,
+            prefix,
+            Some(&scope),
+            cancel,
+            events,
+        )
+        .await
+    }
+
+    /// The decision [`Self::apply_setup_for`] acts on, taken without acting on it: the base verbs and
+    /// enabled programs' steps `prefix` is missing, with an enabled program the catalog has no usable
+    /// row for named first.
+    ///
+    /// # Errors
+    /// As [`Self::missing_setup`].
+    pub fn missing_setup_for(
+        &self,
+        manifest: &VerifiedManifest,
+        prefix: &Prefix,
+        enabled: &[&str],
+    ) -> Result<Vec<String>> {
+        let scope = setup::ProgramScope {
+            enabled,
+            addons_root: &self.paths.root,
+        };
+        setup::missing_for(manifest, prefix, Some(&scope))
+    }
+
+    /// Decide which enabled programs may start with this launch, before the game is spawned.
+    ///
+    /// Each program in `enabled` with a row in the manifest is checked in the catalog's row order, and
+    /// passes only if every gate does: `game_version` is one its row was validated on; `runner`, the
+    /// runner the prefix records, is one of its row's runners; the prefix records this version of it as
+    /// installed; every file its pinned steps placed still hashes to what was placed, walking from `C:`
+    /// without following a link; every self-updater setting its row names reads off; and no program
+    /// before it in this plan holds a fixed name it also claims. A program that misses one is narrated
+    /// on `events` (a caveat, or a failure naming both programs for a conflict), listed in
+    /// [`ProgramPlan::skipped`], and not started.
+    ///
+    /// Runs no wine and reaches no network, but it does read and hash files, so a caller on an async
+    /// runtime should run it on a blocking thread. It takes no game context: the game is not running
+    /// yet. [`ProgramPlan::companions`] takes that once it is.
+    #[must_use]
+    pub fn program_gates(
+        &self,
+        manifest: &VerifiedManifest,
+        prefix: &Prefix,
+        enabled: &[&str],
+        game_version: &str,
+        runner: &apogee_runtime::RunnerRef,
+        events: &SetupEvents,
+    ) -> ProgramPlan {
+        program::gates(
+            manifest.rows(),
+            &self.paths.root,
+            prefix,
+            enabled,
+            game_version,
+            runner,
+            events,
+        )
     }
 
     /// The Dalamud injectable behind the launch setting, or `None` when the manifest offers no row

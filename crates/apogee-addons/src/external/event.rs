@@ -31,6 +31,20 @@ pub enum AddonEvent {
         /// The process id of the copy that was found.
         pid: i32,
     },
+    /// A curated program's path was already running, and this launcher did not start it.
+    ///
+    /// Not [`Self::AlreadyRunning`], and never followed by [`Self::Loaded`] for it: whatever is running
+    /// was not started from the checked install this launch verified, so nothing here can say it is
+    /// the pinned program. It is left running and reported as running, not verified.
+    #[non_exhaustive]
+    RunningUnverified {
+        /// The program row it was built from.
+        what: String,
+        /// The program at that row's path.
+        program: PathBuf,
+        /// The process id of the copy that was found.
+        pid: i32,
+    },
     /// A companion was stopped along with the game.
     #[non_exhaustive]
     Stopped {

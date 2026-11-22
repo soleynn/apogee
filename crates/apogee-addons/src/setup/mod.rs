@@ -66,7 +66,8 @@ pub use event::{SetupEvent, SetupEvents};
 // instead.
 pub(crate) use plan::{SetupPlan, StepAction};
 
-use crate::manifest::{ComponentManifest, Verb, VerifiedManifest};
+use crate::manifest::{ComponentManifest, ProgramEntry, Verb, VerifiedManifest};
+use crate::program::record;
 use crate::{AddonError, Result};
 
 /// What became of one verb.
@@ -374,15 +375,64 @@ pub(crate) async fn apply_verbs(
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<SetupReport> {
+    apply_for(runtime, fetcher, manifest, prefix, None, cancel, events).await
+}
+
+/// Which programs a pass installs, and where it keeps what their steps placed.
+pub(crate) struct ProgramScope<'a> {
+    /// The programs a profile enabled, by row name.
+    pub enabled: &'a [&'a str],
+    /// The addons root, under which each prefix's install records live.
+    pub addons_root: &'a Path,
+}
+
+/// [`apply_verbs`], and then the steps of every program `programs` enables.
+///
+/// A program's steps run in order after the base verbs. One that fails stops the rest of that
+/// program's steps, which are reported as failed without being tried: a later step lays files over an
+/// earlier one's, and applying it over a half-installed program records a state nothing installed. A
+/// program whose steps are all present is recorded in the prefix at its row's version, which is what
+/// the start gate reads. An enabled program the catalog has no usable row for is a failure in the
+/// report, under its name.
+///
+/// # Errors
+/// As [`apply_verbs`].
+// One loop, kept whole: its length is the reasoning about where a cancellation lands, and splitting it
+// would put the two reads of the token in different functions from the step they bracket.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn apply_for(
+    runtime: &Runtime,
+    fetcher: &Fetcher,
+    manifest: &VerifiedManifest,
+    prefix: &Prefix,
+    programs: Option<&ProgramScope<'_>>,
+    cancel: &CancellationToken,
+    events: &SetupEvents,
+) -> Result<SetupReport> {
+    let mut report = SetupReport::default();
+    let rows = enabled_rows(manifest.rows(), programs, |name, why| {
+        let reason = why.to_string();
+        events.emit(SetupEvent::Failed {
+            what: name.to_owned(),
+            reason: reason.clone(),
+        });
+        report.outcomes.push(SetupOutcome {
+            name: name.to_owned(),
+            state: SetupState::Failed { reason },
+        });
+    });
+    let records = programs.map(|scope| record::records_dir(scope.addons_root, prefix.path()));
+
     // The proof stops here, at the last thing that decides *whether* to write. Below this the rows are
     // ordinary data and the functions that read them are private to this crate.
-    let Planned { plan, stale } = plan_for(manifest.rows(), prefix)?;
+    let Planned { plan, stale } = plan_for(manifest.rows(), prefix, &rows, records.as_deref())?;
 
     // One scratch directory per prefix, so two passes over different prefixes cannot clobber each
     // other's staging, and removed at the end whatever happened.
     let work = artifact::work_dir(prefix.path());
-    let mut report = SetupReport::default();
     let mut cancelled = false;
+    // Programs a step of which failed in this pass; their later steps are not tried.
+    let mut broken: Vec<&str> = Vec::new();
 
     for step in plan.steps() {
         // Cancellation ends the pass here rather than being left to each step to notice. Every
@@ -403,6 +453,20 @@ pub(crate) async fn apply_verbs(
                     state: SetupState::AlreadyPresent,
                 });
             }
+            StepAction::Apply
+                if let Some(program) = step.program
+                    && broken.contains(&program.name.as_str()) =>
+            {
+                let reason = format!("an earlier step of {} did not apply", program.name);
+                events.emit(SetupEvent::Failed {
+                    what: step.verb.name.clone(),
+                    reason: reason.clone(),
+                });
+                report.outcomes.push(SetupOutcome {
+                    name: step.verb.name.clone(),
+                    state: SetupState::Failed { reason },
+                });
+            }
             StepAction::Apply => {
                 // Said before it is done, and only for a verb the record already claimed: a verb
                 // reapplied on every launch is what a wrong reading of the prefix looks like from
@@ -419,8 +483,18 @@ pub(crate) async fn apply_verbs(
                         because: because.clone(),
                     });
                 }
-                let outcome =
-                    apply_verb(runtime, fetcher, prefix, step.verb, &work, cancel, events).await;
+                let target = match (step.program, records.as_deref()) {
+                    (Some(program), Some(dir)) => Target::Program {
+                        program,
+                        seeded: step.seeded,
+                        records: dir,
+                    },
+                    _ => Target::Verb,
+                };
+                let outcome = apply_verb(
+                    runtime, fetcher, prefix, step.verb, target, &work, cancel, events,
+                )
+                .await;
                 // The step that was in flight when the token fired is the one the check above cannot
                 // catch: it ran before the step started. So the token is read again here, ahead of
                 // whatever the step made of being interrupted, and for both ways a step can come back
@@ -448,6 +522,9 @@ pub(crate) async fn apply_verbs(
                             what: step.verb.name.clone(),
                             reason: reason.clone(),
                         });
+                        if let Some(program) = step.program {
+                            broken.push(&program.name);
+                        }
                         SetupState::Failed { reason }
                     }
                 };
@@ -470,7 +547,73 @@ pub(crate) async fn apply_verbs(
         });
         return Err(AddonError::Cancelled);
     }
+    record_programs(prefix, &rows, &broken, &mut report, events);
     Ok(report)
+}
+
+/// The rows of the programs `programs` enables, in row order, reporting each enabled name the
+/// manifest has no usable row for.
+fn enabled_rows<'m>(
+    manifest: &'m ComponentManifest,
+    programs: Option<&ProgramScope<'_>>,
+    missing: impl FnMut(&str, crate::SkipReason),
+) -> Vec<&'m ProgramEntry> {
+    let Some(scope) = programs else {
+        return Vec::new();
+    };
+    crate::program::requested(manifest, scope.enabled, missing)
+        .into_iter()
+        .filter_map(|name| manifest.program(name))
+        .collect()
+}
+
+/// Record each program whose steps are all present at its row's version, once.
+///
+/// Only when the record is not already that, because recording appends to the prefix's history and
+/// a launch that changed nothing should leave nothing behind.
+fn record_programs(
+    prefix: &Prefix,
+    rows: &[&ProgramEntry],
+    broken: &[&str],
+    report: &mut SetupReport,
+    events: &SetupEvents,
+) {
+    let installed = prefix.components().unwrap_or_default();
+    for program in rows {
+        if broken.contains(&program.name.as_str()) {
+            continue;
+        }
+        let present = report.present();
+        if !program
+            .steps
+            .iter()
+            .all(|step| present.contains(&step.verb.name.as_str()))
+        {
+            continue;
+        }
+        let current = installed
+            .iter()
+            .any(|c| c.name() == program.name && c.version() == Some(program.version.as_str()));
+        if current {
+            continue;
+        }
+        match prefix.record_component(&program.name, Some(&program.version)) {
+            Ok(_) => events.emit(SetupEvent::Installed {
+                what: program.name.clone(),
+            }),
+            Err(source) => {
+                let reason = crate::chain_of(&source);
+                events.emit(SetupEvent::Failed {
+                    what: program.name.clone(),
+                    reason: reason.clone(),
+                });
+                report.outcomes.push(SetupOutcome {
+                    name: program.name.clone(),
+                    state: SetupState::Failed { reason },
+                });
+            }
+        }
+    }
 }
 
 /// A recorded verb whose effect was checked and is gone, with the reading that says so.
@@ -496,7 +639,12 @@ struct Planned<'m> {
 ///
 /// # Errors
 /// [`AddonError::Io`] if the prefix's record cannot be read.
-fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Planned<'m>> {
+fn plan_for<'m>(
+    manifest: &'m ComponentManifest,
+    prefix: &Prefix,
+    programs: &[&'m ProgramEntry],
+    records: Option<&Path>,
+) -> Result<Planned<'m>> {
     let installed = prefix.components().map_err(|source| AddonError::Io {
         what: "this prefix".to_owned(),
         step: "read what setup it already has",
@@ -505,12 +653,63 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Plan
     })?;
     // A verb the record claims but whose effect is gone has to be applied again, so the check happens
     // before the plan is built rather than being discovered halfway through it.
-    let stale = stale_verbs(manifest, prefix, &installed);
+    let mut stale = stale_verbs(manifest, prefix, &installed);
+    stale.extend(stale_program_steps(programs, prefix, &installed, records));
     let names: Vec<String> = stale.iter().map(|verb| verb.name.clone()).collect();
     Ok(Planned {
-        plan: SetupPlan::build(manifest, &installed, &names),
+        plan: SetupPlan::build_for(manifest, &installed, &names, programs),
         stale,
     })
+}
+
+/// The recorded program steps that have to be installed again, each with why.
+///
+/// A step whose effect has gone, as for a base verb; and a pinned step recorded at another version of
+/// its row, or whose list of what it placed is missing or for another version. Without that list the
+/// start gate can never pass, so a prefix whose record outlived it is reinstalled rather than left
+/// claiming an install nothing can check.
+fn stale_program_steps(
+    programs: &[&ProgramEntry],
+    prefix: &Prefix,
+    installed: &[apogee_runtime::InstalledComponent],
+    records: Option<&Path>,
+) -> Vec<StaleVerb> {
+    let mut stale = Vec::new();
+    for program in programs {
+        for step in &program.steps {
+            let Some(found) = installed.iter().find(|c| c.name() == step.verb.name) else {
+                continue;
+            };
+            let because = verb::stale(prefix, &step.verb).or_else(|| {
+                if step.seeded {
+                    return None;
+                }
+                match found.version() {
+                    Some(version) if version == program.version => {}
+                    Some(version) => {
+                        return Some(format!(
+                            "version {version} is installed and the catalog pins {}",
+                            program.version
+                        ));
+                    }
+                    None => return Some("it was recorded without a version".to_owned()),
+                }
+                let dir = records?;
+                match record::read(dir, &step.verb.name) {
+                    Ok(kept) if kept.version == program.version => None,
+                    Ok(_) => Some("what it placed was recorded for another version".to_owned()),
+                    Err(why) => Some(why),
+                }
+            });
+            if let Some(because) = because {
+                stale.push(StaleVerb {
+                    name: step.verb.name.clone(),
+                    because,
+                });
+            }
+        }
+    }
+    stale
 }
 
 /// The verbs `manifest` defines that `prefix` does not have, in manifest order.
@@ -523,13 +722,33 @@ fn plan_for<'m>(manifest: &'m ComponentManifest, prefix: &Prefix) -> Result<Plan
 /// # Errors
 /// As [`plan_for`].
 pub(crate) fn missing_verbs(manifest: &VerifiedManifest, prefix: &Prefix) -> Result<Vec<String>> {
-    Ok(plan_for(manifest.rows(), prefix)?
-        .plan
-        .steps()
-        .iter()
-        .filter(|step| step.action == StepAction::Apply)
-        .map(|step| step.verb.name.clone())
-        .collect())
+    missing_for(manifest, prefix, None)
+}
+
+/// [`missing_verbs`], and the steps of every program `programs` enables, with an enabled program the
+/// catalog has no usable row for named first.
+///
+/// # Errors
+/// As [`plan_for`].
+pub(crate) fn missing_for(
+    manifest: &VerifiedManifest,
+    prefix: &Prefix,
+    programs: Option<&ProgramScope<'_>>,
+) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    let rows = enabled_rows(manifest.rows(), programs, |name, _| {
+        missing.push(name.to_owned());
+    });
+    let records = programs.map(|scope| record::records_dir(scope.addons_root, prefix.path()));
+    missing.extend(
+        plan_for(manifest.rows(), prefix, &rows, records.as_deref())?
+            .plan
+            .steps()
+            .iter()
+            .filter(|step| step.action == StepAction::Apply)
+            .map(|step| step.verb.name.clone()),
+    );
+    Ok(missing)
 }
 
 /// The recorded verbs whose effect can be checked and is no longer there, each with the reading that
@@ -567,11 +786,27 @@ fn stale_verbs(
 /// # Errors
 /// Whatever the verb's ops failed with, or [`AddonError::Io`] if the prefix's record cannot be
 /// written.
+/// What a step is applied as, which decides how it is placed and recorded.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    /// A base verb: placed straight into its destination, recorded by name.
+    Verb,
+    /// A program step: recorded at its row's version, and unless it is seeded, placed through staging
+    /// with what it placed kept in `records`.
+    Program {
+        program: &'a ProgramEntry,
+        seeded: bool,
+        records: &'a Path,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn apply_verb(
     runtime: &Runtime,
     fetcher: &Fetcher,
     prefix: &Prefix,
     row: &Verb,
+    target: Target<'_>,
     work: &Path,
     cancel: &CancellationToken,
     events: &SetupEvents,
@@ -580,16 +815,37 @@ async fn apply_verb(
         verb: row.name.clone(),
         reason: row.reason.clone(),
     });
-    verb::apply(runtime, fetcher, prefix, row, work, cancel, events).await?;
-    prefix
-        .record_verb(&row.name)
-        .map(|_| ())
-        .map_err(|source| AddonError::Io {
-            what: row.name.clone(),
-            step: "record itself in the prefix",
-            path: prefix.metadata_path(),
-            source: Box::new(source),
-        })?;
+    let staged = matches!(target, Target::Program { seeded: false, .. });
+    let placed = verb::apply(runtime, fetcher, prefix, row, work, staged, cancel, events).await?;
+    let recorded = match target {
+        Target::Verb => prefix.record_verb(&row.name),
+        Target::Program {
+            program,
+            seeded,
+            records,
+        } => {
+            // The list of what it placed is written before the prefix records the step, so a step the
+            // prefix calls installed always has one.
+            if !seeded {
+                record::write(
+                    records,
+                    &record::StepRecord {
+                        program: program.name.clone(),
+                        version: program.version.clone(),
+                        step: row.name.clone(),
+                        files: placed,
+                    },
+                )?;
+            }
+            prefix.record_component(&row.name, Some(&program.version))
+        }
+    };
+    recorded.map(|_| ()).map_err(|source| AddonError::Io {
+        what: row.name.clone(),
+        step: "record itself in the prefix",
+        path: prefix.metadata_path(),
+        source: Box::new(source),
+    })?;
     events.emit(SetupEvent::Applied {
         verb: row.name.clone(),
     });

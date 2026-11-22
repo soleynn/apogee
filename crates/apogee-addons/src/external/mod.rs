@@ -262,10 +262,20 @@ pub async fn start(
         }
 
         if let Some(running) = already_running(addon, game).await {
-            events.emit(AddonEvent::AlreadyRunning {
-                program: program.clone(),
-                pid: running.pid,
-            });
+            // Something at a curated program's path that this launcher did not start is not the
+            // pinned program as far as anything here can tell: identity is the path in a process's
+            // arguments, which anything can carry.
+            events.emit(addon.curated_program().map_or_else(
+                || AddonEvent::AlreadyRunning {
+                    program: program.clone(),
+                    pid: running.pid,
+                },
+                |what| AddonEvent::RunningUnverified {
+                    what: what.to_owned(),
+                    program: program.clone(),
+                    pid: running.pid,
+                },
+            ));
             report.outcomes.push(AddonOutcome {
                 index,
                 program,

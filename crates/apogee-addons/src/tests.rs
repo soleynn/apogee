@@ -210,6 +210,22 @@ frozen!(
             AddonError::Backup(BackupError::NothingSelected),
             "no source tree held anything to back up",
         ),
+        AddonError::UnsafePath { .. } => (
+            AddonError::UnsafePath {
+                what: "act".to_owned(),
+                path: path(),
+                reason: "a directory on the way is a link",
+            },
+            "act: \"/tmp/a\" is not a safe place to use: a directory on the way is a link",
+        ),
+        AddonError::ProgramPrefixMismatch { .. } => (
+            AddonError::ProgramPrefixMismatch {
+                program: "act".to_owned(),
+                gated: path(),
+                game: PathBuf::from("/tmp/b"),
+            },
+            "act was checked in \"/tmp/a\", but the game is running in \"/tmp/b\"",
+        ),
         AddonError::Cancelled => (AddonError::Cancelled, "cancelled"),
         AddonError::Unsupported { .. } => (
             AddonError::Unsupported {

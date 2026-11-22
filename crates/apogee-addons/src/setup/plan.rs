@@ -7,7 +7,7 @@
 
 use apogee_runtime::InstalledComponent;
 
-use crate::manifest::{ComponentManifest, Verb};
+use crate::manifest::{ComponentManifest, ProgramEntry, ProgramStep, Verb};
 
 /// What the setup pass will do about one verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,10 @@ pub(crate) enum StepAction {
 pub(crate) struct PlanStep<'m> {
     pub verb: &'m Verb,
     pub action: StepAction,
+    /// The program this step installs, or `None` for a base verb.
+    pub program: Option<&'m ProgramEntry>,
+    /// Whether it seeds configuration the program then owns.
+    pub seeded: bool,
 }
 
 /// The ordered decision a setup pass is about to carry out.
@@ -47,20 +51,52 @@ impl<'m> SetupPlan<'m> {
     /// overrides the record. That is what makes a verb whose effect a runner upgrade removed from
     /// under us come back, instead of being skipped forever on the strength of an entry that is no
     /// longer true.
+    #[cfg(test)]
     #[must_use]
     pub fn build(
         manifest: &'m ComponentManifest,
         installed: &[InstalledComponent],
         stale: &[String],
     ) -> Self {
-        let steps = manifest
+        Self::build_for(manifest, installed, stale, &[])
+    }
+
+    /// Plan every base verb, then the steps of each program in `programs`, in the order given.
+    ///
+    /// A program's steps follow the base verbs, because a step runs a program's installer inside a
+    /// prefix the verbs have already made fit for it, and each program's steps stay together so they
+    /// run just before the next program's and never twice.
+    ///
+    /// A program step is already present when the prefix records it at the row's version: a version
+    /// moved in the catalog is what makes the step run again. A seeded step only needs recording, at
+    /// any version, because it seeds settings the program then owns.
+    #[must_use]
+    pub fn build_for(
+        manifest: &'m ComponentManifest,
+        installed: &[InstalledComponent],
+        stale: &[String],
+        programs: &[&'m ProgramEntry],
+    ) -> Self {
+        let mut steps: Vec<PlanStep<'m>> = manifest
             .verbs
             .iter()
             .map(|verb| PlanStep {
                 action: action_for(&verb.name, installed, stale),
                 verb,
+                program: None,
+                seeded: false,
             })
             .collect();
+        for program in programs {
+            for step in &program.steps {
+                steps.push(PlanStep {
+                    action: program_action(program, step, installed, stale),
+                    verb: &step.verb,
+                    program: Some(program),
+                    seeded: step.seeded,
+                });
+            }
+        }
         Self { steps }
     }
 
@@ -68,6 +104,24 @@ impl<'m> SetupPlan<'m> {
     #[must_use]
     pub fn steps(&self) -> &[PlanStep<'m>] {
         &self.steps
+    }
+}
+
+fn program_action(
+    program: &ProgramEntry,
+    step: &ProgramStep,
+    installed: &[InstalledComponent],
+    stale: &[String],
+) -> StepAction {
+    if stale.contains(&step.verb.name) {
+        return StepAction::Apply;
+    }
+    match installed.iter().find(|c| c.name() == step.verb.name) {
+        Some(_) if step.seeded => StepAction::AlreadyPresent,
+        Some(record) if record.version() == Some(program.version.as_str()) => {
+            StepAction::AlreadyPresent
+        }
+        _ => StepAction::Apply,
     }
 }
 
@@ -155,6 +209,68 @@ mod tests {
             actions(&plan),
             [&StepAction::Apply, &StepAction::AlreadyPresent],
             "the stale verb comes back and the intact one is left alone"
+        );
+    }
+
+    /// A program's steps come after every base verb and stay together, in the order the programs are
+    /// given. A step recorded at another version of its row is installed again, while a seeded step
+    /// recorded at any version is left alone, so a version bump reinstalls the program without
+    /// overwriting the settings its user has since changed.
+    #[test]
+    fn program_steps_follow_the_verbs_and_reinstall_on_a_version_move() {
+        let row = |name: &str, steps: &str| {
+            format!(
+                r#"{{ "name": "{name}", "version": "2", "tier": "first_class",
+                     "game_versions": ["1"], "runners": [{{ "name": "r", "version": "1" }}],
+                     "steps": {steps},
+                     "start": {{ "program": "Apogee/{name}/x.exe", "trigger": "with_game" }} }}"#
+            )
+        };
+        let json = format!(
+            r#"{{ "version": 1,
+                 "verbs": [ {{ "name": "base", "reason": "r", "ops": [] }} ],
+                 "programs": [ {}, {} ] }}"#,
+            row(
+                "first",
+                r#"[{ "name": "first-files", "reason": "r", "ops": [] },
+                    { "name": "first-config", "reason": "r", "seeded": true, "ops": [] }]"#
+            ),
+            row(
+                "second",
+                r#"[{ "name": "second-files", "reason": "r", "ops": [] }]"#
+            ),
+        );
+        let manifest = ComponentManifest::from_json_bytes(json.as_bytes()).expect("parses");
+        assert!(
+            manifest.refused_programs.is_empty(),
+            "{:?}",
+            manifest.refused_programs
+        );
+        let programs: Vec<&ProgramEntry> = manifest.programs.iter().rev().collect();
+        let versioned = |name: &str, version: &str| InstalledComponent::Versioned {
+            name: name.to_owned(),
+            version: version.to_owned(),
+        };
+        let installed = vec![
+            recorded("base"),
+            versioned("first-files", "1"),
+            versioned("first-config", "1"),
+            versioned("second-files", "2"),
+        ];
+        let plan = SetupPlan::build_for(&manifest, &installed, &[], &programs);
+        let shape: Vec<(&str, &StepAction)> = plan
+            .steps()
+            .iter()
+            .map(|s| (s.verb.name.as_str(), &s.action))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("base", &StepAction::AlreadyPresent),
+                ("second-files", &StepAction::AlreadyPresent),
+                ("first-files", &StepAction::Apply),
+                ("first-config", &StepAction::AlreadyPresent),
+            ]
         );
     }
 

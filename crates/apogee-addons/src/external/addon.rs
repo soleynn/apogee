@@ -104,6 +104,10 @@ pub struct ExternalAddon {
     /// it, and an older build that meets one keeps it as a field it refuses to run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    /// The curated program this entry was built for, when it was built from a signed row rather than
+    /// configured by the user. Never saved: a record that claimed it would be claiming a pin.
+    #[serde(skip)]
+    curated: Option<String>,
     #[serde(flatten)]
     unsupported: BTreeMap<String, serde_json::Value>,
 }
@@ -142,6 +146,7 @@ impl ExternalAddon {
             trigger,
             enabled: true,
             env: BTreeMap::new(),
+            curated: None,
             unsupported: BTreeMap::new(),
         };
         addon.check_program(0)?;
@@ -205,6 +210,20 @@ impl ExternalAddon {
     #[must_use]
     pub const fn env(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+
+    /// The curated program this entry was built for, or `None` for one the user configured.
+    ///
+    /// A curated entry found already running was not started by this launcher, so whatever is running
+    /// at its path is reported as running and unverified rather than as the pinned program.
+    #[must_use]
+    pub fn curated_program(&self) -> Option<&str> {
+        self.curated.as_deref()
+    }
+
+    pub(crate) fn curated_as(mut self, program: &str) -> Self {
+        self.curated = Some(program.to_owned());
+        self
     }
 
     /// Whether the launch considers it at all.
@@ -371,6 +390,7 @@ impl From<RawExternalAddon> for ExternalAddon {
             trigger: raw.trigger,
             enabled: raw.enabled,
             env: raw.env,
+            curated: None,
             unsupported: raw.unsupported,
         }
     }
