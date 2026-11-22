@@ -128,9 +128,11 @@ impl ProgramConsent {
 /// Why a profile write needs a [`ProgramConsent`], or `None` when it grants nothing new.
 ///
 /// What needs one is anything that newly lets code run beside the game: a companion program switched
-/// on, or a companion row of the user's own that is new, changed, or switched on. Switching anything
-/// off, removing a row, and rewriting a row unchanged need none, so a shell round-tripping a profile it
-/// did not touch is never refused.
+/// on, a companion row of the user's own that is new, changed, or switched on, a launch wrapper that
+/// is new, or an environment entry that is new or changed (a variable such as `LD_PRELOAD` or
+/// `WINEDLLOVERRIDES` loads code into the game as surely as a companion does). Switching anything off,
+/// removing a row, wrapper or variable, and rewriting any of them unchanged need none, so a shell
+/// round-tripping a profile it did not touch is never refused.
 pub(crate) fn consent_needed(stored: &Profile, next: &Profile) -> Option<String> {
     if let Some(program) = ProgramName::ALL.into_iter().find(|program| {
         program.needs_consent() && program.is_on(&next.launch) && !program.is_on(&stored.launch)
@@ -141,6 +143,20 @@ pub(crate) fn consent_needed(stored: &Profile, next: &Profile) -> Option<String>
         .iter()
         .find(|row| row.enabled() && !stored.external.contains(row))
         .map(|row| row.program().to_string_lossy().into_owned())
+        .or_else(|| {
+            next.launch
+                .wrappers
+                .iter()
+                .find(|wrapper| !stored.launch.wrappers.contains(wrapper))
+                .cloned()
+        })
+        .or_else(|| {
+            next.launch
+                .extra_env
+                .iter()
+                .find(|entry| !stored.launch.extra_env.contains(entry))
+                .map(|(name, _)| name.clone())
+        })
 }
 
 /// Whether any companion is configured on `profile`: a curated program switched on, or a row of the
@@ -218,6 +234,34 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_new_wrapper_or_environment_entry_needs_consent_and_removing_one_does_not() {
+        let stored = profile();
+        let mut wrapped = stored.clone();
+        wrapped.launch.wrappers = vec!["sh".to_owned(), "-c".to_owned()];
+        assert_eq!(consent_needed(&stored, &wrapped).as_deref(), Some("sh"));
+        assert_eq!(consent_needed(&wrapped, &stored), None);
+        assert_eq!(consent_needed(&wrapped, &wrapped), None);
+
+        let mut preload = stored.clone();
+        preload
+            .launch
+            .extra_env
+            .push(("LD_PRELOAD".to_owned(), "/tmp/a.so".to_owned()));
+        assert_eq!(
+            consent_needed(&stored, &preload).as_deref(),
+            Some("LD_PRELOAD")
+        );
+        // A changed value is new code as much as a new name is.
+        let mut changed = preload.clone();
+        changed.launch.extra_env[0].1 = "/tmp/b.so".to_owned();
+        assert_eq!(
+            consent_needed(&preload, &changed).as_deref(),
+            Some("LD_PRELOAD")
+        );
+        assert_eq!(consent_needed(&preload, &stored), None);
     }
 
     #[test]
