@@ -31,6 +31,11 @@ pub enum SetupValue {
     Dalamud {
         enabled: bool,
     },
+    /// A companion program, and whether the profile runs it.
+    Program {
+        program: crate::ProgramName,
+        enabled: bool,
+    },
 }
 
 /// A setup value paired with the authority that supplied it.

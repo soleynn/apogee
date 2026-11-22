@@ -1188,6 +1188,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         SetupValue::Dalamud { enabled } => {
                             println!("dalamud\tenabled={enabled}\t{:?}", item.source)
                         }
+                        SetupValue::Program { program, enabled } => println!(
+                            "program\t{}\tenabled={enabled}\t{:?}",
+                            program.key(),
+                            item.source
+                        ),
                         _ => println!("setup\tunknown\t{:?}", item.source),
                     }
                 }

@@ -187,6 +187,9 @@ pub struct SystemReportInput {
     pub driver: Option<String>,
     pub runner: Option<String>,
     pub prefix_state: Option<String>,
+    /// What the profile runs beside the game: the companion programs it switches on, and how many
+    /// companion rows of the user's own it configures.
+    pub companions: Option<String>,
 }
 
 /// Compose the public system report in a stable field order.
@@ -205,6 +208,7 @@ pub fn system_report(input: &SystemReportInput, home: Option<&Path>) -> String {
         ("graphics.driver", input.driver.as_deref()),
         ("runtime.runner", input.runner.as_deref()),
         ("runtime.prefix", input.prefix_state.as_deref()),
+        ("runtime.companions", input.companions.as_deref()),
     ];
 
     let mut report = String::new();
@@ -780,6 +784,7 @@ mod tests {
             driver: Some("Mesa 25.1".to_owned()),
             runner: Some(home.join("runners/wine").to_string_lossy().into_owned()),
             prefix_state: Some("healthy".to_owned()),
+            companions: Some("act; 1 user row".to_owned()),
         }
     }
 
@@ -844,6 +849,7 @@ mod tests {
                     "graphics.driver=\"Mesa 25.1\"\n",
                     "runtime.runner={}\n",
                     "runtime.prefix=\"healthy\"\n",
+                    "runtime.companions=\"act; 1 user row\"\n",
                 ),
                 quoted(&runner)
             )

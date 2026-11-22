@@ -833,7 +833,21 @@ impl Core {
                     },
                     source: Provenance::Profile,
                 },
-            ])
+            ]
+            .into_iter()
+            .chain(
+                crate::ProgramName::ALL
+                    .into_iter()
+                    .filter(|program| program.needs_consent())
+                    .map(|program| ResolvedSetup {
+                        value: SetupValue::Program {
+                            program,
+                            enabled: program.is_on(&profile.launch),
+                        },
+                        source: Provenance::Profile,
+                    }),
+            )
+            .collect())
         })
         .await
     }
@@ -1761,6 +1775,7 @@ fn system_report_input_from_profile(
             }
             .to_owned()
         });
+    let companions = selected.as_ref().map(configured_companions);
     crate::SystemReportInput {
         application_version: env!("CARGO_PKG_VERSION").to_owned(),
         target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
@@ -1771,6 +1786,28 @@ fn system_report_input_from_profile(
         driver: None,
         runner,
         prefix_state,
+        companions,
+    }
+}
+
+/// The companion programs `profile` switches on, and the count of companion rows of the user's own
+/// on it, as one report value. Rows are counted rather than named: a row's program path is the
+/// user's own filesystem.
+fn configured_companions(profile: &Profile) -> String {
+    let mut parts: Vec<String> = crate::ProgramName::ALL
+        .into_iter()
+        .filter(|program| program.needs_consent() && program.is_on(&profile.launch))
+        .map(|program| program.key().to_owned())
+        .collect();
+    match profile.external.len() {
+        0 => {}
+        1 => parts.push("1 user row".to_owned()),
+        rows => parts.push(format!("{rows} user rows")),
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join("; ")
     }
 }
 
@@ -1996,6 +2033,36 @@ mod tests {
             .disable_program(profile.id, crate::ProgramName::Xivalexander)
             .unwrap();
         assert!(!off.launch.xivalexander);
+    }
+
+    /// The report names the companion programs a profile switches on and counts its own rows,
+    /// never naming them: a row's program path is the user's own filesystem.
+    #[test]
+    fn the_report_names_switched_on_programs_and_counts_user_rows() {
+        let prefixes = TempDir::new().unwrap();
+        let mut profile = Profile::new(
+            "Main",
+            uuid::Uuid::nil(),
+            "/games/ffxiv".into(),
+            crate::RunnerSelection::Unchosen,
+        );
+        profile.launch.act = true;
+        profile.external.push(
+            apogee_addons::ExternalAddon::new(
+                "/home/someone/private/tool.exe",
+                Vec::new(),
+                apogee_addons::RunIn::Host,
+                apogee_addons::Trigger::OnClose,
+            )
+            .unwrap(),
+        );
+        let input = super::system_report_input_from_profile(Some(profile.clone()), prefixes.path());
+        assert_eq!(input.companions.as_deref(), Some("act; 1 user row"));
+
+        profile.launch.act = false;
+        profile.external.clear();
+        let input = super::system_report_input_from_profile(Some(profile), prefixes.path());
+        assert_eq!(input.companions.as_deref(), Some("none"));
     }
 
     #[tokio::test(flavor = "current_thread")]

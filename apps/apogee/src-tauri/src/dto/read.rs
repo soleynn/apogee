@@ -325,6 +325,10 @@ enum SetupValueDto {
     Dalamud {
         enabled: bool,
     },
+    Program {
+        program: ProgramNameDto,
+        enabled: bool,
+    },
     Unknown,
 }
 
@@ -350,6 +354,10 @@ impl From<&SetupValue> for SetupValueDto {
                 nvapi: *nvapi,
             },
             SetupValue::Dalamud { enabled } => Self::Dalamud { enabled: *enabled },
+            SetupValue::Program { program, enabled } => Self::Program {
+                program: ProgramNameDto::from(*program),
+                enabled: *enabled,
+            },
             _ => Self::Unknown,
         }
     }
@@ -523,6 +531,16 @@ mod tests {
                     source: Provenance::Prefix,
                 },
                 r#"{"value":{"kind":"dalamud","enabled":true},"source":"prefix"}"#,
+            ),
+            (
+                ResolvedSetup {
+                    value: SetupValue::Program {
+                        program: apogee_core::ProgramName::Act,
+                        enabled: false,
+                    },
+                    source: Provenance::Profile,
+                },
+                r#"{"value":{"kind":"program","program":"act","enabled":false},"source":"profile"}"#,
             ),
         ];
 
