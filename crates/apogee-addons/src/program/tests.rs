@@ -501,3 +501,55 @@ async fn a_link_on_the_way_into_the_prefix_is_not_written_through() {
     assert_eq!(report.failed(), ["act-config"]);
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
 }
+
+/// A changed file keeps the program out until the user asks for the pinned files back; then the next
+/// setup pass reinstalls exactly the pinned step and the program passes again.
+#[cfg_attr(not(target_os = "linux"), ignore = "placing files is Linux-only")]
+#[tokio::test]
+async fn a_reset_program_is_reinstalled_by_the_next_pass() {
+    let (server, pin) = served("False").await;
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    let addons = addons(dir.path());
+    let manifest = manifest_with(&[act(&server, &pin)]);
+    install(&addons, &manifest, &prefix).await;
+    std::fs::write(prefix.drive_c().join(EXE), b"MZ updated").unwrap();
+    assert!(matches!(
+        only_skip(&gates(&addons, &manifest, &prefix)),
+        SkipReason::Changed { .. }
+    ));
+
+    assert!(addons.reset_program(&manifest, &prefix, "act").unwrap());
+    assert!(!addons.reset_program(&manifest, &prefix, "absent").unwrap());
+    assert_eq!(
+        addons
+            .missing_setup_for(&manifest, &prefix, &["act"])
+            .unwrap(),
+        ["act-files"]
+    );
+    install(&addons, &manifest, &prefix).await;
+    assert_eq!(
+        std::fs::read(prefix.drive_c().join(EXE)).unwrap(),
+        b"MZ act"
+    );
+    assert!(gates(&addons, &manifest, &prefix).skipped().is_empty());
+}
+
+/// More than one wine server for the prefix is a failure for every companion inside it and no host
+/// companion; one, or none seen, is not.
+#[test]
+fn a_second_wine_server_fails_every_companion_inside_the_prefix() {
+    let trigger = crate::Trigger::WithGame {
+        keep_after_close: false,
+    };
+    let inside = crate::ExternalAddon::new("/opt/act.exe", vec![], RunIn::Prefix, trigger).unwrap();
+    let host = crate::ExternalAddon::new("/usr/bin/tool", vec![], RunIn::Host, trigger).unwrap();
+    let started = [inside, host];
+    assert!(super::separate_sessions(0, &started).is_empty());
+    assert!(super::separate_sessions(1, &started).is_empty());
+    let failures = super::separate_sessions(2, &started);
+    assert!(matches!(
+        failures.as_slice(),
+        [AddonError::SeparateSession { program, servers: 2 }] if program == Path::new("/opt/act.exe")
+    ));
+}

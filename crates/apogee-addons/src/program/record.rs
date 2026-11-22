@@ -77,6 +77,24 @@ pub(crate) fn write(dir: &Path, record: &StepRecord) -> Result<()> {
     std::fs::rename(&staged, &path).map_err(|e| io("write its install record", &path, e))
 }
 
+/// Remove the record for `step`, if there is one.
+///
+/// # Errors
+/// [`AddonError::Io`] if it exists and cannot be removed.
+pub(crate) fn forget(dir: &Path, step: &str) -> Result<()> {
+    let path = dir.join(format!("{step}.json"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(AddonError::Io {
+            what: step.to_owned(),
+            step: "forget its install record",
+            path,
+            source: Box::new(source),
+        }),
+    }
+}
+
 /// The record for `step`, or why there is none to use.
 pub(crate) fn read(dir: &Path, step: &str) -> std::result::Result<StepRecord, String> {
     let path = dir.join(format!("{step}.json"));

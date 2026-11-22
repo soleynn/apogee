@@ -233,6 +233,10 @@ frozen!(
             },
             "Dalamud: https://elsewhere.invalid/latest.zip is not on a host its catalog row allows",
         ),
+        AddonError::SeparateSession { .. } => (
+            AddonError::SeparateSession { program: path(), servers: 2 },
+            "\"/tmp/a\" is not on the game's wine session: 2 wine servers serve this prefix",
+        ),
         AddonError::Cancelled => (AddonError::Cancelled, "cancelled"),
         AddonError::Unsupported { .. } => (
             AddonError::Unsupported {

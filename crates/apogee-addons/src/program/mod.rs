@@ -312,6 +312,21 @@ impl ProgramPlan {
     }
 }
 
+/// What `servers` wine servers for the prefix say about the companions `started` inside it.
+pub(crate) fn separate_sessions(servers: usize, started: &[ExternalAddon]) -> Vec<AddonError> {
+    if servers <= 1 {
+        return Vec::new();
+    }
+    started
+        .iter()
+        .filter(|addon| addon.enabled() && addon.run_in() == RunIn::Prefix)
+        .map(|addon| AddonError::SeparateSession {
+            program: addon.program().to_path_buf(),
+            servers,
+        })
+        .collect()
+}
+
 /// The gates, in order, for every enabled program the manifest carries a row for.
 pub(crate) fn gates(
     manifest: &ComponentManifest,

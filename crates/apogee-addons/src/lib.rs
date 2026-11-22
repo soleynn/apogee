@@ -386,6 +386,22 @@ pub enum AddonError {
         /// The prefix the game is running in.
         game: PathBuf,
     },
+    /// A companion inside the prefix is not a client of the game's wine session: more than one wine
+    /// server serves the prefix once it started, so it brought up its own.
+    ///
+    /// Nothing it does reaches the game from there (pipes, handles and remote threads do not cross
+    /// wine servers), so it is reported as failed even though it is running. Under Proton this is
+    /// what a companion that could not join the game's container looks like.
+    #[error(
+        "{program:?} is not on the game's wine session: {servers} wine servers serve this prefix"
+    )]
+    #[non_exhaustive]
+    SeparateSession {
+        /// The companion's program.
+        program: PathBuf,
+        /// How many wine servers were found for the prefix.
+        servers: usize,
+    },
     /// An external addon entry that cannot be run as written.
     #[error("addon {index} ({program:?}) cannot be run: {reason}")]
     #[non_exhaustive]
@@ -965,6 +981,70 @@ impl Addons {
             runner,
             events,
         )
+    }
+
+    /// Forget what a program's pinned steps placed in `prefix`, so the next
+    /// [`Self::apply_setup_for`] that enables it installs it again.
+    ///
+    /// The repair for [`SkipReason::Changed`]: a program whose files changed outside the launcher is
+    /// not started, and this is how a user asks for the pinned files back. Nothing in the prefix is
+    /// touched here; the reinstall overwrites what changed. Returns whether the manifest has a row for
+    /// `program`.
+    ///
+    /// # Errors
+    /// [`AddonError::Io`] if a record exists and cannot be removed.
+    pub fn reset_program(
+        &self,
+        manifest: &VerifiedManifest,
+        prefix: &Prefix,
+        program: &str,
+    ) -> Result<bool> {
+        let Some(row) = manifest.rows().program(program) else {
+            return Ok(false);
+        };
+        let dir = program::record::records_dir(&self.paths.root, prefix.path());
+        for step in row.steps.iter().filter(|step| !step.seeded) {
+            program::record::forget(&dir, &step.verb.name)?;
+        }
+        Ok(true)
+    }
+
+    /// Check, once the companions are up, that every one of them inside the prefix joined the
+    /// game's wine session rather than starting its own.
+    ///
+    /// Exactly one wine server may serve the prefix. More than one means a companion started a second,
+    /// and each companion in `started` that runs inside the prefix is reported on `events` and
+    /// returned as [`AddonError::SeparateSession`]. None found is no answer rather than a failure: a
+    /// container can hide the server's environment from the scan, and a check that cannot see is not
+    /// evidence. A launch with no prefix, or no companion inside it, has nothing to check.
+    pub async fn check_shared_session(
+        &self,
+        game: &GameContext,
+        started: &[ExternalAddon],
+        events: &AddonEvents,
+    ) -> Vec<AddonError> {
+        let Some(prefix) = game.prefix() else {
+            return Vec::new();
+        };
+        if !started
+            .iter()
+            .any(|a| a.enabled() && a.run_in() == RunIn::Prefix)
+        {
+            return Vec::new();
+        }
+        let servers = apogee_runtime::prefix_processes(prefix, "wineserver")
+            .await
+            .map_or(0, |pids| pids.len());
+        let failures = program::separate_sessions(servers, started);
+        for err in &failures {
+            if let AddonError::SeparateSession { program, .. } = err {
+                events.emit(AddonEvent::Failed {
+                    program: program.clone(),
+                    reason: err.chain(),
+                });
+            }
+        }
+        failures
     }
 
     /// The Dalamud injectable behind the launch setting, or `None` when the manifest offers no row
