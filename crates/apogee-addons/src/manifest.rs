@@ -485,7 +485,8 @@ pub struct InjectableEntry {
     pub caveats: Vec<String>,
     /// The hosts its distribution may send a download to, lowercased. Empty for a row that names
     /// none, which leaves every URL the distribution serves admitted as it was before rows could name
-    /// them; a row that names any confines the release and asset downloads to them.
+    /// them; a row that names any confines every download the injectable makes to them, and every
+    /// redirect hop each download follows.
     pub allowed_hosts: Vec<String>,
 }
 

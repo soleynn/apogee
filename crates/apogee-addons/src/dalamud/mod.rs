@@ -705,9 +705,11 @@ impl Dalamud {
                 .map_err(|source| self.io_failed("stage a download", parent, source))?;
         }
         // No content pin: the distribution versions these itself and the digest maps beside them are
-        // what authenticates the bytes. The fetcher still refuses plain http.
+        // what authenticates the bytes. Every hop of every redirect is held to the row's hosts, and the
+        // fetcher refuses plain http either way.
         let spec = DownloadSpec::builder(url.clone(), dest, Validator::None)
             .allow_unverified()
+            .allowed_hosts(self.allowed_hosts.iter().cloned())
             .build()?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();
         let sink = events.clone();
