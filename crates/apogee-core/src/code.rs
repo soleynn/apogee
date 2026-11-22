@@ -163,6 +163,7 @@ impl StableCode for AddonEvent {
             Self::StillWaiting { .. } => "addon-still-waiting",
             Self::Loaded { .. } => "addon-loaded",
             Self::NotConfirmed { .. } => "addon-not-confirmed",
+            Self::RunningUnverified { .. } => "addon-running-unverified",
             _ => "addon-unknown",
         }
     }
@@ -229,6 +230,7 @@ pub const ALL_CODES: &[&str] = &[
     "addon-finished",
     "addon-loaded",
     "addon-not-confirmed",
+    "addon-running-unverified",
     "addon-started",
     "addon-still-waiting",
     "addon-stopped",

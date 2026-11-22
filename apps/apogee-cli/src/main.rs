@@ -3317,6 +3317,14 @@ fn render_addon(event: &AddonEvent) -> String {
         AddonEvent::AlreadyRunning { program, pid, .. } => {
             format!("addon: {} already running (pid {pid})", program.display())
         }
+        // Not "already running": whatever holds the path was not started from the install this launch
+        // checked, so nothing here can say it is the pinned program.
+        AddonEvent::RunningUnverified {
+            what, program, pid, ..
+        } => format!(
+            "addon: {} is already running (pid {pid}) but was not started by Apogee, so it is not verified as {what}",
+            program.display()
+        ),
         AddonEvent::Stopped { program, pid, .. } => {
             format!("addon: stopped {} (pid {pid})", program.display())
         }
