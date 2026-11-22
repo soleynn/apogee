@@ -228,6 +228,7 @@ fn context_with_otp(
         store: h.store.clone(),
         clock: Arc::new(move || now),
         game_tick: host::game_tick,
+        driver_version: || None,
         computer_id: host::computer_id(&h.store),
         prefixes_dir: h.prefixes.path().to_path_buf(),
         backups_dir: h.backups.path().to_path_buf(),
@@ -4299,4 +4300,47 @@ async fn a_flood_during_a_login_is_narrated_and_the_login_succeeds() {
     };
     assert_eq!(from, IpAddr::V4(flooder));
     assert!(refused > 0, "the advisory counted nothing");
+}
+
+/// The whole computed launch map for a prefix launch, pinned so any variable that starts or stops
+/// being set shows up as a reviewed diff.
+#[test]
+fn a_prefix_launch_env_is_byte_exact() {
+    let profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let config = super::launch_env(
+        &profile,
+        None,
+        true,
+        Some(Path::new("/prefix/driver_cache")),
+    );
+    insta::assert_debug_snapshot!(config.env);
+}
+
+#[test]
+fn a_profile_variable_outranks_the_driver_cache_it_names() {
+    let mut profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    profile.launch.extra_env = vec![(
+        "__GL_SHADER_DISK_CACHE_PATH".to_owned(),
+        "/elsewhere".to_owned(),
+    )];
+    let env = super::launch_env(
+        &profile,
+        None,
+        false,
+        Some(Path::new("/prefix/driver_cache")),
+    )
+    .env;
+    assert_eq!(env["__GL_SHADER_DISK_CACHE_PATH"], "/elsewhere");
+    // The rest of the set still applies; only the variable the user named is theirs.
+    assert_eq!(env["MESA_SHADER_CACHE_DIR"], "/prefix/driver_cache/mesa");
+}
+
+#[test]
+fn a_launch_without_a_prefix_leaves_the_driver_caches_at_their_defaults() {
+    let profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let env = super::launch_env(&profile, None, false, None).env;
+    assert!(
+        !env.keys()
+            .any(|k| k.starts_with("__GL_") || k.starts_with("MESA_"))
+    );
 }
