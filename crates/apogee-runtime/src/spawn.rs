@@ -170,6 +170,11 @@ fn kill_command(prefix: &Prefix, umu_run: Option<PathBuf>) -> Result<Command, Ru
             cmd.env("WINEPREFIX", prefix.path());
             cmd.env("GAMEID", DEFAULT_GAMEID);
             cmd.env("PROTONPATH", runner.dir());
+            // Join the container a session is still running in, when there is one, so the stop
+            // reaches it. A stop started in a fresh container would instead wait on that session's
+            // wine server before running, which is the opposite of stopping it. With no such
+            // container umu starts one as before.
+            cmd.env("UMU_CONTAINER_NSENTER", "1");
             Ok(cmd)
         }
         RunnerKind::Wine | RunnerKind::Custom => {
