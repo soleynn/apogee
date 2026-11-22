@@ -122,3 +122,75 @@ async fn a_redirect_that_stays_on_https_is_followed() {
     );
     assert!(store.stats().requests() > 0, "the second host served it");
 }
+
+#[tokio::test]
+async fn a_confined_download_follows_tls_hops_on_its_hosts_and_never_leaves_tls() {
+    // Confinement is a second client built from the same recipe, so this is also the check that it
+    // carries everything the shared one does, the trusted roots included: a confined client that lost
+    // them would fail the first case on a certificate rather than pass it.
+    let len = 128 * 1024;
+    let store = ChaosServer::builder(83, len).tls().start().await.unwrap();
+    let plaintext = ChaosServer::builder(83, len).start().await.unwrap();
+    let to_tls = ChaosServer::builder(0, len)
+        .tls()
+        .redirect_to(302, store.url("asset.bin").to_string())
+        .start()
+        .await
+        .unwrap();
+    let to_plaintext = ChaosServer::builder(0, len)
+        .tls()
+        .redirect_to(302, plaintext.url("asset.bin").to_string())
+        .start()
+        .await
+        .unwrap();
+    let fetcher = Fetcher::builder()
+        .extra_root_certificate(store.cert_der().unwrap())
+        .extra_root_certificate(to_tls.cert_der().unwrap())
+        .extra_root_certificate(to_plaintext.cert_der().unwrap())
+        .build()
+        .unwrap();
+    let spec = |front: &ChaosServer, dest: &std::path::Path| {
+        DownloadSpec::builder(
+            front.url("asset.bin"),
+            dest,
+            Validator::Sha256(body_sha256(83, len)),
+        )
+        .expected_len(len)
+        .allowed_hosts(["127.0.0.1"])
+        .build()
+        .unwrap()
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let verified = fetcher
+        .download(
+            &spec(&to_tls, &dir.path().join("a.bin")),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::fs::read(verified.path()).await.unwrap(),
+        generated_vec(83, 0, len as usize),
+    );
+
+    // The plaintext host is on the list by name, and is still refused: the list says where a hop may
+    // go, never that it may leave TLS to get there.
+    let dest = dir.path().join("b.bin");
+    let err = fetcher
+        .download(&spec(&to_plaintext, &dest), None, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, FetchError::RedirectRefused { detail, .. }
+            if *detail == "redirect downgrades https to plaintext"),
+        "got {err:?}",
+    );
+    assert_eq!(
+        plaintext.stats().requests(),
+        0,
+        "the plaintext host was contacted"
+    );
+    assert!(!dest.exists(), "nothing was published");
+}

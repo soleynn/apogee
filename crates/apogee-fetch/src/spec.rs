@@ -27,6 +27,7 @@ pub struct DownloadSpec {
     overwrite: bool,
     priority: Priority,
     header_policy: Option<HeaderPolicy>,
+    allowed_hosts: Vec<String>,
 }
 
 impl DownloadSpec {
@@ -68,6 +69,7 @@ impl DownloadSpec {
             priority: Priority::default(),
             allow_unverified: false,
             header_policy: None,
+            allowed_hosts: Vec::new(),
         }
     }
 
@@ -96,6 +98,13 @@ impl DownloadSpec {
     #[must_use]
     pub fn header_policy(&self) -> Option<&HeaderPolicy> {
         self.header_policy.as_ref()
+    }
+
+    /// The hosts this download and every redirect it follows are confined to, lowercased, sorted and
+    /// deduplicated; empty when the spec names none, which confines nothing.
+    #[must_use]
+    pub fn allowed_hosts(&self) -> &[String] {
+        &self.allowed_hosts
     }
 
     /// The final path the verified file lands at.
@@ -250,6 +259,7 @@ pub struct DownloadSpecBuilder {
     header_policy: Option<HeaderPolicy>,
     max_len: Option<u64>,
     allowed_content_types: Vec<String>,
+    allowed_hosts: Vec<String>,
 }
 
 impl DownloadSpecBuilder {
@@ -349,6 +359,46 @@ impl DownloadSpecBuilder {
         self
     }
 
+    /// Confine the download to `hosts`: every source must be on one, and so must every hop of every
+    /// redirect a source answers with, or the hop is refused with
+    /// [`FetchError::RedirectHostNotAllowed`](crate::FetchError::RedirectHostNotAllowed) before
+    /// anything is asked of the host it names. Adds to any hosts already named; naming none leaves the
+    /// download under the redirect policy every request runs under, which follows a hop to any host.
+    ///
+    /// A host is a name or an address as a URL carries it, compared without its port and ignoring
+    /// case. Confinement narrows the shared policy and never widens it: the hop cap and the refusal to
+    /// leave `https` hold either way.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apogee_fetch::{DownloadSpec, SpecError, Validator};
+    ///
+    /// let spec = DownloadSpec::builder(
+    ///     "https://Front.example/file.zip".parse().unwrap(),
+    ///     "/tmp/file.zip",
+    ///     Validator::Sha256([0; 32]),
+    /// )
+    /// .allowed_hosts(["store.example", "FRONT.example"])
+    /// .build()
+    /// .unwrap();
+    /// assert_eq!(spec.allowed_hosts(), ["front.example", "store.example"]);
+    ///
+    /// let refused = DownloadSpec::builder(
+    ///     "https://elsewhere.example/file.zip".parse().unwrap(),
+    ///     "/tmp/file.zip",
+    ///     Validator::Sha256([0; 32]),
+    /// )
+    /// .allowed_hosts(["front.example"])
+    /// .build();
+    /// assert!(matches!(refused, Err(SpecError::HostNotAllowed { .. })));
+    /// ```
+    #[must_use]
+    pub fn allowed_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.allowed_hosts.extend(hosts.into_iter().map(Into::into));
+        self
+    }
+
     /// Acknowledge that [`Validator::None`] leaves the bytes unverified. Required for an unverified
     /// download, and still rejected over plain HTTP.
     #[must_use]
@@ -368,7 +418,9 @@ impl DownloadSpecBuilder {
     /// [`Validator::External`] with no declared length; [`SpecError::BlockLayout`] for a
     /// [`Validator::BlockSha1`] whose block map is inconsistent with the declared length;
     /// [`SpecError::ExpectedLengthExceedsMaximum`] when the exact length exceeds the response cap;
-    /// or [`SpecError::InvalidAllowedContentType`] for a malformed MIME allowlist entry.
+    /// [`SpecError::InvalidAllowedContentType`] for a malformed MIME allowlist entry; or
+    /// [`SpecError::HostNotAllowed`] for a primary or mirror URL off the
+    /// [`allowed_hosts`](Self::allowed_hosts) list, when one is named.
     pub fn build(self) -> Result<DownloadSpec, SpecError> {
         if let (Some(expected), Some(max)) = (self.expected_len, self.max_len)
             && expected > max
@@ -393,6 +445,22 @@ impl DownloadSpecBuilder {
                     return Err(SpecError::UnsupportedScheme {
                         scheme: other.to_owned(),
                     });
+                }
+            }
+        }
+        let mut allowed_hosts: Vec<String> = self
+            .allowed_hosts
+            .iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect();
+        allowed_hosts.sort_unstable();
+        allowed_hosts.dedup();
+        if !allowed_hosts.is_empty() {
+            // The first hop is a source, so the list holds for it exactly as the redirect policy holds
+            // it for every hop after.
+            for url in std::iter::once(&self.url).chain(self.mirrors.iter()) {
+                if !crate::redirect::host_allowed(&allowed_hosts, url) {
+                    return Err(SpecError::HostNotAllowed { url: url.clone() });
                 }
             }
         }
@@ -445,6 +513,7 @@ impl DownloadSpecBuilder {
             overwrite: self.overwrite,
             priority: self.priority,
             header_policy: self.header_policy,
+            allowed_hosts,
         })
     }
 }
