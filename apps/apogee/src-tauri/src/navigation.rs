@@ -657,7 +657,12 @@ mod tests {
         let core = Core::new(config).unwrap();
         let account = apogee_core::Account::new("person", apogee_core::AccountKind::Standard);
         let game = temporary.path().join("game");
-        let profile = apogee_core::Profile::new("Main", account.id, game.clone());
+        let profile = apogee_core::Profile::new(
+            "Main",
+            account.id,
+            game.clone(),
+            apogee_core::RunnerSelection::Unchosen,
+        );
         core.save_account(&account).unwrap();
         core.save_profile(&profile).unwrap();
 

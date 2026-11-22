@@ -426,9 +426,6 @@ async fn advance_first_run(
                         version: version.clone(),
                     }
                 }
-                crate::FirstRunRunnerSelection::SystemWine { .. } => {
-                    crate::RunnerSelection::SystemWine
-                }
             };
             ctx.store.save_profile(&profile)?;
             match create_prefix(ctx, &profile, tx, cancel).await {
@@ -621,7 +618,12 @@ fn materialize_first_run_identities(
         let existing = matches.into_iter().next();
         let is_new = existing.is_none();
         let profile = existing.unwrap_or_else(|| {
-            crate::Profile::new(&account.square_enix_id, account_id, game_path.clone())
+            crate::Profile::new(
+                &account.square_enix_id,
+                account_id,
+                game_path.clone(),
+                first_run_runner(checkpoint),
+            )
         });
         if is_new {
             ctx.store.save_profile(&profile)?;
@@ -629,6 +631,25 @@ fn materialize_first_run_identities(
         checkpoint.profile_id = Some(profile.id);
     }
     Ok(())
+}
+
+/// The runner a profile made during setup starts with: the catalog's recommended row when setup has
+/// read the catalog already, and none otherwise. The runner step replaces it either way.
+fn first_run_runner(checkpoint: &crate::FirstRunCheckpoint) -> crate::RunnerSelection {
+    checkpoint
+        .runners
+        .iter()
+        .find(|reading| reading.recommended && reading.available)
+        .map_or(crate::RunnerSelection::Unchosen, |reading| {
+            match &reading.selection {
+                crate::FirstRunRunnerSelection::Managed { name, version } => {
+                    crate::RunnerSelection::Managed {
+                        name: name.clone(),
+                        version: version.clone(),
+                    }
+                }
+            }
+        })
 }
 
 fn select_first_run_game(
@@ -664,10 +685,14 @@ fn select_first_run_game(
         .filter(|profile| profile.account == account_id && profile.game_path == path)
         .collect::<Vec<_>>();
     matches.sort_by_key(|profile| profile.id);
-    let profile = matches
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| crate::Profile::new(&account.square_enix_id, account_id, path));
+    let profile = matches.into_iter().next().unwrap_or_else(|| {
+        crate::Profile::new(
+            &account.square_enix_id,
+            account_id,
+            path,
+            first_run_runner(&checkpoint),
+        )
+    });
     let next = crate::first_run::transition(
         &checkpoint,
         crate::first_run::FirstRunTransition::SelectGame {
@@ -702,9 +727,7 @@ async fn support_bundle(
 ) -> Result<(), CoreError> {
     let profiles = ctx.store.list_profiles()?;
     let settings = ctx.store.load_settings()?;
-    let system =
-        crate::composition::bounded_system_report_input(&ctx.store, &ctx.prefixes_dir, profile)
-            .await?;
+    let system = crate::composition::system_report_input(&ctx.store, &ctx.prefixes_dir, profile)?;
     let caller_facts = crate::ValidatedCallerFacts::new(facts);
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -977,6 +1000,11 @@ async fn play(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, account) = resolve(ctx, profile_id)?;
+    // Refused before anything is asked of the user: signing in and patching for a launch that cannot
+    // start would spend a one-time code and a download on nothing.
+    if launch {
+        crate::launch::managed_runner(&profile)?;
+    }
     if mode == InstallMode::Update
         && launch
         && let Some(session) = valid_cached_session(ctx, &profile)?
@@ -1103,6 +1131,8 @@ async fn launch_cached(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, account) = resolve(ctx, profile_id)?;
+    // A runner it cannot launch outranks a missing session: signing in would not make it startable.
+    crate::launch::managed_runner(&profile)?;
     match valid_cached_session(ctx, &profile)? {
         Some(session) => launch_game(ctx, &profile, &account, &session, tx, cancel).await,
         None => {
@@ -1887,7 +1917,7 @@ async fn launch_game(
     emit(tx, FlowState::PreparingPrefix);
     let prepared = ctx
         .launch
-        .prepare(&PrefixRequest::from(profile), &prefix_dir, cancel, tx)
+        .prepare(&PrefixRequest::try_from(profile)?, &prefix_dir, cancel, tx)
         .await?;
 
     let steam = is_steam(account);
@@ -2088,7 +2118,7 @@ async fn prefix(
 ) -> Result<(), CoreError> {
     let profile = ctx.store.load_profile(profile_id)?;
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
-    let request = PrefixRequest::from(&profile);
+    let request = PrefixRequest::try_from(&profile)?;
 
     match action {
         PrefixAction::Create => {
@@ -2172,7 +2202,7 @@ async fn create_prefix(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
-    let request = PrefixRequest::from(profile);
+    let request = PrefixRequest::try_from(profile)?;
     emit(tx, FlowState::PreparingPrefix);
     let prepared = ctx
         .launch

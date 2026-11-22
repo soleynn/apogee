@@ -490,7 +490,7 @@ describe('direct core mutations', () => {
     const profile = {
       profile: 'profile-id',
       name: 'Main',
-      runner: { kind: 'systemWine' as const },
+      runner: { kind: 'managed' as const, name: 'wine-xiv', version: '1' },
       launch: {
         region: 'global' as const,
         extraArgs: [],

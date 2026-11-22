@@ -17,6 +17,10 @@ pub enum NextVerb {
     AcceptTerms,
     WaitForMaintenance,
     CloseGameFirst,
+    /// The profile has no runner it can launch. Offer the catalog's recommended row (the catalog view
+    /// marks it) and save it as the profile's runner; [`NextAction::blocked`] says whether none was
+    /// chosen or the one chosen is no longer supported.
+    ChooseRunner,
 }
 
 /// A credential-free description of the command behind [`NextVerb`].
@@ -32,6 +36,9 @@ pub enum NextCommand {
     Repair,
     Login,
     WaitForGate,
+    /// A profile edit that sets the runner. Not a flow command: nothing is downloaded or launched
+    /// until the next action after it.
+    ChooseRunner,
 }
 
 /// A persisted reading of a pending patch set.
@@ -119,12 +126,18 @@ pub(crate) struct StatusRecord {
     pub(crate) pending: Option<StoredPending>,
 }
 
+/// Choose the next action from what is persisted.
+///
+/// `runner_refusal` is the stable code a launch would refuse this profile's runner with, if it would.
+/// It outranks everything but a running game: installing, patching, or signing in for a profile that
+/// cannot start would all be spent before the refusal arrived.
 pub(crate) fn derive_next_action(
     record: Option<&StatusRecord>,
     install_ready: bool,
     cache_valid: bool,
     resumable: bool,
     game_running: bool,
+    runner_refusal: Option<&str>,
 ) -> NextAction {
     if game_running {
         return action(
@@ -133,6 +146,15 @@ pub(crate) fn derive_next_action(
             record.and_then(|record| record.pending.as_ref()),
             resumable,
             Some("preflight-game-running"),
+        );
+    }
+    if let Some(code) = runner_refusal {
+        return action(
+            NextVerb::ChooseRunner,
+            NextCommand::ChooseRunner,
+            None,
+            false,
+            Some(code),
         );
     }
     if !install_ready {
@@ -338,8 +360,8 @@ mod tests {
             disposition: StoredDisposition::PatchesPending,
             pending: Some(pending()),
         };
-        let update = derive_next_action(Some(&record), true, false, false, false);
-        let resume = derive_next_action(Some(&record), true, false, true, false);
+        let update = derive_next_action(Some(&record), true, false, false, false, None);
+        let resume = derive_next_action(Some(&record), true, false, true, false, None);
 
         assert_eq!(update.verb, NextVerb::UpdateAndPlay);
         assert_eq!(resume.verb, NextVerb::Resume);
@@ -353,10 +375,30 @@ mod tests {
             disposition: StoredDisposition::NoService,
             pending: Some(pending()),
         };
-        let next = derive_next_action(Some(&record), false, false, true, false);
+        let next = derive_next_action(Some(&record), false, false, true, false, None);
         assert_eq!(next.verb, NextVerb::Install);
         assert!(next.pending.is_none());
         assert!(!next.resumable);
+    }
+
+    /// A profile that cannot launch is asked for a runner even with patches pending and no install:
+    /// both of those would be downloads for a game that then refuses to start.
+    #[test]
+    fn a_runner_refusal_outranks_install_and_pending_patches_but_not_a_running_game() {
+        let record = StatusRecord {
+            disposition: StoredDisposition::PatchesPending,
+            pending: Some(pending()),
+        };
+        let refusal = Some("err-runner-unsupported");
+        for install_ready in [true, false] {
+            let next = derive_next_action(Some(&record), install_ready, true, true, false, refusal);
+            assert_eq!(next.verb, NextVerb::ChooseRunner);
+            assert_eq!(next.command, NextCommand::ChooseRunner);
+            assert_eq!(next.blocked.as_deref(), refusal);
+            assert!(next.pending.is_none());
+        }
+        let running = derive_next_action(Some(&record), true, true, true, true, refusal);
+        assert_eq!(running.verb, NextVerb::CloseGameFirst);
     }
 
     #[test]
@@ -377,7 +419,7 @@ mod tests {
                 pending: None,
             };
             assert_eq!(
-                derive_next_action(Some(&record), true, false, false, false).verb,
+                derive_next_action(Some(&record), true, false, false, false, None).verb,
                 expected
             );
         }

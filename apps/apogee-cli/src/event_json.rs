@@ -649,10 +649,6 @@ fn runner_selection_value(selection: &apogee_core::FirstRunRunnerSelection) -> V
             "name": name,
             "version": version,
         }),
-        apogee_core::FirstRunRunnerSelection::SystemWine { version } => json!({
-            "kind": "systemWine",
-            "version": version,
-        }),
         _ => json!({ "kind": "unknown" }),
     }
 }

@@ -34,6 +34,8 @@ fn with_profile_and_steam() -> std::io::Result<TempDir> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",
@@ -139,6 +141,8 @@ fn a_machine_without_steam_is_refused_rather_than_written_to() -> std::io::Resul
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",

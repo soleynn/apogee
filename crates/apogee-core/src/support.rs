@@ -747,6 +747,7 @@ mod tests {
             "Token Knight and the Password Managers",
             uuid::Uuid::parse_str("8bc0192e-959f-4d51-9a2a-1620f6adb59e").unwrap(),
             home.join("Games/FINAL FANTASY XIV Online"),
+            crate::RunnerSelection::Unchosen,
         );
         profile.id = uuid::Uuid::parse_str("5cda625d-a777-4a15-8f01-f6a2ec956632").unwrap();
         profile.launch.extra_env = vec![("API_TOKEN".to_owned(), "env-planted-token".to_owned())];

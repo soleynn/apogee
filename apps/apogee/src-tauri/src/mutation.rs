@@ -478,7 +478,12 @@ mod tests {
         account.never_store = true;
         account.otp_delivery = OtpDelivery::Listen;
         core.save_account(&account)?;
-        let mut profile = Profile::new("Before", account.id, PathBuf::from("protected/game/path"));
+        let mut profile = Profile::new(
+            "Before",
+            account.id,
+            PathBuf::from("protected/game/path"),
+            apogee_core::RunnerSelection::Unchosen,
+        );
         profile.prefix = PrefixSelection {
             name: "protected-prefix".to_owned(),
         };
@@ -549,7 +554,12 @@ mod tests {
     async fn removal_requires_the_exact_live_opaque_plan() -> TestResult {
         let (_temporary, state, _account, profile) = seeded_state().await?;
         let core = state.ready_core().await.map_err(ipc_error)?;
-        core.save_profile(&Profile::new("Shared", profile.account, "shared".into()))?;
+        core.save_profile(&Profile::new(
+            "Shared",
+            profile.account,
+            "shared".into(),
+            apogee_core::RunnerSelection::Unchosen,
+        ))?;
         let preview = state.removal_plans.replace(core.plan_removal(profile.id)?);
         let wrong = Uuid::new_v4().to_string();
         let missing = remove_profile_inner(&state, &wrong, true).await;
@@ -569,7 +579,12 @@ mod tests {
     async fn busy_admission_does_not_consume_a_removal_plan() -> TestResult {
         let (_temporary, state, _account, profile) = seeded_state().await?;
         let core = state.ready_core().await.map_err(ipc_error)?;
-        core.save_profile(&Profile::new("Shared", profile.account, "shared".into()))?;
+        core.save_profile(&Profile::new(
+            "Shared",
+            profile.account,
+            "shared".into(),
+            apogee_core::RunnerSelection::Unchosen,
+        ))?;
         let preview = state.removal_plans.replace(core.plan_removal(profile.id)?);
         let request_id = preview.request_id().to_owned();
         let occupied = state.mutation_lease().map_err(ipc_error)?;
@@ -672,8 +687,18 @@ mod tests {
         let core = Core::new(CoreConfig::with_base(temporary.path()))?;
         let account = Account::new("person@example.invalid", AccountKind::Standard);
         core.save_account(&account)?;
-        let first = Profile::new("First", account.id, "first".into());
-        let second = Profile::new("Second", account.id, "second".into());
+        let first = Profile::new(
+            "First",
+            account.id,
+            "first".into(),
+            apogee_core::RunnerSelection::Unchosen,
+        );
+        let second = Profile::new(
+            "Second",
+            account.id,
+            "second".into(),
+            apogee_core::RunnerSelection::Unchosen,
+        );
         core.save_profile(&first)?;
         core.save_profile(&second)?;
         let plans = RemovalPlans::default();

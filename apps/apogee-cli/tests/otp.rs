@@ -63,6 +63,8 @@ fn with_otp_profile() -> std::io::Result<(TempDir, TempDir)> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "otp",
             "--user",

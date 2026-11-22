@@ -43,6 +43,8 @@ fn with_profile() -> std::io::Result<TempDir> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",
@@ -108,6 +110,8 @@ fn an_empty_answer_never_confirms_even_for_an_empty_profile_name() -> std::io::R
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "",
             "--user",

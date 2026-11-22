@@ -54,6 +54,14 @@ pub enum CoreError {
     NoTickSource,
     #[error("no profile with id {0}")]
     NoProfile(Uuid),
+    /// The profile has no runner chosen yet. Nothing that needs a prefix can run until it has one;
+    /// the profile's next action names the choice to make.
+    #[error("profile {profile} has no runner chosen")]
+    RunnerUnchosen { profile: Uuid },
+    /// The profile names a runner this build no longer launches. The profile itself is intact; the
+    /// way forward is choosing a managed runner, which its next action offers.
+    #[error("profile {profile} names the runner {runner:?}, which this build does not launch")]
+    RunnerUnsupported { profile: Uuid, runner: String },
     #[error("no account with id {0}")]
     NoAccount(Uuid),
     #[error("profile removal changed while awaiting confirmation for {profile}")]

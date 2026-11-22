@@ -839,8 +839,12 @@ mod tests {
             apogee_core::AccountKind::Steam { app_id: 39_210 },
         );
         core.save_account(&account)?;
-        let mut profile =
-            apogee_core::Profile::new("Main", account.id, temporary.path().join("game"));
+        let mut profile = apogee_core::Profile::new(
+            "Main",
+            account.id,
+            temporary.path().join("game"),
+            apogee_core::RunnerSelection::Unchosen,
+        );
         profile.launch.region = apogee_core::Region::Korea;
         core.save_profile(&profile)?;
         let mut settings = core.settings()?;

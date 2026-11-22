@@ -781,7 +781,8 @@ struct ProfileEditArgs {
     /// Replacement display name.
     #[arg(long)]
     name: Option<String>,
-    /// Replacement runner: `system` or `managed:<name>@<version>`.
+    /// Replacement runner: `recommended` (the catalog's recommended row) or
+    /// `managed:<name>@<version>`.
     #[arg(long)]
     runner: Option<String>,
     /// Service region: `global`, `korea`, or `china`.
@@ -890,8 +891,8 @@ struct ProfileAddArgs {
     /// The game installation directory (the parent of `boot/` and `game/`).
     #[arg(long)]
     game_path: PathBuf,
-    /// The runner: `system` (host wine) or `managed:<name>@<version>`.
-    #[arg(long, default_value = "system")]
+    /// The runner: `recommended` (the catalog's recommended row) or `managed:<name>@<version>`.
+    #[arg(long, default_value = "recommended")]
     runner: String,
     /// The account uses a one-time password.
     #[arg(long)]
@@ -1034,7 +1035,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Profile { action } => {
-            profile(&core, action)?;
+            profile(&core, action).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Status(args) => {
@@ -2425,15 +2426,15 @@ fn apply_account_edit(account: &mut Account, args: &AccountEditArgs) -> Result<(
     Ok(())
 }
 
-fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
+async fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
     match action {
         ProfileAction::Add(args) => {
             let account = Account {
                 use_otp: args.otp,
                 ..Account::new(args.user, parse_licence(&args.licence)?)
             };
-            let mut profile = Profile::new(args.name, account.id, args.game_path);
-            profile.runner = parse_runner(&args.runner)?;
+            let runner = resolve_runner(core, &args.runner).await?;
+            let mut profile = Profile::new(args.name, account.id, args.game_path, runner);
             profile.launch.region = parse_region(&args.region)?;
             core.save_account(&account)?;
             core.save_profile(&profile)?;
@@ -2489,7 +2490,11 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
         }
         ProfileAction::Edit(args) => {
             let mut profile = resolve_profile(core, &args.profile)?;
-            apply_profile_edit(&mut profile, &args)?;
+            let runner = match &args.runner {
+                Some(spec) => Some(resolve_runner(core, spec).await?),
+                None => None,
+            };
+            apply_profile_edit(&mut profile, &args, runner)?;
             core.save_profile(&profile)?;
             println!("updated profile {} \"{}\"", profile.id, profile.name);
             Ok(())
@@ -2501,13 +2506,19 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
 /// Apply only the editable record projection exposed by both user interfaces. Building a complete
 /// replacement first means a malformed environment entry cannot leave an in-memory record half
 /// changed, while identity, ownership, paths, prefix, and companion tools remain untouched.
-fn apply_profile_edit(profile: &mut Profile, args: &ProfileEditArgs) -> Result<(), CliError> {
+///
+/// The runner arrives already resolved, because `recommended` is answered by the signed catalog.
+fn apply_profile_edit(
+    profile: &mut Profile,
+    args: &ProfileEditArgs,
+    runner: Option<RunnerSelection>,
+) -> Result<(), CliError> {
     let mut next = profile.clone();
     if let Some(value) = &args.name {
         next.name.clone_from(value);
     }
-    if let Some(value) = &args.runner {
-        next.runner = parse_runner(value)?;
+    if let Some(value) = runner {
+        next.runner = value;
     }
     if let Some(value) = &args.region {
         next.launch.region = parse_region(value)?;
@@ -3008,10 +3019,18 @@ fn render_trigger(trigger: Trigger) -> &'static str {
     }
 }
 
-fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
-    if spec == "system" {
-        return Ok(RunnerSelection::SystemWine);
+/// Resolve a runner argument, reading the signed catalog only for `recommended`.
+async fn resolve_runner(core: &Core, spec: &str) -> Result<RunnerSelection, CliError> {
+    if spec == "recommended" {
+        return core
+            .recommended_runner()
+            .await?
+            .ok_or_else(|| "the runner catalog recommends no runner".into());
     }
+    parse_runner(spec)
+}
+
+fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
     if let Some(rest) = spec.strip_prefix("managed:") {
         let (name, version) = rest
             .split_once('@')
@@ -3021,7 +3040,10 @@ fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
             version: version.to_owned(),
         });
     }
-    Err(format!("unknown runner {spec:?} (expected `system` or `managed:<name>@<version>`)").into())
+    Err(
+        format!("unknown runner {spec:?} (expected `recommended` or `managed:<name>@<version>`)")
+            .into(),
+    )
 }
 
 fn parse_licence(licence: &str) -> Result<AccountKind, CliError> {
@@ -3149,6 +3171,7 @@ fn render_next_action(action: &NextAction) -> String {
         NextVerb::AcceptTerms => "Accept the terms",
         NextVerb::WaitForMaintenance => "Wait for maintenance",
         NextVerb::CloseGameFirst => "Close the game first",
+        NextVerb::ChooseRunner => "Choose a runner",
         _ => "Unknown",
     };
     let command = match action.command {
@@ -3158,6 +3181,7 @@ fn render_next_action(action: &NextAction) -> String {
         NextCommand::Repair => "repair",
         NextCommand::Login => "login",
         NextCommand::WaitForGate => "gate --wait",
+        NextCommand::ChooseRunner => "profile edit --runner recommended",
         _ => "unknown",
     };
     let mut output = format!(
@@ -3829,7 +3853,12 @@ mod tests {
         let game_path = std::env::current_dir()
             .expect("working directory")
             .join("game");
-        let mut profile = Profile::new("Main", account, game_path.clone());
+        let mut profile = Profile::new(
+            "Main",
+            account,
+            game_path.clone(),
+            RunnerSelection::Unchosen,
+        );
         profile.prefix.name = "owned-prefix".to_owned();
         profile.external.push(
             ExternalAddon::new(
@@ -3853,7 +3882,13 @@ mod tests {
         let id = profile.id;
         let external = profile.external.clone();
 
-        apply_profile_edit(&mut profile, &args).expect("valid edit applies");
+        let runner = args
+            .runner
+            .as_deref()
+            .map(parse_runner)
+            .transpose()
+            .expect("runner parses");
+        apply_profile_edit(&mut profile, &args, runner).expect("valid edit applies");
 
         assert_eq!(profile.id, id);
         assert_eq!(profile.account, account);
@@ -3899,6 +3934,14 @@ mod tests {
         assert!(profile.launch.act);
     }
 
+    /// The host's Wine is not a runner any more, and its old spelling is refused rather than quietly
+    /// read as something else.
+    #[test]
+    fn the_host_wine_is_not_a_runner_argument() {
+        let error = parse_runner("system").expect_err("the host wine is refused");
+        assert!(error.to_string().contains("recommended"), "{error}");
+    }
+
     #[test]
     fn a_malformed_environment_edit_leaves_the_profile_unchanged() {
         let cli = Cli::try_parse_from([
@@ -3919,10 +3962,16 @@ mod tests {
         else {
             panic!("profile edit should select its command arm");
         };
-        let mut profile = Profile::new("unchanged", Uuid::new_v4(), PathBuf::from("game"));
+        let mut profile = Profile::new(
+            "unchanged",
+            Uuid::new_v4(),
+            PathBuf::from("game"),
+            RunnerSelection::Unchosen,
+        );
         let before = profile.clone();
 
-        let error = apply_profile_edit(&mut profile, &args).expect_err("missing '=' is refused");
+        let error =
+            apply_profile_edit(&mut profile, &args, None).expect_err("missing '=' is refused");
 
         assert!(error.to_string().contains("NAME=VALUE"));
         assert_eq!(profile, before);

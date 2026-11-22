@@ -113,7 +113,15 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
         use_otp,
         ..Account::new("testuser", kind)
     };
-    let mut profile = Profile::new("Main", account.id, game.path().to_path_buf());
+    let mut profile = Profile::new(
+        "Main",
+        account.id,
+        game.path().to_path_buf(),
+        crate::RunnerSelection::Managed {
+            name: "wine-xiv".to_owned(),
+            version: "test".to_owned(),
+        },
+    );
     customize(&mut profile);
     store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
@@ -304,7 +312,7 @@ async fn first_run_import_and_support_are_real_successful_streams() {
         .unwrap()
         .read_to_string(&mut report)
         .unwrap();
-    assert!(report.contains("runtime.runner=\"system-wine"));
+    assert!(report.contains("runtime.runner=\"wine-xiv test\""));
 }
 
 #[tokio::test]
@@ -498,12 +506,13 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
     );
 
     let mut checkpoint = h.store.load_first_run().unwrap();
-    let runner = crate::FirstRunRunnerSelection::SystemWine {
-        version: Some("test-wine".to_owned()),
+    let runner = crate::FirstRunRunnerSelection::Managed {
+        name: "wine-xiv".to_owned(),
+        version: "test".to_owned(),
     };
     checkpoint.runners = vec![crate::RunnerReading {
         selection: runner.clone(),
-        version: Some("test-wine".to_owned()),
+        version: Some("test".to_owned()),
         recommended: false,
         available: true,
     }];
@@ -1610,6 +1619,45 @@ async fn launch_without_a_cached_session_asks_to_log_in_first() {
 
     assert_eq!(states(&events), [FlowState::NeedsLogin]);
     assert_eq!(transport.recorded().len(), 0);
+}
+
+/// A profile that chose the host's Wine still loads, and every way of starting the game refuses it
+/// with the typed error before anything reaches the network or the prefix: a sign-in or a patch for
+/// a game that cannot then start would spend a one-time code and a download on nothing.
+#[tokio::test]
+async fn a_profile_on_a_withdrawn_runner_is_refused_before_sign_in_or_prefix() {
+    let h = harness_customized(false, |profile| {
+        profile.runner = crate::RunnerSelection::Unsupported {
+            runner: "system_wine".to_owned(),
+        };
+    });
+    for command in [
+        play_no_otp(h.profile),
+        Command::Launch { profile: h.profile },
+        Command::Prefix {
+            profile: h.profile,
+            action: crate::PrefixAction::Check,
+        },
+    ] {
+        let transport = Arc::new(FixtureTransport::new([]));
+        let launch = Arc::new(FakeLaunchBackend::exiting());
+        let ctx = context(&h, transport.clone(), launch.clone(), NOW);
+
+        let events = run(ctx, command).await;
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::Error(CoreError::RunnerUnsupported { runner, .. }),
+                    Event::Outcome(RunOutcome::Failed),
+                ] if runner == "system_wine"
+            ),
+            "{events:?}"
+        );
+        assert_eq!(transport.recorded().len(), 0);
+        assert_eq!(launch.launch_count(), 0);
+    }
 }
 
 #[tokio::test]

@@ -35,6 +35,8 @@ fn profile(home: &Path) -> std::io::Result<()> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",

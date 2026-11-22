@@ -74,6 +74,7 @@ enum NextVerbDto {
     AcceptTerms,
     WaitForMaintenance,
     CloseGameFirst,
+    ChooseRunner,
     Unknown,
 }
 
@@ -89,6 +90,7 @@ impl From<NextVerb> for NextVerbDto {
             NextVerb::AcceptTerms => Self::AcceptTerms,
             NextVerb::WaitForMaintenance => Self::WaitForMaintenance,
             NextVerb::CloseGameFirst => Self::CloseGameFirst,
+            NextVerb::ChooseRunner => Self::ChooseRunner,
             _ => Self::Unknown,
         }
     }
@@ -103,6 +105,7 @@ enum NextCommandDto {
     Repair,
     Login,
     WaitForGate,
+    ChooseRunner,
     Unknown,
 }
 
@@ -115,6 +118,7 @@ impl From<NextCommand> for NextCommandDto {
             NextCommand::Repair => Self::Repair,
             NextCommand::Login => Self::Login,
             NextCommand::WaitForGate => Self::WaitForGate,
+            NextCommand::ChooseRunner => Self::ChooseRunner,
             _ => Self::Unknown,
         }
     }

@@ -64,6 +64,13 @@ pub(crate) enum CoreErrorDto {
     NoProfile {
         profile: String,
     },
+    RunnerUnchosen {
+        profile: String,
+    },
+    RunnerUnsupported {
+        profile: String,
+        runner: String,
+    },
     NoAccount {
         account: String,
     },
@@ -117,6 +124,13 @@ impl From<&CoreError> for CoreErrorDto {
             CoreError::NoTickSource => Self::NoTickSource,
             CoreError::NoProfile(profile) => Self::NoProfile {
                 profile: profile.to_string(),
+            },
+            CoreError::RunnerUnchosen { profile } => Self::RunnerUnchosen {
+                profile: profile.to_string(),
+            },
+            CoreError::RunnerUnsupported { profile, runner } => Self::RunnerUnsupported {
+                profile: profile.to_string(),
+                runner: runner.clone(),
             },
             CoreError::NoAccount(account) => Self::NoAccount {
                 account: account.to_string(),

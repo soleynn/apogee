@@ -90,14 +90,12 @@ impl UpdateProfileRequestDto {
 )]
 #[ts(export, export_to = "RunnerSelectionInput.ts")]
 enum RunnerSelectionInputDto {
-    SystemWine,
     Managed { name: String, version: String },
 }
 
 impl RunnerSelectionInputDto {
     fn into_core(self) -> RunnerSelection {
         match self {
-            Self::SystemWine => RunnerSelection::SystemWine,
             Self::Managed { name, version } => RunnerSelection::Managed { name, version },
         }
     }
@@ -714,7 +712,7 @@ mod tests {
         let request = serde_json::json!({
             "profile": Uuid::nil(),
             "name": "updated",
-            "runner": { "kind": "systemWine" },
+            "runner": { "kind": "managed", "name": "wine-xiv", "version": "1" },
             "launch": launch_json(),
             "gamePath": "/planted/path",
         });
@@ -729,7 +727,7 @@ mod tests {
         let request = serde_json::json!({
             "profile": Uuid::nil(),
             "name": "updated",
-            "runner": { "kind": "systemWine" },
+            "runner": { "kind": "managed", "name": "wine-xiv", "version": "1" },
             "launch": launch,
         });
 
@@ -744,7 +742,7 @@ mod tests {
             let request = serde_json::json!({
                 "profile": Uuid::nil(),
                 "name": "updated",
-                "runner": { "kind": "systemWine" },
+                "runner": { "kind": "managed", "name": "wine-xiv", "version": "1" },
                 "launch": launch,
             });
 

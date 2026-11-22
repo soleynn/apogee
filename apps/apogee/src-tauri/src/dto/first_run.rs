@@ -655,7 +655,6 @@ impl RunnerReadingDto {
 )]
 pub(super) enum FirstRunRunnerSelectionDto {
     Managed { name: String, version: String },
-    SystemWine { version: Option<String> },
     Unknown,
 }
 
@@ -664,9 +663,6 @@ impl From<&FirstRunRunnerSelection> for FirstRunRunnerSelectionDto {
         match selection {
             FirstRunRunnerSelection::Managed { name, version } => Self::Managed {
                 name: name.clone(),
-                version: version.clone(),
-            },
-            FirstRunRunnerSelection::SystemWine { version } => Self::SystemWine {
                 version: version.clone(),
             },
             _ => Self::Unknown,

@@ -65,18 +65,22 @@ impl From<&PrefixSelection> for PrefixSelectionDto {
     rename_all_fields = "camelCase"
 )]
 enum RunnerSelectionDto {
-    SystemWine,
     Managed { name: String, version: String },
+    Unchosen,
+    Unsupported { runner: String },
     Unknown,
 }
 
 impl From<&RunnerSelection> for RunnerSelectionDto {
     fn from(runner: &RunnerSelection) -> Self {
         match runner {
-            RunnerSelection::SystemWine => Self::SystemWine,
             RunnerSelection::Managed { name, version } => Self::Managed {
                 name: name.clone(),
                 version: version.clone(),
+            },
+            RunnerSelection::Unchosen => Self::Unchosen,
+            RunnerSelection::Unsupported { runner } => Self::Unsupported {
+                runner: runner.clone(),
             },
             _ => Self::Unknown,
         }
@@ -517,7 +521,12 @@ mod tests {
     #[test]
     fn profile_projection_keeps_user_overrides_and_exact_path() {
         let account = Uuid::nil();
-        let mut profile = Profile::new("Main", account, "install/game".into());
+        let mut profile = Profile::new(
+            "Main",
+            account,
+            "install/game".into(),
+            apogee_core::RunnerSelection::Unchosen,
+        );
         profile.launch.extra_args = vec!["--example".to_owned()];
         profile.launch.extra_env = vec![("KEY".to_owned(), "value".to_owned())];
         profile.launch.wrappers = vec!["wrapper".to_owned()];
@@ -526,6 +535,20 @@ mod tests {
         assert!(json.contains("--example"));
         assert!(json.contains(r#""name":"KEY","value":"value""#));
         assert!(json.contains(r#""display":"install/game""#));
+    }
+
+    /// A profile left on a withdrawn runner reaches the webview as that, by name, so the shell can
+    /// show which choice needs replacing rather than an unknown runner.
+    #[test]
+    fn a_withdrawn_runner_is_projected_by_name() {
+        let runner = apogee_core::RunnerSelection::Unsupported {
+            runner: "system_wine".to_owned(),
+        };
+        let json = serde_json::to_value(RunnerSelectionDto::from(&runner)).unwrap_or_default();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "unsupported", "runner": "system_wine" })
+        );
     }
 
     #[test]

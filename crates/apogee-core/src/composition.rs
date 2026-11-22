@@ -3,7 +3,6 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport, Retain};
 use apogee_addons::backup::{RestorePlan, RestoreReport};
@@ -517,12 +516,11 @@ impl Core {
         let runtime = Runtime::new(
             fetcher.clone(),
             RuntimePaths {
-                runners: runners_dir.clone(),
+                runners: runners_dir,
                 prefixes: prefixes_dir.clone(),
             },
         );
-        let launch: Arc<dyn LaunchBackend> =
-            Arc::new(RuntimeLauncher::new(runtime.clone(), runners_dir));
+        let launch: Arc<dyn LaunchBackend> = Arc::new(RuntimeLauncher::new(runtime.clone()));
         // A patch operation's game root is known only once a profile is chosen, so it travels with
         // each request rather than the construction config.
         let patcher = Patcher::new(
@@ -616,9 +614,12 @@ impl Core {
     pub async fn next_action(&self, profile: Uuid) -> Result<crate::NextAction, CoreError> {
         let store = self.store.clone();
         let clock = Arc::clone(&self.clock);
-        let (status, install_ready, cache_valid, game_running) =
+        let (status, install_ready, cache_valid, game_running, runner_refusal) =
             blocking_read("next-action", move || {
                 let profile = stored_profile(&store, profile)?;
+                let runner_refusal = crate::launch::managed_runner(&profile)
+                    .err()
+                    .map(|refusal| crate::StableCode::code(&refusal));
                 let status = store.load_status(profile.id).map_err(CoreError::from)?;
                 let cached = store.load_uid_cache(profile.account).ok().flatten();
                 let max_expansion = cached.as_ref().map_or(0, |entry| entry.max_expansion);
@@ -639,7 +640,13 @@ impl Core {
                         false
                     }
                 };
-                Ok((status, report.is_some(), cache_valid, game_running))
+                Ok((
+                    status,
+                    report.is_some(),
+                    cache_valid,
+                    game_running,
+                    runner_refusal,
+                ))
             })
             .await?;
         let resumable =
@@ -654,7 +661,25 @@ impl Core {
             cache_valid,
             resumable,
             game_running,
+            runner_refusal,
         ))
+    }
+
+    /// The catalog's recommended runner, as the selection a profile stores.
+    ///
+    /// What a new profile starts with, and what a profile whose runner cannot launch is offered. `None`
+    /// is a catalog that publishes no runner rows at all.
+    ///
+    /// # Errors
+    /// Whatever fetching and verifying the signed catalog fails with.
+    pub async fn recommended_runner(&self) -> Result<Option<crate::RunnerSelection>, CoreError> {
+        let catalog = self.runtime_catalog().await?;
+        Ok(catalog
+            .recommended_runner()
+            .map(|runner| crate::RunnerSelection::Managed {
+                name: runner.name.clone(),
+                version: runner.version.clone(),
+            }))
     }
 
     /// Scan an XIVLauncher data directory without changing either launcher's files.
@@ -745,41 +770,19 @@ impl Core {
             Ok((profile, metadata))
         })
         .await?;
-        let catalog = if matches!(profile.runner, crate::RunnerSelection::Managed { .. }) {
-            Some(self.runtime_catalog().await?)
-        } else {
-            None
-        };
-        let wine_version = if matches!(profile.runner, crate::RunnerSelection::SystemWine) {
-            bounded_system_wine_version().await
-        } else {
-            None
-        };
+        // A profile with no runner it can launch has no setup to resolve: the refusal names why.
+        let (name, version) = crate::launch::managed_runner(&profile)?;
+        let (name, version) = (name.to_owned(), version.to_owned());
+        let catalog = self.runtime_catalog().await?;
         blocking_read("resolved-setup host", move || {
-            let (runner_name, runner_version, runner_source, host) = match &profile.runner {
-                crate::RunnerSelection::Managed { name, version } => {
-                    let runner = catalog
-                        .as_ref()
-                        .and_then(|catalog| catalog.runner(name, version))
-                        .ok_or_else(|| CoreError::Launch {
-                            detail: format!(
-                                "runner {name} {version} is not in the authenticated catalog"
-                            ),
-                        })?;
-                    (
-                        name.clone(),
-                        Some(version.clone()),
-                        Provenance::Catalog,
-                        apogee_runtime::HostCaps::detect().for_runner(runner),
-                    )
-                }
-                crate::RunnerSelection::SystemWine => (
-                    "system-wine".to_owned(),
-                    wine_version,
-                    Provenance::Host,
-                    apogee_runtime::HostCaps::detect(),
-                ),
-            };
+            let runner = catalog
+                .runner(&name, &version)
+                .ok_or_else(|| CoreError::Launch {
+                    detail: format!("runner {name} {version} is not in the authenticated catalog"),
+                })?;
+            let host = apogee_runtime::HostCaps::detect().for_runner(runner);
+            let (runner_name, runner_version, runner_source) =
+                (name, Some(version), Provenance::Catalog);
             let environment = apogee_runtime::compute_environment(
                 &apogee_runtime::EnvConfig {
                     sync: profile.launch.sync,
@@ -1628,50 +1631,17 @@ pub(crate) fn system_report_input(
     profile: Option<Uuid>,
 ) -> Result<crate::SystemReportInput, CoreError> {
     let selected = profile.map(|id| stored_profile(store, id)).transpose()?;
-    let system_wine = selected
-        .as_ref()
-        .is_some_and(|profile| matches!(&profile.runner, crate::RunnerSelection::SystemWine))
-        .then(system_wine_version)
-        .flatten();
-    Ok(system_report_input_from_profile(
-        selected,
-        prefixes_dir,
-        system_wine,
-    ))
-}
-
-pub(crate) async fn bounded_system_report_input(
-    store: &Store,
-    prefixes_dir: &Path,
-    profile: Option<Uuid>,
-) -> Result<crate::SystemReportInput, CoreError> {
-    let selected = profile.map(|id| stored_profile(store, id)).transpose()?;
-    let system_wine = if selected
-        .as_ref()
-        .is_some_and(|profile| matches!(&profile.runner, crate::RunnerSelection::SystemWine))
-    {
-        bounded_system_wine_version().await
-    } else {
-        None
-    };
-    Ok(system_report_input_from_profile(
-        selected,
-        prefixes_dir,
-        system_wine,
-    ))
+    Ok(system_report_input_from_profile(selected, prefixes_dir))
 }
 
 fn system_report_input_from_profile(
     selected: Option<Profile>,
     prefixes_dir: &Path,
-    system_wine: Option<String>,
 ) -> crate::SystemReportInput {
     let runner = selected.as_ref().map(|profile| match &profile.runner {
-        crate::RunnerSelection::SystemWine => system_wine.map_or_else(
-            || "system-wine".to_owned(),
-            |version| format!("system-wine {version}"),
-        ),
         crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
+        crate::RunnerSelection::Unchosen => "unchosen".to_owned(),
+        crate::RunnerSelection::Unsupported { runner } => format!("unsupported {runner}"),
     });
     let prefix_state = selected
         .as_ref()
@@ -1771,15 +1741,6 @@ pub(crate) async fn read_first_run_checkpoint(
                 available: row.available,
             })
             .collect();
-        let system_version = bounded_system_wine_version().await;
-        checkpoint.runners.push(crate::RunnerReading {
-            selection: crate::FirstRunRunnerSelection::SystemWine {
-                version: system_version.clone(),
-            },
-            version: system_version.clone(),
-            recommended: false,
-            available: system_version.is_some(),
-        });
     }
     if checkpoint.credential_backends.is_empty()
         && matches!(
@@ -1859,34 +1820,6 @@ fn first_run_credential_backends(
         });
     }
     readings
-}
-
-fn system_wine_version() -> Option<String> {
-    wine_version_from_output(
-        std::process::Command::new("wine")
-            .arg("--version")
-            .output()
-            .ok()?,
-    )
-}
-
-async fn bounded_system_wine_version() -> Option<String> {
-    let mut command = tokio::process::Command::new("wine");
-    command.arg("--version").kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
-        .await
-        .ok()?
-        .ok()?;
-    wine_version_from_output(output)
-}
-
-fn wine_version_from_output(output: std::process::Output) -> Option<String> {
-    if !output.status.success() {
-        return None;
-    }
-    let version = String::from_utf8(output.stdout).ok()?;
-    let version = version.trim();
-    (!version.is_empty()).then(|| version.to_owned())
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -2043,7 +1976,12 @@ mod tests {
         let backups = config.backups_dir.clone();
         let core = Core::new(config).unwrap();
         let account = Account::new("person", AccountKind::Standard);
-        let profile = Profile::new("Main", account.id, dir.path().join("game-root"));
+        let profile = Profile::new(
+            "Main",
+            account.id,
+            dir.path().join("game-root"),
+            crate::RunnerSelection::Unchosen,
+        );
         core.save_account(&account).unwrap();
         core.save_profile(&profile).unwrap();
 
@@ -2093,7 +2031,12 @@ mod tests {
     fn deleting_a_missing_profile_surfaces_as_no_profile() {
         let (_dir, core) = core();
         let account = Account::new("me@example.invalid", AccountKind::Standard);
-        let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+        let profile = Profile::new(
+            "Main",
+            account.id,
+            "/games/ffxiv".into(),
+            crate::RunnerSelection::Unchosen,
+        );
         let id = profile.id;
 
         core.save_account(&account).unwrap();
@@ -2152,7 +2095,12 @@ mod tests {
 
         fn seeded(core: &Core, store: &MemoryStore) -> (Account, Profile) {
             let account = Account::new("me@example.invalid", AccountKind::Standard);
-            let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+            let profile = Profile::new(
+                "Main",
+                account.id,
+                "/games/ffxiv".into(),
+                crate::RunnerSelection::Unchosen,
+            );
             core.save_account(&account).unwrap();
             core.save_profile(&profile).unwrap();
             for kind in SecretKind::ALL {
@@ -2196,7 +2144,12 @@ mod tests {
             assert_eq!(core.profile(first.id).unwrap().id, first.id);
             assert_eq!(store.len(), SecretKind::ALL.len());
 
-            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            let second = Profile::new(
+                "Alt",
+                account.id,
+                "/games/ffxiv".into(),
+                crate::RunnerSelection::Unchosen,
+            );
             core.save_profile(&second).unwrap();
             let shared_plan = core.plan_removal(first.id).unwrap();
             assert_eq!(shared_plan.profile(), first.id);
@@ -2212,7 +2165,12 @@ mod tests {
             let (account, first) = seeded(&core, &store);
             let plan = core.plan_removal(first.id).unwrap();
 
-            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            let second = Profile::new(
+                "Alt",
+                account.id,
+                "/games/ffxiv".into(),
+                crate::RunnerSelection::Unchosen,
+            );
             core.save_profile(&second).unwrap();
             let error = core.remove_profile(plan).unwrap_err();
 
@@ -2266,7 +2224,12 @@ mod tests {
             let store = Arc::new(MemoryStore::new());
             let (_dir, core) = core_with(Arc::clone(&store));
             let (account, profile) = seeded(&core, &store);
-            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            let second = Profile::new(
+                "Alt",
+                account.id,
+                "/games/ffxiv".into(),
+                crate::RunnerSelection::Unchosen,
+            );
             core.save_profile(&second).unwrap();
 
             let removal = remove_profile(&core, profile.id).unwrap();
@@ -2348,7 +2311,12 @@ mod tests {
             );
             let (_dir, core) = core_with(Arc::clone(&store));
             let account = Account::new("me@example.invalid", AccountKind::Standard);
-            let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+            let profile = Profile::new(
+                "Main",
+                account.id,
+                "/games/ffxiv".into(),
+                crate::RunnerSelection::Unchosen,
+            );
             core.save_account(&account).unwrap();
             core.save_profile(&profile).unwrap();
 
@@ -2377,7 +2345,12 @@ mod tests {
             );
             let (_dir, core) = core_with(Arc::clone(&store));
             let account = Account::new("me@example.invalid", AccountKind::Standard);
-            let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+            let profile = Profile::new(
+                "Main",
+                account.id,
+                "/games/ffxiv".into(),
+                crate::RunnerSelection::Unchosen,
+            );
             core.save_account(&account).unwrap();
             core.save_profile(&profile).unwrap();
 
@@ -2425,7 +2398,12 @@ mod tests {
                 let store = Arc::new(MemoryStore::new().failing_with(FailAt::Everything, error));
                 let (_dir, core) = core_with(Arc::clone(&store));
                 let account = Account::new("me@example.invalid", AccountKind::Standard);
-                let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+                let profile = Profile::new(
+                    "Main",
+                    account.id,
+                    "/games/ffxiv".into(),
+                    crate::RunnerSelection::Unchosen,
+                );
                 core.save_account(&account).unwrap();
                 core.save_profile(&profile).unwrap();
 

@@ -243,7 +243,6 @@ pub struct RunnerReading {
 #[non_exhaustive]
 pub enum FirstRunRunnerSelection {
     Managed { name: String, version: String },
-    SystemWine { version: Option<String> },
 }
 
 /// The persisted result of runner selection and prefix preparation.
@@ -787,18 +786,9 @@ mod tests {
             state: ExistingGameState::Current,
         });
         checkpoint.credential = Some(CredentialChoice::DoNotSave);
-        checkpoint.runners = vec![RunnerReading {
-            selection: FirstRunRunnerSelection::SystemWine {
-                version: Some("10.0".to_owned()),
-            },
-            version: Some("10.0".to_owned()),
-            recommended: false,
-            available: true,
-        }];
+        checkpoint.runners = vec![runner_reading()];
         let choice = RunnerAndPrefixChoice {
-            runner: FirstRunRunnerSelection::SystemWine {
-                version: Some("10.0".to_owned()),
-            },
+            runner: runner().runner,
             prefix: PrefixOutcome::ContinueWithoutPrefix {
                 code: "prefix-create-failed".to_owned(),
             },

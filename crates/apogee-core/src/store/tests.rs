@@ -97,6 +97,110 @@ fn first_run_checkpoint_migrates_without_trusting_a_stored_position() {
     assert!(raw["data"].get("position").is_none());
 }
 
+/// A setup checkpoint written while the host's Wine was a runner still reads. The row offering it
+/// goes, and a choice or failed attempt that named it is cleared so setup asks for a runner again;
+/// the managed row beside it is untouched.
+#[test]
+fn a_first_run_checkpoint_that_named_the_host_wine_reads_and_asks_again() {
+    let (dir, store) = store();
+    let system_wine = serde_json::json!({ "kind": "system_wine", "value": { "version": "10.0" } });
+    let managed = serde_json::json!({
+        "kind": "managed", "value": { "name": "wine-xiv", "version": "1" }
+    });
+    let mut data = serde_json::to_value(FirstRunCheckpoint::default()).unwrap();
+    data["runners"] = serde_json::json!([
+        { "selection": system_wine, "version": "10.0", "recommended": false, "available": true },
+        { "selection": managed, "version": "1", "recommended": true, "available": true },
+    ]);
+    data["prefix_failure"] = serde_json::json!({ "runner": system_wine, "code": "err-launch" });
+    data["runner_and_prefix"] = serde_json::json!({
+        "runner": system_wine, "prefix": { "state": "ready" }
+    });
+    let envelope = serde_json::json!({ "schema_version": 3, "data": data });
+    fs::write(
+        dir.path().join("first-run.json"),
+        serde_json::to_vec(&envelope).unwrap(),
+    )
+    .unwrap();
+
+    let checkpoint = store.load_first_run().unwrap();
+    assert_eq!(checkpoint.runners.len(), 1);
+    assert!(checkpoint.runners[0].recommended);
+    assert_eq!(checkpoint.prefix_failure, None);
+    assert_eq!(checkpoint.runner_and_prefix, None);
+}
+
+/// The host's Wine is no longer a runner, but a profile that chose it is not set aside as unreadable
+/// and not moved onto a guessed replacement: it reads as naming a runner this build does not launch,
+/// and a re-save keeps saying so.
+#[test]
+fn a_profile_that_chose_the_host_wine_loads_as_unsupported_and_stays_that_way() {
+    let (dir, store) = store();
+    let id = uuid::Uuid::new_v4();
+    let account = Account::new("me@example.invalid", AccountKind::Standard);
+    store.save_account(&account).unwrap();
+    let data = serde_json::json!({
+        "id": id, "name": "Main", "account": account.id, "game_path": "/games/ffxiv",
+        "runner": "SystemWine", "prefix": { "name": "kept" },
+        "external": [],
+        "launch": {
+            "region": "Global", "extra_args": [], "extra_env": [], "wrappers": [],
+            "nvapi": true, "gamemode": true, "dalamud": true
+        },
+    });
+    let envelope = serde_json::json!({ "schema_version": 4, "data": data });
+    let path = dir.path().join("profiles").join(format!("{id}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let loaded = store.load_profile(id).unwrap();
+    assert_eq!(
+        loaded.runner,
+        crate::RunnerSelection::Unsupported {
+            runner: "system_wine".to_owned()
+        }
+    );
+    // Everything else the profile chose survives the step.
+    assert_eq!(loaded.prefix.name, "kept");
+    assert!(loaded.launch.nvapi && loaded.launch.gamemode && loaded.launch.dalamud);
+    assert!(
+        fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .all(|entry| entry.unwrap().path() == path),
+        "nothing was copied aside as corrupt"
+    );
+
+    store.save_profile(&loaded).unwrap();
+    assert_eq!(store.load_profile(id).unwrap().runner, loaded.runner);
+}
+
+/// The same step leaves a managed runner exactly as it was.
+#[test]
+fn a_managed_runner_crosses_the_withdrawal_step_unchanged() {
+    let (dir, store) = store();
+    let id = uuid::Uuid::new_v4();
+    let data = serde_json::json!({
+        "id": id, "name": "Main", "account": uuid::Uuid::new_v4(), "game_path": "/games/ffxiv",
+        "runner": { "Managed": { "name": "GE-Proton", "version": "11-12" } },
+        "prefix": { "name": "" }, "external": [],
+        "launch": {
+            "region": "Global", "extra_args": [], "extra_env": [], "wrappers": [], "dalamud": false
+        },
+    });
+    let envelope = serde_json::json!({ "schema_version": 4, "data": data });
+    let path = dir.path().join("profiles").join(format!("{id}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    assert_eq!(
+        store.load_profile(id).unwrap().runner,
+        crate::RunnerSelection::Managed {
+            name: "GE-Proton".to_owned(),
+            version: "11-12".to_owned()
+        }
+    );
+}
+
 #[rstest]
 #[case(1)]
 #[case(2)]
@@ -281,7 +385,12 @@ fn an_unreadable_install_id_is_reported_not_silently_rotated() {
 fn a_profile_round_trips_through_the_store() {
     let (_dir, store) = store();
     let account = Account::new("me@example.invalid", AccountKind::Standard);
-    let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+    let profile = Profile::new(
+        "Main",
+        account.id,
+        "/games/ffxiv".into(),
+        crate::RunnerSelection::Unchosen,
+    );
     store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
     assert_eq!(store.list_profiles().unwrap(), vec![profile]);
@@ -291,7 +400,12 @@ fn a_profile_round_trips_through_the_store() {
 fn listing_profiles_ignores_a_corrupt_backup_beside_them() {
     let (dir, store) = store();
     let account = Account::new("me@example.invalid", AccountKind::Standard);
-    let profile = Profile::new("Main", account.id, "/games/ffxiv".into());
+    let profile = Profile::new(
+        "Main",
+        account.id,
+        "/games/ffxiv".into(),
+        crate::RunnerSelection::Unchosen,
+    );
     store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
     // A stray backup file must not be parsed as a profile.
@@ -319,7 +433,12 @@ fn a_profile_cannot_attach_to_an_account_while_its_removal_holds_the_graph_lock(
 
     let (dir, store) = store();
     let account = Account::new("me@example.invalid", AccountKind::Standard);
-    let profile = Profile::new("Alt", account.id, "/games/ffxiv".into());
+    let profile = Profile::new(
+        "Alt",
+        account.id,
+        "/games/ffxiv".into(),
+        crate::RunnerSelection::Unchosen,
+    );
     store.save_account(&account).unwrap();
 
     // This is the interval after removal has re-checked ownership and while its secret sweep may be
@@ -486,7 +605,12 @@ fn everything_written_is_owner_only() {
 
     let (dir, store) = store();
     let account = Account::new("someone", AccountKind::Standard);
-    let profile = Profile::new("main", account.id, "/tmp/ffxiv".into());
+    let profile = Profile::new(
+        "main",
+        account.id,
+        "/tmp/ffxiv".into(),
+        crate::RunnerSelection::Unchosen,
+    );
     store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
     store.save_settings(&Settings::default()).unwrap();
@@ -533,7 +657,12 @@ fn a_directory_left_readable_by_an_earlier_build_is_narrowed() {
     let account = Account::new("someone", AccountKind::Standard);
     store.save_account(&account).unwrap();
     store
-        .save_profile(&Profile::new("main", account.id, "/tmp/ffxiv".into()))
+        .save_profile(&Profile::new(
+            "main",
+            account.id,
+            "/tmp/ffxiv".into(),
+            crate::RunnerSelection::Unchosen,
+        ))
         .unwrap();
 
     let mode = std::fs::metadata(base.join("profiles"))
