@@ -685,3 +685,49 @@ async fn a_content_addressed_archive_must_hash_to_its_address() -> Result<(), Bo
     }
     Ok(())
 }
+
+/// A digest map whose key climbs out of the tree fails the install as an unsafe path, whichever map
+/// it is in. The file the release's key points at exists, holding exactly the bytes the map claims,
+/// so a resolver that followed the key would call the tree intact.
+#[tokio::test]
+async fn a_digest_key_that_leaves_its_tree_fails_the_install() -> Result<(), Box<dyn Error>> {
+    for (extra, asset, named) in [
+        (
+            r#", "..\\..\\escape.dll": "A312764C3972C532880BB8BB12BE8AF2""#,
+            None,
+            r"..\..\escape.dll",
+        ),
+        ("", Some("../../../escape.otf"), "../../../escape.otf"),
+    ] {
+        let root = tempfile::tempdir()?;
+        let dist = Distribution::start_shaped(Shape {
+            asset_version: 432,
+            extra_release_hashes: extra,
+            asset_file_name: asset,
+            ..Shape::default()
+        })
+        .await?;
+        let dalamud = dalamud(root.path(), &dist)?;
+        let prefix = prefix(&root.path().join("prefix"))?;
+        // Two levels above the version directory is the addon directory itself.
+        let addon = paths(root.path()).addon;
+        std::fs::create_dir_all(&addon)?;
+        std::fs::write(addon.join("escape.dll"), b"injector")?;
+
+        let err = dalamud
+            .ensure(&prefix, &CancellationToken::new(), &SetupEvents::none())
+            .await
+            .err()
+            .ok_or("a map naming a file outside its tree was accepted")?;
+
+        assert!(
+            matches!(
+                &err,
+                apogee_addons::AddonError::UnsafePath { path, .. } if path == Path::new(named)
+            ),
+            "{named}: got {err:?}"
+        );
+        assert!(dalamud.installed().is_none(), "{named}: it was recorded");
+    }
+    Ok(())
+}

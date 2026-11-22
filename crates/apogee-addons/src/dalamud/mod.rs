@@ -604,7 +604,18 @@ impl Dalamud {
         const WHAT: &str = "Dalamud assets";
 
         meta.assets.iter().find_map(|asset| {
-            let file = integrity::resolve(dir, &asset.file_name);
+            let file = match integrity::resolve(dir, &asset.file_name) {
+                Ok(file) => file,
+                Err(reason) => {
+                    return Some(Self::tree_fault(
+                        WHAT,
+                        integrity::TreeFault::Unsafe {
+                            key: asset.file_name.clone(),
+                            reason,
+                        },
+                    ));
+                }
+            };
             let fault = match asset.digest() {
                 Some(expected) => match integrity::hash_file(&file, Digest::Sha1) {
                     Ok(found) if found == expected => return None,
@@ -779,8 +790,9 @@ impl Dalamud {
     }
 
     /// One file that proves a tree wrong, in the taxonomy's own terms: a file that could not be read is
-    /// a filesystem failure and a file that read as other bytes is an integrity failure, and the two
-    /// send a reader to different places.
+    /// a filesystem failure, a file that read as other bytes is an integrity failure, and a key that
+    /// names no place inside the tree is an unsafe path, and the three send a reader to different
+    /// places.
     fn tree_fault(what: &str, fault: integrity::TreeFault) -> AddonError {
         match fault {
             integrity::TreeFault::Unreadable { file, source } => AddonError::Io {
@@ -788,6 +800,12 @@ impl Dalamud {
                 step: "read a file the digest map names",
                 path: file,
                 source: Box::new(source),
+            },
+            // The key is reported as the distribution wrote it, since it names no place on disk.
+            integrity::TreeFault::Unsafe { key, reason } => AddonError::UnsafePath {
+                what: what.to_owned(),
+                path: PathBuf::from(key),
+                reason: reason.as_str(),
             },
             integrity::TreeFault::Mismatch {
                 file,

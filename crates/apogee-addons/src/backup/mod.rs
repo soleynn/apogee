@@ -50,7 +50,7 @@
 //! ```
 
 mod archive;
-mod confine;
+pub(crate) mod confine;
 mod error;
 mod manifest;
 mod restore;

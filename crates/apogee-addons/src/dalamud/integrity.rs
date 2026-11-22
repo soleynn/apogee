@@ -19,6 +19,7 @@ use apogee_fetch::{DigestPin, HexPins};
 use url::Url;
 
 use super::wire::HashManifest;
+use crate::backup::confine::{RejectReason, relative_parts};
 
 /// Which digest a manifest's values are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,17 +74,21 @@ fn hex_upper(bytes: &[u8]) -> String {
     out
 }
 
-/// Resolve one manifest key against `root`.
+/// Resolve one manifest key against `root`, or say why the key may not be resolved at all.
 ///
 /// The keys are Windows-shaped, because the tree they describe is. A backslash is an ordinary character
 /// on Linux, so without folding it the whole key would arrive as a single filename that exists nowhere
 /// and every file would read as missing.
-pub(crate) fn resolve(root: &Path, key: &str) -> PathBuf {
+///
+/// A key is the distribution's claim about where a file is, and the distribution is not trusted to
+/// keep it below `root`: a key that is rooted, climbs out with `..`, carries a drive letter, or names
+/// something the prefix would reinterpret is refused under the same rules a restored archive entry
+/// is. Refused rather than skipped, because a map that names a file outside its own tree is not a map
+/// of that tree.
+pub(crate) fn resolve(root: &Path, key: &str) -> Result<PathBuf, RejectReason> {
     let mut path = root.to_path_buf();
-    for part in key.split(['\\', '/']).filter(|part| !part.is_empty()) {
-        path.push(part);
-    }
-    path
+    path.extend(relative_parts(key)?);
+    Ok(path)
 }
 
 /// The sha256 a content-addressed URL names, when it names one: a last path segment that is exactly
@@ -112,6 +117,8 @@ pub(crate) enum TreeFault {
     /// promised: the reason it cannot be read is the same reason not to trust the tree, and the io
     /// error is what says which of those it was.
     Unreadable { file: PathBuf, source: io::Error },
+    /// A key the map names is not a place below the tree at all.
+    Unsafe { key: String, reason: RejectReason },
     /// A file the map names is there and carries other bytes.
     Mismatch {
         file: PathBuf,
@@ -130,7 +137,15 @@ pub(crate) fn first_fault(
     digest: Digest,
 ) -> Option<TreeFault> {
     manifest.iter().find_map(|(key, expected)| {
-        let file = resolve(root, key);
+        let file = match resolve(root, key) {
+            Ok(file) => file,
+            Err(reason) => {
+                return Some(TreeFault::Unsafe {
+                    key: key.clone(),
+                    reason,
+                });
+            }
+        };
         match hash_file(&file, digest) {
             Ok(found) if found == *expected => None,
             Ok(found) => Some(TreeFault::Mismatch {
@@ -195,6 +210,55 @@ mod tests {
         let digest = payload_md5(&root);
         assert!(first_fault(&root, &manifest(r"sub\thing.dll", &digest), Digest::Md5).is_none());
         assert!(first_fault(&root, &manifest("sub/thing.dll", &digest), Digest::Md5).is_none());
+    }
+
+    /// A key is a claim about where a file is below the tree, and one that would put it anywhere else
+    /// is refused before the filesystem is asked about it, in either separator and in every spelling
+    /// a Windows reader would honour.
+    #[test]
+    fn a_key_that_leaves_the_tree_is_refused() {
+        let root = Path::new("/srv/dalamud/Hooks/1.0");
+        for (key, reason) in [
+            ("..", RejectReason::Traversal),
+            (r"..\..\..\.bashrc", RejectReason::Traversal),
+            ("sub/../../escape.dll", RejectReason::Traversal),
+            ("/etc/passwd", RejectReason::Absolute),
+            (r"\Windows\System32\x.dll", RejectReason::Absolute),
+            (r"C:\Windows\x.dll", RejectReason::DriveLetter),
+            ("C:", RejectReason::DriveLetter),
+            ("sub/thing.dll:stream", RejectReason::WindowsHostile),
+            ("sub/CON.dll", RejectReason::WindowsHostile),
+            ("sub/thing.dll.", RejectReason::WindowsHostile),
+            ("sub/\0thing.dll", RejectReason::WindowsHostile),
+            ("", RejectReason::Empty),
+            (r".\\", RejectReason::Empty),
+        ] {
+            assert_eq!(resolve(root, key), Err(reason), "{key:?}");
+        }
+        assert_eq!(
+            resolve(root, r".\sub\\thing.dll"),
+            Ok(root.join("sub/thing.dll")),
+            "a current-directory step and a doubled separator name nothing outside"
+        );
+    }
+
+    /// A refused key fails the tree as an unsafe key rather than reading as a missing file: nothing
+    /// was opened, so there is no filesystem answer to report.
+    #[test]
+    fn a_map_naming_a_file_outside_its_tree_fails_it_without_opening_anything() {
+        let (tmp, root) = tree();
+        // A real file at the place the key points, with the digest the map claims for it: following
+        // the key would find it and call the tree intact.
+        std::fs::write(tmp.path().join("outside.dll"), b"payload").expect("write");
+        let digest = payload_md5(&root);
+        let mut map = manifest(r"sub\thing.dll", &digest);
+        map.insert(r"..\..\outside.dll".to_owned(), digest);
+        let fault = first_fault(&root, &map, Digest::Md5).expect("the escaping key is a fault");
+        assert!(
+            matches!(&fault, TreeFault::Unsafe { key, reason: RejectReason::Traversal }
+                if key == r"..\..\outside.dll"),
+            "{fault:?}"
+        );
     }
 
     /// The distribution's file host addresses every download by the sha256 of its bytes, in the last

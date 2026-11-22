@@ -82,7 +82,15 @@ impl std::fmt::Display for RejectReason {
     /// Each reason as the thing that is wrong with the name, so the refusal reads as a sentence.
     // What is refused is attacker-chosen, so the reason is the only part of the message worth reading.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        f.write_str(self.as_str())
+    }
+}
+
+impl RejectReason {
+    /// The reason as [`Display`](std::fmt::Display) writes it, for an error that carries a static
+    /// string.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
             Self::NotAFileOrDir => "it is neither a regular file nor a directory",
             Self::Absolute => "it is rooted, so it would land outside the destination",
             Self::Traversal => "it contains a parent reference",
@@ -95,7 +103,7 @@ impl std::fmt::Display for RejectReason {
             Self::WindowsHostile => "the destination would reinterpret it rather than store it",
             Self::Collision => "another entry differs from it only in case",
             Self::NotInRecord => "the archive's own record does not list it",
-        })
+        }
     }
 }
 
@@ -134,6 +142,30 @@ pub(crate) fn entry_name(raw: &str, is_regular: bool) -> Result<ConfinedName, Re
     if !is_regular {
         return Err(RejectReason::NotAFileOrDir);
     }
+    let mut parts = relative_parts(raw)?.into_iter();
+    let Some(head) = parts.next() else {
+        return Err(RejectReason::Empty);
+    };
+    let root = label(&head).ok_or(RejectReason::UnknownRoot)?;
+    let relative: PathBuf = parts.collect();
+    if relative.as_os_str().is_empty() {
+        // The root's own directory entry, which carries no content and needs no target.
+        return Err(RejectReason::Empty);
+    }
+    Ok(ConfinedName { root, relative })
+}
+
+/// Walk `raw` into the components it names below wherever it is resolved, refusing every shape that
+/// would land elsewhere or that the destination would reinterpret: rooted, a parent reference, a
+/// drive letter, a reserved or Windows-hostile component, too long, or too deep. A NUL anywhere is
+/// refused as hostile. Backslashes are separators, as they are where these names come from.
+///
+/// The name-only half of [`entry_name`], with no root label and no entry kind, for any other
+/// untrusted relative name resolved under a directory this crate owns.
+///
+/// # Errors
+/// The first [`RejectReason`] the name fails. An empty result is [`RejectReason::Empty`].
+pub(crate) fn relative_parts(raw: &str) -> Result<Vec<String>, RejectReason> {
     if raw.len() > MAX_PATH_BYTES {
         return Err(RejectReason::NameTooLong);
     }
@@ -162,18 +194,10 @@ pub(crate) fn entry_name(raw: &str, is_regular: bool) -> Result<ConfinedName, Re
             }
         }
     }
-
-    let mut parts = parts.into_iter();
-    let Some(head) = parts.next() else {
-        return Err(RejectReason::Empty);
-    };
-    let root = label(&head).ok_or(RejectReason::UnknownRoot)?;
-    let relative: PathBuf = parts.collect();
-    if relative.as_os_str().is_empty() {
-        // The root's own directory entry, which carries no content and needs no target.
+    if parts.is_empty() {
         return Err(RejectReason::Empty);
     }
-    Ok(ConfinedName { root, relative })
+    Ok(parts)
 }
 
 /// Reject the component shapes the destination would reinterpret rather than store.
