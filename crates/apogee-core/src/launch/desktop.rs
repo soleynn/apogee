@@ -324,6 +324,18 @@ mod tests {
         assert!(png_edge(&png(48)[..20]).is_none());
     }
 
+    /// Against a real executable named in `APOGEE_ICON_PROBE`, when set: the largest PNG icon is
+    /// found. For checking a new upstream build by hand.
+    #[test]
+    #[ignore = "needs APOGEE_ICON_PROBE pointing at a real executable"]
+    fn a_real_executable_yields_its_icon() {
+        let path = std::env::var("APOGEE_ICON_PROBE").expect("APOGEE_ICON_PROBE");
+        let bytes = std::fs::read(path).unwrap();
+        let (edge, png) = largest_png_icon(&bytes).expect("an icon");
+        assert!(edge >= 128, "{edge}");
+        assert!(png.starts_with(b"\x89PNG"));
+    }
+
     /// ACT's entry carries ACT's own icon under its own name, and names no class: the window rule
     /// assigns it.
     #[test]

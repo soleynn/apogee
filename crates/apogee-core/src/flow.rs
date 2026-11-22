@@ -1959,24 +1959,9 @@ async fn launch_game(
         // about the game is no reason to hold or fail the launch.
         let exe = game_dir.join("ffxiv_dx11.exe");
         let class = crate::launch::desktop::window_class(prepared.runner);
-        // ACT's own entry, from the copy its program row placed, when it runs beside the game.
-        let act = prepared
-            .prefix
-            .as_ref()
-            .filter(|_| profile.launch.act)
-            .map(|prefix| {
-                prefix
-                    .drive_c()
-                    .join("Apogee/ACT/Advanced Combat Tracker.exe")
-            });
         tokio::task::spawn_blocking(move || {
             if let Err(error) = crate::launch::desktop::ensure(&home, &exe, class) {
                 tracing::warn!(%error, "the game's taskbar icon was not installed");
-            }
-            if let Some(act) = act
-                && let Err(error) = crate::launch::desktop::ensure_act(&home, &act)
-            {
-                tracing::warn!(%error, "ACT's taskbar icon was not installed");
             }
         });
     }
@@ -2040,6 +2025,21 @@ async fn launch_game(
         .addons
         .prepare_launch(prepared.prefix, request, &mut plan, cancel, tx)
         .await;
+    // ACT's own taskbar entry, from the copy its program row has just placed, when it runs beside the
+    // game. After the programs are installed rather than with the game's entry, which comes earlier:
+    // on a fresh prefix ACT is not there yet at that point.
+    if let (Some(home), Some(prefix)) = (ctx.desktop_dir.clone(), plan.prefix())
+        && profile.launch.act
+    {
+        let act = prefix
+            .drive_c()
+            .join("Apogee/ACT/Advanced Combat Tracker.exe");
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::launch::desktop::ensure_act(&home, &act) {
+                tracing::warn!(%error, "ACT's taskbar icon was not installed");
+            }
+        });
+    }
     let in_prefix_companion = prepared_addons.programs.any()
         || profile
             .external
