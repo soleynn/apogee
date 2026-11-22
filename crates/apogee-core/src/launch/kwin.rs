@@ -1,11 +1,13 @@
 //! Keeping ACT's overlays above the game under KWin.
 //!
-//! OverlayPlugin draws each overlay in a topmost, layered, borderless window titled `OverlayForm`. KWin
-//! keeps a focused full-screen window above every ordinary "keep above" window, so without help the
-//! overlays sink under the game the moment it is focused. A window rule forcing those windows into
-//! KWin's overlay layer fixes that. The rule matches the game's window class and that exact title, so
-//! nothing else in the session (the game, ACT's own windows) is touched, and it is merged into the
-//! user's rules file as its own group, leaving every rule of theirs as it was.
+//! OverlayPlugin draws each overlay in a topmost, borderless window titled with the overlay's own name,
+//! which the user picks. KWin keeps a focused full-screen window above every ordinary "keep above"
+//! window, so without help the overlays sink under the game the moment it is focused. A window rule
+//! forcing them into KWin's overlay layer fixes that. Every window in the game's session shares one
+//! class, and overlay titles are free text, so the rule matches that class and excludes the two
+//! windows that must stay ordinary, the game's and ACT's main window, by title. ACT's own dialogs float
+//! above the game too, which is harmless. The rule is merged into the user's rules file as its own
+//! group, leaving every rule of theirs as it was.
 
 use std::path::Path;
 
@@ -18,7 +20,7 @@ fn rule_body(class: &str) -> String {
     format!(
         "Description=Apogee: ACT overlays above the game\n\
          wmclass={class}\nwmclassmatch=1\n\
-         title=OverlayForm\ntitlematch=1\n\
+         title=^(?!FINAL FANTASY XIV$)(?!Advanced Combat Tracker).+$\ntitlematch=3\n\
          layer=overlay\nlayerrule=2\n"
     )
 }
@@ -166,7 +168,8 @@ mod tests {
         assert!(out.contains("[act-overlays-on-top]\nDescription=mine\nwmclass=steam_app_0\n"));
         assert!(
             out.contains("[apogee-overlays]\n")
-                && out.contains("title=OverlayForm\ntitlematch=1\n")
+                && out.contains("titlematch=3\n")
+                && !out.contains("OverlayForm")
         );
         // A second pass changes nothing, so KWin is not asked to reload every launch.
         assert_eq!(merged(&out, "steam_app_apogee"), out);
