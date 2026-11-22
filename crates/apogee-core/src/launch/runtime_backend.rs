@@ -406,9 +406,46 @@ impl LaunchBackend for RuntimeLauncher {
         events: &UnboundedSender<Event>,
     ) -> Result<Box<dyn GameHandle>, CoreError> {
         let progress = relay_progress(events);
+        if let Some(prefix) = plan.prefix() {
+            end_leftover_session(&self.runtime, prefix).await;
+        }
         let session = self.runtime.launch(plan, cancel, &progress).await?;
         Ok(Box::new(RuntimeGameHandle { session }))
     }
+}
+
+/// End a wine session still running in `prefix` with no game in it, before a new launch.
+///
+/// A program that outlived its game, or a crash, can leave the prefix's session up. Under umu a launch
+/// that lets programs join it would join that session's container rather than start its own, and the
+/// game never appears where the launch looks for it. A session with the game still in it is left
+/// alone: that launch is refused elsewhere, and stopping a running game is never this function's call.
+async fn end_leftover_session(runtime: &Runtime, prefix: &apogee_runtime::Prefix) {
+    let count = |name: &'static str| async move {
+        apogee_runtime::prefix_processes(prefix, name)
+            .await
+            .map_or(0, |pids| pids.len())
+    };
+    if count("wineserver").await == 0 || count("ffxiv_dx11.exe").await > 0 {
+        return;
+    }
+    tracing::info!("ending a session left running in the prefix before launching");
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        runtime.kill_prefix(prefix),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("stopping the leftover session did not finish in time");
+    }
+    for _ in 0..30 {
+        if count("wineserver").await == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    tracing::warn!("a session left running in the prefix did not end; launching anyway");
 }
 
 /// Wraps `apogee-runtime`'s supervised session, normalizing the opaque exit marker to `()`.
