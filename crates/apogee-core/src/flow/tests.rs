@@ -4407,3 +4407,268 @@ fn a_launch_without_a_prefix_leaves_the_driver_caches_at_their_defaults() {
             .any(|k| k.starts_with("__GL_") || k.starts_with("MESA_"))
     );
 }
+
+// ---- curated programs at launch ------------------------------------------------------------------
+
+/// A launch's addon seam and launch backend, wired over `h` for a login that reaches a current game.
+fn program_launch(
+    h: &Harness,
+    launch: Arc<FakeLaunchBackend>,
+    addons: Arc<FakeAddons>,
+) -> FlowContext {
+    context_with_addons(
+        h,
+        Arc::new(FixtureTransport::new(play_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons,
+        NOW,
+    )
+}
+
+fn prefix_tool(path: &str, run_in: RunIn) -> ExternalAddon {
+    ExternalAddon::new(
+        absolute_fixture_path(path),
+        vec![],
+        run_in,
+        Trigger::WithGame {
+            keep_after_close: false,
+        },
+    )
+    .unwrap()
+}
+
+/// A program its row was not validated on this game version for is narrated under its own name and
+/// left out, and the game starts exactly as it would have without it. On a umu runner that also means
+/// no container join: the only thing that would have joined it was skipped.
+#[tokio::test]
+async fn a_program_off_its_game_version_is_skipped_and_the_game_still_starts() {
+    let h = harness_customized(false, |profile| profile.launch.act = true);
+    let launch =
+        Arc::new(FakeLaunchBackend::exiting().on_runner(apogee_runtime::RunnerKind::ProtonUmu));
+    let addons = Arc::new(FakeAddons::new().skipping("act"));
+
+    let events = run(
+        program_launch(&h, launch.clone(), addons.clone()),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Setup(apogee_addons::SetupEvent::Caveat { what, .. }) if what == "act"
+        )),
+        "the skip was not narrated: {events:?}"
+    );
+    assert!(addons.calls().contains(&AddonCall::ProgramsRequested {
+        programs: vec!["act".to_owned()],
+        game_version: GAME_VERSION.to_owned(),
+    }));
+    assert!(addons.started_programs().is_empty());
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("UMU_CONTAINER_NSENTER"));
+}
+
+/// The join is announced on the game's launch only when something will use it. An addon-free launch
+/// differs from a launch with a program by that one variable and nothing else, so a program turned on
+/// cannot quietly change how the game itself starts.
+#[tokio::test]
+async fn only_a_launch_with_an_in_prefix_companion_joins_the_umu_container() {
+    let umu =
+        || Arc::new(FakeLaunchBackend::exiting().on_runner(apogee_runtime::RunnerKind::ProtonUmu));
+
+    let plain = harness(false);
+    let plain_launch = umu();
+    let plain_addons = Arc::new(FakeAddons::new());
+    run(
+        program_launch(&plain, plain_launch.clone(), plain_addons.clone()),
+        play_no_otp(plain.profile),
+    )
+    .await;
+    let plain_env = plain_launch.last_plan().unwrap().env().clone();
+    assert!(!plain_env.contains_key("UMU_CONTAINER_NSENTER"));
+    assert_eq!(plain_addons.shared_env(), Some(Default::default()));
+
+    let with_act = harness_customized(false, |profile| profile.launch.act = true);
+    let act_launch = umu();
+    let act_addons = Arc::new(FakeAddons::new());
+    run(
+        program_launch(&with_act, act_launch.clone(), act_addons.clone()),
+        play_no_otp(with_act.profile),
+    )
+    .await;
+    let mut act_env = act_launch.last_plan().unwrap().env().clone();
+    assert_eq!(
+        act_env.remove("UMU_CONTAINER_NSENTER").as_deref(),
+        Some("1")
+    );
+    // Byte-identical once the join is taken out: the driver-cache paths name the profile's own
+    // prefix, so compare the names and every value that does not.
+    assert_eq!(
+        act_env.keys().collect::<Vec<_>>(),
+        plain_env.keys().collect::<Vec<_>>()
+    );
+    for (name, value) in &plain_env {
+        if !value.contains(&plain.profile.to_string()) {
+            assert_eq!(act_env.get(name), Some(value), "{name} differs");
+        }
+    }
+    // The companion is told to join the same container and nothing else: inside it the runner sets
+    // synchronization for both sides.
+    assert_eq!(
+        act_addons.shared_env(),
+        Some(std::collections::BTreeMap::from([(
+            "UMU_CONTAINER_NSENTER".to_owned(),
+            "1".to_owned()
+        )]))
+    );
+}
+
+/// A user's own tool inside the prefix needs the join as much as a curated program does; one on the
+/// host is not inside any container and does not.
+#[rstest::rstest]
+#[case(RunIn::Prefix, true)]
+#[case(RunIn::Host, false)]
+#[tokio::test]
+async fn a_users_own_tool_joins_the_container_only_when_it_runs_in_the_prefix(
+    #[case] run_in: RunIn,
+    #[case] joins: bool,
+) {
+    let h = harness_customized(false, |profile| {
+        profile.external.push(prefix_tool("tools/own.exe", run_in));
+    });
+    let launch =
+        Arc::new(FakeLaunchBackend::exiting().on_runner(apogee_runtime::RunnerKind::ProtonUmu));
+    run(
+        program_launch(&h, launch.clone(), Arc::new(FakeAddons::new())),
+        play_no_otp(h.profile),
+    )
+    .await;
+    assert_eq!(
+        launch
+            .last_plan()
+            .unwrap()
+            .env()
+            .contains_key("UMU_CONTAINER_NSENTER"),
+        joins
+    );
+}
+
+/// Under plain wine there is no container to join, and what a companion must share is the
+/// synchronization the game's server was started with.
+#[tokio::test]
+async fn a_plain_wine_companion_shares_the_games_synchronization() {
+    let h = harness_customized(false, |profile| profile.launch.xivalexander = true);
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting()
+            .on_runner(apogee_runtime::RunnerKind::Wine)
+            .reporting(apogee_runtime::HostCaps {
+                ntsync: false,
+                fsync: true,
+            }),
+    );
+    let addons = Arc::new(FakeAddons::new());
+    run(
+        program_launch(&h, launch.clone(), addons.clone()),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("UMU_CONTAINER_NSENTER"));
+    assert_eq!(plan.env().get("WINEFSYNC").map(String::as_str), Some("1"));
+    assert_eq!(
+        addons.shared_env(),
+        Some(std::collections::BTreeMap::from([(
+            "WINEFSYNC".to_owned(),
+            "1".to_owned()
+        )]))
+    );
+}
+
+/// Programs are built and started only once the game's pid is known, ahead of the user's own tools,
+/// and a disabled program is never so much as named to the seam.
+#[tokio::test]
+async fn programs_start_after_the_game_and_ahead_of_the_users_own_tools() {
+    let own = absolute_fixture_path("tools/own.sh");
+    let h = harness_customized(false, |profile| {
+        profile.launch.xivalexander = true;
+        profile.launch.act = false;
+        profile
+            .external
+            .push(prefix_tool("tools/own.sh", RunIn::Host));
+    });
+    let addons = Arc::new(FakeAddons::new());
+    let events = run(
+        program_launch(&h, Arc::new(FakeLaunchBackend::exiting()), addons.clone()),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    assert_eq!(
+        addons.calls(),
+        [
+            AddonCall::Prepared {
+                prefix: false,
+                dalamud: false,
+            },
+            AddonCall::ProgramsRequested {
+                programs: vec!["xivalexander".to_owned()],
+                game_version: GAME_VERSION.to_owned(),
+            },
+            AddonCall::Started {
+                game_pid: std::process::id().cast_signed(),
+                confirming: false,
+                count: 2,
+            },
+            AddonCall::GameClosed,
+        ]
+    );
+    let running = states(&events)
+        .iter()
+        .position(|s| *s == FlowState::Running)
+        .unwrap();
+    assert!(running > 0);
+    assert_eq!(
+        addons.started_programs(),
+        [PathBuf::from("/fake/programs/xivalexander.exe"), own]
+    );
+}
+
+/// `prefix fix` resolves what a check reports, and a check reports the enabled programs' steps, so
+/// both carry them; a profile with every program off asks for the base setup only.
+#[rstest::rstest]
+#[case(PrefixAction::Check)]
+#[case(PrefixAction::Fix)]
+#[tokio::test]
+async fn prefix_repair_and_check_carry_the_enabled_programs(#[case] action: PrefixAction) {
+    let h = harness_customized(false, |profile| profile.launch.act = true);
+    let health = apogee_runtime::PrefixHealth::default();
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting().with_health(health.clone(), health)),
+        addons.clone(),
+        NOW,
+    );
+    run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action,
+        },
+    )
+    .await;
+    assert!(
+        addons.calls().contains(&AddonCall::ProgramSetup {
+            programs: vec!["act".to_owned()],
+        }),
+        "{:?}",
+        addons.calls()
+    );
+}

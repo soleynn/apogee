@@ -1952,31 +1952,40 @@ async fn launch_game(
     // Comes back with the proof to watch for when something took the launch over, which is the
     // companion layer's answer rather than something read back off the plan: what a redirect leaves in
     // a plan is the shape one happened to take, and the companion that composed it is gone by the time
-    // the proof lands.
-    let confirming = ctx
+    // the proof lands. It also installs and gates the curated programs the profile turns on, before the
+    // spawn: a program that misses a gate is narrated and left out, and the game starts regardless.
+    let request = crate::addons::LaunchPrograms {
+        dalamud: dalamud_config(profile, session, &settings),
+        programs: crate::addons::LaunchPrograms::enabled(&profile.launch),
+        game_version: session.game_version.clone(),
+    };
+    let prepared_addons = ctx
         .addons
-        .prepare_launch(
-            prepared.prefix,
-            dalamud_config(profile, session, &settings),
-            &mut plan,
-            cancel,
-            tx,
-        )
+        .prepare_launch(prepared.prefix, request, &mut plan, cancel, tx)
         .await;
+    let in_prefix_companion = prepared_addons.programs.any()
+        || profile
+            .external
+            .iter()
+            .any(|addon| addon.enabled() && addon.run_in() == apogee_addons::RunIn::Prefix);
+    let shared_env = join_session(&mut plan, prepared.runner, in_prefix_companion);
 
     emit(tx, FlowState::Launching);
     let handle = ctx.launch.launch(plan, cancel, tx).await?;
     tracing::debug!(pid = handle.game_pid(), "game process running");
     emit(tx, FlowState::Running);
 
-    // Started once the game is up, so a companion that looks for it finds it.
+    // Started once the game is up, so a companion that looks for it finds it: the curated programs
+    // that passed their gates first, then the user's own.
     let addons = ctx
         .addons
         .start(
             handle.game_pid(),
             handle.prefix(),
+            shared_env,
+            prepared_addons.programs,
             profile.external.clone(),
-            confirming,
+            prepared_addons.confirming,
             cancel,
             tx,
         )
@@ -2119,6 +2128,9 @@ async fn prefix(
     let profile = ctx.store.load_profile(profile_id)?;
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
     let request = PrefixRequest::try_from(&profile)?;
+    // The curated programs the profile turns on are part of the setup a prefix is checked against
+    // and repaired to, so the action that resolves what a check reports installs them too.
+    let programs = crate::addons::LaunchPrograms::enabled(&profile.launch);
 
     match action {
         PrefixAction::Create => {
@@ -2135,7 +2147,10 @@ async fn prefix(
                     // Both halves are read, neither is applied. A prefix whose structure is intact but
                     // which has none of the setup the catalog publishes is a prefix with something
                     // wrong, and reporting only the runtime's half is how it reads as fine.
-                    let missing = ctx.addons.missing_setup(examined.prefix, cancel, tx).await;
+                    let missing = ctx
+                        .addons
+                        .missing_setup(examined.prefix, &programs, cancel, tx)
+                        .await;
                     let _ = tx.send(Event::Prefix(PrefixReport {
                         health: examined.health,
                         missing_setup: missing,
@@ -2158,7 +2173,10 @@ async fn prefix(
                 // Applied at all because this is the action that resolves what a check reports, and a
                 // check reports both halves: leaving the setup out would name something as wrong in one
                 // command and refuse to act on it in the one that exists to act.
-                let missing = ctx.addons.apply_setup(examined.prefix, cancel, tx).await;
+                let missing = ctx
+                    .addons
+                    .apply_setup(examined.prefix, &programs, cancel, tx)
+                    .await;
                 // What is left after the fix, which is what a user has to decide about. An empty
                 // report is the fix having resolved everything.
                 let _ = tx.send(Event::Prefix(PrefixReport {
@@ -2189,7 +2207,7 @@ async fn prefix(
             // A rebuilt prefix is a new one, so it needs the setup a new one gets. Without this, the
             // command that exists to put a prefix back in a known state leaves it in one no other
             // path produces.
-            ctx.addons.apply_setup(fresh, cancel, tx).await;
+            ctx.addons.apply_setup(fresh, &programs, cancel, tx).await;
         }
     }
     Ok(())
@@ -2208,7 +2226,10 @@ async fn create_prefix(
         .launch
         .prepare(&request, &prefix_dir, cancel, tx)
         .await?;
-    ctx.addons.apply_setup(prepared.prefix, cancel, tx).await;
+    let programs = crate::addons::LaunchPrograms::enabled(&profile.launch);
+    ctx.addons
+        .apply_setup(prepared.prefix, &programs, cancel, tx)
+        .await;
     Ok(())
 }
 
@@ -2253,6 +2274,41 @@ fn launch_env(
         wrappers: profile.launch.wrappers.clone(),
         dxvk,
     }
+}
+
+/// Make the game's wine session one a companion can join, and return what a companion inside the
+/// prefix must share with the game to join it.
+///
+/// Under a umu runner each `umu-run` builds its own container, and a companion started in a second
+/// container cannot see the game's wine server: it starts its own, and nothing it does reaches the
+/// game. umu's own join is a variable on both launches, the game's announcing its container on the
+/// session bus and the companion's entering it. It is set on the game only when an in-prefix
+/// companion is enabled, because an announced container is something any session-bus client the
+/// service admits can run a program in, and a launch with nothing to join offers that for nothing.
+/// Inside the container the runner sets the synchronization variables itself, so nothing else is
+/// shared.
+///
+/// Under plain wine there is no container: a companion given the same prefix is a client of the
+/// game's server by construction, and what it must share is the synchronization the game was started
+/// with, since a client whose settings differ from its server's is a known way to hang both.
+fn join_session(
+    plan: &mut LaunchPlan,
+    runner: Option<apogee_runtime::RunnerKind>,
+    in_prefix_companion: bool,
+) -> std::collections::BTreeMap<String, String> {
+    if runner == Some(apogee_runtime::RunnerKind::ProtonUmu) {
+        if !in_prefix_companion {
+            return std::collections::BTreeMap::new();
+        }
+        let join = ("UMU_CONTAINER_NSENTER".to_owned(), "1".to_owned());
+        plan.env_mut().insert(join.0.clone(), join.1.clone());
+        return std::collections::BTreeMap::from([join]);
+    }
+    plan.env()
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "WINEFSYNC" | "WINEESYNC"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 /// The prefix directory name for a profile: its named prefix, or the profile id when unnamed.

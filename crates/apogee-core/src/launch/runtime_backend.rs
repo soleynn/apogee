@@ -262,6 +262,7 @@ impl RuntimeLauncher {
             caps: host.for_runner(&entry),
             dxvk,
             catalog: Some(catalog),
+            runner: Some(entry.kind),
         })
     }
 }

@@ -106,6 +106,9 @@ pub(crate) struct Prepared {
     /// The verified catalog this preparation already fetched, when it needed one. Carried so a
     /// caller that also needs it does not download and re-verify the same signed file twice.
     pub(crate) catalog: Option<apogee_runtime::Catalog>,
+    /// How the runner that built the prefix starts a program in it, which decides how a companion
+    /// joins the game's wine session. `None` is a backend that prepared no runner at all.
+    pub(crate) runner: Option<apogee_runtime::RunnerKind>,
 }
 
 /// A prefix that was looked at, and what the runtime made of it.
@@ -226,6 +229,8 @@ pub(crate) mod fake {
         caps: apogee_runtime::HostCaps,
         /// What `prepare` reports the prefix's graphics translation to be.
         dxvk: Option<apogee_runtime::DxvkEnv>,
+        /// What `prepare` reports the runner to be.
+        runner: Option<apogee_runtime::RunnerKind>,
         /// What a check reports, and what a fix is asked to resolve.
         health: Option<apogee_runtime::PrefixHealth>,
         /// What a fix reports is left afterwards.
@@ -278,6 +283,7 @@ pub(crate) mod fake {
                     fsync: false,
                 },
                 dxvk: None,
+                runner: Some(apogee_runtime::RunnerKind::Wine),
                 health: None,
                 residual: None,
                 fixed: Arc::new(AtomicBool::new(false)),
@@ -316,6 +322,12 @@ pub(crate) mod fake {
         /// preparation brought up to the published build.
         pub(crate) fn with_dxvk(mut self, dxvk: apogee_runtime::DxvkEnv) -> Self {
             self.dxvk = Some(dxvk);
+            self
+        }
+
+        /// Report a runner of `kind` from `prepare`.
+        pub(crate) fn on_runner(mut self, kind: apogee_runtime::RunnerKind) -> Self {
+            self.runner = Some(kind);
             self
         }
 
@@ -399,6 +411,7 @@ pub(crate) mod fake {
                 caps: self.caps,
                 dxvk: self.dxvk.clone(),
                 catalog: None,
+                runner: self.runner,
             })
         }
 
