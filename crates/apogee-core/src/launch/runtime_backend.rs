@@ -408,6 +408,8 @@ impl LaunchBackend for RuntimeLauncher {
         let progress = relay_progress(events);
         end_leftover_session(&self.runtime, &plan).await;
         let session = self.runtime.launch(plan, cancel, &progress).await?;
+        #[cfg(target_os = "linux")]
+        crate::launch::leftover::record(session.prefix().path(), session.game_pid());
         Ok(Box::new(RuntimeGameHandle { session }))
     }
 }
@@ -433,6 +435,10 @@ async fn end_leftover_session(runtime: &Runtime, plan: &LaunchPlan) {
     if game_running {
         return;
     }
+    // The session this launcher recorded is ended by its process tree, which reaches every program in
+    // it whatever sandbox either side runs in. Asking wine below is for a session with no record.
+    #[cfg(target_os = "linux")]
+    crate::launch::leftover::end_recorded(prefix.path()).await;
     let bus = session_bus_name(prefix.path());
     let live = || async {
         apogee_runtime::prefix_processes(prefix, "wineserver")
