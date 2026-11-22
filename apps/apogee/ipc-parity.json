@@ -32,6 +32,14 @@
       "equivalence": "Resolved setup values with provenance."
     },
     {
+      "ipc": "program_settings",
+      "cli": [
+        ["program", "list", "--profile", "00000000-0000-0000-0000-000000000001"],
+        ["program", "status", "act", "--profile", "00000000-0000-0000-0000-000000000001"]
+      ],
+      "equivalence": "Each program's switch with the signed catalog's row for it."
+    },
+    {
       "ipc": "runner_catalog",
       "cli": [["runner", "list"]],
       "equivalence": "Signed runner catalog view."
@@ -132,6 +140,11 @@
       "ipc": "disable_pushed_codes",
       "cli": [["otp", "ask", "--account", "00000000-0000-0000-0000-000000000001"]],
       "equivalence": "Return listener delivery to typed codes."
+    },
+    {
+      "ipc": "disable_program",
+      "cli": [["program", "disable", "act", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Switch one program off; nothing is deleted. Switching one on needs consent the shell cannot yet ask for, so it is terminal-only."
     },
     {
       "ipc": "delete_secret",

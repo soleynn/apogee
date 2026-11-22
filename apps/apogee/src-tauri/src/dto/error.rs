@@ -74,6 +74,12 @@ pub(crate) enum CoreErrorDto {
     NoAccount {
         account: String,
     },
+    /// A profile write that would newly run code beside the game, refused because it carried no
+    /// consent. `what` is the program switch or companion row's program.
+    ConsentRequired {
+        profile: String,
+        what: String,
+    },
     RemovalPlanChanged {
         profile: String,
     },
@@ -134,6 +140,10 @@ impl From<&CoreError> for CoreErrorDto {
             },
             CoreError::NoAccount(account) => Self::NoAccount {
                 account: account.to_string(),
+            },
+            CoreError::ConsentRequired { profile, what } => Self::ConsentRequired {
+                profile: profile.to_string(),
+                what: what.clone(),
             },
             CoreError::RemovalPlanChanged { profile } => Self::RemovalPlanChanged {
                 profile: profile.to_string(),

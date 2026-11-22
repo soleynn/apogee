@@ -6,11 +6,11 @@ use apogee_core::{Core, ListenerConsent, ProfileRemovalPlan, Secret, SecretKind,
 
 use crate::dto::IpcErrorDto;
 use crate::dto::mutation::{
-    DeleteSecretRequestDto, DisablePushedCodesRequestDto, ForgetSecretsRequestDto,
-    ForgetSecretsResultDto, ImportTotpSecretRequestDto, NeverStoreResultDto, ProfileRemovalDto,
-    ProfileRemovalPlanDto, RemoveProfileRequestDto, SetNeverStoreRequestDto,
-    StorePasswordRequestDto, TotpImportResultDto, UpdateAccountRequestDto, UpdateProfileRequestDto,
-    UpdateSettingsRequestDto, UsePushedCodesRequestDto,
+    DeleteSecretRequestDto, DisableProgramRequestDto, DisablePushedCodesRequestDto,
+    ForgetSecretsRequestDto, ForgetSecretsResultDto, ImportTotpSecretRequestDto,
+    NeverStoreResultDto, ProfileRemovalDto, ProfileRemovalPlanDto, RemoveProfileRequestDto,
+    SetNeverStoreRequestDto, StorePasswordRequestDto, TotpImportResultDto, UpdateAccountRequestDto,
+    UpdateProfileRequestDto, UpdateSettingsRequestDto, UsePushedCodesRequestDto,
 };
 use crate::dto::store::{AccountDto, ProfileDto, SettingsDto};
 use crate::{ShellState, run_blocking};
@@ -301,6 +301,23 @@ async fn disable_pushed_codes_inner(
 }
 
 #[tauri::command]
+pub(super) async fn disable_program(
+    state: tauri::State<'_, ShellState>,
+    request: DisableProgramRequestDto,
+) -> Result<ProfileDto, IpcErrorDto> {
+    let (profile, program) = request.into_parts();
+    let program = program
+        .into_core()
+        .ok_or_else(|| IpcErrorDto::shell("shell.command.invalid"))?;
+    blocking_mutation(&state, move |core| {
+        core.disable_program(profile, program)
+            .map(|record| ProfileDto::from(&record))
+            .map_err(|error| IpcErrorDto::core(&error))
+    })
+    .await
+}
+
+#[tauri::command]
 pub(super) async fn delete_secret(
     state: tauri::State<'_, ShellState>,
     request: DeleteSecretRequestDto,
@@ -547,6 +564,52 @@ mod tests {
         assert_eq!(saved.game_path, PathBuf::from("protected/game/path"));
         assert_eq!(saved.prefix.name, "protected-prefix");
         assert_eq!(saved.launch, launch);
+        Ok(())
+    }
+
+    /// The shell cannot ask for consent yet, so a profile update that switches a companion program
+    /// on is refused and writes nothing, while one that leaves the switches as stored, or switches one
+    /// off, goes through. A switch set from the terminal survives a shell save untouched.
+    #[tokio::test]
+    async fn a_profile_update_switching_a_program_on_is_refused() -> TestResult {
+        let (_temporary, state, _account, profile) = seeded_state().await?;
+        let mut launch = profile.launch.clone();
+        launch.act = true;
+        let refused = update_profile_inner(
+            &state,
+            profile.id,
+            "After".to_owned(),
+            profile.runner.clone(),
+            launch,
+        )
+        .await;
+        let Err(refused) = refused else {
+            return Err("a companion was switched on without consent".into());
+        };
+        let wire = serde_json::to_value(&refused)?;
+        assert_eq!(wire["code"], "err-consent-required");
+        assert_eq!(wire["error"]["kind"], "consentRequired");
+        assert_eq!(wire["error"]["what"], "act");
+        let core = state.ready_core().await.map_err(ipc_error)?;
+        assert!(!core.profile(profile.id)?.launch.act);
+        assert_eq!(core.profile(profile.id)?.name, profile.name);
+
+        // On from the terminal, then a shell save that round-trips it: kept, not refused.
+        let on = core.enable_program(
+            profile.id,
+            apogee_core::ProgramName::Act,
+            apogee_core::ProgramConsent::granted(),
+        )?;
+        update_profile_inner(
+            &state,
+            profile.id,
+            "After".to_owned(),
+            on.runner.clone(),
+            on.launch.clone(),
+        )
+        .await
+        .map_err(ipc_error)?;
+        assert!(core.profile(profile.id)?.launch.act);
         Ok(())
     }
 

@@ -11,6 +11,7 @@ import type { CoreErrorDto } from './generated/CoreErrorDto';
 import type { IpcErrorDto } from './generated/IpcError';
 import type { SecretsReportDto } from './generated/SecretsReport';
 import type { NextActionDto } from './generated/NextAction';
+import type { ProgramSettingDto } from './generated/ProgramSetting';
 import type { ResolvedSetupDto } from './generated/ResolvedSetup';
 import type { StartupDto } from './generated/Startup';
 import type { PassphrasePromptDto } from './generated/PassphrasePrompt';
@@ -18,6 +19,7 @@ import type { SecretsFileRemovalDto } from './generated/SecretsFileRemoval';
 import type { SecretsFileStatusDto } from './generated/SecretsFileStatus';
 import type { AccountDto } from './generated/AccountDto';
 import type { DeleteSecretRequestDto } from './generated/DeleteSecretRequest';
+import type { DisableProgramRequestDto } from './generated/DisableProgramRequest';
 import type { DisablePushedCodesRequestDto } from './generated/DisablePushedCodesRequest';
 import type { ForgetSecretsRequestDto } from './generated/ForgetSecretsRequest';
 import type { ForgetSecretsResultDto } from './generated/ForgetSecretsResult';
@@ -292,6 +294,11 @@ export function disablePushedCodes(request: DisablePushedCodesRequestDto): Promi
   return invokeIpc<AccountDto>('disable_pushed_codes', { request });
 }
 
+/** Switches one program off for a profile. Switching one on is not offered here. */
+export function disableProgram(request: DisableProgramRequestDto): Promise<ProfileDto> {
+  return invokeIpc<ProfileDto>('disable_program', { request });
+}
+
 /** Deletes one write-only secret after an inline confirmation. */
 export function deleteSecret(request: DeleteSecretRequestDto): Promise<AccountDto> {
   return invokeIpc<AccountDto>('delete_secret', { request });
@@ -337,6 +344,11 @@ export function defaults(): Promise<DefaultsDto> {
 /** Reads the effective launch setup together with the authority behind every value. */
 export function resolvedSetup(profile: string): Promise<ResolvedSetupDto[]> {
   return invokeIpc<ResolvedSetupDto[]>('resolved_setup', { profile });
+}
+
+/** Reads each program's switch with the signed catalog's row for it. */
+export function programSettings(profile: string): Promise<ProgramSettingDto[]> {
+  return invokeIpc<ProgramSettingDto[]>('program_settings', { profile });
 }
 
 /** Reads authenticated runner rows and local installation state. */

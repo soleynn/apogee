@@ -443,6 +443,23 @@ impl UsePushedCodesRequestDto {
     }
 }
 
+/// Switch one program off for a profile. There is no request to switch one on: that grants a
+/// third-party program the launcher's access, and this shell has no native confirmation to ask with.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "DisableProgramRequest.ts")]
+pub(crate) struct DisableProgramRequestDto {
+    #[ts(type = "string")]
+    profile: Uuid,
+    program: super::read::ProgramNameDto,
+}
+
+impl DisableProgramRequestDto {
+    pub(crate) const fn into_parts(self) -> (Uuid, super::read::ProgramNameDto) {
+        (self.profile, self.program)
+    }
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export, export_to = "DisablePushedCodesRequest.ts")]

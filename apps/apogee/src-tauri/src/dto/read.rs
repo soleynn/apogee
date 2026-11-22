@@ -1,14 +1,130 @@
 //! Read-only core projections exposed as direct shell methods.
 
 use apogee_core::{
-    BundlePart, CatalogViewEntry, NextAction, NextCommand, NextVerb, PendingReading, Provenance,
-    ResolvedSetup, SetupValue, SyncStatus,
+    BundlePart, CatalogViewEntry, NextAction, NextCommand, NextVerb, PendingReading, ProgramName,
+    ProgramRow, ProgramSetting, ProgramTier, Provenance, ResolvedSetup, SetupValue, SyncStatus,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::path::PathDto;
 use super::store::GpuSelectDto;
+
+/// One of the programs a profile can run with the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "ProgramName.ts")]
+pub(crate) enum ProgramNameDto {
+    Dalamud,
+    Xivalexander,
+    Act,
+    /// A program this shell was not built to name. Never accepted in a request.
+    #[serde(skip_deserializing)]
+    Unknown,
+}
+
+impl From<ProgramName> for ProgramNameDto {
+    #[allow(clippy::wildcard_enum_match_arm)]
+    fn from(program: ProgramName) -> Self {
+        match program {
+            ProgramName::Dalamud => Self::Dalamud,
+            ProgramName::Xivalexander => Self::Xivalexander,
+            ProgramName::Act => Self::Act,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl ProgramNameDto {
+    /// The core's program, or `None` for one this shell cannot name.
+    pub(crate) const fn into_core(self) -> Option<ProgramName> {
+        match self {
+            Self::Dalamud => Some(ProgramName::Dalamud),
+            Self::Xivalexander => Some(ProgramName::Xivalexander),
+            Self::Act => Some(ProgramName::Act),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// A program's switch on a profile, with what the signed catalog says about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "ProgramSetting.ts")]
+pub(crate) struct ProgramSettingDto {
+    program: ProgramNameDto,
+    enabled: bool,
+    row: Option<ProgramRowDto>,
+}
+
+impl From<&ProgramSetting> for ProgramSettingDto {
+    fn from(setting: &ProgramSetting) -> Self {
+        Self {
+            program: ProgramNameDto::from(setting.program),
+            enabled: setting.enabled,
+            row: setting.row.as_ref().map(ProgramRowDto::from),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+struct ProgramRowDto {
+    tier: ProgramTierDto,
+    caveats: Vec<String>,
+    version: Option<String>,
+    game_versions: Vec<String>,
+    runners: Vec<RunnerPinDto>,
+}
+
+impl From<&ProgramRow> for ProgramRowDto {
+    fn from(row: &ProgramRow) -> Self {
+        Self {
+            tier: ProgramTierDto::from(&row.tier),
+            caveats: row.caveats.clone(),
+            version: row.version.clone(),
+            game_versions: row.game_versions.clone(),
+            runners: row
+                .runners
+                .iter()
+                .map(|(name, version)| RunnerPinDto {
+                    name: name.clone(),
+                    version: version.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+struct RunnerPinDto {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum ProgramTierDto {
+    FirstClass,
+    BestEffort { note: String },
+    Unknown,
+}
+
+impl From<&ProgramTier> for ProgramTierDto {
+    #[allow(clippy::wildcard_enum_match_arm)]
+    fn from(tier: &ProgramTier) -> Self {
+        match tier {
+            ProgramTier::FirstClass => Self::FirstClass,
+            ProgramTier::BestEffort { note } => Self::BestEffort { note: note.clone() },
+            _ => Self::Unknown,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
