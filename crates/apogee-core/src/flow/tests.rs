@@ -4354,7 +4354,12 @@ async fn a_flood_during_a_login_is_narrated_and_the_login_succeeds() {
 /// being set shows up as a reviewed diff.
 #[test]
 fn a_prefix_launch_env_is_byte_exact() {
-    let profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let profile = Profile::new(
+        "Main",
+        Uuid::nil(),
+        PathBuf::from("/game"),
+        crate::RunnerSelection::Unchosen,
+    );
     let config = super::launch_env(
         &profile,
         None,
@@ -4366,7 +4371,12 @@ fn a_prefix_launch_env_is_byte_exact() {
 
 #[test]
 fn a_profile_variable_outranks_the_driver_cache_it_names() {
-    let mut profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let mut profile = Profile::new(
+        "Main",
+        Uuid::nil(),
+        PathBuf::from("/game"),
+        crate::RunnerSelection::Unchosen,
+    );
     profile.launch.extra_env = vec![(
         "__GL_SHADER_DISK_CACHE_PATH".to_owned(),
         "/elsewhere".to_owned(),
@@ -4385,7 +4395,12 @@ fn a_profile_variable_outranks_the_driver_cache_it_names() {
 
 #[test]
 fn a_launch_without_a_prefix_leaves_the_driver_caches_at_their_defaults() {
-    let profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let profile = Profile::new(
+        "Main",
+        Uuid::nil(),
+        PathBuf::from("/game"),
+        crate::RunnerSelection::Unchosen,
+    );
     let env = super::launch_env(&profile, None, false, None).env;
     assert!(
         !env.keys()
