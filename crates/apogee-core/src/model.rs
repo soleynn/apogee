@@ -182,6 +182,10 @@ pub struct LaunchSettings {
     /// because one account's raiding profile and another's are not the same decision. While it is off,
     /// nothing here contacts its distribution.
     pub dalamud: bool,
+    /// Run XivAlexander beside the game. Off by default and per profile.
+    pub xivalexander: bool,
+    /// Run ACT with the FFXIV parsing plugin beside the game. Off by default and per profile.
+    pub act: bool,
 }
 
 /// The service region a profile connects to.

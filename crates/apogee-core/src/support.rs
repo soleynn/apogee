@@ -509,6 +509,8 @@ fn profile_snapshot(profile: &Profile, home: Option<&Path>) -> Value {
             "gamescope": gamescope,
             "gamemode": profile.launch.gamemode,
             "dalamud": profile.launch.dalamud,
+            "xivalexander": profile.launch.xivalexander,
+            "act": profile.launch.act,
         }
     })
 }

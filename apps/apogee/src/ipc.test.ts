@@ -503,6 +503,8 @@ describe('direct core mutations', () => {
         gamescope: null,
         gamemode: false,
         dalamud: false,
+        xivalexander: false,
+        act: false,
       },
     };
     const settings = {

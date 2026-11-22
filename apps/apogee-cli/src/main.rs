@@ -861,6 +861,12 @@ struct ProfileEditArgs {
     /// Whether to load Dalamud into the game.
     #[arg(long)]
     dalamud: Option<bool>,
+    /// Whether to run XivAlexander beside the game.
+    #[arg(long)]
+    xivalexander: Option<bool>,
+    /// Whether to run ACT with its FFXIV parsing plugin beside the game.
+    #[arg(long)]
+    act: Option<bool>,
 }
 
 #[derive(Args)]
@@ -2586,6 +2592,12 @@ fn apply_profile_edit(profile: &mut Profile, args: &ProfileEditArgs) -> Result<(
     if let Some(value) = args.dalamud {
         next.launch.dalamud = value;
     }
+    if let Some(value) = args.xivalexander {
+        next.launch.xivalexander = value;
+    }
+    if let Some(value) = args.act {
+        next.launch.act = value;
+    }
     *profile = next;
     Ok(())
 }
@@ -3800,6 +3812,10 @@ mod tests {
             "true",
             "--dalamud",
             "true",
+            "--xivalexander",
+            "true",
+            "--act",
+            "true",
         ])
         .expect("complete profile edit parses");
         let Some(Commands::Profile {
@@ -3879,6 +3895,8 @@ mod tests {
         );
         assert!(profile.launch.gamemode);
         assert!(profile.launch.dalamud);
+        assert!(profile.launch.xivalexander);
+        assert!(profile.launch.act);
     }
 
     #[test]

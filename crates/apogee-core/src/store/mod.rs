@@ -99,7 +99,7 @@ trait Migrate: Sized {
 }
 
 impl Migrate for Profile {
-    const CURRENT_VERSION: u32 = 4;
+    const CURRENT_VERSION: u32 = 5;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -135,6 +135,24 @@ impl Migrate for Profile {
                 launch
                     .as_object_mut()
                     .ok_or_else(|| "profile launch settings are not a json object".to_string())?;
+            }
+            // Gained the XivAlexander and ACT toggles beside the Dalamud one. Both arrive off: each
+            // runs third-party code beside the client, and a profile that predates the setting never
+            // asked for either. An ACT entry in the curated set the 2-to-3 step shed does not come
+            // back here, because what that entry named is not what the toggle now runs.
+            4 => {
+                let launch = obj
+                    .entry("launch")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                let launch = launch
+                    .as_object_mut()
+                    .ok_or_else(|| "profile launch settings are not a json object".to_string())?;
+                launch
+                    .entry("xivalexander")
+                    .or_insert(serde_json::Value::Bool(false));
+                launch
+                    .entry("act")
+                    .or_insert(serde_json::Value::Bool(false));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }

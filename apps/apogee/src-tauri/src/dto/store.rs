@@ -181,6 +181,8 @@ pub(crate) struct LaunchSettingsDto {
     gamescope: Option<GamescopeDto>,
     gamemode: bool,
     dalamud: bool,
+    xivalexander: bool,
+    act: bool,
 }
 
 impl From<&LaunchSettings> for LaunchSettingsDto {
@@ -204,6 +206,8 @@ impl From<&LaunchSettings> for LaunchSettingsDto {
             gamescope: launch.gamescope.as_ref().map(GamescopeDto::from),
             gamemode: launch.gamemode,
             dalamud: launch.dalamud,
+            xivalexander: launch.xivalexander,
+            act: launch.act,
         }
     }
 }

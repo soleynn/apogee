@@ -6,4 +6,4 @@ import type { HudDto } from "./HudDto";
 import type { RegionDto } from "./RegionDto";
 import type { SyncChoiceDto } from "./SyncChoiceDto";
 
-export type LaunchSettingsDto = { region: RegionDto, extraArgs: Array<string>, extraEnv: Array<EnvironmentEntryDto>, wrappers: Array<string>, sync: SyncChoiceDto, hud: HudDto, gpu: GpuSelectDto, nvapi: boolean, gamescope: GamescopeDto | null, gamemode: boolean, dalamud: boolean, };
+export type LaunchSettingsDto = { region: RegionDto, extraArgs: Array<string>, extraEnv: Array<EnvironmentEntryDto>, wrappers: Array<string>, sync: SyncChoiceDto, hud: HudDto, gpu: GpuSelectDto, nvapi: boolean, gamescope: GamescopeDto | null, gamemode: boolean, dalamud: boolean, xivalexander: boolean, act: boolean, };

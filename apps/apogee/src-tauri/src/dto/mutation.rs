@@ -118,6 +118,8 @@ struct LaunchSettingsInputDto {
     gamescope: Option<GamescopeInputDto>,
     gamemode: bool,
     dalamud: bool,
+    xivalexander: bool,
+    act: bool,
 }
 
 impl LaunchSettingsInputDto {
@@ -138,6 +140,8 @@ impl LaunchSettingsInputDto {
             gamescope: self.gamescope.map(GamescopeInputDto::into_core),
             gamemode: self.gamemode,
             dalamud: self.dalamud,
+            xivalexander: self.xivalexander,
+            act: self.act,
         }
     }
 }
@@ -687,6 +691,8 @@ mod tests {
             "gamescope": null,
             "gamemode": false,
             "dalamud": false,
+            "xivalexander": false,
+            "act": false,
         })
     }
 

@@ -547,6 +547,7 @@ fn a_directory_left_readable_by_an_earlier_build_is_narrowed() {
 #[case(1)]
 #[case(2)]
 #[case(3)]
+#[case(4)]
 fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) {
     let (dir, store) = store();
     let id = uuid::Uuid::new_v4();
@@ -572,12 +573,27 @@ fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) 
         }),
         // By this version the component set was gone and the toggle beside the launch settings had
         // arrived, but none of the graphics or synchronization knobs existed yet.
+        3 => serde_json::json!({
+            "id": id, "name": "Main", "account": account, "game_path": "/games/ffxiv",
+            "runner": "SystemWine", "prefix": { "name": "" },
+            "external": [],
+            "launch": serde_json::json!({
+                "region": "Global", "extra_args": [], "extra_env": [], "wrappers": [],
+                "dalamud": false
+            }),
+        }),
+        // The graphics and synchronization knobs had arrived, but no program beside Dalamud had a
+        // toggle yet.
         _ => serde_json::json!({
             "id": id, "name": "Main", "account": account, "game_path": "/games/ffxiv",
             "runner": "SystemWine", "prefix": { "name": "" },
             "external": [],
             "launch": serde_json::json!({
                 "region": "Global", "extra_args": [], "extra_env": [], "wrappers": [],
+                "sync": serde_json::to_value(apogee_runtime::SyncChoice::Auto).unwrap(),
+                "hud": serde_json::to_value(apogee_runtime::Hud::None).unwrap(),
+                "gpu": serde_json::to_value(apogee_runtime::GpuSelect::Default).unwrap(),
+                "nvapi": false, "gamescope": null, "gamemode": false,
                 "dalamud": false
             }),
         }),
@@ -593,6 +609,10 @@ fn profiles_migrate_forward_from_every_historical_version(#[case] version: u32) 
     // The toggle a profile did not have yet arrives off. Defaulting it on would load third-party code
     // into the client of every profile that predates the setting.
     assert!(!loaded.launch.dalamud);
+    // The same holds for the other programs a profile can run beside the game, and an ACT row in the
+    // shed component set does not turn the new toggle on.
+    assert!(!loaded.launch.xivalexander);
+    assert!(!loaded.launch.act);
     // The knobs a profile never chose arrive unset, so the launch resolves them against the host and
     // the runner rather than against a value written on the profile's behalf.
     assert_eq!(loaded.launch.sync, apogee_runtime::SyncChoice::Auto);
