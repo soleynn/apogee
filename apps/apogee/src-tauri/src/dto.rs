@@ -521,12 +521,7 @@ mod tests {
             ),
             ("firstRun", Event::FirstRun(Box::default())),
             ("notice", Event::Notice(Notice::ClockSkew { seconds: -45 })),
-            (
-                "error",
-                Event::Error(apogee_core::CoreError::Launch {
-                    detail: "token=planted-secret".to_owned(),
-                }),
-            ),
+            ("error", Event::Error(error::planted_secret_failure())),
             ("outcome", Event::Outcome(RunOutcome::Cancelled)),
         ];
 
