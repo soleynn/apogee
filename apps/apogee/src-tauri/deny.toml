@@ -16,16 +16,6 @@ yanked = "deny"
 # to GTK4. The framework has no GTK4 line, so there is no version of this dependency that clears the
 # notice; it goes away when the framework moves, not when this file changes.
 ignore = [
-    "RUSTSEC-2024-0411", # atk
-    "RUSTSEC-2024-0412", # atk-sys
-    "RUSTSEC-2024-0413", # gdk
-    "RUSTSEC-2024-0414", # gdk-sys
-    "RUSTSEC-2024-0415", # gtk
-    "RUSTSEC-2024-0416", # gdkwayland-sys
-    "RUSTSEC-2024-0417", # gdkx11
-    "RUSTSEC-2024-0418", # gdkx11-sys
-    "RUSTSEC-2024-0419", # gtk3-macros
-    "RUSTSEC-2024-0420", # gtk-sys
     # A procedural-macro helper the GTK3 bindings' own macros are written against.
     "RUSTSEC-2024-0370", # proc-macro-error
     # The Unicode identifier tables the configuration parser reaches through its JSON5 reader.
