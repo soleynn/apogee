@@ -521,7 +521,10 @@ mod tests {
             ),
             ("firstRun", Event::FirstRun(Box::default())),
             ("notice", Event::Notice(Notice::ClockSkew { seconds: -45 })),
-            ("error", Event::Error(error::planted_secret_failure())),
+            (
+                "error",
+                Event::Error(error::launch_error_with_planted_secret()),
+            ),
             ("outcome", Event::Outcome(RunOutcome::Cancelled)),
         ];
 
