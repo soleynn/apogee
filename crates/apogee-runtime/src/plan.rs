@@ -255,12 +255,21 @@ impl Prefix {
     /// Reads the prefix's `dosdevices/` directory on every call, so a caller translating many paths
     /// should keep the result rather than ask again.
     ///
+    /// Under Proton the map leaves out `s:` and `t:`. Proton points or removes those two itself on
+    /// every start (its game drive and Steam drive), depending on how that start was invoked, so a
+    /// path spelled through one of them before a launch may not exist once the launch begins.
+    ///
     /// # Errors
     ///
     /// [`RuntimeError::Io`](crate::RuntimeError::Io) if `dosdevices/` cannot be listed.
     #[cfg(target_os = "linux")]
     pub fn drive_map(&self) -> Result<crate::dosdevices::DriveMap, crate::RuntimeError> {
-        crate::dosdevices::DriveMap::from_prefix(&self.wine_root())
+        let map = crate::dosdevices::DriveMap::from_prefix(&self.wine_root())?;
+        Ok(if self.runner.kind == RunnerKind::ProtonUmu {
+            map.without(&['s', 't'])
+        } else {
+            map
+        })
     }
 }
 

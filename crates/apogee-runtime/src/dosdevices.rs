@@ -83,6 +83,14 @@ impl DriveMap {
         Ok(Self::from_drives(drives))
     }
 
+    /// The same map without the drives lettered `letters` (lowercase), for drives something else
+    /// re-points between reading the map and using a path spelled through it.
+    #[must_use]
+    pub fn without(mut self, letters: &[char]) -> Self {
+        self.drives.retain(|drive| !letters.contains(&drive.letter));
+        self
+    }
+
     /// Sort drives longest-target-first, ties broken by letter, so the most specific mapping wins.
     fn from_drives(mut drives: Vec<Drive>) -> Self {
         drives.sort_by(|a, b| {
@@ -296,6 +304,21 @@ mod tests {
         assert_eq!(drive_letter(OsStr::new("c::")), None); // device link
         assert_eq!(drive_letter(OsStr::new("com1")), None);
         assert_eq!(drive_letter(OsStr::new("c")), None);
+    }
+
+    /// A path under a left-out drive falls to the next most specific one, as it must when Proton has
+    /// pointed its game drive at a parent of the path for one start and removes it for the next.
+    #[test]
+    fn a_left_out_drive_no_longer_spells_paths() {
+        let full = map(&[('z', "/"), ('w', "/mnt"), ('s', "/mnt/Storage")]);
+        let path = Path::new("/mnt/Storage/addons/Injector.exe");
+        assert_eq!(full.to_windows(path).unwrap(), "S:\\addons\\Injector.exe");
+        let without = full.without(&['s', 't']);
+        assert_eq!(
+            without.to_windows(path).unwrap(),
+            "W:\\Storage\\addons\\Injector.exe"
+        );
+        assert!(without.to_unix("S:\\addons").is_err());
     }
 
     /// The most specific drive wins over the `z:` mapping of `/` that would also match, and a drive
