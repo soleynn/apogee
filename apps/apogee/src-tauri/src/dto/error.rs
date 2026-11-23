@@ -213,10 +213,11 @@ impl From<&StoreError> for StoreErrorDto {
     }
 }
 
-/// A core failure whose free-text detail is a planted secret. Boundary tests in sibling modules
-/// build their error events from this, so the core error type stays named only in this module.
+/// A launch error carrying a planted secret in its free-text detail, for tests outside this module
+/// that prove the detail never crosses the boundary. It lives here so the error type stays named only
+/// at the boundary sites.
 #[cfg(test)]
-pub(crate) fn planted_secret_failure() -> CoreError {
+pub(crate) fn launch_error_with_planted_secret() -> CoreError {
     CoreError::Launch {
         detail: "token=planted-secret".to_owned(),
     }
