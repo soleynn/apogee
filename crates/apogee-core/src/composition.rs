@@ -234,6 +234,31 @@ pub enum SecretSweep {
     LeftBehind,
 }
 
+/// A side-effect-free decision about what removing one profile must take with it.
+///
+/// Its fields are private so a caller can return only a plan this core produced. Removal validates
+/// the decision again before touching anything; if account sharing changed while a confirmation was
+/// open, the stale plan is refused instead of deleting more or less than the user approved.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProfileRemovalPlan {
+    profile: Uuid,
+    account_removed: Option<Uuid>,
+}
+
+impl ProfileRemovalPlan {
+    /// The profile this plan removes.
+    #[must_use]
+    pub const fn profile(&self) -> Uuid {
+        self.profile
+    }
+
+    /// The account removed with the profile when no other profile uses it.
+    #[must_use]
+    pub const fn account_removed(&self) -> Option<Uuid> {
+        self.account_removed
+    }
+}
+
 /// What deleting a profile took with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1048,7 +1073,7 @@ impl Core {
     /// # Errors
     /// Returns [`CoreError::NoProfile`] if no such profile exists, or a [`CoreError::Store`] when
     /// the profile set cannot be read.
-    pub fn plan_removal(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
+    pub fn plan_removal(&self, id: Uuid) -> Result<ProfileRemovalPlan, CoreError> {
         let account = self.profile(id)?.account;
         // Decided before anything is removed, and excluding the profile on its way out: this is the
         // last user of the account if no *other* profile signs in as it.
@@ -1058,32 +1083,43 @@ impl Core {
             .any(|p| p.id != id && p.account == account);
 
         Ok(if last_user {
-            ProfileRemoval {
+            ProfileRemovalPlan {
+                profile: id,
                 account_removed: Some(account),
-                secret_sweep: None,
             }
         } else {
-            ProfileRemoval {
+            ProfileRemovalPlan {
+                profile: id,
                 account_removed: None,
-                secret_sweep: None,
             }
         })
     }
 
-    /// Delete `id` according to the result of [`Core::plan_removal`].
+    /// Consume a result of [`Core::plan_removal`] and delete exactly what it approved.
+    ///
+    /// The plan is checked again before the first write. A caller that held a confirmation open
+    /// while another profile changed account ownership gets [`CoreError::RemovalPlanChanged`] and
+    /// must show a fresh preview.
     ///
     /// # Errors
     /// Returns [`CoreError::NoProfile`] if no such profile exists, [`CoreError::Secrets`] if the
     /// account's secrets could not be swept, or a [`CoreError::Store`] on an IO failure.
-    pub fn remove_profile(&self, id: Uuid) -> Result<ProfileRemoval, CoreError> {
-        let plan = self.plan_removal(id)?;
+    pub fn remove_profile(&self, plan: ProfileRemovalPlan) -> Result<ProfileRemoval, CoreError> {
+        if self.plan_removal(plan.profile)? != plan {
+            return Err(CoreError::RemovalPlanChanged {
+                profile: plan.profile,
+            });
+        }
         let Some(account) = plan.account_removed else {
-            self.delete_profile(id)?;
-            return Ok(plan);
+            self.delete_profile(plan.profile)?;
+            return Ok(ProfileRemoval {
+                account_removed: None,
+                secret_sweep: None,
+            });
         };
 
         let secret_sweep = Some(self.forget_secrets(account)?);
-        self.delete_profile(id)?;
+        self.delete_profile(plan.profile)?;
         self.store.clear_uid_cache(account)?;
         self.delete_account(account)?;
         Ok(ProfileRemoval {
@@ -1279,6 +1315,48 @@ impl Core {
             return Err(SecretsError::NotStoring.into());
         }
         Ok(self.secrets.store().set(account, kind, value)?)
+    }
+
+    /// Delete one stored secret without exposing any read surface for it.
+    ///
+    /// Removing a TOTP secret first moves the account back to typed codes. The ordering is
+    /// fail-safe: a store refusal may leave a now-unused secret behind, but can never leave an
+    /// account configured to derive a code from material that no longer exists.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoAccount`] for an unknown account, or a typed store or secret failure.
+    pub fn delete_secret(&self, account: Uuid, kind: SecretKind) -> Result<(), CoreError> {
+        self.account_or_missing(account)?;
+        if matches!(kind, SecretKind::TotpSecret) {
+            self.otp.forget(account);
+            self.ask_for_typed_codes(account)?;
+        }
+        Ok(self.secrets.store().delete(account, kind)?)
+    }
+
+    /// Enable or disable the account's keep-nothing policy.
+    ///
+    /// Enabling sweeps first and persists the policy only after the sweep reaches a classified
+    /// outcome. The account is re-read after the sweep because deleting a TOTP secret may also have
+    /// changed its delivery mode.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::NoAccount`] for an unknown account, or a typed store or secret failure.
+    pub fn set_never_store(
+        &self,
+        account: Uuid,
+        enabled: bool,
+    ) -> Result<Option<SecretSweep>, CoreError> {
+        self.account_or_missing(account)?;
+        let secret_sweep = if enabled {
+            Some(self.forget_secrets(account)?)
+        } else {
+            None
+        };
+        let mut record = self.account_or_missing(account)?;
+        record.never_store = enabled;
+        self.save_account(&record)?;
+        Ok(secret_sweep)
     }
 
     /// The account with `id`, reporting a miss as [`CoreError::NoAccount`] rather than as a store
@@ -1620,7 +1698,7 @@ fn home_dir() -> Option<PathBuf> {
 mod tests {
     use tempfile::TempDir;
 
-    use super::{Core, CoreConfig, SecretSweep};
+    use super::{Core, CoreConfig, ProfileRemoval, SecretSweep};
     use crate::error::CoreError;
     use crate::model::{Account, AccountKind, Profile};
 
@@ -1858,6 +1936,11 @@ mod tests {
             (account, profile)
         }
 
+        fn remove_profile(core: &Core, profile: Uuid) -> Result<ProfileRemoval, CoreError> {
+            let plan = core.plan_removal(profile)?;
+            core.remove_profile(plan)
+        }
+
         #[test]
         fn defaults_are_independent_of_saved_settings() {
             let store = Arc::new(MemoryStore::new());
@@ -1881,17 +1964,38 @@ mod tests {
             let (account, first) = seeded(&core, &store);
 
             let last_plan = core.plan_removal(first.id).unwrap();
-            assert_eq!(last_plan.account_removed, Some(account.id));
-            assert_eq!(last_plan.secret_sweep, None);
+            assert_eq!(last_plan.profile(), first.id);
+            assert_eq!(last_plan.account_removed(), Some(account.id));
             assert_eq!(core.profile(first.id).unwrap().id, first.id);
             assert_eq!(store.len(), SecretKind::ALL.len());
 
             let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
             core.save_profile(&second).unwrap();
             let shared_plan = core.plan_removal(first.id).unwrap();
-            assert_eq!(shared_plan.account_removed, None);
-            assert_eq!(shared_plan.secret_sweep, None);
+            assert_eq!(shared_plan.profile(), first.id);
+            assert_eq!(shared_plan.account_removed(), None);
             assert_eq!(core.profiles().unwrap().len(), 2);
+            assert_eq!(store.len(), SecretKind::ALL.len());
+        }
+
+        #[test]
+        fn a_stale_removal_plan_changes_nothing() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let (account, first) = seeded(&core, &store);
+            let plan = core.plan_removal(first.id).unwrap();
+
+            let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
+            core.save_profile(&second).unwrap();
+            let error = core.remove_profile(plan).unwrap_err();
+
+            assert!(matches!(
+                error,
+                CoreError::RemovalPlanChanged { profile } if profile == first.id
+            ));
+            assert!(core.profile(first.id).is_ok());
+            assert!(core.profile(second.id).is_ok());
+            assert!(core.account(account.id).is_ok());
             assert_eq!(store.len(), SecretKind::ALL.len());
         }
 
@@ -1917,7 +2021,7 @@ mod tests {
             std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
             std::fs::write(&cached, "{}").unwrap();
 
-            let removal = core.remove_profile(profile.id).unwrap();
+            let removal = remove_profile(&core, profile.id).unwrap();
 
             assert_eq!(removal.account_removed, Some(account.id));
             assert!(store.is_empty(), "a secret survived the account");
@@ -1938,7 +2042,7 @@ mod tests {
             let second = Profile::new("Alt", account.id, "/games/ffxiv".into());
             core.save_profile(&second).unwrap();
 
-            let removal = core.remove_profile(profile.id).unwrap();
+            let removal = remove_profile(&core, profile.id).unwrap();
 
             assert_eq!(removal.account_removed, None);
             assert_eq!(store.len(), SecretKind::ALL.len());
@@ -1960,7 +2064,7 @@ mod tests {
             let (_dir, core) = core_with(Arc::clone(&store));
             let (account, profile) = seeded(&core, &store);
 
-            let err = core.remove_profile(profile.id).unwrap_err();
+            let err = remove_profile(&core, profile.id).unwrap_err();
 
             assert!(matches!(err, CoreError::Secrets(_)), "{err:?}");
             assert_eq!(core.account(account.id).unwrap().sqex_id, account.sqex_id);
@@ -1990,7 +2094,7 @@ mod tests {
                 Arc::new(MemoryStore::new().failing(FailAt::Delete(Some(SecretKind::Password))));
             let (dir, core) = core_with(Arc::clone(&failing));
             let (account, profile) = seeded(&core, &failing);
-            core.remove_profile(profile.id).unwrap_err();
+            remove_profile(&core, profile.id).unwrap_err();
 
             // The same store, now cooperating, reached through a second core over the same files.
             let working = Arc::new(MemoryStore::new());
@@ -2001,7 +2105,7 @@ mod tests {
             )
             .unwrap();
 
-            let removal = core.remove_profile(profile.id).unwrap();
+            let removal = remove_profile(&core, profile.id).unwrap();
 
             assert_eq!(removal.account_removed, Some(account.id));
             assert_eq!(removal.secret_sweep, Some(SecretSweep::Swept));
@@ -2021,7 +2125,7 @@ mod tests {
             core.save_account(&account).unwrap();
             core.save_profile(&profile).unwrap();
 
-            let removal = core.remove_profile(profile.id).unwrap();
+            let removal = remove_profile(&core, profile.id).unwrap();
 
             assert_eq!(removal.account_removed, Some(account.id));
             assert_eq!(
@@ -2050,7 +2154,7 @@ mod tests {
             core.save_account(&account).unwrap();
             core.save_profile(&profile).unwrap();
 
-            let removal = core.remove_profile(profile.id).unwrap();
+            let removal = remove_profile(&core, profile.id).unwrap();
 
             assert_eq!(removal.account_removed, Some(account.id));
             assert_eq!(
@@ -2098,7 +2202,7 @@ mod tests {
                 core.save_account(&account).unwrap();
                 core.save_profile(&profile).unwrap();
 
-                let removed = core.remove_profile(profile.id);
+                let removed = remove_profile(&core, profile.id);
                 let condition = error();
 
                 assert_eq!(
@@ -2136,6 +2240,202 @@ mod tests {
                 "{err:?}"
             );
             assert!(store.is_empty(), "the refusal still reached the store");
+        }
+
+        #[test]
+        fn deleting_a_password_leaves_the_totp_secret_and_delivery_mode() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                use_otp: true,
+                otp_delivery: OtpDelivery::Generate,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+            store
+                .set(
+                    account.id,
+                    SecretKind::Password,
+                    Secret::new(b"pw".to_vec()),
+                )
+                .unwrap();
+            store
+                .set(
+                    account.id,
+                    SecretKind::TotpSecret,
+                    Secret::new(b"totp".to_vec()),
+                )
+                .unwrap();
+
+            core.delete_secret(account.id, SecretKind::Password)
+                .unwrap();
+
+            assert_eq!(store.stored(account.id, SecretKind::Password), None);
+            assert_eq!(
+                store.stored(account.id, SecretKind::TotpSecret),
+                Some(b"totp".to_vec())
+            );
+            assert_eq!(
+                core.account(account.id).unwrap().otp_delivery,
+                OtpDelivery::Generate
+            );
+        }
+
+        #[test]
+        fn deleting_a_totp_secret_moves_the_account_back_to_typed_codes() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                use_otp: true,
+                otp_delivery: OtpDelivery::Generate,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+            store
+                .set(
+                    account.id,
+                    SecretKind::TotpSecret,
+                    Secret::new(b"totp".to_vec()),
+                )
+                .unwrap();
+
+            core.delete_secret(account.id, SecretKind::TotpSecret)
+                .unwrap();
+
+            assert_eq!(store.stored(account.id, SecretKind::TotpSecret), None);
+            assert_eq!(
+                core.account(account.id).unwrap().otp_delivery,
+                OtpDelivery::Ask
+            );
+        }
+
+        #[test]
+        fn a_failed_totp_delete_never_leaves_generate_pointing_at_missing_material() {
+            let store =
+                Arc::new(MemoryStore::new().failing(FailAt::Delete(Some(SecretKind::TotpSecret))));
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                use_otp: true,
+                otp_delivery: OtpDelivery::Generate,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+            store
+                .set(
+                    account.id,
+                    SecretKind::TotpSecret,
+                    Secret::new(b"totp".to_vec()),
+                )
+                .unwrap();
+
+            assert!(
+                core.delete_secret(account.id, SecretKind::TotpSecret)
+                    .is_err()
+            );
+
+            assert_eq!(
+                core.account(account.id).unwrap().otp_delivery,
+                OtpDelivery::Ask
+            );
+            assert_eq!(
+                store.stored(account.id, SecretKind::TotpSecret),
+                Some(b"totp".to_vec())
+            );
+        }
+
+        #[test]
+        fn deleting_a_secret_for_a_missing_account_never_touches_the_store() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+
+            let error = core
+                .delete_secret(Uuid::new_v4(), SecretKind::Password)
+                .unwrap_err();
+
+            assert!(matches!(error, CoreError::NoAccount(_)));
+            assert!(store.calls().is_empty());
+        }
+
+        #[test]
+        fn enabling_never_store_sweeps_before_persisting_the_policy() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                use_otp: true,
+                otp_delivery: OtpDelivery::Generate,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+            for kind in SecretKind::ALL {
+                store
+                    .set(account.id, kind, Secret::new(vec![kind as u8]))
+                    .unwrap();
+            }
+
+            let sweep = core.set_never_store(account.id, true).unwrap();
+
+            assert_eq!(sweep, Some(SecretSweep::Swept));
+            let updated = core.account(account.id).unwrap();
+            assert!(updated.never_store);
+            assert_eq!(updated.otp_delivery, OtpDelivery::Ask);
+            assert!(store.is_empty());
+        }
+
+        #[test]
+        fn a_blocked_never_store_sweep_leaves_the_policy_disabled() {
+            let store =
+                Arc::new(MemoryStore::new().failing(FailAt::Delete(Some(SecretKind::Password))));
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account::new("me@example.invalid", AccountKind::Standard);
+            core.save_account(&account).unwrap();
+            store
+                .set(
+                    account.id,
+                    SecretKind::Password,
+                    Secret::new(b"pw".to_vec()),
+                )
+                .unwrap();
+
+            assert!(core.set_never_store(account.id, true).is_err());
+
+            assert!(!core.account(account.id).unwrap().never_store);
+        }
+
+        #[test]
+        fn disabling_never_store_does_not_touch_the_secret_backend() {
+            let store = Arc::new(MemoryStore::new());
+            let (_dir, core) = core_with(Arc::clone(&store));
+            let account = Account {
+                never_store: true,
+                ..Account::new("me@example.invalid", AccountKind::Standard)
+            };
+            core.save_account(&account).unwrap();
+
+            let sweep = core.set_never_store(account.id, false).unwrap();
+
+            assert_eq!(sweep, None);
+            assert!(!core.account(account.id).unwrap().never_store);
+            assert!(store.calls().is_empty());
+        }
+
+        #[test]
+        fn classified_never_store_residue_is_returned_and_the_policy_is_enabled() {
+            let cases: [(fn() -> SecretsError, SecretSweep); 2] = [
+                (|| SecretsError::NoBackend, SecretSweep::Unanswered),
+                (|| SecretsError::Ambiguous, SecretSweep::LeftBehind),
+            ];
+
+            for (failure, expected) in cases {
+                let store = Arc::new(MemoryStore::new().failing_with(FailAt::Everything, failure));
+                let (_dir, core) = core_with(Arc::clone(&store));
+                let account = Account::new("me@example.invalid", AccountKind::Standard);
+                core.save_account(&account).unwrap();
+
+                let sweep = core.set_never_store(account.id, true).unwrap();
+
+                assert_eq!(sweep, Some(expected));
+                assert!(core.account(account.id).unwrap().never_store);
+            }
         }
 
         /// The import reads the other launcher's copy and writes ours. Its copy is not this

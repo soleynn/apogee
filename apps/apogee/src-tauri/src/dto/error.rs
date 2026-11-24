@@ -67,6 +67,9 @@ pub(crate) enum CoreErrorDto {
     NoAccount {
         account: String,
     },
+    RemovalPlanChanged {
+        profile: String,
+    },
     InvalidCredential,
     Import,
     XivImport,
@@ -117,6 +120,9 @@ impl From<&CoreError> for CoreErrorDto {
             },
             CoreError::NoAccount(account) => Self::NoAccount {
                 account: account.to_string(),
+            },
+            CoreError::RemovalPlanChanged { profile } => Self::RemovalPlanChanged {
+                profile: profile.to_string(),
             },
             CoreError::InvalidCredential => Self::InvalidCredential,
             CoreError::Import { .. } => Self::Import,

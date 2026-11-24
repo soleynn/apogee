@@ -67,7 +67,9 @@ pub use command::{
     ImportData, ImportXivLauncher, LaunchProgramExit, NewsData, NewsRow, Notice, PasswordSource,
     PrefixAction, PrefixReport, Progress, RunOutcome, SupportBundleData,
 };
-pub use composition::{Core, CoreConfig, Defaults, ImportOutcome, ProfileRemoval, SecretSweep};
+pub use composition::{
+    Core, CoreConfig, Defaults, ImportOutcome, ProfileRemoval, ProfileRemovalPlan, SecretSweep,
+};
 pub use error::CoreError;
 pub use first_run::{
     AccountChoice, CredentialBackend, CredentialBackendReading, CredentialBackendState,

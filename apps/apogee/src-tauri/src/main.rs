@@ -61,7 +61,6 @@ struct ShellState {
     core_waiting: Notify,
     startup: OnceCell<StartupDto>,
     direct_reads: Arc<Semaphore>,
-    secret_file_ops: Arc<Semaphore>,
     passphrases: Arc<passphrase::PromptBroker>,
     runs: Runs,
 }
@@ -75,7 +74,6 @@ impl Default for ShellState {
             core_waiting: Notify::new(),
             startup: OnceCell::new(),
             direct_reads: Arc::new(Semaphore::new(4)),
-            secret_file_ops: Arc::new(Semaphore::new(1)),
             passphrases: Arc::new(passphrase::PromptBroker::default()),
             runs: Runs::default(),
         }
@@ -161,11 +159,8 @@ impl ShellState {
         Ok((core, permit))
     }
 
-    async fn secret_file_permit(&self) -> Result<OwnedSemaphorePermit, IpcErrorDto> {
-        Arc::clone(&self.secret_file_ops)
-            .acquire_owned()
-            .await
-            .map_err(|_| IpcErrorDto::shell("shell.state.unavailable"))
+    fn mutation_lease(&self) -> Result<supervisor::MutationLease, IpcErrorDto> {
+        self.runs.start_mutation().map_err(run_admission_error)
     }
 }
 
@@ -232,14 +227,14 @@ async fn execute(
     // a single pre-flow view of every startup record.
     let core = state.ready_core_after(state.initial_snapshot()).await?;
     let run_id = Uuid::new_v4();
-    let cancel = state
+    let lease = state
         .runs
         .start(run_id, class)
         .map_err(run_admission_error)?;
-    let runs = state.runs.clone();
+    let cancel = lease.cancellation();
     tauri::async_runtime::spawn(async move {
         supervisor::drive(core.as_ref(), command, cancel, &on_event).await;
-        runs.finish(run_id);
+        drop(lease);
     });
     Ok(run_id)
 }
@@ -446,22 +441,6 @@ mod tests {
         assert!(!waiting.is_finished());
 
         admitted.pop();
-        assert!(waiting.await?.is_ok());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn sealed_file_operations_admit_only_one_blocking_caller() -> TestResult {
-        let state = Arc::new(ShellState::default());
-        let first = state.secret_file_permit().await.map_err(ipc_test_error)?;
-        let waiting = {
-            let state = Arc::clone(&state);
-            tokio::spawn(async move { state.secret_file_permit().await })
-        };
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
-
-        drop(first);
         assert!(waiting.await?.is_ok());
         Ok(())
     }

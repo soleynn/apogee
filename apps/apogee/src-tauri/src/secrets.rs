@@ -16,12 +16,20 @@ fn status(core: &Core) -> SecretsFileStatusDto {
     SecretsFileStatusDto::new(core.secrets_file_state(), core.secrets_file_is_open())
 }
 
-async fn blocking_core_result<T, F>(core: Arc<Core>, task: F) -> Result<T, IpcErrorDto>
+async fn blocking_core_mutation<T, F>(
+    core: Arc<Core>,
+    lease: crate::supervisor::MutationLease,
+    task: F,
+) -> Result<T, IpcErrorDto>
 where
     T: Send + 'static,
     F: FnOnce(&Core) -> Result<T, IpcErrorDto> + Send + 'static,
 {
-    run_blocking(move || task(&core)).await?
+    run_blocking(move || {
+        let _lease = lease;
+        task(&core)
+    })
+    .await?
 }
 
 /// Inspect the sealed-file header and key-cache reading without prompting.
@@ -51,8 +59,8 @@ async fn unlock_secrets_file_inner(
     state: &ShellState,
 ) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
-    blocking_core_result(core, |core| {
+    let lease = state.mutation_lease()?;
+    blocking_core_mutation(core, lease, |core| {
         core.unlock_secrets_file()
             .map_err(|error| IpcErrorDto::core(&error))?;
         Ok(status(core))
@@ -81,8 +89,8 @@ async fn create_secrets_file_inner(
     }
     state.initial_snapshot().await?;
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
-    blocking_core_result(core, move |core| {
+    let lease = state.mutation_lease()?;
+    blocking_core_mutation(core, lease, move |core| {
         core.create_secrets_file(Consent::granted(), &passphrase)
             .map_err(|error| IpcErrorDto::core(&error))?;
         Ok(status(core))
@@ -108,8 +116,8 @@ async fn change_secrets_file_passphrase_inner(
 ) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     state.initial_snapshot().await?;
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
-    blocking_core_result(core, move |core| {
+    let lease = state.mutation_lease()?;
+    blocking_core_mutation(core, lease, move |core| {
         core.change_secrets_file_passphrase(&current, &replacement)
             .map_err(|error| IpcErrorDto::core(&error))?;
         Ok(status(core))
@@ -135,8 +143,8 @@ async fn remove_secrets_file_inner(
     }
     state.initial_snapshot().await?;
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
-    blocking_core_result(core, |core| {
+    let lease = state.mutation_lease()?;
+    blocking_core_mutation(core, lease, |core| {
         let removed = core
             .remove_secrets_file(Consent::granted())
             .map_err(|error| IpcErrorDto::core(&error))?;
@@ -155,8 +163,9 @@ pub(super) async fn seal_secrets_file(
 
 async fn seal_secrets_file_inner(state: &ShellState) -> Result<SecretsFileStatusDto, IpcErrorDto> {
     let core = state.ready_core().await?;
-    let _permit = state.secret_file_permit().await?;
+    let lease = state.mutation_lease()?;
     run_blocking(move || {
+        let _lease = lease;
         core.seal_secrets_file();
         status(&core)
     })
@@ -341,5 +350,39 @@ mod tests {
 
         assert!(create.await.is_err());
         assert!(remove.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn aborted_waiter_cannot_release_a_running_blocking_mutation() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let state = Arc::new(ShellState::default());
+        state.install_core(Core::new(CoreConfig::with_base(temporary.path())));
+        let core = state.ready_core().await.map_err(ipc_error)?;
+        let lease = state.mutation_lease().map_err(ipc_error)?;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiting = tokio::spawn(blocking_core_mutation(core, lease, move |_| {
+            entered_tx
+                .send(())
+                .map_err(|_| IpcErrorDto::shell("shell.test.enter"))?;
+            release_rx
+                .recv()
+                .map_err(|_| IpcErrorDto::shell("shell.test.release"))?;
+            Ok(())
+        }));
+        tauri::async_runtime::spawn_blocking(move || entered_rx.recv())
+            .await
+            .map_err(|_| std::io::Error::other("entry waiter panicked"))??;
+
+        waiting.abort();
+        assert!(state.mutation_lease().is_err());
+        release_tx.send(())?;
+        for _ in 0..1_000 {
+            if state.mutation_lease().is_ok() {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(std::io::Error::other("blocking task did not release mutation admission").into())
     }
 }
