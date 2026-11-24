@@ -151,6 +151,7 @@ is tagged with its change type. Versioning aims to follow
 - Add startup and credential snapshots (#253) _(added)_
 - Expose direct core reads (#255) _(added)_
 - Add sealed store lifecycle (#257) _(added)_
+- Add safe direct mutations (#259) _(added)_
 
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
