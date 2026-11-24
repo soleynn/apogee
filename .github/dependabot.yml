@@ -3,6 +3,8 @@ updates:
   # The desktop shell resolves its own dependency graph from a manifest and a lockfile of its own,
   # outside the root workspace, so both directories are listed. One entry with one group yields a
   # single pull request that updates both lockfiles, instead of two that collide on the same crates.
+  # Breaking updates (a new major, or a new minor below 1.0) get a second group of their own, since an
+  # update outside every group is raised once per directory.
   - package-ecosystem: cargo
     directories:
       - "/"
@@ -19,6 +21,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      cargo-major:
+        update-types:
+          - "major"
 
   - package-ecosystem: npm
     directory: "/apps/apogee"
@@ -34,6 +39,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      npm-major:
+        update-types:
+          - "major"
 
   - package-ecosystem: github-actions
     directory: "/"
