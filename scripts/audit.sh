@@ -333,8 +333,8 @@ done
 
 # The same split on Linux, where the classification this crate does most of reads the Secret Service
 # error out of what the store boxed. A live job does catch this one, by asserting a locked collection
-# still classifies as locked; it is asserted here as well because that job is not a required check,
-# and because the graph says which package resolved without needing a bus to say it.
+# still classifies as locked; it is asserted here as well because the graph says which package
+# resolved without needing a bus to say it.
 for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
   linux=$(cargo metadata --format-version 1 --filter-platform "$target")
   jq -e '.packages[]|select(.name=="zbus-secret-service-keyring-store")' <<<"$linux" >/dev/null \

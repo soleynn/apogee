@@ -229,7 +229,7 @@ jobs:
   # only a real provider produces the errors it classifies, and only a real socket shows whether the
   # secret crossed it in the clear.
   #
-  # Required by the branch ruleset, unlike the other store jobs: this one reads no secret of the
+  # Required by the branch ruleset, like the other store jobs: this one reads no secret of the
   # repository's and installs its provider from apt, so gating merges on it costs nothing.
   test-linux-secret-service:
     name: test-linux-secret-service
@@ -443,8 +443,7 @@ jobs:
 
   # The one path no other job can reach. `build-windows-cross` runs `cargo build`, not
   # `--all-targets`, so a Windows test target is never even type-checked there, and the credential
-  # store the import reads exists only here. Advisory: the branch ruleset's required contexts are
-  # fixed, and adding one is a separate change.
+  # store the import reads exists only here. Required by the branch ruleset.
   test-windows-credential-store:
     name: test-windows-credential-store
     runs-on: windows-latest
@@ -499,8 +498,7 @@ jobs:
   # administrator token, so an elevation request is granted with no consent dialog and no integrity
   # transition. The plumbing around the hop is covered; the moment a user actually sees is not.
   #
-  # Advisory, like the credential-store jobs: the branch ruleset's required contexts are fixed, and
-  # promoting one is a separate change.
+  # Required by the branch ruleset, like the credential-store jobs.
   test-windows-elevated-worker:
     name: test-windows-elevated-worker
     runs-on: windows-latest
@@ -539,8 +537,7 @@ jobs:
   # `-p apogee-runtime` rather than the workspace, for the reason the job above names: other crates
   # carry Windows test targets that do not compile today.
   #
-  # Advisory, like the jobs above: the branch ruleset's required contexts are fixed, and promoting one
-  # is a separate change.
+  # Required by the branch ruleset, like the jobs above.
   test-windows-launch:
     name: test-windows-launch
     runs-on: windows-latest
@@ -573,8 +570,7 @@ jobs:
   # Apple SDK to build. Which store keyring actually resolves for these targets is a graph property
   # rather than a compile one, so `scripts/audit.sh` asserts it and this job does not.
   #
-  # Advisory, like the two credential-store jobs: the branch ruleset's required contexts are fixed,
-  # and adding one is a separate change.
+  # Required by the branch ruleset, like the two credential-store jobs.
   check-apple-cross:
     name: check-apple-cross
     runs-on: ubuntu-latest
