@@ -15,6 +15,7 @@ is tagged with its change type. Versioning aims to follow
 - Harden the companion seam before its surface freezes (#169) _(changed)_
 - Rewrite the crate's rustdoc from scratch (#170) _(documentation)_
 - Add the readings callers were deriving, clear pedantic, and freeze at 1.0.0 (#171) _(added)_
+- Always pass --no-sandbox to the Dalamud injector (#302) _(fixed)_
 
 ### apogee-cli
 - Take the one-time code on stdin and stop the launcher being dumpable (#116) _(fixed)_
@@ -148,6 +149,7 @@ is tagged with its change type. Versioning aims to follow
 - Complete the typed IPC boundary (#252) _(added)_
 - Add startup and credential snapshots (#253) _(added)_
 - Expose direct core reads (#255) _(added)_
+- Add sealed store lifecycle (#257) _(added)_
 
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
@@ -181,6 +183,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### workflows
 - Require a pull request title the changelog can read (#93) _(ci)_
+- Retry a stalled package install (#303) _(ci)_
 
 ### workspace
 - Unblock the two permanent deletion dead ends in the secrets lifecycle (#153) _(fixed)_
