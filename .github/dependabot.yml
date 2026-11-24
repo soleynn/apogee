@@ -42,6 +42,12 @@ updates:
       npm-major:
         update-types:
           - "major"
+    # svelte-check accepts TypeScript 5 or 6 as its peer, so a TypeScript 7 bump cannot install.
+    # Remove this once a svelte-check release widens that range.
+    ignore:
+      - dependency-name: "typescript"
+        versions:
+          - "7.x"
 
   - package-ecosystem: github-actions
     directory: "/"
