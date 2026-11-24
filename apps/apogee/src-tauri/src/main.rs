@@ -13,6 +13,8 @@
 mod command;
 mod direct;
 mod dto;
+mod passphrase;
+mod secrets;
 mod supervisor;
 
 use std::future::Future;
@@ -20,8 +22,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use apogee_core::{Core, CoreConfig, Uuid};
-use tauri::Manager;
 use tauri::ipc::Channel;
+use tauri::{Emitter, Manager};
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use command::CommandDto;
@@ -29,6 +31,22 @@ use dto::secrets::SecretsReportDto;
 use dto::startup::StartupDto;
 use dto::{EventWireDto, IpcErrorDto};
 use supervisor::{RunAdmissionError, RunClass, Runs};
+
+struct TauriPromptEmitter {
+    handle: tauri::AppHandle,
+}
+
+impl passphrase::PromptEmitter for TauriPromptEmitter {
+    fn emit(
+        &self,
+        event: &'static str,
+        prompt: &passphrase::PassphrasePromptDto,
+    ) -> Result<(), passphrase::PromptEmitError> {
+        self.handle
+            .emit_to("main", event, prompt)
+            .map_err(|_| passphrase::PromptEmitError::new())
+    }
+}
 
 enum CoreStatus {
     Starting,
@@ -43,6 +61,8 @@ struct ShellState {
     core_waiting: Notify,
     startup: OnceCell<StartupDto>,
     direct_reads: Arc<Semaphore>,
+    secret_file_ops: Arc<Semaphore>,
+    passphrases: Arc<passphrase::PromptBroker>,
     runs: Runs,
 }
 
@@ -55,6 +75,8 @@ impl Default for ShellState {
             core_waiting: Notify::new(),
             startup: OnceCell::new(),
             direct_reads: Arc::new(Semaphore::new(4)),
+            secret_file_ops: Arc::new(Semaphore::new(1)),
+            passphrases: Arc::new(passphrase::PromptBroker::default()),
             runs: Runs::default(),
         }
     }
@@ -138,6 +160,13 @@ impl ShellState {
             .map_err(|_| IpcErrorDto::shell("shell.state.unavailable"))?;
         Ok((core, permit))
     }
+
+    async fn secret_file_permit(&self) -> Result<OwnedSemaphorePermit, IpcErrorDto> {
+        Arc::clone(&self.secret_file_ops)
+            .acquire_owned()
+            .await
+            .map_err(|_| IpcErrorDto::shell("shell.state.unavailable"))
+    }
 }
 
 /// Read the complete local store only after composition finishes. Failed reads remain retryable
@@ -160,7 +189,7 @@ async fn secrets_report(
 }
 
 async fn secrets_report_snapshot(state: &ShellState) -> Result<SecretsReportDto, IpcErrorDto> {
-    let core = state.ready_core().await?;
+    let (core, _permit) = state.ready_core_for_direct_read().await?;
     run_blocking(move || SecretsReportDto::new(&core.secrets_report(), core.secrets_path())).await
 }
 
@@ -248,13 +277,22 @@ fn main() -> ExitCode {
         .manage(ShellState::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            let state = app.state::<ShellState>();
+            let passphrase = Arc::new(passphrase::WebviewPassphrase::new(
+                Arc::clone(&state.passphrases),
+                Arc::new(TauriPromptEmitter {
+                    handle: handle.clone(),
+                }),
+                std::thread::current().id(),
+            ));
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<ShellState>();
                 initialize_state(
                     &state,
-                    || {
-                        CoreConfig::try_from_env()
-                            .and_then(Core::new)
+                    move || {
+                        let config = CoreConfig::try_from_env()
+                            .map_err(|error| IpcErrorDto::core(&error))?;
+                        Core::with_passphrase(config, passphrase)
                             .map_err(|error| IpcErrorDto::core(&error))
                     },
                     ShellState::install_core_result,
@@ -273,6 +311,13 @@ fn main() -> ExitCode {
             direct::dxvk_catalog,
             direct::system_report,
             direct::support_bundle_contents,
+            secrets::secrets_file_status,
+            secrets::unlock_secrets_file,
+            secrets::create_secrets_file,
+            secrets::change_secrets_file_passphrase,
+            secrets::remove_secrets_file,
+            secrets::seal_secrets_file,
+            secrets::answer_passphrase_prompt,
             execute,
             cancel
         ])
@@ -401,6 +446,22 @@ mod tests {
         assert!(!waiting.is_finished());
 
         admitted.pop();
+        assert!(waiting.await?.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sealed_file_operations_admit_only_one_blocking_caller() -> TestResult {
+        let state = Arc::new(ShellState::default());
+        let first = state.secret_file_permit().await.map_err(ipc_test_error)?;
+        let waiting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.secret_file_permit().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+
+        drop(first);
         assert!(waiting.await?.is_ok());
         Ok(())
     }

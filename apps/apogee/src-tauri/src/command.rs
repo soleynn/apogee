@@ -4,11 +4,10 @@ use std::path::PathBuf;
 
 use apogee_core::{
     Command, FirstRunRequest, FirstRunTransition, FrontierQuery, ImportPlan, ImportXivLauncher,
-    OtpSource, PasswordSource, PrefixAction, Repo, Secret, Uuid,
+    OtpSource, PasswordSource, PrefixAction, Repo, Uuid,
 };
 use serde::Deserialize;
 use ts_rs::TS;
-use zeroize::Zeroizing;
 
 use crate::dto::first_run::{
     AccountChoiceDto, CredentialBackendReadingDto, CredentialChoiceDto, FirstRunImportCandidateDto,
@@ -16,25 +15,7 @@ use crate::dto::first_run::{
     RunnerAndPrefixChoiceDto, RunnerReadingDto,
 };
 use crate::dto::path::PathDto;
-
-/// Bytes that arrived over IPC and are erased when the request leaves scope.
-///
-/// `Zeroizing` owns deserialization, so the allocation becomes guarded as it is constructed. The
-/// buffer is moved into core's `Secret` without making a second copy.
-#[derive(Deserialize)]
-#[serde(transparent)]
-pub(crate) struct SecretBytes(Zeroizing<Vec<u8>>);
-
-impl SecretBytes {
-    fn into_secret(mut self) -> Secret {
-        Secret::new(std::mem::take(&mut *self.0))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new(bytes: Vec<u8>) -> Self {
-        Self(Zeroizing::new(bytes))
-    }
-}
+use crate::dto::secrets::SecretBytes;
 
 /// Where the core should get the account password for this run.
 #[derive(Deserialize, TS)]

@@ -1,21 +1,31 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   IpcFailure,
+  cancelPassphrase,
   cancel,
+  changeSecretsFilePassphrase,
   corruptStoreRecovery,
+  createSecretsFile,
   defaults,
   dxvkCatalog,
   execute,
   nextAction,
+  onPassphrasePrompt,
+  removeSecretsFile,
   resolvedSetup,
   runnerCatalog,
   secretsReport,
+  secretsFileStatus,
+  sealSecretsFile,
   selectActiveProfile,
   startup,
   supportBundleContents,
+  submitPassphrase,
   systemReport,
+  unlockSecretsFile,
 } from './ipc';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -25,13 +35,128 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(),
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(listen).mockResolvedValue(vi.fn());
   const values = new Map<string, string>();
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => values.set(key, value),
     removeItem: (key: string) => values.delete(key),
+  });
+});
+
+describe('sealed secret file', () => {
+  it('forwards only the typed ambient prompt payload', async () => {
+    let receive: ((event: { payload: { requestId: string } }) => void) | undefined;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation((_name, handler) => {
+      receive = handler as typeof receive;
+      return Promise.resolve(unlisten);
+    });
+    const handler = vi.fn();
+
+    await expect(onPassphrasePrompt(handler)).resolves.toBe(unlisten);
+    expect(listen).toHaveBeenCalledWith('passphrase-request', expect.any(Function));
+    receive?.({ payload: { requestId: 'request-id' } });
+    expect(handler).toHaveBeenCalledWith({ requestId: 'request-id' });
+  });
+
+  it('submits bytes once and overwrites them before the invoke settles', async () => {
+    let settle: ((accepted: boolean) => void) | undefined;
+    let sent: unknown;
+    vi.mocked(invoke).mockImplementation((_command, args) => {
+      sent = structuredClone(args);
+      return new Promise((resolve) => {
+        settle = resolve;
+      });
+    });
+    const bytes = [115, 101, 99, 114, 101, 116];
+
+    const pending = submitPassphrase('request-id', bytes);
+    expect(sent).toEqual({
+      requestId: 'request-id',
+      answer: { kind: 'submit', passphrase: [115, 101, 99, 114, 101, 116] },
+    });
+    expect(bytes).toEqual([0, 0, 0, 0, 0, 0]);
+
+    settle?.(true);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it('overwrites submitted bytes when dispatch throws before returning a promise', () => {
+    vi.mocked(invoke).mockImplementation(() => {
+      throw new Error('synchronous bridge failure');
+    });
+    const bytes = [9, 8, 7];
+
+    expect(() => submitPassphrase('request-id', bytes)).toThrow('synchronous bridge failure');
+    expect(bytes).toEqual([0, 0, 0]);
+  });
+
+  it('uses the closed cancel response with no secret field', async () => {
+    vi.mocked(invoke).mockResolvedValue(true);
+    await expect(cancelPassphrase('request-id')).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith('answer_passphrase_prompt', {
+      requestId: 'request-id',
+      answer: { kind: 'cancel' },
+    });
+  });
+
+  it('keeps every lifecycle invocation explicit and erases mutation inputs', async () => {
+    const sent: Array<{ command: string; args: unknown }> = [];
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      sent.push({ command, args: structuredClone(args) });
+      return Promise.resolve({ state: { kind: 'absent' }, isOpen: false });
+    });
+    const create = [1, 2, 3];
+    const current = [4, 5];
+    const replacement = [6, 7];
+
+    await secretsFileStatus();
+    await unlockSecretsFile();
+    await createSecretsFile(create, true);
+    await changeSecretsFilePassphrase(current, replacement);
+    await removeSecretsFile(true);
+    await sealSecretsFile();
+
+    expect(sent).toEqual([
+      { command: 'secrets_file_status', args: undefined },
+      { command: 'unlock_secrets_file', args: undefined },
+      {
+        command: 'create_secrets_file',
+        args: { request: { confirmed: true, passphrase: [1, 2, 3] } },
+      },
+      {
+        command: 'change_secrets_file_passphrase',
+        args: { request: { current: [4, 5], replacement: [6, 7] } },
+      },
+      {
+        command: 'remove_secrets_file',
+        args: { request: { confirmed: true } },
+      },
+      { command: 'seal_secrets_file', args: undefined },
+    ]);
+    expect(create).toEqual([0, 0, 0]);
+    expect(current).toEqual([0, 0]);
+    expect(replacement).toEqual([0, 0]);
+  });
+
+  it('normalizes lifecycle failures through the common IPC envelope', async () => {
+    vi.mocked(invoke).mockRejectedValue({
+      code: 'err-secrets',
+      error: { kind: 'secrets', secrets: 'wrongPassphrase' },
+    });
+
+    await expect(unlockSecretsFile()).rejects.toMatchObject({
+      name: 'IpcFailure',
+      code: 'err-secrets',
+      error: { kind: 'secrets', secrets: 'wrongPassphrase' },
+    });
   });
 });
 
