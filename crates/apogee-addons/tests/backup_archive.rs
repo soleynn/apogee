@@ -45,7 +45,7 @@ fn listing(archive: &Path) -> Result<Vec<Stored>, Fallible> {
     let mut out = Vec::new();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
-        let name = entry.name().to_owned();
+        let name = entry.name()?.into_owned();
         let mode = entry.unix_mode().unwrap_or(0);
         let size = entry.size();
         let mut body = Vec::new();
@@ -156,19 +156,18 @@ fn entries_carry_fixed_metadata_not_the_sources() -> Result<(), BackupError> {
     let mut zip = zip::ZipArchive::new(file).unwrap();
     for i in 0..zip.len() {
         let entry = zip.by_index(i).unwrap();
+        let name = entry.name().unwrap().into_owned();
         let want = if entry.is_dir() { 0o755 } else { 0o644 };
         // Masked to the permission bits: the stored mode also carries the file-type bits.
         assert_eq!(
             entry.unix_mode().map(|m| m & 0o777),
             Some(want),
-            "{} carries a source mode",
-            entry.name()
+            "{name} carries a source mode"
         );
         assert_eq!(
             entry.last_modified(),
             Some(zip::DateTime::default()),
-            "{} carries a source timestamp",
-            entry.name()
+            "{name} carries a source timestamp"
         );
     }
     Ok(())
