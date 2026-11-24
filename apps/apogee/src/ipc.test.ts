@@ -7,13 +7,20 @@ import {
   cancelPassphrase,
   cancel,
   changeSecretsFilePassphrase,
+  cancelProfileRemoval,
   corruptStoreRecovery,
   createSecretsFile,
+  deleteSecret,
+  disablePushedCodes,
   defaults,
   dxvkCatalog,
   execute,
+  forgetSecrets,
+  importTotpSecret,
   nextAction,
   onPassphrasePrompt,
+  planProfileRemoval,
+  removeProfile,
   removeSecretsFile,
   resolvedSetup,
   runnerCatalog,
@@ -21,11 +28,17 @@ import {
   secretsFileStatus,
   sealSecretsFile,
   selectActiveProfile,
+  setNeverStore,
+  storePassword,
   startup,
   supportBundleContents,
   submitPassphrase,
   systemReport,
   unlockSecretsFile,
+  updateAccount,
+  updateProfile,
+  updateSettings,
+  usePushedCodes,
 } from './ipc';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -376,5 +389,121 @@ describe('direct core reads', () => {
       name: 'IpcFailure',
       code: 'err-runtime',
     });
+  });
+});
+
+describe('direct core mutations', () => {
+  it('dispatches path-free record updates and opaque removal plans', async () => {
+    vi.mocked(invoke).mockResolvedValue({});
+    const account = {
+      account: 'account-id',
+      squareEnixId: 'person@example.invalid',
+      kind: { kind: 'standard' as const },
+      useOtp: false,
+    };
+    const profile = {
+      profile: 'profile-id',
+      name: 'Main',
+      runner: { kind: 'systemWine' as const },
+      launch: {
+        region: 'global' as const,
+        extraArgs: [],
+        extraEnv: [],
+        wrappers: [],
+        sync: 'auto' as const,
+        hud: { kind: 'none' as const },
+        gpu: { kind: 'default' as const },
+        nvapi: false,
+        gamescope: null,
+        gamemode: false,
+        dalamud: false,
+      },
+    };
+    const settings = {
+      language: 'en',
+      closeAfterLaunch: false,
+      secretBackend: 'platform' as const,
+      keepPatches: true,
+      backupsKept: 5,
+      backupBeforePatch: true,
+      frontierPollSeconds: 30,
+      otpListener: {
+        bind: '0.0.0.0',
+        port: 4646,
+        sources: { kind: 'any' as const },
+        waitSeconds: 90,
+      },
+    };
+
+    await updateAccount(account);
+    await updateProfile(profile);
+    await updateSettings(settings);
+    await planProfileRemoval('profile-id');
+    await cancelProfileRemoval('request-id');
+    await removeProfile({ requestId: 'request-id', confirmed: true });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'update_account', { request: account });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'update_profile', { request: profile });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'update_settings', { request: settings });
+    expect(invoke).toHaveBeenNthCalledWith(4, 'plan_profile_removal', {
+      profile: 'profile-id',
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, 'cancel_profile_removal', {
+      requestId: 'request-id',
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, 'remove_profile', {
+      request: { requestId: 'request-id', confirmed: true },
+    });
+  });
+
+  it('erases secret inputs and keeps destructive acknowledgments explicit', async () => {
+    const sent: Array<{ command: string; args: unknown }> = [];
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      sent.push({ command, args: structuredClone(args) });
+      return Promise.resolve({});
+    });
+    const password = [1, 2, 3];
+    const generator = [4, 5, 6];
+
+    await storePassword('account-id', password);
+    await importTotpSecret('account-id', generator);
+    await usePushedCodes('account-id', 'listen');
+    await disablePushedCodes({ account: 'account-id' });
+    await deleteSecret({ account: 'account-id', kind: 'password', confirmed: true });
+    await forgetSecrets({ account: 'account-id', confirmed: true });
+    await setNeverStore({ account: 'account-id', on: true });
+
+    expect(sent).toEqual([
+      {
+        command: 'store_password',
+        args: { request: { account: 'account-id', password: [1, 2, 3] } },
+      },
+      {
+        command: 'import_totp_secret',
+        args: { request: { account: 'account-id', secret: [4, 5, 6] } },
+      },
+      {
+        command: 'use_pushed_codes',
+        args: { request: { account: 'account-id', confirmation: 'listen' } },
+      },
+      {
+        command: 'disable_pushed_codes',
+        args: { request: { account: 'account-id' } },
+      },
+      {
+        command: 'delete_secret',
+        args: { request: { account: 'account-id', kind: 'password', confirmed: true } },
+      },
+      {
+        command: 'forget_secrets',
+        args: { request: { account: 'account-id', confirmed: true } },
+      },
+      {
+        command: 'set_never_store',
+        args: { request: { account: 'account-id', on: true } },
+      },
+    ]);
+    expect(password).toEqual([0, 0, 0]);
+    expect(generator).toEqual([0, 0, 0]);
   });
 });

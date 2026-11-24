@@ -4,6 +4,7 @@ mod error;
 pub(crate) mod first_run;
 mod frontier;
 mod import;
+pub(crate) mod mutation;
 pub(crate) mod path;
 pub(crate) mod read;
 pub(crate) mod secrets;
