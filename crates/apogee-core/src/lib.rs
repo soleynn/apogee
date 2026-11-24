@@ -73,12 +73,12 @@ pub use composition::{
 pub use error::CoreError;
 pub use first_run::{
     AccountChoice, CredentialBackend, CredentialBackendReading, CredentialBackendState,
-    CredentialChoice, ExistingGameState, FirstRunAccountKind, FirstRunCheckpoint,
-    FirstRunImportCandidate, FirstRunImportSource, FirstRunPosition, FirstRunRunnerSelection,
-    FirstRunStep, FirstRunTransition, FirstRunTransitionError, GameCandidate, GameCandidateState,
-    GameChoice, ImportDecision, ImportState, LegibilityReading, PatchReading, PrefixOutcome,
-    ReadyAction, ReadyState, RunnerAndPrefixChoice, RunnerReading, SessionType, SteamClientReading,
-    first_incomplete, ready_action,
+    CredentialChoice, ExistingGameState, FirstRunAccountInput, FirstRunAccountKind, FirstRunAction,
+    FirstRunCheckpoint, FirstRunImportCandidate, FirstRunImportSource, FirstRunPosition,
+    FirstRunRunnerSelection, FirstRunStep, FirstRunTransitionError, GameCandidate,
+    GameCandidateState, GameChoice, ImportDecision, ImportState, LegibilityReading, PatchReading,
+    PrefixFailure, PrefixOutcome, ReadyAction, ReadyState, RunnerAndPrefixChoice, RunnerReading,
+    SessionType, SteamClientReading, first_incomplete, ready_action,
 };
 pub use model::{
     Account, AccountKind, LaunchSettings, ListenerSettings, ListenerSources, OtpDelivery,

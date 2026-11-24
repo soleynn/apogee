@@ -178,6 +178,13 @@ hits=$(grep -nE 'error\.(to_string|to_owned)[[:space:]]*\(|format(_args)?![^(]*\
   apps/apogee/src-tauri/src/dto/error.rs || true)
 [ -z "$hits" ] || report "the CoreError selector formats its input" "$hits"
 
+# 6b.3. Private design metaphors never become durable source vocabulary. The pattern is assembled so
+#       this enforcement line does not contain the phrases it rejects.
+lens_pattern="the (do""or|rib""bon|por""ch|read""out)"
+hits=$(git grep -n -iE "$lens_pattern" -- \
+  .github apps crates fuzz scripts site tools ':(exclude)References/**' || true)
+[ -z "$hits" ] || report "private design vocabulary reached a committed artifact" "$hits"
+
 # 6c. No dynamic loading: the other way to reach a native artifact without declaring a dependency.
 hits=$(src_grep -E '\b(libloading|dlopen|dlsym|LoadLibraryW?|GetProcAddress)\b' \
   --include='*.rs' --include='Cargo.toml' || true)

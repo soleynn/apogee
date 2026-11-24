@@ -12,18 +12,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apogee_core::{
-    ALL_CODES, Account, AccountChoice, AccountKind, AddonEvent, BenchStats, CatalogViewEntry,
-    Command, Consent, Core, CoreConfig, CredentialBackendReading, CredentialChoice, Deviation,
-    Event, ExternalAddon, FileState, FirstRunImportCandidate, FirstRunRequest, FirstRunTransition,
-    FlowState, ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData,
-    FrontierQuery, GameCandidate, GameChoice, Gamescope, GpuSelect, HealthIssue, Hud,
-    ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
-    LegibilityReading, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
+    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
+    Core, CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon, FileState,
+    FirstRunAccountInput, FirstRunAccountKind, FirstRunAction as CoreFirstRunAction,
+    FirstRunRequest, FirstRunRunnerSelection, FlowState, ForeignCredentialStore, ForeignKey,
+    ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, Gamescope, GpuSelect, HealthIssue,
+    Hud, ImportDecision, ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher,
+    LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
     NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
-    PrefixAction, PrefixReport, Profile, ReadyAction, Recoveries, Region, Repo, RunIn, RunOutcome,
-    RunnerAndPrefixChoice, RunnerReading, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID,
-    Secret, SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
-    SyncChoice, Trigger, Uuid,
+    PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
+    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
+    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -205,7 +204,6 @@ enum Commands {
         action: PrefixCommand,
     },
     /// Start a profile from the Steam interface, on a handheld or anywhere else without a desktop.
-    #[cfg(unix)]
     Steam {
         #[command(subcommand)]
         action: SteamAction,
@@ -243,70 +241,99 @@ enum ImportCommand {
 enum FirstRunAction {
     /// Print the checkpoint and its next required step.
     Show,
-    /// Apply one core-validated transition encoded as JSON.
+    /// Apply one core-validated user action encoded as JSON.
     Advance(FirstRunAdvanceArgs),
 }
 
 #[derive(Args)]
 struct FirstRunAdvanceArgs {
-    /// A transition JSON object. The current checkpoint still validates its position and every
+    /// A user-action JSON object. The current checkpoint still validates its position and every
     /// selected candidate before anything is persisted.
     #[arg(long)]
     transition_json: String,
 }
 
-/// The terminal's input format for first-run transitions.
+/// The terminal's input format for first-run user actions.
 ///
 /// This mirror deliberately lives at the presentation boundary. Core owns the domain transition,
 /// while each shell owns how that transition is encoded on its wire.
 #[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-enum FirstRunTransitionInput {
-    ConfirmLegibility(LegibilityReading),
-    RecordImportDiscovery(Vec<FirstRunImportCandidate>),
-    DecideImport(apogee_core::ImportDecision),
-    SaveAccount(AccountChoice),
-    RecordGameCandidates(Vec<GameCandidate>),
-    SelectGame(GameChoice),
-    RecordCredentialBackends(Vec<CredentialBackendReading>),
+#[serde(
+    rename_all = "snake_case",
+    tag = "kind",
+    content = "value",
+    deny_unknown_fields
+)]
+enum FirstRunActionInput {
+    ConfirmLegibility,
+    DecideImport(ImportDecision),
+    SaveAccount(FirstRunAccountInputDto),
+    InspectGame { path: PathBuf },
+    SelectExistingGame { path: PathBuf },
+    SelectInstallLocation { path: PathBuf },
     SelectCredential(CredentialChoice),
-    RecordRunners(Vec<RunnerReading>),
-    FinishRunnerAndPrefix(RunnerAndPrefixChoice),
-    StartReady(ReadyAction),
+    SelectRunner(FirstRunRunnerSelection),
+    ContinueWithoutPrefix,
+    StartReady,
 }
 
-impl From<FirstRunTransitionInput> for FirstRunTransition {
-    fn from(value: FirstRunTransitionInput) -> Self {
-        match value {
-            FirstRunTransitionInput::ConfirmLegibility(reading) => Self::ConfirmLegibility(reading),
-            FirstRunTransitionInput::RecordImportDiscovery(candidates) => {
-                Self::RecordImportDiscovery(candidates)
-            }
-            FirstRunTransitionInput::DecideImport(decision) => Self::DecideImport(decision),
-            FirstRunTransitionInput::SaveAccount(account) => Self::SaveAccount(account),
-            FirstRunTransitionInput::RecordGameCandidates(candidates) => {
-                Self::RecordGameCandidates(candidates)
-            }
-            FirstRunTransitionInput::SelectGame(game) => Self::SelectGame(game),
-            FirstRunTransitionInput::RecordCredentialBackends(backends) => {
-                Self::RecordCredentialBackends(backends)
-            }
-            FirstRunTransitionInput::SelectCredential(credential) => {
-                Self::SelectCredential(credential)
-            }
-            FirstRunTransitionInput::RecordRunners(runners) => Self::RecordRunners(runners),
-            FirstRunTransitionInput::FinishRunnerAndPrefix(choice) => {
-                Self::FinishRunnerAndPrefix(choice)
-            }
-            FirstRunTransitionInput::StartReady(action) => Self::StartReady(action),
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FirstRunAccountInputDto {
+    square_enix_id: String,
+    kind: FirstRunAccountKind,
+    never_save_password: bool,
+}
+
+impl From<FirstRunAccountInputDto> for FirstRunAccountInput {
+    fn from(value: FirstRunAccountInputDto) -> Self {
+        Self {
+            square_enix_id: value.square_enix_id,
+            kind: value.kind,
+            never_save_password: value.never_save_password,
         }
     }
 }
 
-fn parse_first_run_transition(input: &str) -> Result<FirstRunTransition, CliError> {
-    let transition: FirstRunTransitionInput = serde_json::from_str(input)
-        .map_err(|error| format!("invalid first-run transition JSON: {error}"))?;
-    Ok(transition.into())
+impl From<FirstRunActionInput> for CoreFirstRunAction {
+    fn from(value: FirstRunActionInput) -> Self {
+        match value {
+            FirstRunActionInput::ConfirmLegibility => {
+                let session = if cfg!(windows) {
+                    apogee_core::SessionType::Windows
+                } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                    apogee_core::SessionType::Wayland
+                } else if std::env::var_os("DISPLAY").is_some() {
+                    apogee_core::SessionType::X11
+                } else {
+                    apogee_core::SessionType::Unknown
+                };
+                Self::ConfirmLegibility(apogee_core::LegibilityReading {
+                    gpu: None,
+                    driver: None,
+                    session,
+                    render_tier: None,
+                })
+            }
+            FirstRunActionInput::DecideImport(decision) => Self::DecideImport(decision),
+            FirstRunActionInput::SaveAccount(account) => Self::SaveAccount(account.into()),
+            FirstRunActionInput::InspectGame { path } => Self::InspectGame { path },
+            FirstRunActionInput::SelectExistingGame { path } => Self::SelectExistingGame { path },
+            FirstRunActionInput::SelectInstallLocation { path } => {
+                Self::SelectInstallLocation { path }
+            }
+            FirstRunActionInput::SelectCredential(credential) => Self::SelectCredential(credential),
+            FirstRunActionInput::SelectRunner(runner) => Self::SelectRunner(runner),
+            FirstRunActionInput::ContinueWithoutPrefix => Self::ContinueWithoutPrefix,
+            FirstRunActionInput::StartReady => Self::StartReady,
+        }
+    }
+}
+
+fn parse_first_run_action(input: &str) -> Result<CoreFirstRunAction, CliError> {
+    let action: FirstRunActionInput = serde_json::from_str(input)
+        .map_err(|error| format!("invalid first-run action JSON: {error}"))?;
+    Ok(action.into())
 }
 
 #[derive(Args)]
@@ -565,7 +592,6 @@ struct PrefixRecreateArgs {
     backup_config: bool,
 }
 
-#[cfg(unix)]
 #[derive(Subcommand)]
 enum SteamAction {
     /// Say what this machine is and whether Steam has been told about any profile.
@@ -978,7 +1004,6 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
     // Reading what the machine is, and withdrawing a registration, are answerable without the store.
     // They have to be: the environment a game session hands a program is minimal, and these are the
     // two commands worth running when a launch from that session has gone wrong.
-    #[cfg(unix)]
     if let Some(Commands::Steam { action }) = &cli.command
         && !matches!(action, SteamAction::Register(_))
     {
@@ -1190,10 +1215,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             )
             .await),
             Some(FirstRunAction::Advance(args)) => {
-                let transition = parse_first_run_transition(&args.transition_json)?;
+                let action = parse_first_run_action(&args.transition_json)?;
                 Ok(drive(
                     &core,
-                    Command::FirstRun(FirstRunRequest::Advance(transition)),
+                    Command::FirstRun(FirstRunRequest::Advance(action)),
                     event_format,
                 )
                 .await)
@@ -1238,7 +1263,6 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Prefix { action } => prefix(&core, action, event_format).await,
-        #[cfg(unix)]
         Commands::Steam { action } => steam_register(&core, action),
     }
 }
@@ -1843,6 +1867,20 @@ fn steam_without_store(action: &SteamAction) -> Result<ExitCode, CliError> {
     }
 }
 
+#[cfg(not(unix))]
+fn steam_without_store(action: &SteamAction) -> Result<ExitCode, CliError> {
+    match action {
+        SteamAction::Status => {
+            println!("steam: compatibility-tool discovery is unavailable on this platform");
+            Ok(ExitCode::SUCCESS)
+        }
+        SteamAction::Unregister => {
+            Err("steam compatibility-tool registration is unavailable on this platform".into())
+        }
+        SteamAction::Register(_) => Ok(ExitCode::SUCCESS),
+    }
+}
+
 /// The machine, in the words a user would use for it rather than the name of a variant.
 ///
 /// The model a future handheld reports is a model this build has no name for, and saying so beats
@@ -1897,6 +1935,11 @@ fn steam_register(core: &Core, action: SteamAction) -> Result<ExitCode, CliError
     println!("runs: {}", written.command);
     println!("restart steam for it to appear in the compatibility tool list");
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(not(unix))]
+fn steam_register(_core: &Core, _action: SteamAction) -> Result<ExitCode, CliError> {
+    Err("steam compatibility-tool registration is unavailable on this platform".into())
 }
 
 /// The Steam installation to act on: the first one found, since the search is ordered by how
@@ -3005,7 +3048,7 @@ fn render(event: &Event) -> String {
         Event::Frontier(data) => render_frontier(data),
         Event::FirstRun(checkpoint) => format!(
             "first-run next: {:?}\ncheckpoint: {checkpoint:#?}",
-            apogee_core::first_incomplete(checkpoint)
+            checkpoint.position
         ),
         Event::Import(data) => format!("import: {data:#?}"),
         Event::SupportBundle(data) => format!("support bundle: {} bytes", data.bytes().len()),
@@ -3523,7 +3566,7 @@ mod tests {
                                 action: Some(FirstRunAction::Advance(args)),
                             }),
                         ..
-                    }) => parse_first_run_transition(&args.transition_json).is_ok(),
+                    }) => parse_first_run_action(&args.transition_json).is_ok(),
                     Ok(_) => true,
                     Err(error) => matches!(
                         error.kind(),
@@ -3550,7 +3593,7 @@ mod tests {
             "--events-json",
             "advance",
             "--transition-json",
-            r#"{"kind":"confirm_legibility","value":{"gpu":null,"driver":null,"session":"unknown","render_tier":0}}"#,
+            r#"{"kind":"confirm_legibility"}"#,
         ])
         .expect("global output switch parses after the command name");
 
@@ -3558,32 +3601,30 @@ mod tests {
     }
 
     #[test]
-    fn first_run_transition_json_stays_a_cli_owned_wire_shape() {
-        let transition = parse_first_run_transition(
-            r#"{"kind":"confirm_legibility","value":{"gpu":"NVIDIA","driver":"560.1","session":"wayland","render_tier":1}}"#,
-        )
-        .expect("the documented transition shape parses");
+    fn first_run_action_json_stays_a_cli_owned_wire_shape() {
+        let action = parse_first_run_action(r#"{"kind":"confirm_legibility"}"#)
+            .expect("the documented action shape parses");
 
         assert!(matches!(
-            transition,
-            FirstRunTransition::ConfirmLegibility(LegibilityReading {
-                gpu: Some(gpu),
-                driver: Some(driver),
-                session: apogee_core::SessionType::Wayland,
-                render_tier: 1,
-            }) if gpu == "NVIDIA" && driver == "560.1"
+            action,
+            CoreFirstRunAction::ConfirmLegibility(apogee_core::LegibilityReading {
+                render_tier: None,
+                ..
+            })
         ));
     }
 
     #[test]
-    fn first_run_transition_json_covers_persisted_discovery_steps() {
-        let transition = parse_first_run_transition(r#"{"kind":"record_runners","value":[]}"#)
-            .expect("runner discovery transition parses");
-
-        assert!(matches!(
-            transition,
-            FirstRunTransition::RecordRunners(readings) if readings.is_empty()
-        ));
+    fn first_run_action_json_rejects_backend_facts() {
+        for action in [
+            r#"{"kind":"record_runners","value":[]}"#,
+            r#"{"kind":"record_game_candidates","value":[]}"#,
+            r#"{"kind":"start_ready","value":{"action":"play"}}"#,
+            r#"{"kind":"save_account","value":{"square_enix_id":"user","kind":"standard","never_save_password":false,"steam_client":"present"}}"#,
+            r#"{"kind":"select_install_location","value":{"path":"game","exact_download_bytes":1}}"#,
+        ] {
+            assert!(parse_first_run_action(action).is_err(), "accepted {action}");
+        }
     }
 
     /// Every reader that takes a typed answer hands back a buffer that erases itself.

@@ -46,17 +46,35 @@ tauri-build = { version = "2", features = [] }
 # The launcher. A path dependency for the same reason the CLI takes one: the shell is a front end
 # over the one command/event surface, and it holds no rules of its own.
 apogee-core = { path = "../../../crates/apogee-core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
+# Native capabilities used by the shell. Dialog access stays behind Rust commands; clipboard and
+# notification permissions are narrowed in the window capability, and window state is automatic.
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-window-state = "2"
 # The shell owns the wire shape the frontend binds to, so the types that cross the boundary are
 # declared here and derive their serialization here. Nothing is added to the domain model for it.
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+open = "5"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
+tracing = "0.1"
 ts-rs = { version = "12.0.1", features = ["no-serde-warnings"] }
+url = "2"
 zeroize = { version = "1", features = ["serde"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+nix = { version = "0.26.4", default-features = false, features = ["fs"] }
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
+rustix = { version = "1", features = ["fs"] }
+wry = "0.55"
+zbus = { version = "5", features = ["blocking-api"] }
+
 [dev-dependencies]
-serde_json = "1"
 tokio = { version = "1", features = ["rt", "test-util"] }
 tempfile = "3"

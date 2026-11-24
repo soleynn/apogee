@@ -2,6 +2,6 @@
 import type { PathValueDto } from "./PathValueDto";
 
 /**
- * A path's readable label plus the exact platform representation needed for a round trip.
+ * A path's readable label plus its exact platform representation for diagnostics and copying.
  */
 export type PathDto = { display: string, value: PathValueDto, };

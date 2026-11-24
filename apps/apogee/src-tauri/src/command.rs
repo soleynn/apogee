@@ -1,21 +1,16 @@
 //! The shell-owned request shape and its one-way conversion into core commands.
 
-use std::path::PathBuf;
-
 use apogee_core::{
-    Command, FirstRunRequest, FirstRunTransition, FrontierQuery, ImportPlan, ImportXivLauncher,
-    OtpSource, PasswordSource, PrefixAction, Repo, Uuid,
+    Command, FirstRunAccountInput, FirstRunAction, FirstRunRequest, FrontierQuery, ImportDecision,
+    ImportXivLauncher, OtpSource, PasswordSource, PrefixAction, Uuid,
 };
 use serde::Deserialize;
 use ts_rs::TS;
 
-use crate::dto::first_run::{
-    AccountChoiceDto, CredentialBackendReadingDto, CredentialChoiceDto, FirstRunImportCandidateDto,
-    GameCandidateDto, GameChoiceDto, ImportDecisionDto, LegibilityDto, ReadyActionDto,
-    RunnerAndPrefixChoiceDto, RunnerReadingDto,
-};
-use crate::dto::path::PathDto;
+use crate::dto::first_run::{CredentialChoiceDto, FirstRunAccountKindDto};
 use crate::dto::secrets::SecretBytes;
+use crate::navigation::NavigationState;
+use crate::render::RenderMonitor;
 
 /// Where the core should get the account password for this run.
 #[derive(Deserialize, TS)]
@@ -58,7 +53,8 @@ impl OtpSourceDto {
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 #[ts(export, export_to = "Command.ts")]
 pub(crate) enum CommandDto {
@@ -93,7 +89,6 @@ pub(crate) enum CommandDto {
     Repair {
         #[ts(type = "string")]
         profile: Uuid,
-        local_indexes: Vec<LocalIndexDto>,
     },
     Prefix {
         #[ts(type = "string")]
@@ -112,12 +107,15 @@ pub(crate) enum CommandDto {
     SupportBundle {
         #[ts(type = "string | null")]
         profile: Option<Uuid>,
-        facts: Vec<CallerFactDto>,
     },
 }
 
 impl CommandDto {
-    pub(crate) fn into_core(self) -> Result<Command, CommandDtoError> {
+    pub(crate) fn into_core(
+        self,
+        navigation: &NavigationState,
+        render: &RenderMonitor,
+    ) -> Result<Command, CommandDtoError> {
         Ok(match self {
             Self::Login {
                 profile,
@@ -156,29 +154,22 @@ impl CommandDto {
                 password: password.into_core(),
                 otp: otp.into_core(),
             },
-            Self::Repair {
+            Self::Repair { profile } => Command::Repair {
                 profile,
-                local_indexes,
-            } => Command::Repair {
-                profile,
-                local_indexes: local_indexes
-                    .into_iter()
-                    .map(LocalIndexDto::into_core)
-                    .collect::<Result<Vec<_>, _>>()?,
+                local_indexes: Vec::new(),
             },
             Self::Prefix { profile, action } => Command::Prefix {
                 profile,
                 action: action.into_core(),
             },
-            Self::FirstRun { request } => Command::FirstRun(request.into_core()?),
-            Self::ImportXivLauncher { request } => Command::ImportXivLauncher(request.into_core()?),
+            Self::FirstRun { request } => Command::FirstRun(request.into_core(navigation, render)?),
+            Self::ImportXivLauncher { request } => {
+                Command::ImportXivLauncher(request.into_core(navigation)?)
+            }
             Self::Frontier { query } => Command::Frontier(query.into_core()),
-            Self::SupportBundle { profile, facts } => Command::SupportBundle {
+            Self::SupportBundle { profile } => Command::SupportBundle {
                 profile,
-                facts: facts
-                    .into_iter()
-                    .map(|fact| (fact.name, fact.value))
-                    .collect(),
+                facts: render.support_facts(),
             },
         })
     }
@@ -187,43 +178,9 @@ impl CommandDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandDtoError {
     UnsupportedFirstRunValue,
-    UnsupportedPathEncoding,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LocalIndexDto {
-    repo: RepoDto,
-    path: PathDto,
-}
-
-impl LocalIndexDto {
-    fn into_core(self) -> Result<(Repo, PathBuf), CommandDtoError> {
-        Ok((
-            self.repo.into_core(),
-            self.path
-                .into_path()
-                .map_err(|_| CommandDtoError::UnsupportedPathEncoding)?,
-        ))
-    }
-}
-
-#[derive(Deserialize, TS)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub(crate) enum RepoDto {
-    Boot,
-    Game,
-    Expansion { number: u8 },
-}
-
-impl RepoDto {
-    fn into_core(self) -> Repo {
-        match self {
-            Self::Boot => Repo::Boot,
-            Self::Game => Repo::Game,
-            Self::Expansion { number } => Repo::Expansion(number),
-        }
-    }
+    UnknownFolder,
+    UnknownImportScan,
+    UnknownFirstRunSelection,
 }
 
 #[derive(Deserialize, TS)]
@@ -251,133 +208,179 @@ impl PrefixActionDto {
 }
 
 #[derive(Deserialize, TS)]
-#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "camelCase",
+    deny_unknown_fields
+)]
 pub(crate) enum FirstRunRequestDto {
     Read,
-    Advance(FirstRunTransitionDto),
+    Advance(FirstRunActionDto),
 }
 
 impl FirstRunRequestDto {
-    fn into_core(self) -> Result<FirstRunRequest, CommandDtoError> {
+    fn into_core(
+        self,
+        navigation: &NavigationState,
+        render: &RenderMonitor,
+    ) -> Result<FirstRunRequest, CommandDtoError> {
         Ok(match self {
             Self::Read => FirstRunRequest::Read,
-            Self::Advance(transition) => FirstRunRequest::Advance(transition.into_core()?),
+            Self::Advance(action) => {
+                FirstRunRequest::Advance(action.into_core(navigation, render)?)
+            }
         })
     }
 }
 
 /// The accepted first-run transitions, mirrored so their field casing remains shell-owned.
 #[derive(Deserialize, TS)]
-#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
-pub(crate) enum FirstRunTransitionDto {
-    ConfirmLegibility(LegibilityDto),
-    RecordImportDiscovery(Vec<FirstRunImportCandidateDto>),
-    DecideImport(ImportDecisionDto),
-    SaveAccount(AccountChoiceDto),
-    RecordGameCandidates(Vec<GameCandidateDto>),
-    SelectGame(GameChoiceDto),
-    RecordCredentialBackends(Vec<CredentialBackendReadingDto>),
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "camelCase",
+    deny_unknown_fields
+)]
+pub(crate) enum FirstRunActionDto {
+    ConfirmLegibility,
+    DecideImport(FirstRunImportDecisionDto),
+    SaveAccount(FirstRunAccountInputDto),
+    InspectGame {
+        #[ts(type = "string")]
+        folder: Uuid,
+    },
+    SelectExistingGame {
+        #[ts(type = "string")]
+        candidate: Uuid,
+    },
+    SelectInstallLocation {
+        #[ts(type = "string")]
+        folder: Uuid,
+    },
     SelectCredential(CredentialChoiceDto),
-    RecordRunners(Vec<RunnerReadingDto>),
-    FinishRunnerAndPrefix(RunnerAndPrefixChoiceDto),
-    StartReady(ReadyActionDto),
+    SelectRunner {
+        #[ts(type = "string")]
+        candidate: Uuid,
+    },
+    ContinueWithoutPrefix,
+    StartReady,
 }
 
-impl FirstRunTransitionDto {
-    fn into_core(self) -> Result<FirstRunTransition, CommandDtoError> {
+impl FirstRunActionDto {
+    fn into_core(
+        self,
+        navigation: &NavigationState,
+        render: &RenderMonitor,
+    ) -> Result<FirstRunAction, CommandDtoError> {
         let unsupported = || CommandDtoError::UnsupportedFirstRunValue;
         Ok(match self {
-            Self::ConfirmLegibility(reading) => {
-                FirstRunTransition::ConfirmLegibility(reading.into_core().ok_or_else(unsupported)?)
+            Self::ConfirmLegibility => {
+                FirstRunAction::ConfirmLegibility(render.legibility_reading())
             }
-            Self::RecordImportDiscovery(candidates) => FirstRunTransition::RecordImportDiscovery(
-                candidates
-                    .into_iter()
-                    .map(FirstRunImportCandidateDto::into_core)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(unsupported)?,
-            ),
             Self::DecideImport(decision) => {
-                FirstRunTransition::DecideImport(decision.into_core().ok_or_else(unsupported)?)
+                FirstRunAction::DecideImport(decision.into_core(navigation)?)
             }
-            Self::SaveAccount(account) => {
-                FirstRunTransition::SaveAccount(account.into_core().ok_or_else(unsupported)?)
+            Self::SaveAccount(account) => FirstRunAction::SaveAccount(FirstRunAccountInput {
+                square_enix_id: account.square_enix_id,
+                kind: account.kind.into_core().ok_or_else(unsupported)?,
+                never_save_password: account.never_save_password,
+            }),
+            Self::InspectGame { folder } => FirstRunAction::InspectGame {
+                path: navigation
+                    .folder(folder)
+                    .ok_or(CommandDtoError::UnknownFolder)?,
+            },
+            Self::SelectExistingGame { candidate } => FirstRunAction::SelectExistingGame {
+                path: navigation
+                    .first_run_game(candidate)
+                    .and_then(|choice| match choice {
+                        apogee_core::GameChoice::Existing { path, .. } => Some(path),
+                        _ => None,
+                    })
+                    .ok_or(CommandDtoError::UnknownFirstRunSelection)?,
+            },
+            Self::SelectInstallLocation { folder } => FirstRunAction::SelectInstallLocation {
+                path: navigation
+                    .folder(folder)
+                    .ok_or(CommandDtoError::UnknownFolder)?,
+            },
+            Self::SelectCredential(credential) => {
+                FirstRunAction::SelectCredential(credential.into_core().ok_or_else(unsupported)?)
             }
-            Self::RecordGameCandidates(candidates) => FirstRunTransition::RecordGameCandidates(
-                candidates
-                    .into_iter()
-                    .map(GameCandidateDto::into_core)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(unsupported)?,
+            Self::SelectRunner { candidate } => FirstRunAction::SelectRunner(
+                navigation
+                    .first_run_runner(candidate)
+                    .ok_or(CommandDtoError::UnknownFirstRunSelection)?,
             ),
-            Self::SelectGame(game) => {
-                FirstRunTransition::SelectGame(game.into_core().ok_or_else(unsupported)?)
-            }
-            Self::RecordCredentialBackends(backends) => {
-                FirstRunTransition::RecordCredentialBackends(
-                    backends
-                        .into_iter()
-                        .map(CredentialBackendReadingDto::into_core)
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(unsupported)?,
-                )
-            }
-            Self::SelectCredential(credential) => FirstRunTransition::SelectCredential(
-                credential.into_core().ok_or_else(unsupported)?,
-            ),
-            Self::RecordRunners(runners) => FirstRunTransition::RecordRunners(
-                runners
-                    .into_iter()
-                    .map(RunnerReadingDto::into_core)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(unsupported)?,
-            ),
-            Self::FinishRunnerAndPrefix(choice) => FirstRunTransition::FinishRunnerAndPrefix(
-                choice.into_core().ok_or_else(unsupported)?,
-            ),
-            Self::StartReady(action) => {
-                FirstRunTransition::StartReady(action.into_core().ok_or_else(unsupported)?)
-            }
+            Self::ContinueWithoutPrefix => FirstRunAction::ContinueWithoutPrefix,
+            Self::StartReady => FirstRunAction::StartReady,
         })
     }
 }
 
 #[derive(Deserialize, TS)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FirstRunAccountInputDto {
+    square_enix_id: String,
+    kind: FirstRunAccountKindDto,
+    never_save_password: bool,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(
+    tag = "choice",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub(crate) enum FirstRunImportDecisionDto {
+    Import {
+        #[ts(type = "string")]
+        candidate: Uuid,
+    },
+    Skip,
+}
+
+impl FirstRunImportDecisionDto {
+    fn into_core(self, navigation: &NavigationState) -> Result<ImportDecision, CommandDtoError> {
+        match self {
+            Self::Import { candidate } => navigation
+                .first_run_import(candidate)
+                .ok_or(CommandDtoError::UnknownFirstRunSelection),
+            Self::Skip => Ok(ImportDecision::Skip),
+        }
+    }
+}
+
+#[derive(Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum ImportXivLauncherDto {
-    Scan { path: PathDto },
-    Apply { plan: ImportPlanDto },
+    Scan {
+        #[ts(type = "string")]
+        folder: Uuid,
+    },
+    Apply {
+        #[ts(type = "string")]
+        scan: Uuid,
+        accepted: Vec<String>,
+    },
 }
 
 impl ImportXivLauncherDto {
-    fn into_core(self) -> Result<ImportXivLauncher, CommandDtoError> {
+    fn into_core(self, navigation: &NavigationState) -> Result<ImportXivLauncher, CommandDtoError> {
         Ok(match self {
-            Self::Scan { path } => ImportXivLauncher::Scan(
-                path.into_path()
-                    .map_err(|_| CommandDtoError::UnsupportedPathEncoding)?,
+            Self::Scan { folder } => ImportXivLauncher::Scan(
+                navigation
+                    .folder(folder)
+                    .ok_or(CommandDtoError::UnknownFolder)?,
             ),
-            Self::Apply { plan } => ImportXivLauncher::Apply(plan.into_core()?),
+            Self::Apply { scan, accepted } => ImportXivLauncher::Apply(
+                navigation
+                    .import_plan(scan, accepted)
+                    .ok_or(CommandDtoError::UnknownImportScan)?,
+            ),
         })
-    }
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ImportPlanDto {
-    source: PathDto,
-    fingerprint: String,
-    accepted: Vec<String>,
-}
-
-impl ImportPlanDto {
-    fn into_core(self) -> Result<ImportPlan, CommandDtoError> {
-        Ok(ImportPlan::from_selection_parts(
-            self.source
-                .into_path()
-                .map_err(|_| CommandDtoError::UnsupportedPathEncoding)?,
-            self.fingerprint,
-            self.accepted,
-        ))
     }
 }
 
@@ -397,13 +400,6 @@ impl FrontierQueryDto {
             Self::Banners => FrontierQuery::Banners,
         }
     }
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CallerFactDto {
-    name: String,
-    value: String,
 }
 
 /// Every leaf operation the generic `execute` IPC command accepts.
@@ -429,7 +425,7 @@ pub(crate) fn operation_ids() -> std::collections::BTreeSet<String> {
             .map(|kind| format!("firstRun.{kind}")),
     );
     operations.extend(
-        tagged_kinds::<FirstRunTransitionDto>()
+        tagged_kinds::<FirstRunActionDto>()
             .into_iter()
             .map(|kind| format!("firstRun.advance.{kind}")),
     );
@@ -463,14 +459,17 @@ mod tests {
 
     const PROFILE: &str = "00000000-0000-0000-0000-000000000000";
 
-    fn parse(json: &str) -> Option<Command> {
+    fn parse(json: &str, navigation: &NavigationState) -> Option<Command> {
+        let render = RenderMonitor::disabled();
         serde_json::from_str::<CommandDto>(json)
             .ok()
-            .and_then(|command| command.into_core().ok())
+            .and_then(|command| command.into_core(navigation, &render).ok())
     }
 
     #[test]
     fn every_command_arm_accepts_the_shell_wire_shape() {
+        let navigation = NavigationState::default();
+        let folder = navigation.register_folder("import-root".into()).id();
         let commands = [
             format!(
                 r#"{{"kind":"login","profile":"{PROFILE}","password":{{"kind":"stored"}},"otp":{{"kind":"totp"}}}}"#
@@ -485,20 +484,21 @@ mod tests {
             format!(
                 r#"{{"kind":"install","profile":"{PROFILE}","password":{{"kind":"stored"}},"otp":{{"kind":"totp"}}}}"#
             ),
-            format!(
-                r#"{{"kind":"repair","profile":"{PROFILE}","localIndexes":[{{"repo":{{"kind":"expansion","number":2}},"path":{{"display":"index.apzi","value":{{"kind":"utf8","value":"index.apzi"}}}}}}]}}"#
-            ),
+            format!(r#"{{"kind":"repair","profile":"{PROFILE}"}}"#),
             format!(
                 r#"{{"kind":"prefix","profile":"{PROFILE}","action":{{"kind":"recreate","backupConfig":true}}}}"#
             ),
-            r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"confirmLegibility","value":{"gpu":null,"driver":null,"session":"wayland","renderTier":1}}}}"#.to_owned(),
-            r#"{"kind":"importXivLauncher","request":{"kind":"scan","path":{"display":"import-root","value":{"kind":"utf8","value":"import-root"}}}}"#.to_owned(),
+            r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"confirmLegibility"}}}"#.to_owned(),
+            format!(r#"{{"kind":"importXivLauncher","request":{{"kind":"scan","folder":"{folder}"}}}}"#),
             r#"{"kind":"frontier","query":{"kind":"gate","wait":true}}"#.to_owned(),
-            r#"{"kind":"supportBundle","facts":[{"name":"render_tier","value":"1"}]}"#.to_owned(),
+            r#"{"kind":"supportBundle"}"#.to_owned(),
         ];
 
         for command in commands {
-            assert!(parse(&command).is_some(), "did not accept {command}");
+            assert!(
+                parse(&command, &navigation).is_some(),
+                "did not accept {command}"
+            );
         }
     }
 
@@ -506,19 +506,79 @@ mod tests {
     fn unsupported_first_run_fallbacks_are_rejected_before_core() {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"saveAccount","value":{"squareEnixId":"person","kind":"unknown","neverSavePassword":true,"steamClient":"notRequired"}}}}"#;
 
-        assert!(parse(command).is_none());
+        assert!(parse(command, &NavigationState::default()).is_none());
     }
 
     #[test]
-    fn first_run_discovery_transitions_have_a_typed_webview_shape() {
+    fn backend_owned_first_run_readings_are_not_accepted_from_the_webview() {
         let command = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"recordRunners","value":[]}}}"#;
 
+        assert!(parse(command, &NavigationState::default()).is_none());
+    }
+
+    #[test]
+    fn first_run_paths_must_be_process_local_capabilities() {
+        let import = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"decideImport","value":{"choice":"import","path":"candidate"}}}}"#;
+        let game = r#"{"kind":"firstRun","request":{"kind":"advance","value":{"kind":"selectExistingGame","value":{"path":"game"}}}}"#;
+
+        assert!(parse(import, &NavigationState::default()).is_none());
+        assert!(parse(game, &NavigationState::default()).is_none());
+    }
+
+    #[test]
+    fn first_run_capabilities_restore_the_observed_core_values() {
+        let navigation = NavigationState::default();
+        let import_path = std::path::PathBuf::from("private/import");
+        let game_path = std::path::PathBuf::from("private/game");
+        let checkpoint = apogee_core::FirstRunCheckpoint {
+            import: apogee_core::ImportState::Candidates(vec![
+                apogee_core::FirstRunImportCandidate {
+                    path: import_path.clone(),
+                    source: apogee_core::FirstRunImportSource::Core,
+                },
+            ]),
+            game_candidates: vec![apogee_core::GameCandidate {
+                path: game_path.clone(),
+                state: apogee_core::GameCandidateState::Current {
+                    installed_bytes: 42,
+                },
+            }],
+            ..apogee_core::FirstRunCheckpoint::default()
+        };
+        let snapshot = navigation.replace_first_run(&checkpoint);
+        let import = snapshot.import_id(0).expect("import capability");
+        let game = snapshot.game_id(0).expect("game capability");
+        let import_command = format!(
+            r#"{{"kind":"firstRun","request":{{"kind":"advance","value":{{"kind":"decideImport","value":{{"choice":"import","candidate":"{import}"}}}}}}}}"#
+        );
+        let game_command = format!(
+            r#"{{"kind":"firstRun","request":{{"kind":"advance","value":{{"kind":"selectExistingGame","value":{{"candidate":"{game}"}}}}}}}}"#
+        );
+
         assert!(matches!(
-            parse(command),
+            parse(&import_command, &navigation),
             Some(Command::FirstRun(FirstRunRequest::Advance(
-                FirstRunTransition::RecordRunners(readings)
-            ))) if readings.is_empty()
+                FirstRunAction::DecideImport(ImportDecision::Import(path))
+            ))) if path == import_path
         ));
+        assert!(matches!(
+            parse(&game_command, &navigation),
+            Some(Command::FirstRun(FirstRunRequest::Advance(
+                FirstRunAction::SelectExistingGame { path }
+            ))) if path == game_path
+        ));
+    }
+
+    #[test]
+    fn repair_and_import_reject_frontend_paths() {
+        let repair = format!(
+            r#"{{"kind":"repair","profile":"{PROFILE}","localIndexes":[{{"path":"index.apzi"}}]}}"#
+        );
+        let import =
+            r#"{"kind":"importXivLauncher","request":{"kind":"scan","path":"import-root"}}"#;
+
+        assert!(serde_json::from_str::<CommandDto>(&repair).is_err());
+        assert!(serde_json::from_str::<CommandDto>(import).is_err());
     }
 
     #[test]
@@ -530,6 +590,17 @@ mod tests {
         assert!(operations.contains("firstRun.advance.confirmLegibility"));
         assert!(operations.contains("importXivLauncher.apply"));
         assert!(operations.contains("frontier.gate"));
-        assert_eq!(operations.len(), 28);
+        assert_eq!(operations.len(), 27);
+    }
+
+    #[test]
+    fn generated_command_contract_contains_no_path_type() {
+        let declaration = CommandDto::decl(&ts_rs::Config::default());
+        let first_run = FirstRunActionDto::decl(&ts_rs::Config::default());
+        let import = ImportXivLauncherDto::decl(&ts_rs::Config::default());
+
+        assert!(!declaration.contains("PathDto"));
+        assert!(!first_run.contains("PathDto"));
+        assert!(!import.contains("PathDto"));
     }
 }

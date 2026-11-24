@@ -12,14 +12,18 @@
     "windows": [
       {
         "title": "Apogee",
-        "width": 960,
-        "height": 640,
-        "minWidth": 800,
+        "width": 1080,
+        "height": 720,
+        "minWidth": 900,
         "minHeight": 560
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'none';\nscript-src 'self';\nstyle-src 'self';\nimg-src 'self' asset: http://asset.localhost data:;\nfont-src 'self';\nconnect-src ipc: http://ipc.localhost;\nbase-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
   "bundle": {

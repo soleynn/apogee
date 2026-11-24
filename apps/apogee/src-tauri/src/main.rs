@@ -13,8 +13,12 @@
 mod command;
 mod direct;
 mod dto;
+mod instance;
+mod lifecycle;
 mod mutation;
+mod navigation;
 mod passphrase;
+mod render;
 mod secrets;
 mod supervisor;
 
@@ -22,7 +26,7 @@ use std::future::Future;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use apogee_core::{Core, CoreConfig, Uuid};
+use apogee_core::{Command, Core, CoreConfig, Uuid};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
@@ -47,6 +51,7 @@ macro_rules! ipc_surface {
             direct::dxvk_catalog,
             direct::system_report,
             direct::support_bundle_contents,
+            direct::steam_installs,
             secrets::secrets_file_status,
             secrets::unlock_secrets_file,
             secrets::create_secrets_file,
@@ -67,6 +72,15 @@ macro_rules! ipc_surface {
             mutation::plan_profile_removal,
             mutation::cancel_profile_removal,
             mutation::remove_profile,
+            navigation::open_link,
+            navigation::reveal,
+            navigation::activity_log,
+            navigation::save_support_bundle,
+            navigation::pick_folder,
+            render::render_status,
+            render::render_ok,
+            render::confirm_render,
+            lifecycle::answer_close_request,
             execute,
             cancel,
         }
@@ -120,11 +134,20 @@ struct ShellState {
     direct_reads: Arc<Semaphore>,
     passphrases: Arc<passphrase::PromptBroker>,
     removal_plans: Arc<mutation::RemovalPlans>,
+    lifecycle: lifecycle::CloseController,
+    navigation: navigation::NavigationState,
+    render: render::RenderMonitor,
     runs: Runs,
 }
 
 impl Default for ShellState {
     fn default() -> Self {
+        Self::new(render::RenderMonitor::disabled())
+    }
+}
+
+impl ShellState {
+    fn new(render: render::RenderMonitor) -> Self {
         Self {
             core: Mutex::new(CoreStatus::Starting),
             core_ready: Notify::new(),
@@ -134,12 +157,12 @@ impl Default for ShellState {
             direct_reads: Arc::new(Semaphore::new(4)),
             passphrases: Arc::new(passphrase::PromptBroker::default()),
             removal_plans: Arc::new(mutation::RemovalPlans::default()),
+            lifecycle: lifecycle::CloseController::default(),
+            navigation: navigation::NavigationState::default(),
+            render,
             runs: Runs::default(),
         }
     }
-}
-
-impl ShellState {
     #[cfg(test)]
     fn install_core(&self, core: Result<Core, apogee_core::CoreError>) {
         self.install_core_result(core.map_err(|error| IpcErrorDto::core(&error)));
@@ -272,15 +295,22 @@ where
 /// Start one core command and relay its event stream over `on_event` until core closes it.
 #[tauri::command]
 async fn execute(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ShellState>,
     command: CommandDto,
     on_event: Channel<EventWireDto>,
 ) -> Result<Uuid, IpcErrorDto> {
     // Consume credential bytes before touching any other state, so the IPC allocation is guarded by
     // core's write-only Secret for the rest of the command body.
-    let command = command
-        .into_core()
+    let mut command = command
+        .into_core(&state.navigation, &state.render)
         .map_err(|_| IpcErrorDto::shell("shell.command.invalid"))?;
+    if let Command::SupportBundle { facts, .. } = &mut command
+        && let Some(window) = app.get_webview_window("main")
+        && let Ok(scale) = window.scale_factor()
+    {
+        facts.push(("window_scale".to_owned(), scale.to_string()));
+    }
     let class = RunClass::for_command(&command);
     // The first store snapshot is the bootstrap boundary. No mutating flow starts before it has read
     // a single pre-flow view of every startup record.
@@ -291,9 +321,26 @@ async fn execute(
         .start(run_id, class)
         .map_err(run_admission_error)?;
     let cancel = lease.cancellation();
+    let navigation = state.navigation.clone();
+    let assets = app.asset_protocol_scope();
+    let close_app = app.clone();
+    let close_runs = state.runs.clone();
+    let close_prompts = Arc::clone(&state.passphrases);
     tauri::async_runtime::spawn(async move {
-        supervisor::drive(core.as_ref(), command, cancel, &on_event).await;
+        let close = supervisor::drive(
+            core.as_ref(),
+            command,
+            cancel,
+            run_id,
+            &navigation,
+            &assets,
+            &on_event,
+        )
+        .await;
         drop(lease);
+        if close {
+            lifecycle::close_after_launch(close_app, close_runs, close_prompts).await;
+        }
     });
     Ok(run_id)
 }
@@ -302,6 +349,7 @@ fn run_admission_error(error: RunAdmissionError) -> IpcErrorDto {
     match error {
         RunAdmissionError::Duplicate => IpcErrorDto::shell("shell.run.duplicate"),
         RunAdmissionError::Busy => IpcErrorDto::shell("shell.run.busy"),
+        RunAdmissionError::Draining => IpcErrorDto::shell("shell.run.draining"),
         RunAdmissionError::Unavailable => IpcErrorDto::shell("shell.state.unavailable"),
     }
 }
@@ -316,6 +364,39 @@ async fn cancel(state: tauri::State<'_, ShellState>, run_id: Uuid) -> Result<boo
 }
 
 fn main() -> ExitCode {
+    let instance = match instance::preflight() {
+        Ok(instance::InstancePreflight::Continue(instance)) => instance,
+        Ok(instance::InstancePreflight::Exit(code)) => return code,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let reexec_environment = match instance.reexec_environment() {
+        Ok(environment) => environment,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let render = match render::preflight(reexec_environment) {
+        Ok(render::RenderPreflight::Continue(render)) => render,
+        Ok(render::RenderPreflight::Exit(code)) => return code,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = instance.seal_inheritance() {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "Apogee render tier {}; use --safe-render if the window is unreadable.",
+        render.tier()
+    );
+    let instance = Arc::new(instance);
+
     // The context macro builds the window's context on a thread of its own, for the larger stack,
     // and ends the process itself if that thread panics. Nothing here can reach around that, so the
     // one lint the table denies is carved out over the one statement that expands the macro. It is
@@ -327,11 +408,24 @@ fn main() -> ExitCode {
     )]
     let context = tauri::generate_context!();
 
-    match tauri::Builder::default()
-        .manage(ShellState::default())
-        .setup(|app| {
+    let setup_render = render.clone();
+    let result = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .on_window_event(lifecycle::on_window_event)
+        .manage(Arc::clone(&instance))
+        .manage(ShellState::new(render.clone()))
+        .setup(move |app| {
             let handle = app.handle().clone();
+            app.state::<Arc<instance::InstanceGuard>>()
+                .start(handle.clone())?;
             let state = app.state::<ShellState>();
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title(&setup_render.title())?;
+            }
+            setup_render.start(handle.clone());
             let passphrase = Arc::new(passphrase::WebviewPassphrase::new(
                 Arc::clone(&state.passphrases),
                 Arc::new(TauriPromptEmitter {
@@ -356,16 +450,49 @@ fn main() -> ExitCode {
             Ok(())
         })
         .invoke_handler(ipc_surface!(tauri_handler))
-        .run(context)
-    {
-        Ok(()) => ExitCode::SUCCESS,
+        .run(context);
+
+    let code = match result {
+        Ok(()) => {
+            if let Err(error) = render.record_window_closed() {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         // A return code rather than a panic: the builder fails on a window that cannot be created,
         // which is the condition the render fallback reads to try the next way of drawing one.
         Err(error) => {
             eprintln!("{error}");
+            if let Err(render_error) = render.record_builder_failure() {
+                eprintln!("{render_error}");
+            }
             ExitCode::FAILURE
         }
+    };
+
+    if render.retry_requested() {
+        #[cfg(unix)]
+        {
+            let reexec_environment = match instance.reexec_environment() {
+                Ok(environment) => environment,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match render.retry_exec(reexec_environment) {
+                Ok(render::RenderPreflight::Exit(retry_code)) => return retry_code,
+                Ok(render::RenderPreflight::Continue(_)) => return ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
     }
+    code
 }
 
 #[cfg(test)]
@@ -373,10 +500,68 @@ mod tests {
     use std::collections::BTreeSet;
 
     use serde::Deserialize;
+    use serde_json::Value;
 
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn desktop_policy_exposes_only_the_required_webview_capabilities() -> TestResult {
+        const CSP: &str = "default-src 'none';\nscript-src 'self';\nstyle-src 'self';\nimg-src 'self' asset: http://asset.localhost data:;\nfont-src 'self';\nconnect-src ipc: http://ipc.localhost;\nbase-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
+
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json"))?;
+        assert_eq!(
+            config.pointer("/app/security/csp").and_then(Value::as_str),
+            Some(CSP)
+        );
+        assert_eq!(
+            config
+                .pointer("/app/security/assetProtocol/enable")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            config
+                .pointer("/app/security/assetProtocol/scope")
+                .and_then(Value::as_array),
+            Some(&Vec::new())
+        );
+
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))?;
+        let permissions = capability["permissions"]
+            .as_array()
+            .ok_or("capability permissions must be an array")?;
+        let actual = permissions
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected = BTreeSet::from([
+            "clipboard-manager:allow-write-text",
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "notification:allow-is-permission-granted",
+            "notification:allow-notify",
+            "notification:allow-request-permission",
+        ]);
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|permission| {
+            !permission.starts_with("fs:")
+                && !permission.starts_with("http:")
+                && !permission.starts_with("opener:")
+                && !permission.starts_with("shell:")
+                && !permission.ends_with(":default")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn release_manifest_does_not_enable_the_web_inspector() {
+        assert!(
+            !include_str!("../Cargo.toml").contains("\"devtools\""),
+            "the release-only Tauri devtools feature must stay disabled"
+        );
+    }
 
     #[derive(Deserialize)]
     struct ParityManifest {
@@ -465,6 +650,25 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn compatibility_tool_mutations_are_not_webview_commands() {
+        assert!(
+            IPC_HANDLER_PATHS
+                .iter()
+                .any(|handler| handler.ends_with("steam_installs"))
+        );
+        assert!(
+            !IPC_HANDLER_PATHS
+                .iter()
+                .any(|handler| handler.contains("install_compat_tool"))
+        );
+        assert!(
+            !IPC_HANDLER_PATHS
+                .iter()
+                .any(|handler| handler.contains("remove_compat_tool"))
+        );
     }
 
     #[tokio::test]

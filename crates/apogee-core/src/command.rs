@@ -15,7 +15,7 @@ use apogee_secrets::Secret;
 use uuid::Uuid;
 
 use crate::error::CoreError;
-use crate::{FirstRunCheckpoint, FirstRunTransition, ImportApplyReport, ImportPlan, ImportScan};
+use crate::{FirstRunAction, FirstRunCheckpoint, ImportApplyReport, ImportPlan, ImportScan};
 
 /// A request from a shell to the core.
 ///
@@ -100,7 +100,7 @@ pub enum Command {
 #[non_exhaustive]
 pub enum FirstRunRequest {
     Read,
-    Advance(FirstRunTransition),
+    Advance(FirstRunAction),
 }
 
 /// Preview or apply an XIVLauncher configuration import.
@@ -120,6 +120,7 @@ pub enum ImportData {
 }
 
 /// A fully encoded, redacted support archive.
+#[derive(Clone)]
 pub struct SupportBundleData(Vec<u8>);
 
 impl SupportBundleData {
@@ -455,6 +456,9 @@ pub enum FlowState {
     Launching,
     /// The game process is running.
     Running,
+    /// The game is running and core has determined that this launcher has no remaining teardown
+    /// work, so a shell may end its own lifetime without ending the game.
+    Detached,
     /// Detaching after launch was requested, but this launch has companion teardown to perform, so
     /// the launcher stays attached. Without this the launcher would simply appear to hang.
     SupervisingAddons,

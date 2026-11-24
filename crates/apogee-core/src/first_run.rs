@@ -26,13 +26,21 @@ pub enum FirstRunPosition {
     Complete,
 }
 
+impl Default for FirstRunPosition {
+    fn default() -> Self {
+        Self::Step(FirstRunStep::Legibility)
+    }
+}
+
 /// Facts shown while a person confirms that the window is legible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegibilityReading {
     pub gpu: Option<String>,
     pub driver: Option<String>,
     pub session: SessionType,
-    pub render_tier: u8,
+    /// The native shell's renderer mitigation tier, when that shell can report it without trusting
+    /// web content. A headless caller and shells without a native probe leave it unknown.
+    pub render_tier: Option<u8>,
 }
 
 /// The display-server session in which the window was confirmed.
@@ -95,6 +103,14 @@ pub struct AccountChoice {
     pub steam_client: SteamClientReading,
 }
 
+/// Account fields a person supplies during setup. Machine observations are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstRunAccountInput {
+    pub square_enix_id: String,
+    pub kind: FirstRunAccountKind,
+    pub never_save_password: bool,
+}
+
 /// Account kinds that change login and launch behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,10 +143,18 @@ pub struct GameCandidate {
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 #[non_exhaustive]
 pub enum GameCandidateState {
-    Current { installed_bytes: u64 },
+    Current {
+        installed_bytes: u64,
+    },
     NeedsUpdate(PatchReading),
+    /// A recognizable installation whose update status has not been authenticated yet.
+    Installed {
+        installed_bytes: u64,
+    },
     NotAGame,
-    Unreadable { code: String },
+    Unreadable {
+        code: String,
+    },
 }
 
 /// A verified patch reading used by setup summaries and the ready action.
@@ -151,8 +175,10 @@ pub enum GameChoice {
     },
     Install {
         path: PathBuf,
-        approximate_bytes: u64,
-        exact_download_bytes: u64,
+        /// A published estimate, absent until a verified first-party source supplies one.
+        approximate_bytes: Option<u64>,
+        /// Exact patch bytes, absent until authenticated registration returns patch lists.
+        exact_download_bytes: Option<u64>,
     },
 }
 
@@ -163,6 +189,7 @@ pub enum GameChoice {
 pub enum ExistingGameState {
     Current,
     NeedsUpdate(PatchReading),
+    UpdateUnknown,
 }
 
 /// A credential backend and its current usability.
@@ -226,6 +253,13 @@ pub struct RunnerAndPrefixChoice {
     pub prefix: PrefixOutcome,
 }
 
+/// A prefix attempt that failed and is waiting for an explicit retry-or-continue decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixFailure {
+    pub runner: FirstRunRunnerSelection,
+    pub code: String,
+}
+
 /// Prefix preparation either succeeds or continues with an explicit degraded state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
@@ -242,7 +276,8 @@ pub enum PrefixOutcome {
 pub enum ReadyAction {
     Play,
     UpdateAndPlay(PatchReading),
-    InstallAndPlay { bytes: u64 },
+    CheckAndPlay,
+    InstallAndPlay { bytes: Option<u64> },
 }
 
 /// Whether the final action is still waiting or has been started.
@@ -261,33 +296,62 @@ pub enum ReadyState {
 /// discovery rows can be refreshed independently before their corresponding choice is persisted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FirstRunCheckpoint {
+    /// The next required step, derived after every load and transition rather than persisted.
+    #[serde(skip)]
+    pub position: FirstRunPosition,
     pub legibility: Option<LegibilityReading>,
     #[serde(default)]
     pub import: ImportState,
     pub account: Option<AccountChoice>,
+    #[serde(default)]
+    pub account_id: Option<uuid::Uuid>,
     pub game_candidates: Vec<GameCandidate>,
     pub game: Option<GameChoice>,
+    #[serde(default)]
+    pub profile_id: Option<uuid::Uuid>,
     pub credential_backends: Vec<CredentialBackendReading>,
     pub credential: Option<CredentialChoice>,
     pub runners: Vec<RunnerReading>,
+    #[serde(default)]
+    pub prefix_failure: Option<PrefixFailure>,
     pub runner_and_prefix: Option<RunnerAndPrefixChoice>,
     #[serde(default)]
     pub ready: ReadyState,
 }
 
+/// A person's intent during setup. Discovery rows and verified facts never cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstRunAction {
+    ConfirmLegibility(LegibilityReading),
+    DecideImport(ImportDecision),
+    SaveAccount(FirstRunAccountInput),
+    InspectGame { path: PathBuf },
+    SelectExistingGame { path: PathBuf },
+    SelectInstallLocation { path: PathBuf },
+    SelectCredential(CredentialChoice),
+    SelectRunner(FirstRunRunnerSelection),
+    ContinueWithoutPrefix,
+    StartReady,
+}
+
 /// A pure state change accepted by [`transition`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum FirstRunTransition {
+pub(crate) enum FirstRunTransition {
     ConfirmLegibility(LegibilityReading),
     RecordImportDiscovery(Vec<FirstRunImportCandidate>),
     DecideImport(ImportDecision),
-    SaveAccount(AccountChoice),
+    SaveAccount {
+        choice: AccountChoice,
+        account_id: uuid::Uuid,
+    },
     RecordGameCandidates(Vec<GameCandidate>),
-    SelectGame(GameChoice),
-    RecordCredentialBackends(Vec<CredentialBackendReading>),
+    SelectGame {
+        choice: GameChoice,
+        profile_id: uuid::Uuid,
+    },
     SelectCredential(CredentialChoice),
-    RecordRunners(Vec<RunnerReading>),
     FinishRunnerAndPrefix(RunnerAndPrefixChoice),
     StartReady(ReadyAction),
 }
@@ -308,6 +372,8 @@ pub enum FirstRunTransitionError {
     CredentialBackendNotReady { backend: CredentialBackend },
     #[error("runner is not available: {runner:?}")]
     RunnerNotAvailable { runner: FirstRunRunnerSelection },
+    #[error("there is no failed prefix attempt to continue from")]
+    NoFailedPrefixAttempt,
     #[error("ready action does not match the verified game state")]
     ReadyActionMismatch,
 }
@@ -342,6 +408,11 @@ pub fn first_incomplete(checkpoint: &FirstRunCheckpoint) -> FirstRunPosition {
     }
 }
 
+/// Refresh the derived position after loading a checkpoint written by any schema version.
+pub(crate) fn refresh_position(checkpoint: &mut FirstRunCheckpoint) {
+    checkpoint.position = first_incomplete(checkpoint);
+}
+
 /// Derive the only valid final action from the verified game choice.
 pub fn ready_action(checkpoint: &FirstRunCheckpoint) -> Option<ReadyAction> {
     match checkpoint.game.as_ref()? {
@@ -353,6 +424,10 @@ pub fn ready_action(checkpoint: &FirstRunCheckpoint) -> Option<ReadyAction> {
             state: ExistingGameState::NeedsUpdate(patches),
             ..
         } => Some(ReadyAction::UpdateAndPlay(*patches)),
+        GameChoice::Existing {
+            state: ExistingGameState::UpdateUnknown,
+            ..
+        } => Some(ReadyAction::CheckAndPlay),
         GameChoice::Install {
             exact_download_bytes,
             ..
@@ -401,26 +476,24 @@ pub fn transition(
             }
             next.import = ImportState::Complete(decision);
         }
-        FirstRunTransition::SaveAccount(account)
+        FirstRunTransition::SaveAccount { choice, account_id }
             if position == FirstRunPosition::Step(FirstRunStep::Account) =>
         {
-            next.account = Some(account);
+            next.account = Some(choice);
+            next.account_id = Some(account_id);
         }
         FirstRunTransition::RecordGameCandidates(candidates)
             if position == FirstRunPosition::Step(FirstRunStep::Game) =>
         {
             next.game_candidates = candidates;
         }
-        FirstRunTransition::SelectGame(game)
-            if position == FirstRunPosition::Step(FirstRunStep::Game) =>
-        {
+        FirstRunTransition::SelectGame {
+            choice: game,
+            profile_id,
+        } if position == FirstRunPosition::Step(FirstRunStep::Game) => {
             validate_game_choice(&next, &game)?;
             next.game = Some(game);
-        }
-        FirstRunTransition::RecordCredentialBackends(backends)
-            if position == FirstRunPosition::Step(FirstRunStep::CredentialBackend) =>
-        {
-            next.credential_backends = backends;
+            next.profile_id = Some(profile_id);
         }
         FirstRunTransition::SelectCredential(credential)
             if position == FirstRunPosition::Step(FirstRunStep::CredentialBackend) =>
@@ -435,23 +508,11 @@ pub fn transition(
             }
             next.credential = Some(credential);
         }
-        FirstRunTransition::RecordRunners(runners)
-            if position == FirstRunPosition::Step(FirstRunStep::RunnerAndPrefix) =>
-        {
-            next.runners = runners;
-        }
         FirstRunTransition::FinishRunnerAndPrefix(choice)
             if position == FirstRunPosition::Step(FirstRunStep::RunnerAndPrefix) =>
         {
-            let available = next
-                .runners
-                .iter()
-                .any(|reading| reading.selection == choice.runner && reading.available);
-            if !available {
-                return Err(FirstRunTransitionError::RunnerNotAvailable {
-                    runner: choice.runner,
-                });
-            }
+            validate_runner_selection(&next, &choice.runner)?;
+            next.prefix_failure = None;
             next.runner_and_prefix = Some(choice);
         }
         FirstRunTransition::StartReady(action)
@@ -464,7 +525,25 @@ pub fn transition(
         }
         _ => return Err(FirstRunTransitionError::WrongPosition { position }),
     }
+    refresh_position(&mut next);
     Ok(next)
+}
+
+pub(crate) fn validate_runner_selection(
+    checkpoint: &FirstRunCheckpoint,
+    runner: &FirstRunRunnerSelection,
+) -> Result<(), FirstRunTransitionError> {
+    let available = checkpoint
+        .runners
+        .iter()
+        .any(|reading| &reading.selection == runner && reading.available);
+    if available {
+        Ok(())
+    } else {
+        Err(FirstRunTransitionError::RunnerNotAvailable {
+            runner: runner.clone(),
+        })
+    }
 }
 
 fn validate_game_choice(
@@ -487,6 +566,7 @@ fn validate_game_choice(
             GameCandidateState::NeedsUpdate(candidate_patches),
             ExistingGameState::NeedsUpdate(selected_patches),
         ) => candidate_patches == selected_patches,
+        (GameCandidateState::Installed { .. }, ExistingGameState::UpdateUnknown) => true,
         _ => false,
     };
     if matches {
@@ -505,7 +585,7 @@ mod tests {
             gpu: Some("Example GPU".to_owned()),
             driver: Some("1.2.3".to_owned()),
             session: SessionType::Wayland,
-            render_tier: 0,
+            render_tier: Some(0),
         }
     }
 
@@ -539,21 +619,25 @@ mod tests {
     }
 
     fn through_account() -> FirstRunCheckpoint {
-        FirstRunCheckpoint {
+        let mut checkpoint = FirstRunCheckpoint {
             legibility: Some(legibility()),
             import: ImportState::NoneFound,
             account: Some(account()),
             ..FirstRunCheckpoint::default()
-        }
+        };
+        refresh_position(&mut checkpoint);
+        checkpoint
     }
 
     fn through_runner(game: GameChoice) -> FirstRunCheckpoint {
-        FirstRunCheckpoint {
+        let mut checkpoint = FirstRunCheckpoint {
             game: Some(game),
             credential: Some(CredentialChoice::DoNotSave),
             runner_and_prefix: Some(runner()),
             ..through_account()
-        }
+        };
+        refresh_position(&mut checkpoint);
+        checkpoint
     }
 
     #[test]
@@ -662,8 +746,14 @@ mod tests {
             steam_client: SteamClientReading::Missing,
             ..account()
         };
-        let next = transition(&checkpoint, FirstRunTransition::SaveAccount(steam.clone()))
-            .expect("account transition");
+        let next = transition(
+            &checkpoint,
+            FirstRunTransition::SaveAccount {
+                choice: steam.clone(),
+                account_id: uuid::Uuid::nil(),
+            },
+        )
+        .expect("account transition");
         assert_eq!(next.account, Some(steam));
         assert_eq!(
             first_incomplete(&next),
@@ -733,7 +823,13 @@ mod tests {
             state: ExistingGameState::Current,
         };
         assert_eq!(
-            transition(&checkpoint, FirstRunTransition::SelectGame(choice)),
+            transition(
+                &checkpoint,
+                FirstRunTransition::SelectGame {
+                    choice,
+                    profile_id: uuid::Uuid::nil(),
+                },
+            ),
             Err(FirstRunTransitionError::UnknownGameCandidate {
                 path: PathBuf::from("unknown")
             })
@@ -749,10 +845,13 @@ mod tests {
         assert_eq!(
             transition(
                 &checkpoint,
-                FirstRunTransition::SelectGame(GameChoice::Existing {
-                    path: PathBuf::from("empty"),
-                    state: ExistingGameState::Current,
-                })
+                FirstRunTransition::SelectGame {
+                    choice: GameChoice::Existing {
+                        path: PathBuf::from("empty"),
+                        state: ExistingGameState::Current,
+                    },
+                    profile_id: uuid::Uuid::nil(),
+                }
             ),
             Err(FirstRunTransitionError::UnusableGameCandidate {
                 path: PathBuf::from("empty")
@@ -765,8 +864,8 @@ mod tests {
         let mut checkpoint = through_account();
         checkpoint.game = Some(GameChoice::Install {
             path: PathBuf::from("new"),
-            approximate_bytes: 100,
-            exact_download_bytes: 90,
+            approximate_bytes: Some(100),
+            exact_download_bytes: Some(90),
         });
         checkpoint.credential_backends = vec![CredentialBackendReading {
             backend: CredentialBackend::SecretService,
@@ -819,8 +918,12 @@ mod tests {
         });
         let install = through_runner(GameChoice::Install {
             path: PathBuf::from("new"),
-            approximate_bytes: 100_000,
-            exact_download_bytes: 91_000,
+            approximate_bytes: Some(100_000),
+            exact_download_bytes: Some(91_000),
+        });
+        let unknown = through_runner(GameChoice::Existing {
+            path: PathBuf::from("unchecked"),
+            state: ExistingGameState::UpdateUnknown,
         });
 
         assert_eq!(ready_action(&current), Some(ReadyAction::Play));
@@ -830,8 +933,11 @@ mod tests {
         );
         assert_eq!(
             ready_action(&install),
-            Some(ReadyAction::InstallAndPlay { bytes: 91_000 })
+            Some(ReadyAction::InstallAndPlay {
+                bytes: Some(91_000)
+            })
         );
+        assert_eq!(ready_action(&unknown), Some(ReadyAction::CheckAndPlay));
     }
 
     #[test]
@@ -843,7 +949,7 @@ mod tests {
         assert_eq!(
             transition(
                 &checkpoint,
-                FirstRunTransition::StartReady(ReadyAction::InstallAndPlay { bytes: 1 })
+                FirstRunTransition::StartReady(ReadyAction::InstallAndPlay { bytes: Some(1) })
             ),
             Err(FirstRunTransitionError::ReadyActionMismatch)
         );
@@ -877,8 +983,15 @@ mod tests {
             state: ExistingGameState::Current,
         });
         let encoded = serde_json::to_vec(&checkpoint).expect("serialize checkpoint");
-        let decoded: FirstRunCheckpoint =
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&encoded)
+                .unwrap()
+                .get("position")
+                .is_none()
+        );
+        let mut decoded: FirstRunCheckpoint =
             serde_json::from_slice(&encoded).expect("deserialize checkpoint");
+        refresh_position(&mut decoded);
         assert_eq!(decoded, checkpoint);
         assert_eq!(
             first_incomplete(&decoded),

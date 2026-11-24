@@ -2,10 +2,12 @@
 import type { AccountChoiceDto } from "./AccountChoiceDto";
 import type { CredentialBackendReadingDto } from "./CredentialBackendReadingDto";
 import type { CredentialChoiceDto } from "./CredentialChoiceDto";
+import type { FirstRunPositionDto } from "./FirstRunPositionDto";
 import type { GameCandidateDto } from "./GameCandidateDto";
 import type { GameChoiceDto } from "./GameChoiceDto";
 import type { ImportStateDto } from "./ImportStateDto";
 import type { LegibilityDto } from "./LegibilityDto";
+import type { PrefixFailureDto } from "./PrefixFailureDto";
 import type { ReadyStateDto } from "./ReadyStateDto";
 import type { RunnerAndPrefixChoiceDto } from "./RunnerAndPrefixChoiceDto";
 import type { RunnerReadingDto } from "./RunnerReadingDto";
@@ -13,4 +15,4 @@ import type { RunnerReadingDto } from "./RunnerReadingDto";
 /**
  * Everything needed to resume or render initial setup.
  */
-export type FirstRunDto = { legibility: LegibilityDto | null, import: ImportStateDto, account: AccountChoiceDto | null, gameCandidates: Array<GameCandidateDto>, game: GameChoiceDto | null, credentialBackends: Array<CredentialBackendReadingDto>, credential: CredentialChoiceDto | null, runners: Array<RunnerReadingDto>, runnerAndPrefix: RunnerAndPrefixChoiceDto | null, ready: ReadyStateDto, };
+export type FirstRunDto = { position: FirstRunPositionDto, legibility: LegibilityDto | null, import: ImportStateDto, account: AccountChoiceDto | null, gameCandidates: Array<GameCandidateDto>, game: GameChoiceDto | null, credentialBackends: Array<CredentialBackendReadingDto>, credential: CredentialChoiceDto | null, runners: Array<RunnerReadingDto>, prefixFailure: PrefixFailureDto | null, runnerAndPrefix: RunnerAndPrefixChoiceDto | null, ready: ReadyStateDto, };

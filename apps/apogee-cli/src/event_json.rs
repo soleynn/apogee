@@ -140,6 +140,7 @@ fn state_value(state: &FlowState) -> Value {
         FlowState::RecreatingPrefix => json!({ "kind": "recreatingPrefix" }),
         FlowState::Launching => json!({ "kind": "launching" }),
         FlowState::Running => json!({ "kind": "running" }),
+        FlowState::Detached => json!({ "kind": "detached" }),
         FlowState::SupervisingAddons => json!({ "kind": "supervisingAddons" }),
         FlowState::Exited => json!({ "kind": "exited" }),
         FlowState::Cancelled => json!({ "kind": "cancelled" }),
@@ -392,6 +393,7 @@ fn news_row_value(row: &apogee_core::NewsRow) -> Value {
 
 fn first_run_value(checkpoint: &apogee_core::FirstRunCheckpoint) -> Value {
     json!({
+        "position": first_run_position_value(checkpoint.position),
         "legibility": checkpoint.legibility.as_ref().map(legibility_value),
         "import": first_run_import_state_value(&checkpoint.import),
         "account": checkpoint.account.as_ref().map(account_choice_value),
@@ -404,9 +406,33 @@ fn first_run_value(checkpoint: &apogee_core::FirstRunCheckpoint) -> Value {
             .collect::<Vec<_>>(),
         "credential": checkpoint.credential.as_ref().map(credential_choice_value),
         "runners": checkpoint.runners.iter().map(runner_reading_value).collect::<Vec<_>>(),
+        "prefixFailure": checkpoint.prefix_failure.as_ref().map(prefix_failure_value),
         "runnerAndPrefix": checkpoint.runner_and_prefix.as_ref().map(runner_and_prefix_value),
         "ready": ready_state_value(&checkpoint.ready),
     })
+}
+
+fn first_run_position_value(position: apogee_core::FirstRunPosition) -> Value {
+    match position {
+        apogee_core::FirstRunPosition::Step(step) => json!({
+            "state": "step",
+            "value": match step {
+                apogee_core::FirstRunStep::Legibility => "legibility",
+                apogee_core::FirstRunStep::Import => "import",
+                apogee_core::FirstRunStep::Account => "account",
+                apogee_core::FirstRunStep::Game => "game",
+                apogee_core::FirstRunStep::CredentialBackend => "credentialBackend",
+                apogee_core::FirstRunStep::RunnerAndPrefix => "runnerAndPrefix",
+                apogee_core::FirstRunStep::Ready => "ready",
+                _ => "unknown",
+            },
+        }),
+        apogee_core::FirstRunPosition::WaitingForImportDiscovery => {
+            json!({ "state": "waitingForImportDiscovery" })
+        }
+        apogee_core::FirstRunPosition::Complete => json!({ "state": "complete" }),
+        _ => json!({ "state": "unknown" }),
+    }
 }
 
 fn legibility_value(reading: &apogee_core::LegibilityReading) -> Value {
@@ -505,6 +531,10 @@ fn game_candidate_state_value(state: &apogee_core::GameCandidateState) -> Value 
             "state": "needsUpdate",
             "value": patch_reading_value(*reading),
         }),
+        apogee_core::GameCandidateState::Installed { installed_bytes } => json!({
+            "state": "installed",
+            "value": { "installedBytes": installed_bytes },
+        }),
         apogee_core::GameCandidateState::NotAGame => json!({ "state": "notAGame" }),
         apogee_core::GameCandidateState::Unreadable { code } => json!({
             "state": "unreadable",
@@ -550,6 +580,7 @@ fn existing_game_state_value(state: apogee_core::ExistingGameState) -> Value {
             "state": "needsUpdate",
             "value": patch_reading_value(reading),
         }),
+        apogee_core::ExistingGameState::UpdateUnknown => json!({ "state": "updateUnknown" }),
         _ => json!({ "state": "unknown" }),
     }
 }
@@ -618,6 +649,13 @@ fn runner_selection_value(selection: &apogee_core::FirstRunRunnerSelection) -> V
     }
 }
 
+fn prefix_failure_value(failure: &apogee_core::PrefixFailure) -> Value {
+    json!({
+        "runner": runner_selection_value(&failure.runner),
+        "code": failure.code,
+    })
+}
+
 fn runner_and_prefix_value(choice: &apogee_core::RunnerAndPrefixChoice) -> Value {
     json!({
         "runner": runner_selection_value(&choice.runner),
@@ -654,6 +692,7 @@ fn ready_action_value(action: apogee_core::ReadyAction) -> Value {
             "action": "updateAndPlay",
             "value": patch_reading_value(reading),
         }),
+        apogee_core::ReadyAction::CheckAndPlay => json!({ "action": "checkAndPlay" }),
         apogee_core::ReadyAction::InstallAndPlay { bytes } => json!({
             "action": "installAndPlay",
             "value": { "bytes": bytes },
@@ -980,14 +1019,17 @@ mod tests {
             bytes: 4096,
         }));
         let outcome = render_event_json(&Event::Outcome(RunOutcome::Cancelled));
+        let detached = render_event_json(&Event::State(FlowState::Detached));
         let state: Value = serde_json::from_str(&state).unwrap_or(Value::Null);
         let outcome: Value = serde_json::from_str(&outcome).unwrap_or(Value::Null);
+        let detached: Value = serde_json::from_str(&detached).unwrap_or(Value::Null);
 
         assert_eq!(state["state"]["kind"], "patchesPending");
         assert_eq!(state["state"]["count"], 7);
         assert_eq!(state["state"]["bytes"], 4096);
         assert_eq!(outcome["outcome"], "cancelled");
         assert_eq!(outcome["code"], "event-outcome-cancelled");
+        assert_eq!(detached["state"]["kind"], "detached");
     }
 
     #[test]

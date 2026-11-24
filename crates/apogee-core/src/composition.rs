@@ -873,20 +873,11 @@ impl Core {
         read_first_run_checkpoint(
             self.store.clone(),
             self.runtime.clone(),
+            self.secrets.shared(),
+            self.sealed_file.clone(),
             CancellationToken::new(),
         )
         .await
-    }
-
-    /// Apply and persist one validated first-run transition.
-    pub fn advance_first_run(
-        &self,
-        change: crate::FirstRunTransition,
-    ) -> Result<crate::FirstRunCheckpoint, CoreError> {
-        let checkpoint = self.store.load_first_run()?;
-        let next = crate::first_run::transition(&checkpoint, change)?;
-        self.store.save_first_run(&next)?;
-        Ok(next)
     }
 
     fn system_report_input(
@@ -939,6 +930,37 @@ impl Core {
     /// file is corrupt.
     pub fn profile(&self, id: Uuid) -> Result<Profile, CoreError> {
         stored_profile(&self.store, id)
+    }
+
+    /// The selected profile's persisted game directory.
+    ///
+    /// A presentation layer uses this instead of reconstructing or accepting the path when it needs
+    /// to show the location in the platform file manager.
+    ///
+    /// # Errors
+    /// As [`Core::profile`].
+    pub fn game_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
+        Ok(self.profile(id)?.game_path)
+    }
+
+    /// The directory containing the selected profile's configuration backups.
+    ///
+    /// # Errors
+    /// As [`Core::profile`].
+    pub fn backup_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
+        let profile = self.profile(id)?;
+        Ok(crate::backup::profile_dir(&self.backups_dir, &profile))
+    }
+
+    /// The repair recycler beneath the selected profile's game directory.
+    ///
+    /// Repair quarantines unrecognized files here rather than deleting them. Keeping this path in
+    /// core prevents a presentation layer from duplicating that on-disk contract.
+    ///
+    /// # Errors
+    /// As [`Core::profile`].
+    pub fn repair_recycler_directory(&self, id: Uuid) -> Result<PathBuf, CoreError> {
+        Ok(self.profile(id)?.game_path.join("apogee_repair_recycler"))
     }
 
     /// Every stored account.
@@ -1587,6 +1609,7 @@ impl Core {
             steam: self.steam.clone(),
             otp: self.otp.clone(),
             secrets: self.secrets.shared(),
+            sealed_file: self.sealed_file.clone(),
             store: self.store.clone(),
             clock: self.clock.clone(),
             game_tick: host::game_tick,
@@ -1676,6 +1699,8 @@ fn system_report_input_from_profile(
 pub(crate) async fn read_first_run_checkpoint(
     store: Store,
     runtime: Runtime,
+    secrets: Arc<dyn apogee_secrets::SecretStore + Send + Sync>,
+    sealed_file: Arc<EncryptedFile>,
     cancel: CancellationToken,
 ) -> Result<crate::FirstRunCheckpoint, CoreError> {
     let read_store = store.clone();
@@ -1707,7 +1732,7 @@ pub(crate) async fn read_first_run_checkpoint(
                 .collect();
             crate::first_run::transition(
                 &checkpoint,
-                crate::FirstRunTransition::RecordImportDiscovery(candidates),
+                crate::first_run::FirstRunTransition::RecordImportDiscovery(candidates),
             )
             .map_err(CoreError::from)
             .map_err(Box::new)
@@ -1755,6 +1780,24 @@ pub(crate) async fn read_first_run_checkpoint(
             available: system_version.is_some(),
         });
     }
+    if checkpoint.credential_backends.is_empty()
+        && matches!(
+            crate::first_incomplete(&checkpoint),
+            crate::FirstRunPosition::Step(crate::FirstRunStep::CredentialBackend)
+                | crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+                | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+        )
+    {
+        checkpoint.credential_backends =
+            blocking_read("first-run credential backends", move || {
+                Ok(first_run_credential_backends(
+                    &secrets.probe(),
+                    &sealed_file,
+                ))
+            })
+            .await?;
+    }
+    crate::first_run::refresh_position(&mut checkpoint);
     blocking_read("first-run save", move || {
         store
             .save_first_run(&checkpoint)
@@ -1763,6 +1806,58 @@ pub(crate) async fn read_first_run_checkpoint(
         Ok(checkpoint)
     })
     .await
+}
+
+fn first_run_credential_backends(
+    active: &BackendReport,
+    sealed_file: &EncryptedFile,
+) -> Vec<crate::CredentialBackendReading> {
+    use apogee_secrets::{Backend, FileState};
+
+    let mut readings = Vec::new();
+    let backend = match active.backend {
+        Backend::SecretService => Some(crate::CredentialBackend::SecretService),
+        Backend::WindowsCredentialManager => {
+            Some(crate::CredentialBackend::WindowsCredentialManager)
+        }
+        Backend::EncryptedFile => Some(crate::CredentialBackend::EncryptedFile),
+        _ => None,
+    };
+    if let Some(backend) = backend {
+        let state = if active.is_usable() {
+            crate::CredentialBackendState::Ready
+        } else {
+            crate::CredentialBackendState::Unavailable {
+                code: crate::StableCode::code(&active.state).to_owned(),
+            }
+        };
+        readings.push(crate::CredentialBackendReading { backend, state });
+    }
+    if !readings
+        .iter()
+        .any(|reading| reading.backend == crate::CredentialBackend::EncryptedFile)
+    {
+        let state = match sealed_file.inspect() {
+            FileState::Absent | FileState::Sealed { .. } if !sealed_file.is_open() => {
+                crate::CredentialBackendState::NeedsPassphrase
+            }
+            FileState::Sealed { .. } => crate::CredentialBackendState::Ready,
+            FileState::Unreadable => crate::CredentialBackendState::Unavailable {
+                code: "secrets-file-unreadable".to_owned(),
+            },
+            FileState::Foreign => crate::CredentialBackendState::Unavailable {
+                code: "secrets-file-foreign".to_owned(),
+            },
+            _ => crate::CredentialBackendState::Unavailable {
+                code: "secrets-file-unknown".to_owned(),
+            },
+        };
+        readings.push(crate::CredentialBackendReading {
+            backend: crate::CredentialBackend::EncryptedFile,
+            state,
+        });
+    }
+    readings
 }
 
 fn system_wine_version() -> Option<String> {
@@ -1937,6 +2032,28 @@ mod tests {
         assert_eq!(
             config.secrets_path(),
             std::path::Path::new("/base/store/secrets.apsf")
+        );
+    }
+
+    #[test]
+    fn profile_owned_directories_are_resolved_from_persisted_state() {
+        let dir = TempDir::new().unwrap();
+        let config = CoreConfig::with_base(dir.path());
+        let backups = config.backups_dir.clone();
+        let core = Core::new(config).unwrap();
+        let account = Account::new("person", AccountKind::Standard);
+        let profile = Profile::new("Main", account.id, dir.path().join("game-root"));
+        core.save_account(&account).unwrap();
+        core.save_profile(&profile).unwrap();
+
+        assert_eq!(core.game_directory(profile.id).unwrap(), profile.game_path);
+        assert_eq!(
+            core.backup_directory(profile.id).unwrap(),
+            backups.join(profile.id.to_string())
+        );
+        assert_eq!(
+            core.repair_recycler_directory(profile.id).unwrap(),
+            profile.game_path.join("apogee_repair_recycler")
         );
     }
 

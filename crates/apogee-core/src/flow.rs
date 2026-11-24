@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
+use crate::StableCode;
 use crate::addons::AddonBackend;
 use crate::command::{
     Command, Event, FirstRunRequest, FlowState, FrontierData, FrontierQuery, GateData, ImportData,
@@ -78,6 +79,7 @@ pub(crate) struct FlowContext {
     pub(crate) otp: Otp,
     /// The account-scoped password store. It is intentionally reachable only inside the flow.
     pub(crate) secrets: Arc<dyn SecretStore + Send + Sync>,
+    pub(crate) sealed_file: Arc<apogee_secrets::EncryptedFile>,
     pub(crate) store: Store,
     pub(crate) clock: Clock,
     pub(crate) game_tick: host::TickSource,
@@ -255,24 +257,424 @@ async fn first_run(
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
-    let checkpoint = match request {
-        FirstRunRequest::Read => {
+    let (checkpoint, start) = match request {
+        FirstRunRequest::Read => (
             crate::composition::read_first_run_checkpoint(
                 ctx.store.clone(),
                 ctx.runtime.clone(),
+                Arc::clone(&ctx.secrets),
+                Arc::clone(&ctx.sealed_file),
                 cancel.clone(),
             )
-            .await?
-        }
-        FirstRunRequest::Advance(change) => {
-            let checkpoint = ctx.store.load_first_run()?;
-            let checkpoint = crate::first_run::transition(&checkpoint, change)?;
-            ctx.store.save_first_run(&checkpoint)?;
-            checkpoint
+            .await?,
+            false,
+        ),
+        FirstRunRequest::Advance(action) => {
+            let start = matches!(action, crate::FirstRunAction::StartReady);
+            (advance_first_run(ctx, action, tx, cancel).await?, start)
         }
     };
     let _ = tx.send(Event::FirstRun(Box::new(checkpoint)));
+    if start {
+        let checkpoint = ctx.store.load_first_run()?;
+        let profile = checkpoint.profile_id.ok_or_else(|| CoreError::Init {
+            detail: "first-run profile identity is missing".to_owned(),
+        })?;
+        let action = match checkpoint.ready {
+            crate::ReadyState::Started(action) => action,
+            crate::ReadyState::Pending => {
+                return Err(CoreError::Init {
+                    detail: "first-run final action was not persisted".to_owned(),
+                });
+            }
+        };
+        let mode = match action {
+            crate::ReadyAction::InstallAndPlay { .. } => InstallMode::FromNothing,
+            crate::ReadyAction::Play
+            | crate::ReadyAction::UpdateAndPlay(_)
+            | crate::ReadyAction::CheckAndPlay => InstallMode::Update,
+        };
+        play(
+            ctx,
+            profile,
+            PasswordSource::Stored,
+            OtpSource::Totp,
+            mode,
+            true,
+            tx,
+            cancel,
+        )
+        .await?;
+    }
     Ok(())
+}
+
+async fn advance_first_run(
+    ctx: &FlowContext,
+    action: crate::FirstRunAction,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<crate::FirstRunCheckpoint, CoreError> {
+    use crate::first_run::FirstRunTransition as Transition;
+
+    let checkpoint = ctx.store.load_first_run()?;
+    let next = match action {
+        crate::FirstRunAction::ConfirmLegibility(reading) => {
+            crate::first_run::transition(&checkpoint, Transition::ConfirmLegibility(reading))?
+        }
+        crate::FirstRunAction::DecideImport(decision) => {
+            crate::first_run::transition(&checkpoint, Transition::DecideImport(decision))?
+        }
+        crate::FirstRunAction::SaveAccount(input) => {
+            let steam_client = installed_steam_client(input.kind);
+            let choice = crate::AccountChoice {
+                square_enix_id: input.square_enix_id.clone(),
+                kind: input.kind,
+                never_save_password: input.never_save_password,
+                steam_client,
+            };
+            let account = account_from_first_run(&input);
+            let next = crate::first_run::transition(
+                &checkpoint,
+                Transition::SaveAccount {
+                    choice,
+                    account_id: account.id,
+                },
+            )?;
+            ctx.store.save_account(&account)?;
+            next
+        }
+        crate::FirstRunAction::InspectGame { path } => {
+            let candidate = inspect_first_run_game(path).await;
+            let mut candidates = checkpoint.game_candidates.clone();
+            candidates.retain(|known| known.path != candidate.path);
+            candidates.push(candidate);
+            crate::first_run::transition(&checkpoint, Transition::RecordGameCandidates(candidates))?
+        }
+        crate::FirstRunAction::SelectExistingGame { path } => {
+            let candidate = checkpoint
+                .game_candidates
+                .iter()
+                .find(|candidate| candidate.path == path)
+                .ok_or_else(|| crate::FirstRunTransitionError::UnknownGameCandidate {
+                    path: path.clone(),
+                })?;
+            let state = match candidate.state {
+                crate::GameCandidateState::Current { .. } => crate::ExistingGameState::Current,
+                crate::GameCandidateState::NeedsUpdate(reading) => {
+                    crate::ExistingGameState::NeedsUpdate(reading)
+                }
+                crate::GameCandidateState::Installed { .. } => {
+                    crate::ExistingGameState::UpdateUnknown
+                }
+                crate::GameCandidateState::NotAGame
+                | crate::GameCandidateState::Unreadable { .. } => {
+                    return Err(
+                        crate::FirstRunTransitionError::UnusableGameCandidate { path }.into(),
+                    );
+                }
+            };
+            select_first_run_game(
+                ctx,
+                &checkpoint,
+                crate::GameChoice::Existing { path, state },
+            )?
+        }
+        crate::FirstRunAction::SelectInstallLocation { path } => select_first_run_game(
+            ctx,
+            &checkpoint,
+            crate::GameChoice::Install {
+                path,
+                approximate_bytes: None,
+                exact_download_bytes: None,
+            },
+        )?,
+        crate::FirstRunAction::SelectCredential(credential) => {
+            let next = crate::first_run::transition(
+                &checkpoint,
+                Transition::SelectCredential(credential),
+            )?;
+            let mut settings = ctx.store.load_settings()?;
+            settings.secret_backend = match credential {
+                crate::CredentialChoice::SaveIn(crate::CredentialBackend::EncryptedFile) => {
+                    crate::SecretBackend::EncryptedFile
+                }
+                crate::CredentialChoice::SaveIn(
+                    crate::CredentialBackend::SecretService
+                    | crate::CredentialBackend::WindowsCredentialManager,
+                ) => crate::SecretBackend::Platform,
+                crate::CredentialChoice::DoNotSave => crate::SecretBackend::Nothing,
+            };
+            ctx.store.save_settings(&settings)?;
+            next
+        }
+        crate::FirstRunAction::SelectRunner(runner) => {
+            let selected_runner = runner.clone();
+            crate::first_run::validate_runner_selection(&checkpoint, &selected_runner)?;
+            let mut next = checkpoint.clone();
+            materialize_first_run_identities(ctx, &mut next)?;
+            let profile_id = next.profile_id.ok_or_else(|| CoreError::Init {
+                detail: "first-run profile identity is missing".to_owned(),
+            })?;
+            let mut profile = ctx.store.load_profile(profile_id)?;
+            profile.runner = match &selected_runner {
+                crate::FirstRunRunnerSelection::Managed { name, version } => {
+                    crate::RunnerSelection::Managed {
+                        name: name.clone(),
+                        version: version.clone(),
+                    }
+                }
+                crate::FirstRunRunnerSelection::SystemWine { .. } => {
+                    crate::RunnerSelection::SystemWine
+                }
+            };
+            ctx.store.save_profile(&profile)?;
+            match create_prefix(ctx, &profile, tx, cancel).await {
+                Ok(()) => crate::first_run::transition(
+                    &next,
+                    Transition::FinishRunnerAndPrefix(crate::RunnerAndPrefixChoice {
+                        runner,
+                        prefix: crate::PrefixOutcome::Ready,
+                    }),
+                )?,
+                Err(error) if is_cancellation(&error) => return Err(error),
+                Err(error) => {
+                    next.prefix_failure = Some(crate::PrefixFailure {
+                        runner,
+                        code: error.code().to_owned(),
+                    });
+                    crate::first_run::refresh_position(&mut next);
+                    next
+                }
+            }
+        }
+        crate::FirstRunAction::ContinueWithoutPrefix => {
+            let failure = checkpoint
+                .prefix_failure
+                .clone()
+                .ok_or(crate::FirstRunTransitionError::NoFailedPrefixAttempt)?;
+            crate::first_run::transition(
+                &checkpoint,
+                Transition::FinishRunnerAndPrefix(crate::RunnerAndPrefixChoice {
+                    runner: failure.runner,
+                    prefix: crate::PrefixOutcome::ContinueWithoutPrefix { code: failure.code },
+                }),
+            )?
+        }
+        crate::FirstRunAction::StartReady => {
+            let action = crate::ready_action(&checkpoint).ok_or_else(|| CoreError::Init {
+                detail: "first-run ready action is unavailable".to_owned(),
+            })?;
+            crate::first_run::transition(&checkpoint, Transition::StartReady(action))?
+        }
+    };
+    let mut next = next;
+    materialize_first_run_identities(ctx, &mut next)?;
+    ctx.store.save_first_run(&next)?;
+    Ok(next)
+}
+
+async fn inspect_first_run_game(path: std::path::PathBuf) -> crate::GameCandidate {
+    let failed_path = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let state = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {
+                match sqex_proto::VersionReport::from_install(
+                    &sqex_proto::InstallPaths::new(&path),
+                    // Expansion entitlement is learned only after authentication. Base and boot
+                    // versions are enough to recognize an installation without inventing it.
+                    0,
+                ) {
+                    Ok(_) => crate::GameCandidateState::Installed {
+                        installed_bytes: directory_bytes(&path),
+                    },
+                    Err(_) => crate::GameCandidateState::NotAGame,
+                }
+            }
+            Ok(_) => crate::GameCandidateState::NotAGame,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::GameCandidateState::NotAGame
+            }
+            Err(_) => crate::GameCandidateState::Unreadable {
+                code: "game-candidate-unreadable".to_owned(),
+            },
+        };
+        crate::GameCandidate { path, state }
+    })
+    .await
+    .unwrap_or(crate::GameCandidate {
+        path: failed_path,
+        state: crate::GameCandidateState::Unreadable {
+            code: "game-candidate-task-failed".to_owned(),
+        },
+    })
+}
+
+fn directory_bytes(root: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file()
+                && let Ok(metadata) = entry.metadata()
+            {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    total
+}
+
+fn installed_steam_client(kind: crate::FirstRunAccountKind) -> crate::SteamClientReading {
+    if kind != crate::FirstRunAccountKind::Steam {
+        return crate::SteamClientReading::NotRequired;
+    }
+    #[cfg(unix)]
+    if !crate::steam_installs().is_empty() {
+        return crate::SteamClientReading::Present;
+    }
+    crate::SteamClientReading::Missing
+}
+
+fn account_from_first_run(input: &crate::FirstRunAccountInput) -> crate::Account {
+    account_from_first_run_choice(&crate::AccountChoice {
+        square_enix_id: input.square_enix_id.clone(),
+        kind: input.kind,
+        never_save_password: input.never_save_password,
+        steam_client: installed_steam_client(input.kind),
+    })
+}
+
+fn account_from_first_run_choice(choice: &crate::AccountChoice) -> crate::Account {
+    let kind = match choice.kind {
+        crate::FirstRunAccountKind::Standard => crate::AccountKind::Standard,
+        crate::FirstRunAccountKind::Steam => crate::AccountKind::Steam {
+            app_id: crate::STEAM_APP_ID,
+        },
+        crate::FirstRunAccountKind::FreeTrial => crate::AccountKind::FreeTrial,
+    };
+    let mut account = crate::Account::new(&choice.square_enix_id, kind);
+    account.never_store = choice.never_save_password;
+    account
+}
+
+fn materialize_first_run_identities(
+    ctx: &FlowContext,
+    checkpoint: &mut crate::FirstRunCheckpoint,
+) -> Result<(), CoreError> {
+    if checkpoint.account_id.is_none()
+        && let Some(choice) = checkpoint.account.as_ref()
+    {
+        let expected = account_from_first_run_choice(choice);
+        let mut matches = ctx
+            .store
+            .list_accounts()?
+            .into_iter()
+            .filter(|account| {
+                account.sqex_id == expected.sqex_id
+                    && account.kind == expected.kind
+                    && account.never_store == expected.never_store
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|account| account.id);
+        let existing = matches.into_iter().next();
+        let is_new = existing.is_none();
+        let account = existing.unwrap_or(expected);
+        if is_new {
+            ctx.store.save_account(&account)?;
+        }
+        checkpoint.account_id = Some(account.id);
+    }
+
+    if checkpoint.profile_id.is_none()
+        && let (Some(account_id), Some(choice), Some(account)) = (
+            checkpoint.account_id,
+            checkpoint.game.as_ref(),
+            checkpoint.account.as_ref(),
+        )
+    {
+        let game_path = match choice {
+            crate::GameChoice::Existing { path, .. } | crate::GameChoice::Install { path, .. } => {
+                path
+            }
+        };
+        let mut matches = ctx
+            .store
+            .list_profiles()?
+            .into_iter()
+            .filter(|profile| profile.account == account_id && profile.game_path == *game_path)
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|profile| profile.id);
+        let existing = matches.into_iter().next();
+        let is_new = existing.is_none();
+        let profile = existing.unwrap_or_else(|| {
+            crate::Profile::new(&account.square_enix_id, account_id, game_path.clone())
+        });
+        if is_new {
+            ctx.store.save_profile(&profile)?;
+        }
+        checkpoint.profile_id = Some(profile.id);
+    }
+    Ok(())
+}
+
+fn select_first_run_game(
+    ctx: &FlowContext,
+    checkpoint: &crate::FirstRunCheckpoint,
+    choice: crate::GameChoice,
+) -> Result<crate::FirstRunCheckpoint, CoreError> {
+    // Run the reducer first so an invalid path or out-of-order action cannot create model rows.
+    crate::first_run::transition(
+        checkpoint,
+        crate::first_run::FirstRunTransition::SelectGame {
+            choice: choice.clone(),
+            profile_id: uuid::Uuid::nil(),
+        },
+    )?;
+    let mut checkpoint = checkpoint.clone();
+    materialize_first_run_identities(ctx, &mut checkpoint)?;
+    let account = checkpoint.account.as_ref().ok_or_else(|| CoreError::Init {
+        detail: "first-run account is missing".to_owned(),
+    })?;
+    let account_id = checkpoint.account_id.ok_or_else(|| CoreError::Init {
+        detail: "first-run account identity is missing".to_owned(),
+    })?;
+    let path = match &choice {
+        crate::GameChoice::Existing { path, .. } | crate::GameChoice::Install { path, .. } => {
+            path.clone()
+        }
+    };
+    let mut matches = ctx
+        .store
+        .list_profiles()?
+        .into_iter()
+        .filter(|profile| profile.account == account_id && profile.game_path == path)
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|profile| profile.id);
+    let profile = matches
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| crate::Profile::new(&account.square_enix_id, account_id, path));
+    let next = crate::first_run::transition(
+        &checkpoint,
+        crate::first_run::FirstRunTransition::SelectGame {
+            choice,
+            profile_id: profile.id,
+        },
+    )?;
+    ctx.store.save_profile(&profile)?;
+    Ok(next)
 }
 
 fn import_xivlauncher(
@@ -440,7 +842,9 @@ fn observe_status(store: &Store, profile: Uuid, event: &Event) -> Result<(), Sto
         Event::State(State::PatchesPending { .. }) => Some(StoredDisposition::PatchesPending),
         Event::State(State::VersionNotServiced) => Some(StoredDisposition::VersionNotServiced),
         Event::State(State::Cancelled) => Some(StoredDisposition::Cancelled),
-        Event::State(State::Running | State::Exited) => Some(StoredDisposition::Current),
+        Event::State(State::Running | State::Detached | State::Exited) => {
+            Some(StoredDisposition::Current)
+        }
         Event::Error(error) => Some(StoredDisposition::Failed {
             code: crate::StableCode::code(error).to_owned(),
         }),
@@ -1521,6 +1925,7 @@ async fn launch_game(
     // with companions still to stop would leave them running with nothing left that knows about them.
     if settings.close_after_launch {
         if !addons.has_work() {
+            emit(tx, FlowState::Detached);
             return Ok(());
         }
         emit(tx, FlowState::SupervisingAddons);
@@ -1656,12 +2061,7 @@ async fn prefix(
 
     match action {
         PrefixAction::Create => {
-            emit(tx, FlowState::PreparingPrefix);
-            let prepared = ctx
-                .launch
-                .prepare(&request, &prefix_dir, cancel, tx)
-                .await?;
-            ctx.addons.apply_setup(prepared.prefix, cancel, tx).await;
+            create_prefix(ctx, &profile, tx, cancel).await?;
         }
         PrefixAction::Check => {
             emit(tx, FlowState::CheckingPrefix);
@@ -1731,6 +2131,23 @@ async fn prefix(
             ctx.addons.apply_setup(fresh, cancel, tx).await;
         }
     }
+    Ok(())
+}
+
+async fn create_prefix(
+    ctx: &FlowContext,
+    profile: &Profile,
+    tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
+) -> Result<(), CoreError> {
+    let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
+    let request = PrefixRequest::from(profile);
+    emit(tx, FlowState::PreparingPrefix);
+    let prepared = ctx
+        .launch
+        .prepare(&request, &prefix_dir, cancel, tx)
+        .await?;
+    ctx.addons.apply_setup(prepared.prefix, cancel, tx).await;
     Ok(())
 }
 

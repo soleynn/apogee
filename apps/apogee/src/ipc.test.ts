@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   IpcFailure,
+  activityLog,
+  answerCloseRequest,
   cancelPassphrase,
   cancel,
   changeSecretsFilePassphrase,
@@ -18,12 +20,21 @@ import {
   forgetSecrets,
   importTotpSecret,
   nextAction,
+  openLink,
+  pickFolder,
   onPassphrasePrompt,
+  onInstanceAttention,
+  onQuitDuringRun,
   planProfileRemoval,
   removeProfile,
   removeSecretsFile,
+  renderOk,
+  renderStatus,
+  confirmRender,
+  reveal,
   resolvedSetup,
   runnerCatalog,
+  saveSupportBundle,
   secretsReport,
   secretsFileStatus,
   sealSecretsFile,
@@ -31,6 +42,7 @@ import {
   setNeverStore,
   storePassword,
   startup,
+  steamInstalls,
   supportBundleContents,
   submitPassphrase,
   systemReport,
@@ -60,6 +72,78 @@ beforeEach(() => {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => values.set(key, value),
     removeItem: (key: string) => values.delete(key),
+  });
+});
+
+describe('confined host actions', () => {
+  it('forwards only opaque link ids and closed reveal targets', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    const target = { kind: 'evidence' as const, run: 'run-id', addon: 'addon-id' };
+
+    await openLink('row-id');
+    await reveal(target);
+    await activityLog();
+    await saveSupportBundle();
+    await pickFolder();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'open_link', { rowId: 'row-id' });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'reveal', { target });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'activity_log');
+    expect(invoke).toHaveBeenNthCalledWith(4, 'save_support_bundle');
+    expect(invoke).toHaveBeenNthCalledWith(5, 'pick_folder');
+  });
+});
+
+describe('renderer acknowledgements', () => {
+  it('keeps machine and human confirmation as separate native messages', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await renderStatus();
+    await renderOk();
+    await confirmRender();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'render_status');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'render_ok');
+    expect(invoke).toHaveBeenNthCalledWith(3, 'confirm_render');
+  });
+});
+
+describe('close interception', () => {
+  it('keeps the ambient request separate from the confirmed drain answer', async () => {
+    let receive: (() => void) | undefined;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation((_name, handler) => {
+      receive = () => handler({ payload: undefined } as never);
+      return Promise.resolve(unlisten);
+    });
+    const requested = vi.fn();
+    vi.mocked(invoke).mockResolvedValue(true);
+
+    await expect(onQuitDuringRun(requested)).resolves.toBe(unlisten);
+    receive?.();
+    await expect(answerCloseRequest(true)).resolves.toBe(true);
+
+    expect(requested).toHaveBeenCalledOnce();
+    expect(listen).toHaveBeenCalledWith('quit-during-run-request', expect.any(Function));
+    expect(invoke).toHaveBeenCalledWith('answer_close_request', { confirmed: true });
+  });
+});
+
+describe('single-instance attention', () => {
+  it('reports the attention-only fallback as a distinct ambient event', async () => {
+    let receive: (() => void) | undefined;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation((_name, handler) => {
+      receive = () => handler({ payload: undefined } as never);
+      return Promise.resolve(unlisten);
+    });
+    const highlighted = vi.fn();
+
+    await expect(onInstanceAttention(highlighted)).resolves.toBe(unlisten);
+    receive?.();
+
+    expect(highlighted).toHaveBeenCalledOnce();
+    expect(listen).toHaveBeenCalledWith('instance-attention-requested', expect.any(Function));
   });
 });
 
@@ -360,16 +444,18 @@ describe('direct core reads', () => {
     expect(invoke).toHaveBeenNthCalledWith(3, 'dxvk_catalog', { profile: 'profile-id' });
   });
 
-  it('uses independent methods for catalogs, defaults, and support previews', async () => {
+  it('uses independent methods for catalogs, defaults, support previews, and Steam status', async () => {
     vi.mocked(invoke).mockResolvedValue([]);
 
     await runnerCatalog();
     await defaults();
     await supportBundleContents();
+    await steamInstalls();
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'runner_catalog');
     expect(invoke).toHaveBeenNthCalledWith(2, 'defaults');
     expect(invoke).toHaveBeenNthCalledWith(3, 'support_bundle_contents');
+    expect(invoke).toHaveBeenNthCalledWith(4, 'steam_installs');
   });
 
   it('requests core-composed reports with an optional profile only', async () => {

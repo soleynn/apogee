@@ -10,6 +10,7 @@ use super::{Migrate, Store, StoreError, UidCacheEntry};
 use crate::model::{
     Account, AccountKind, ListenerSettings, ListenerSources, Profile, SecretBackend, Settings,
 };
+use crate::{FirstRunCheckpoint, FirstRunPosition, FirstRunStep};
 
 fn cache_entry(game_version: &str, expires_at: u64) -> UidCacheEntry {
     UidCacheEntry {
@@ -48,6 +49,52 @@ fn settings_round_trips_at_the_current_version() {
 fn missing_settings_loads_the_default() {
     let (_dir, store) = store();
     assert_eq!(store.load_settings().unwrap(), Settings::default());
+}
+
+#[test]
+fn first_run_checkpoint_migrates_without_trusting_a_stored_position() {
+    let (dir, store) = store();
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "data": {
+            "legibility": {
+                "gpu": null,
+                "driver": null,
+                "session": "unknown",
+                "render_tier": 2
+            },
+            "import": { "state": "none_found" },
+            "account": null,
+            "game_candidates": [],
+            "game": null,
+            "credential_backends": [],
+            "credential": null,
+            "runners": [],
+            "runner_and_prefix": null,
+            "ready": { "state": "pending" }
+        }
+    });
+    let path = dir.path().join("first-run.json");
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let checkpoint = store.load_first_run().unwrap();
+    assert_eq!(checkpoint.legibility.unwrap().render_tier, Some(2));
+    assert_eq!(checkpoint.account_id, None);
+    assert_eq!(checkpoint.profile_id, None);
+    assert_eq!(
+        checkpoint.position,
+        FirstRunPosition::Step(FirstRunStep::Account)
+    );
+
+    store
+        .save_first_run(&FirstRunCheckpoint::default())
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        raw["schema_version"],
+        serde_json::json!(FirstRunCheckpoint::CURRENT_VERSION)
+    );
+    assert!(raw["data"].get("position").is_none());
 }
 
 #[rstest]

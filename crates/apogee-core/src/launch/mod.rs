@@ -192,6 +192,8 @@ pub(crate) mod fake {
         auto_exit: bool,
         /// Whether `prepare` stops the way a runner does when the token fires mid-`wineboot`.
         cancel_prepare: bool,
+        /// Whether `prepare` fails without cancellation, for retry-or-continue setup tests.
+        fail_prepare: bool,
         killed: Arc<AtomicBool>,
         /// What `prepare` reports the host and runner resolve to.
         caps: apogee_runtime::HostCaps,
@@ -226,6 +228,13 @@ pub(crate) mod fake {
             }
         }
 
+        pub(crate) fn failing_while_preparing() -> Self {
+            Self {
+                fail_prepare: true,
+                ..Self::with_auto_exit(true)
+            }
+        }
+
         fn with_auto_exit(auto_exit: bool) -> Self {
             Self {
                 recorded: Mutex::new(Vec::new()),
@@ -233,6 +242,7 @@ pub(crate) mod fake {
                 requested: Mutex::new(Vec::new()),
                 auto_exit,
                 cancel_prepare: false,
+                fail_prepare: false,
                 killed: Arc::new(AtomicBool::new(false)),
                 // A host that can do nothing in particular, so a test that does not care about the
                 // environment gets the same answer on every machine.
@@ -349,6 +359,11 @@ pub(crate) mod fake {
                     source: Box::new(apogee_runtime::StepCancelled),
                 }
                 .into());
+            }
+            if self.fail_prepare {
+                return Err(CoreError::Launch {
+                    detail: "scripted prefix preparation failure".to_owned(),
+                });
             }
             // No prefix: a fake runner has no wine to initialize one with, and the flows that consume
             // one are written to treat its absence as nothing to do.

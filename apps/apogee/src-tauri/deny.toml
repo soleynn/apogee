@@ -80,6 +80,10 @@ exceptions = [
     # The GTK bindings' build helper reads target triples through this. The exception is the LLVM
     # one attached to Apache-2.0, which the allow list above cannot express on its own.
     { name = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    # The Boost license is permissive and compatible with this project's license. These two are the
+    # Windows clipboard backend under the clipboard plugin; they are never built for Linux.
+    { name = "clipboard-win", allow = ["BSL-1.0"] },
+    { name = "error-code", allow = ["BSL-1.0"] },
 ]
 private = { ignore = true }
 

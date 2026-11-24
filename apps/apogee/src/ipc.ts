@@ -32,6 +32,11 @@ import type { TotpImportResultDto } from './generated/TotpImportResult';
 import type { UpdateAccountRequestDto } from './generated/UpdateAccountRequest';
 import type { UpdateProfileRequestDto } from './generated/UpdateProfileRequest';
 import type { UpdateSettingsRequestDto } from './generated/UpdateSettingsRequest';
+import type { ActivityEntryDto } from './generated/ActivityEntry';
+import type { RevealTargetDto } from './generated/RevealTarget';
+import type { FolderSelectionDto } from './generated/FolderSelection';
+import type { SteamInstallDto } from './generated/SteamInstall';
+import type { RenderStatusDto } from './generated/RenderStatus';
 
 export interface FutureCoreEvent {
   kind: 'futureEvent';
@@ -66,6 +71,8 @@ export class IpcFailure extends Error {
 
 const ACTIVE_PROFILE_KEY = 'apogee.activeProfile';
 const PASSPHRASE_REQUEST_EVENT = 'passphrase-request';
+const QUIT_DURING_RUN_EVENT = 'quit-during-run-request';
+const INSTANCE_ATTENTION_EVENT = 'instance-attention-requested';
 
 const knownEventKinds = new Set([
   'state',
@@ -350,6 +357,66 @@ export function systemReport(profile: string | null = null): Promise<string> {
 /** Reads core's ordered preview of the entries included in a support archive. */
 export function supportBundleContents(): Promise<BundlePartDto[]> {
   return invokeIpc<BundlePartDto[]>('support_bundle_contents');
+}
+
+/** Reads user-owned Steam roots and compatibility-tool status without exposing mutations. */
+export function steamInstalls(): Promise<SteamInstallDto[]> {
+  return invokeIpc<SteamInstallDto[]>('steam_installs');
+}
+
+/** Opens only the ordinary HTTPS URL behind a row id issued by this core process. */
+export function openLink(rowId: string): Promise<void> {
+  return invokeIpc<void>('open_link', { rowId });
+}
+
+/** Reveals one launcher-owned path selected by a closed, path-free target. */
+export function reveal(target: RevealTargetDto): Promise<void> {
+  return invokeIpc<void>('reveal', { target });
+}
+
+/** Reads bounded native-shell diagnostics as stable localization codes. */
+export function activityLog(): Promise<ActivityEntryDto[]> {
+  return invokeIpc<ActivityEntryDto[]>('activity_log');
+}
+
+/** Publishes the pending redacted archive under a native folder choice. */
+export function saveSupportBundle(): Promise<boolean> {
+  return invokeIpc<boolean>('save_support_bundle');
+}
+
+/** Opens a native directory picker and retains the path behind a process-local id. */
+export function pickFolder(): Promise<FolderSelectionDto | null> {
+  return invokeIpc<FolderSelectionDto | null>('pick_folder');
+}
+
+/** Reads native renderer facts without trusting browser-supplied environment values. */
+export function renderStatus(): Promise<RenderStatusDto> {
+  return invokeIpc<RenderStatusDto>('render_status');
+}
+
+/** Acknowledges that the webview completed two animation frames. */
+export function renderOk(): Promise<void> {
+  return invokeIpc<void>('render_ok');
+}
+
+/** Records the person's distinct confirmation that the current window is legible. */
+export function confirmRender(): Promise<void> {
+  return invokeIpc<void>('confirm_render');
+}
+
+/** Subscribes to the one native close request that needs a stop-and-resume confirmation. */
+export function onQuitDuringRun(handler: () => void): Promise<UnlistenFn> {
+  return listen<void>(QUIT_DURING_RUN_EVENT, () => handler());
+}
+
+/** Reports that another launch highlighted this window without claiming compositor activation. */
+export function onInstanceAttention(handler: () => void): Promise<UnlistenFn> {
+  return listen<void>(INSTANCE_ATTENTION_EVENT, () => handler());
+}
+
+/** Declines the pending close or cancels and drains every active operation before closing. */
+export function answerCloseRequest(confirmed: boolean): Promise<boolean> {
+  return invokeIpc<boolean>('answer_close_request', { confirmed });
 }
 
 /** Selects the structured corrupt-store recovery fields from any invoke rejection. */

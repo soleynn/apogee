@@ -55,6 +55,20 @@ impl PromptBroker {
         sender.is_some_and(|sender| sender.send(answer).is_ok())
     }
 
+    /// Cancel every pending native prompt so a shutdown cannot wait for the two-minute timeout.
+    pub(crate) fn cancel_all(&self) -> usize {
+        let senders = self
+            .pending()
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>();
+        let count = senders.len();
+        for sender in senders {
+            let _ = sender.send(None);
+        }
+        count
+    }
+
     fn insert(&self, request_id: Uuid, sender: SyncSender<Option<Secret>>) -> bool {
         use std::collections::hash_map::Entry;
 
@@ -330,6 +344,40 @@ mod tests {
                 Err(SecretsError::Locked)
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_cancels_every_pending_prompt_without_waiting_for_timeout() -> TestResult {
+        let broker = Arc::new(PromptBroker::default());
+        let (requests_tx, requests_rx) = mpsc::channel();
+        let first = unlock_on_worker(
+            Arc::clone(&broker),
+            Arc::new(CapturingEmitter {
+                requests: requests_tx.clone(),
+            }),
+            Duration::from_secs(120),
+        );
+        let second = unlock_on_worker(
+            Arc::clone(&broker),
+            Arc::new(CapturingEmitter {
+                requests: requests_tx,
+            }),
+            Duration::from_secs(120),
+        );
+        let _ = receive_request(&requests_rx)?;
+        let _ = receive_request(&requests_rx)?;
+
+        assert_eq!(broker.cancel_all(), 2);
+        for worker in [first, second] {
+            assert!(matches!(
+                worker
+                    .join()
+                    .map_err(|_| std::io::Error::other("unlock worker panicked"))?,
+                Err(SecretsError::Locked)
+            ));
+        }
+        assert_eq!(broker.pending().len(), 0);
         Ok(())
     }
 
