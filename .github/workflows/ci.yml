@@ -5,10 +5,15 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref instead of letting them pile up.
+# A pull request's runs share one group per pull request, so a new push there supersedes the run
+# before it. A push to main gets a group of its own per commit and is never cancelled: pull
+# requests are not required to be up to date with main, so the run on main is the only test of
+# what the merges add up to, and every merge needs one. Grouping main by ref would not be enough
+# even without cancelling: a group holds one pending run, and a third merge in a burst replaces
+# the second.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -81,6 +86,9 @@ jobs:
         with:
           toolchain: "1.97.0"
           components: clippy
+      # Its own cache rather than one shared with test-linux: this is a check build with every
+      # feature on, that one a full build with the default set, so they share almost no artifacts
+      # and a shared entry would only ever hold whichever of the two saved first.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -376,10 +384,16 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: lts/*
+      # The registry only, not the build tree. The window framework's tree is close to 2 GB, a
+      # fifth of the repository's whole cache allowance, and every lockfile change writes a second
+      # copy of it. Building it cold adds about two minutes to a job that still finishes inside
+      # test-linux, so the cache it would evict from every other job is worth more than those
+      # minutes here.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: apps/apogee/src-tauri
           key: shell
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The webview, its JavaScript engine and the HTTP library that framework links against. Named
       # by their development packages rather than pulled in by a helper action, so what the build
@@ -619,8 +633,11 @@ jobs:
   # The hostile-input fuzz smoke, split into four jobs grouped by the crates their targets build, so
   # a run's wall clock is one shard rather than the sum of all twenty-six targets. Only the parsers
   # fed hostile input can regress these; a change that touches none of their crates skips all four,
-  # and a push to main always runs them. Each shard caches its own build tree under its own key and
-  # restores only the corpora its own targets seed from.
+  # and a push to main always runs them. The four shards share one build cache: the fuzz workspace
+  # is a single package, so whichever targets a shard builds, cargo compiles the same dependency set
+  # with the same flags, and four copies of it were four identical entries. The first shard to
+  # finish saves it and the rest find it already there. Each shard restores only the corpora its
+  # own targets seed from.
   fuzz-smoke-proto:
     name: fuzz-smoke-proto
     runs-on: ubuntu-latest
@@ -642,7 +659,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-          key: proto
+          shared-key: fuzz-smoke
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Seed each 30 s run below with the corpus the nightly five-minute soaks have accumulated
       # (their cache keys, one per target), instead of starting libFuzzer from empty on every push:
@@ -734,7 +751,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-          key: stores
+          shared-key: fuzz-smoke
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Corpus seeds for this shard's targets, restore-only, for the reason given on
       # fuzz-smoke-proto's restores.
@@ -827,7 +844,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-          key: sqpack
+          shared-key: fuzz-smoke
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Corpus seeds for this shard's targets, restore-only, for the reason given on
       # fuzz-smoke-proto's restores.
@@ -901,7 +918,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
-          key: patch
+          shared-key: fuzz-smoke
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Corpus seeds for this shard's targets, restore-only, for the reason given on
       # fuzz-smoke-proto's restores.
