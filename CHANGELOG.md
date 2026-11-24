@@ -132,6 +132,8 @@ is tagged with its change type. Versioning aims to follow
 ### core
 - Add explicit login contracts and shell driver (#250) _(added)_
 - Complete launcher setup and recovery surfaces (#251) _(added)_
+- Make read surfaces concurrency-safe (#254) _(fixed)_
+- Add sealed store lifecycle (#256) _(added)_
 
 ### deps
 - Clear published security advisories and restore CI on main (#301) _(fixed)_
@@ -141,6 +143,11 @@ is tagged with its change type. Versioning aims to follow
 
 ### release
 - Ship a Windows archive with the elevated worker (#213) _(ci)_
+
+### shell
+- Complete the typed IPC boundary (#252) _(added)_
+- Add startup and credential snapshots (#253) _(added)_
+- Expose direct core reads (#255) _(added)_
 
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
