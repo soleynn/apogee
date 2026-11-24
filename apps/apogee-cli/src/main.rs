@@ -13,9 +13,9 @@ use std::process::ExitCode;
 
 use apogee_core::{
     ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
-    Core, CoreConfig, Deviation, EncryptedFile, Event, ExternalAddon, FileState, FlowState,
+    Core, CoreConfig, Deviation, Event, ExternalAddon, FileState, FlowState,
     ForeignCredentialStore, ForeignKey, ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery,
-    GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource, KdfCost,
+    GpuSelect, HealthIssue, Hud, ImportFindingResult, ImportOutcome, ImportSource,
     LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
     NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
     PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
@@ -956,9 +956,8 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             println!("backend  {:?}", report.backend);
             println!("state    {:?}", report.state);
             if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
-                let store = sealed_store(core);
-                println!("file     {}", store.path().display());
-                println!("at path  {:?}", store.inspect());
+                println!("file     {}", core.secrets_path().display());
+                println!("at path  {:?}", core.secrets_file_state());
             }
             match &report.sandbox {
                 Some(sandbox) => println!("sandbox  {sandbox:?}"),
@@ -1025,22 +1024,20 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             Ok(())
         }
         SecretsCommand::Passphrase => {
-            let store = sealed_store(core);
-            if !matches!(store.inspect(), FileState::Sealed { .. }) {
+            if !matches!(core.secrets_file_state(), FileState::Sealed { .. }) {
                 println!(
                     "there is no sealed secret file at {}",
-                    store.path().display()
+                    core.secrets_path().display()
                 );
                 return Ok(());
             }
             let current = read_passphrase("Current secret file passphrase: ")?;
             let new = read_new_passphrase()?;
-            store.change_passphrase(&current, &new)?;
+            core.change_secrets_file_passphrase(&current, &new)?;
             println!("re-sealed the secret file under the new passphrase");
             Ok(())
         }
         SecretsCommand::DestroyFile => {
-            let store = sealed_store(core);
             if core.settings()?.secret_backend == SecretBackend::EncryptedFile {
                 println!(
                     "the launcher is still set to use the secret file; run `secrets backend --to platform` \
@@ -1051,13 +1048,13 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
             println!(
                 "this deletes {} and every password and one-time-password secret in it. \
                  Nothing recovers them.",
-                store.path().display()
+                core.secrets_path().display()
             );
             if !confirmed("destroy")? {
                 println!("left alone");
                 return Ok(());
             }
-            if store.remove(Consent::granted())? {
+            if core.remove_secrets_file(Consent::granted())? {
                 println!("deleted the secret file");
             } else {
                 println!("there was no secret file to delete");
@@ -1100,15 +1097,6 @@ fn secrets(core: &Core, action: SecretsCommand) -> Result<(), CliError> {
     }
 }
 
-/// A handle over the sealed secret file, whichever backend is currently selected.
-///
-/// Its own handle rather than the one the core is holding, because these verbs act on the file
-/// itself: creating it, re-sealing it, deleting it. None of that is reachable through the storage
-/// seam, which is what stops anything else in the launcher doing it by accident.
-fn sealed_store(core: &Core) -> EncryptedFile {
-    EncryptedFile::open(core.secrets_path(), std::sync::Arc::new(TerminalPassphrase))
-}
-
 /// Switch where secrets are kept from the next run onwards.
 ///
 /// Switching to the sealed file is the one direction that needs anything of the user, because it is
@@ -1120,12 +1108,11 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
     let chosen = SecretBackend::from(choice);
 
     if chosen == SecretBackend::EncryptedFile {
-        let store = sealed_store(core);
-        match store.inspect() {
+        match core.secrets_file_state() {
             FileState::Sealed { work } => {
                 println!(
                     "using the secret file already at {} ({} KiB over {} passes)",
-                    store.path().display(),
+                    core.secrets_path().display(),
                     work.memory_kib(),
                     work.passes()
                 );
@@ -1135,19 +1122,23 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
                 println!("  it protects a copy of the file taken off this machine, no more");
                 println!("  anything running as you can read the file and watch you type");
                 println!("  a forgotten passphrase means the saved passwords are gone");
-                println!("  the passphrase is asked for once per run of the launcher");
+                println!(
+                    "  the derived key is forgotten after five idle minutes, so expect another prompt"
+                );
                 if !confirmed("encrypt")? {
                     println!("left alone");
                     return Ok(());
                 }
                 let passphrase = read_new_passphrase()?;
-                store.create(Consent::granted(), &passphrase, KdfCost::CURRENT)?;
-                println!("created {}", store.path().display());
+                core.create_secrets_file(Consent::granted(), &passphrase)?;
+                println!("created {}", core.secrets_path().display());
             }
             FileState::Unreadable => {
-                return Err(
-                    format!("something at {} cannot be read", store.path().display()).into(),
-                );
+                return Err(format!(
+                    "something at {} cannot be read",
+                    core.secrets_path().display()
+                )
+                .into());
             }
             // Anything else at the path, including a condition a later build reports, is refused
             // rather than created over: the one thing that must never happen here is overwriting a
@@ -1155,7 +1146,7 @@ fn secrets_backend(core: &Core, choice: BackendChoice) -> Result<(), CliError> {
             _ => {
                 return Err(format!(
                     "something at {} is not a secret file this build can open",
-                    store.path().display()
+                    core.secrets_path().display()
                 )
                 .into());
             }

@@ -17,15 +17,15 @@ use crate::{Secret, SecretsError};
 /// been left alone, and should not treat the second prompt as a fault.
 ///
 /// An implementation must be callable from any thread and must not cache what it returns. It must
-/// also not call back into the store that asked it: the store holds its lock across the whole
-/// operation, so a re-entrant source deadlocks.
+/// also not call back into the store that asked it: the store holds its in-process key-cache lock
+/// across the whole operation, so a re-entrant source deadlocks.
 ///
-/// **A write holds the cross-process lock while this is answered**, which for a terminal prompt is
-/// milliseconds and for a modal dialog is however long the user takes to notice it. A second
-/// launcher process writing at that moment waits. The alternative is to unlock, prompt, and take the
-/// lock again, and that is worse: the file could be re-sealed in the gap, so the write would have to
-/// re-read and redo its work anyway, and the second process's write would be the one at risk. A front
-/// end that prompts modally should ask before it starts a write, not during one.
+/// A write asks before it takes the cross-process file lock. It then re-reads under that lock and
+/// retries the preparation if another process re-keyed the file in between. This keeps a modal
+/// prompt from blocking every other launcher process's write while still merging an ordinary
+/// concurrent update. A front end that prompts modally should still call
+/// [`EncryptedFile::unlock`](crate::EncryptedFile::unlock) proactively, so the prompt is an explicit
+/// step rather than a surprise inside the mutation.
 pub trait Passphrase: Send + Sync {
     /// Produce the passphrase.
     ///

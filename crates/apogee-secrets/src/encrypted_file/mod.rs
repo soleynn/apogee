@@ -274,6 +274,17 @@ enum Missing {
     Ignore,
 }
 
+/// Key material validated against one complete file snapshot before a writer takes the file lock.
+struct PreparedKey {
+    salt: [u8; SALT_LEN],
+    cost: KdfCost,
+    key: Zeroizing<[u8; KEY_LEN]>,
+}
+
+/// A constantly re-keyed file is already unavailable to useful work. Bound the optimistic retry so
+/// a competing process cannot keep one synchronous caller alive forever.
+const WRITE_PREPARE_ATTEMPTS: usize = 3;
+
 /// Opt-in fallback backend: every account secret in one file, sealed under a passphrase.
 ///
 /// XChaCha20-Poly1305 over the whole record table, keyed by an Argon2id derivation of a passphrase
@@ -453,6 +464,28 @@ impl EncryptedFile {
         }
     }
 
+    /// Unlock this handle without reading a stored secret or changing the file.
+    ///
+    /// A front end that prompts modally calls this before starting a write. The passphrase is checked
+    /// against both sealed envelopes and the derived key is left in this handle's bounded cache, so
+    /// the following write does not prompt while it holds the cross-process file lock. This read-only
+    /// operation takes no file lock: a writer publishes by rename, and [`disk::read`] observes one
+    /// complete version.
+    ///
+    /// # Errors
+    /// [`SecretsError::NoCollection`] if no sealed store exists, [`SecretsError::WrongPassphrase`] if
+    /// the supplied passphrase does not open it, [`SecretsError::Corrupt`] if it is damaged, or the
+    /// filesystem and derivation failures from opening it.
+    pub fn unlock(&self) -> Result<(), SecretsError> {
+        let mut cached = self.cache();
+        let Some(bytes) = disk::read(&self.path)? else {
+            return Err(SecretsError::NoCollection);
+        };
+        disk::narrow_file(&self.path);
+        drop(self.read_table(&mut cached, &bytes)?);
+        Ok(())
+    }
+
     /// Whether this handle holds a derived key that is still inside its window.
     ///
     /// A key whose window has run out reads as closed here from the moment it expires, whether or not
@@ -552,11 +585,22 @@ impl EncryptedFile {
     ///
     /// A key that turned out not to open the file is never left in the cache, however it was reached,
     /// so the next call asks again instead of failing the same way forever.
-    fn read_table(&self, cached: &mut KeyGuard<'_>, bytes: &[u8]) -> Result<Table, SecretsError> {
+    fn read_table_with_key(
+        &self,
+        cached: &mut KeyGuard<'_>,
+        bytes: &[u8],
+    ) -> Result<(Table, PreparedKey), SecretsError> {
         let header = Header::parse(bytes)?;
         let key = self.key_for(cached, &header)?;
         match unseal(bytes, &header, &key) {
-            Ok(table) => Ok(table),
+            Ok(table) => Ok((
+                table,
+                PreparedKey {
+                    salt: header.salt,
+                    cost: header.cost,
+                    key,
+                },
+            )),
             Err(err) => {
                 if matches!(err, SecretsError::WrongPassphrase) {
                     **cached = None;
@@ -564,6 +608,12 @@ impl EncryptedFile {
                 Err(err)
             }
         }
+    }
+
+    /// Open the file's table, unlocking first if this handle is sealed.
+    fn read_table(&self, cached: &mut KeyGuard<'_>, bytes: &[u8]) -> Result<Table, SecretsError> {
+        self.read_table_with_key(cached, bytes)
+            .map(|(table, _key)| table)
     }
 
     /// Seal `table` and put it in place of whatever is at the path.
@@ -622,31 +672,63 @@ impl EncryptedFile {
             };
         }
         disk::private_dir(&self.path)?;
-        let _lock = disk::Lock::take(&self.path)?;
-        disk::sweep_temps(&self.path);
-
-        // Re-read under the lock, because the check above is a fact about the moment before it: a
-        // store can be removed between the two, and that answer is the one that counts.
-        let Some(bytes) = disk::read(&self.path)? else {
-            return match missing {
-                Missing::Refuse => Err(SecretsError::NoCollection),
-                Missing::Ignore => Ok(()),
+        let mut change = Some(change);
+        for _attempt in 0..WRITE_PREPARE_ATTEMPTS {
+            // Prompt and derive against one complete snapshot before taking the write lock. A modal
+            // front end may take minutes to answer; no other process's write waits behind it.
+            let Some(before) = disk::read(&self.path)? else {
+                return match missing {
+                    Missing::Refuse => Err(SecretsError::NoCollection),
+                    Missing::Ignore => Ok(()),
+                };
             };
-        };
-        disk::narrow_file(&self.path);
+            disk::narrow_file(&self.path);
+            let (prepared_table, prepared) = self.read_table_with_key(&mut cached, &before)?;
+            drop(prepared_table);
 
-        let mut table = self.read_table(&mut cached, &bytes)?;
-        if !change(&mut table) {
+            let _lock = disk::Lock::take(&self.path)?;
+            disk::sweep_temps(&self.path);
+
+            // Re-read under the lock, because the prepared snapshot is a fact about the moment
+            // before ownership. An ordinary writer keeps the salt and cost, so its update can still
+            // be merged. A passphrase rotation changes them; release the lock and prepare again.
+            let Some(bytes) = disk::read(&self.path)? else {
+                return match missing {
+                    Missing::Refuse => Err(SecretsError::NoCollection),
+                    Missing::Ignore => Ok(()),
+                };
+            };
+            disk::narrow_file(&self.path);
+            let header = Header::parse(&bytes)?;
+            if header.salt != prepared.salt || header.cost != prepared.cost {
+                continue;
+            }
+
+            let mut table = match unseal(&bytes, &header, &prepared.key) {
+                Ok(table) => table,
+                Err(error) => {
+                    if matches!(error, SecretsError::WrongPassphrase) {
+                        *cached = None;
+                    }
+                    return Err(error);
+                }
+            };
+            let Some(change) = change.take() else {
+                return Err(SecretsError::Backend {
+                    step: "apply a secret store change once",
+                });
+            };
+            if !change(&mut table) {
+                cached.store(prepared.salt, prepared.cost, prepared.key);
+                return Ok(());
+            }
+            self.publish(&table, &prepared.salt, prepared.cost, &prepared.key)?;
+            cached.store(prepared.salt, prepared.cost, prepared.key);
             return Ok(());
         }
-        let Some(current) = cached.as_ref() else {
-            // Unreachable: `read_table` leaves a key in the cache on every path that returns a table.
-            // Reported rather than unwrapped, because this crate takes no panics.
-            return Err(SecretsError::Backend {
-                step: "seal the secret store",
-            });
-        };
-        self.publish(&table, &current.salt, current.cost, &current.key)
+        Err(SecretsError::Backend {
+            step: "write a secret store that kept changing",
+        })
     }
 }
 

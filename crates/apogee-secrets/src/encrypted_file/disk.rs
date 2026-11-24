@@ -24,6 +24,27 @@ const TEMP_SUFFIX: &str = "tmp";
 /// How many times a lock will re-take a sidecar that was replaced under it before giving up.
 const LOCK_ATTEMPTS: u32 = 8;
 
+/// A unit-test rendezvous after a particular sidecar has been opened and before its lock is taken.
+/// Production has no hook or branch here; tests use it to prove the waited-on inode replacement
+/// race without guessing how long a spawned thread needs to reach `flock`.
+#[cfg(test)]
+static SIDECAR_OPEN_HOOK: std::sync::Mutex<Option<(PathBuf, std::sync::mpsc::Sender<()>)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn note_sidecar_open(sidecar: &Path) {
+    let mut hook = SIDECAR_OPEN_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if hook
+        .as_ref()
+        .is_some_and(|(expected, _sender)| expected == sidecar)
+        && let Some((_expected, sender)) = hook.take()
+    {
+        let _ = sender.send(());
+    }
+}
+
 /// Read the sealed file, or answer `None` if there is nothing at the path.
 ///
 /// The size is checked against the cap from the directory entry, before any of the file is read, so a
@@ -148,6 +169,8 @@ impl Lock {
         // over is racing something doing it deliberately, and waiting forever is the worse answer.
         for _ in 0..LOCK_ATTEMPTS {
             let file = open_sidecar(&sidecar)?;
+            #[cfg(test)]
+            note_sidecar_open(&sidecar);
             // The sidecar is never deleted. Removing it would race the next process to acquire,
             // which would then lock a file nobody else can see and serialise against nothing.
             file.lock().map_err(|_| failed())?;
@@ -771,6 +794,55 @@ mod tests {
         assert!(dir.path().join("store.apsf.keepme").exists());
         assert!(!dir.path().join("store.apsf.abc.tmp").exists());
         assert!(!dir.path().join("store.apsf.def.tmp").exists());
+    }
+
+    /// A waiter must re-check that the sidecar name still denotes the inode it locked. Otherwise,
+    /// unlinking the name while it waits leaves it holding a lock no later writer will open, so two
+    /// successful read-modify-writes can publish over one another.
+    #[cfg(unix)]
+    #[test]
+    fn a_waiter_rejects_a_sidecar_replaced_while_it_waited() {
+        let dir = temp_dir();
+        let path = dir.path().join("store.apsf");
+        let holder = Lock::take(&path).expect("hold the original sidecar");
+
+        let sidecar = sibling(&path, LOCK_SUFFIX);
+        let (opened, observed) = std::sync::mpsc::channel();
+        *SIDECAR_OPEN_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((sidecar.clone(), opened));
+        let (done, answer) = std::sync::mpsc::channel();
+        let waiting_path = path.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(Lock::take(&waiting_path));
+        });
+        observed
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter never opened the original sidecar");
+        assert!(
+            answer.try_recv().is_err(),
+            "the waiter should still be behind the held lock"
+        );
+
+        std::fs::remove_file(&sidecar).expect("unlink the sidecar being waited on");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&sidecar)
+                .status()
+                .expect("mkfifo")
+                .success()
+        );
+        drop(holder);
+
+        let answered = answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter never re-checked the sidecar");
+        assert!(matches!(
+            answered,
+            Err(SecretsError::Corrupt {
+                detail: "store lock"
+            })
+        ));
     }
 
     /// The narrowing of an existing wide *directory*, which is the one permissions path the store's

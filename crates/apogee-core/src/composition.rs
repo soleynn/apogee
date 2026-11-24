@@ -16,8 +16,8 @@ use apogee_otp::{Deviation, ListenerConsent, Otp, TotpParams};
 use apogee_patcher::{Patcher, PatcherConfig};
 use apogee_runtime::{Runtime, RuntimePaths};
 use apogee_secrets::{
-    BackendReport, EncryptedFile, ForeignKey, Import, ImportSource, Null, Passphrase, Secret,
-    SecretKind, Secrets, SecretsError, Unprompted,
+    BackendReport, Consent, EncryptedFile, FileState, ForeignKey, Import, ImportSource, KdfCost,
+    Null, Passphrase, Secret, SecretKind, Secrets, SecretsError, Unprompted,
 };
 use sqex_proto::{ComputerId, Transport};
 use tokio::sync::mpsc;
@@ -325,6 +325,9 @@ pub struct Core {
     /// build here can mint one yet: what is wired refuses, and says so.
     steam: Arc<dyn SteamBackend>,
     secrets: Secrets,
+    /// The sealed-file handle retained even when another backend is active, so its explicit
+    /// lifecycle and the active backend share one bounded key cache when it is selected.
+    sealed_file: Arc<EncryptedFile>,
     otp: Otp,
     store: Store,
     /// The launcher's machine fingerprint, sent on OAuth/frontier requests.
@@ -405,15 +408,13 @@ impl Core {
             .load_settings()
             .map(|s| s.secret_backend)
             .unwrap_or_default();
+        let sealed_file = Arc::new(EncryptedFile::open(config.secrets_path(), passphrase));
         let secrets = match chosen {
             SecretBackend::Platform => Secrets::new(),
-            SecretBackend::EncryptedFile => Secrets::with_backend(Arc::new(EncryptedFile::open(
-                config.secrets_path(),
-                passphrase,
-            ))),
+            SecretBackend::EncryptedFile => Secrets::with_backend(sealed_file.clone()),
             SecretBackend::Nothing => Secrets::with_backend(Arc::new(Null::new())),
         };
-        Self::with_secrets(config, transport, secrets)
+        Self::with_secrets_and_file(config, transport, secrets, sealed_file)
     }
 
     /// Construct and wire every subsystem from `config`, using the injected `transport` and the
@@ -428,6 +429,19 @@ impl Core {
         config: CoreConfig,
         transport: Arc<dyn Transport>,
         secrets: Secrets,
+    ) -> Result<Self, CoreError> {
+        let sealed_file = Arc::new(EncryptedFile::open(
+            config.secrets_path(),
+            Arc::new(Unprompted),
+        ));
+        Self::with_secrets_and_file(config, transport, secrets, sealed_file)
+    }
+
+    fn with_secrets_and_file(
+        config: CoreConfig,
+        transport: Arc<dyn Transport>,
+        secrets: Secrets,
+        sealed_file: Arc<EncryptedFile>,
     ) -> Result<Self, CoreError> {
         // Derived before `config` is consumed, and held so a front end can name the sealed store's
         // file without resolving the base directories a second time.
@@ -497,6 +511,7 @@ impl Core {
             addons: Arc::new(AddonsBackend::new(addons)) as Arc<dyn AddonBackend>,
             steam: Arc::new(NoSteam) as Arc<dyn SteamBackend>,
             secrets,
+            sealed_file,
             otp,
             store,
             computer_id,
@@ -1163,6 +1178,78 @@ impl Core {
     #[must_use]
     pub fn secrets_path(&self) -> &Path {
         &self.secrets_path
+    }
+
+    /// What is currently at the sealed-file store path.
+    ///
+    /// Reads only the file header, never prompts, and is available whichever credential backend is
+    /// active so a front end can present the file's lifecycle before it is selected.
+    #[must_use]
+    pub fn secrets_file_state(&self) -> FileState {
+        self.sealed_file.inspect()
+    }
+
+    /// Whether this core still holds the sealed store's derived key inside its idle window.
+    #[must_use]
+    pub fn secrets_file_is_open(&self) -> bool {
+        self.sealed_file.is_open()
+    }
+
+    /// Unlock the sealed store explicitly, without reading a stored secret or changing the file.
+    ///
+    /// A prompting front end calls this before a write. The following mutation then reuses the
+    /// bounded key cache instead of prompting while it holds the store's cross-process write lock.
+    ///
+    /// # Errors
+    /// Returns the sealed store's typed failure when it is absent, damaged, unreadable, or the
+    /// passphrase source did not open it.
+    pub fn unlock_secrets_file(&self) -> Result<(), CoreError> {
+        Ok(self.sealed_file.unlock()?)
+    }
+
+    /// Create an empty sealed store under this build's current derivation cost.
+    ///
+    /// The explicit consent is minted by the front end only after confirmation. Existing bytes are
+    /// never replaced by this operation.
+    ///
+    /// # Errors
+    /// Returns the sealed store's typed failure, including an existing path or an empty passphrase.
+    pub fn create_secrets_file(
+        &self,
+        consent: Consent,
+        passphrase: &Secret,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .sealed_file
+            .create(consent, passphrase, KdfCost::CURRENT)?)
+    }
+
+    /// Re-seal the existing store under `new` after proving `current` opens it.
+    ///
+    /// # Errors
+    /// Returns the sealed store's typed failure.
+    pub fn change_secrets_file_passphrase(
+        &self,
+        current: &Secret,
+        new: &Secret,
+    ) -> Result<(), CoreError> {
+        Ok(self.sealed_file.change_passphrase(current, new)?)
+    }
+
+    /// Remove the sealed store and every secret it holds.
+    ///
+    /// Answers whether a file existed. The explicit consent is minted only after the destructive
+    /// confirmation has been accepted.
+    ///
+    /// # Errors
+    /// Returns the sealed store's typed filesystem or lock failure.
+    pub fn remove_secrets_file(&self, consent: Consent) -> Result<bool, CoreError> {
+        Ok(self.sealed_file.remove(consent)?)
+    }
+
+    /// Erase the sealed store's derived key from this process immediately.
+    pub fn seal_secrets_file(&self) {
+        self.sealed_file.seal();
     }
 
     /// What the credential store this launcher is using reports about itself.
