@@ -5,6 +5,7 @@ pub(crate) mod first_run;
 mod frontier;
 mod import;
 pub(crate) mod path;
+pub(crate) mod read;
 pub(crate) mod secrets;
 pub(crate) mod startup;
 pub(crate) mod store;

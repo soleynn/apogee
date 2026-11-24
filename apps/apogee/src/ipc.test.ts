@@ -5,10 +5,17 @@ import {
   IpcFailure,
   cancel,
   corruptStoreRecovery,
+  defaults,
+  dxvkCatalog,
   execute,
+  nextAction,
+  resolvedSetup,
+  runnerCatalog,
   secretsReport,
   selectActiveProfile,
   startup,
+  supportBundleContents,
+  systemReport,
 } from './ipc';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -199,5 +206,50 @@ describe('run commands', () => {
 
     await expect(cancel('run-id')).resolves.toBe(true);
     expect(invoke).toHaveBeenCalledWith('cancel', { runId: 'run-id' });
+  });
+});
+
+describe('direct core reads', () => {
+  it('keeps profile identity explicit on profile-scoped reads', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+
+    await nextAction('profile-id');
+    await resolvedSetup('profile-id');
+    await dxvkCatalog('profile-id');
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'next_action', { profile: 'profile-id' });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'resolved_setup', { profile: 'profile-id' });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'dxvk_catalog', { profile: 'profile-id' });
+  });
+
+  it('uses independent methods for catalogs, defaults, and support previews', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+
+    await runnerCatalog();
+    await defaults();
+    await supportBundleContents();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'runner_catalog');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'defaults');
+    expect(invoke).toHaveBeenNthCalledWith(3, 'support_bundle_contents');
+  });
+
+  it('requests core-composed reports with an optional profile only', async () => {
+    vi.mocked(invoke).mockResolvedValue('report');
+
+    await expect(systemReport()).resolves.toBe('report');
+    await expect(systemReport('profile-id')).resolves.toBe('report');
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'system_report', { profile: null });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'system_report', { profile: 'profile-id' });
+  });
+
+  it('normalizes failures from direct reads through the same boundary', async () => {
+    vi.mocked(invoke).mockRejectedValue({ code: 'err-runtime', error: null });
+
+    await expect(runnerCatalog()).rejects.toMatchObject({
+      name: 'IpcFailure',
+      code: 'err-runtime',
+    });
   });
 });

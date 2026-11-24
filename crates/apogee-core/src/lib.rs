@@ -49,7 +49,7 @@ pub use apogee_otp::{Deviation, ListenerConsent, OtpSource};
 pub use apogee_patcher::{PatchProgress, PreflightError, Repo};
 pub use apogee_runtime::{
     BenchError, BenchStats, CatalogViewEntry, FrameLog, Gamescope, GpuSelect, HealthIssue, Hud,
-    PrefixHealth, ProgramStatus, SyncChoice,
+    PrefixHealth, ProgramStatus, SyncChoice, SyncStatus,
 };
 #[cfg(unix)]
 pub use apogee_runtime::{
