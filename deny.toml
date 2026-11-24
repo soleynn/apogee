@@ -6,6 +6,14 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Unmaintained notices for the D-Bus wire-format crates, which upstream folded into zbus 6. They reach
+# the graph through the Secret Service keyring store, whose released line still requires zbus 5, so no
+# version clears them until that store moves. Vulnerability advisories are never ignored here.
+ignore = [
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
+]
 
 [bans]
 # Home-built domain code only: no third-party FFXIV crates in the graph.

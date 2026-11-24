@@ -100,7 +100,8 @@ fn unpack_zip(
         // A zip name is specified to use `/`, so a `\` in one is either Windows tooling being loose
         // or someone hand-building an escape. Folded before the walk either way: on Linux a backslash
         // is an ordinary character, so `..\..\x` would otherwise survive as one opaque component.
-        let raw = PathBuf::from(entry.name().replace('\\', "/"));
+        let name = entry.name().map_err(|e| decode_err(archive, &e))?;
+        let raw = PathBuf::from(name.replace('\\', "/"));
         let rel = match resolve(&raw, strip_prefix) {
             Resolved::Path(p) => p,
             Resolved::Skip => continue,

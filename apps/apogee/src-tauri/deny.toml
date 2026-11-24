@@ -8,7 +8,7 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# Every entry below is an "unmaintained" notice, not a vulnerability, and every one of them arrives
+# Every entry below is an "unmaintained" notice, not a vulnerability, and all but the last group arrive
 # through the desktop framework rather than through anything this repository chose. Vulnerability
 # advisories are not ignored anywhere and still fail this check.
 #
@@ -34,6 +34,11 @@ ignore = [
     "RUSTSEC-2025-0081", # unic-char-property
     "RUSTSEC-2025-0098", # unic-ucd-version
     "RUSTSEC-2025-0100", # unic-ucd-ident
+    # The D-Bus wire-format crates, which upstream folded into zbus 6. They arrive through the Secret
+    # Service keyring store rather than the framework; its released line still requires zbus 5.
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
 ]
 
 [bans]
