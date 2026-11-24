@@ -133,6 +133,7 @@ is tagged with its change type. Versioning aims to follow
 - Add explicit login contracts and shell driver (#250) _(added)_
 - Complete launcher setup and recovery surfaces (#251) _(added)_
 - Make read surfaces concurrency-safe (#254) _(fixed)_
+- Add sealed store lifecycle (#256) _(added)_
 
 ### deps
 - Clear published security advisories and restore CI on main (#301) _(fixed)_
