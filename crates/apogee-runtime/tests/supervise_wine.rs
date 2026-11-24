@@ -18,18 +18,31 @@ use apogee_runtime::{LaunchPlan, Progress, RunnerKind, Runtime, RuntimePaths};
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
-/// A custom runner whose `bin/wine`/`bin/wineserver` shell out to the host's wine on `PATH`, so the
-/// exact install location need not be known.
+/// A custom runner whose `bin/wine`/`bin/wineserver` shell out to the host's wine, so the exact
+/// install location need not be known.
+///
+/// `wine` is always on `PATH`; `wineserver` is not. Debian-family packages from wine 10 on keep it in
+/// their private library directory, so the shim falls back to those. A shim that finds none exits
+/// nonzero, which the broad stop reads as "nothing to kill", so it says why on stderr first.
 fn wine_runner(dir: &Path) -> Result<(), Box<dyn Error>> {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin)?;
     write_script(&bin.join("wine"), "#!/bin/sh\nexec wine \"$@\"\n")?;
-    write_script(
-        &bin.join("wineserver"),
-        "#!/bin/sh\nexec wineserver \"$@\"\n",
-    )?;
+    write_script(&bin.join("wineserver"), WINESERVER_SHIM)?;
     Ok(())
 }
+
+/// Run the host's `wineserver`, wherever the distribution put it.
+const WINESERVER_SHIM: &str = r#"#!/bin/sh
+for ws in "$(command -v wineserver)" \
+    /usr/lib/x86_64-linux-gnu/wine/wineserver \
+    /usr/lib/wine/wineserver64 \
+    /usr/lib/wine/wineserver; do
+    if [ -n "$ws" ] && [ -x "$ws" ]; then exec "$ws" "$@"; fi
+done
+echo "no host wineserver found" >&2
+exit 127
+"#;
 
 fn write_script(path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
     std::fs::write(path, body)?;
