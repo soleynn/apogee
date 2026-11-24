@@ -5,10 +5,17 @@
 //! the injector's own parser is not ours to read. A golden test over [`injector_argv`] is what that
 //! contract is pinned by.
 //!
-//! One deliberate difference from the reference launcher. It joins its arguments into a single string
-//! that wine splits again, so it wraps every path in literal double quotes to survive that round trip.
-//! This builds a real argv, where a quote is just a character, so the quotes are not emitted: a path
-//! carrying them would be a path that does not exist.
+//! Two deliberate differences from the reference launcher.
+//!
+//! It joins its arguments into a single string that wine splits again, so it wraps every path in
+//! literal double quotes to survive that round trip. This builds a real argv, where a quote is just a
+//! character, so the quotes are not emitted: a path carrying them would be a path that does not exist.
+//!
+//! The reference launcher also passes no sandbox flag, and this always passes `--no-sandbox`. Recent
+//! injectors read and parse a sandbox settings file from the prefix's application data on every launch
+//! unless told not to, so a malformed file there, which any process in the prefix can write, aborts the
+//! launch before the game starts. The `AppContainer` sandbox that file configures cannot work under wine
+//! (the profile API behind it is an unimplemented stub), so turning it off loses nothing.
 
 use std::fmt;
 
@@ -172,6 +179,10 @@ pub(crate) fn injector_argv(inv: &InjectorInvocation<'_>) -> Vec<String> {
         format!("--dalamud-client-language={}", inv.client_language),
         format!("--dalamud-delay-initialize={}", inv.delay_initialize_ms),
         format!("--dalamud-tspack-b64={}", inv.troubleshooting_b64),
+        // Always, and before the separator: past it the flag would be a game argument. Injectors that
+        // predate it log one "not a valid command line argument, ignoring" warning and carry on, so no
+        // version check is needed.
+        "--no-sandbox".to_owned(),
     ];
     match inv.plugins {
         PluginPolicy::All => {}
@@ -221,6 +232,7 @@ mod tests {
                 "--dalamud-client-language=1",
                 "--dalamud-delay-initialize=0",
                 "--dalamud-tspack-b64=e30=",
+                "--no-sandbox",
                 "--",
             ]
         );
@@ -282,6 +294,25 @@ mod tests {
                 ..invocation()
             });
             assert_eq!(argv.last().map(String::as_str), Some("--"));
+        }
+    }
+
+    /// The sandbox switch is unconditional: whatever the plugin policy, it is present and ahead of the
+    /// separator, because a copy past it would be handed to the game instead of the injector.
+    #[test]
+    fn the_sandbox_is_always_switched_off_ahead_of_the_separator() {
+        for plugins in [
+            PluginPolicy::All,
+            PluginPolicy::NoThirdParty,
+            PluginPolicy::None,
+        ] {
+            let argv = injector_argv(&InjectorInvocation {
+                plugins,
+                ..invocation()
+            });
+            let flag = argv.iter().position(|arg| arg == "--no-sandbox");
+            let separator = argv.iter().position(|arg| arg == "--");
+            assert!(flag < separator && flag.is_some(), "{argv:?}");
         }
     }
 
