@@ -377,11 +377,15 @@ mod tests {
         waiting.abort();
         assert!(state.mutation_lease().is_err());
         release_tx.send(())?;
-        for _ in 0..1_000 {
+        // The closure returns on another thread, and the admission is released only after that
+        // thread has unwound it. Wait on the clock rather than on a count of yields, which a busy
+        // machine can spend before the other thread is scheduled at all.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             if state.mutation_lease().is_ok() {
                 return Ok(());
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         Err(std::io::Error::other("blocking task did not release mutation admission").into())
     }
