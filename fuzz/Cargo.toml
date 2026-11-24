@@ -25,6 +25,10 @@ apogee-addons = { path = "../crates/apogee-addons" }
 # really on the machine, and a dependency edge is how it would get switched on everywhere.
 apogee-secrets = { path = "../crates/apogee-secrets", features = ["fuzzing"] }
 apogee-otp = { path = "../crates/apogee-otp", features = ["fuzzing"] }
+# Not used here directly: a version hold on the archive crates' file-timestamp helper. 0.2.30 calls a
+# std API it detects by the compiler's minor version, and the pinned fuzz nightly reports 1.99 from
+# before that API was stabilized, so the build fails. Drop this when the nightly pin moves forward.
+filetime = ">=0.2, <0.2.30"
 
 [[bin]]
 name = "patchlist"

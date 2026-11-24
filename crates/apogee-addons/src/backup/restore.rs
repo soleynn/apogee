@@ -297,7 +297,13 @@ fn restore_entry(
     let mut entry = zip.by_index(index).map_err(|_| BackupError::NotAnArchive {
         path: plan.archive.clone(),
     })?;
-    let raw = entry.name().to_owned();
+    // A name that does not decode is a malformed archive, not an entry to reason about.
+    let raw = entry
+        .name()
+        .map_err(|_| BackupError::NotAnArchive {
+            path: plan.archive.clone(),
+        })?
+        .into_owned();
     if raw == MANIFEST_ENTRY {
         return Ok(());
     }
