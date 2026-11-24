@@ -322,11 +322,23 @@ pub(crate) enum ExitWatch {
 pub(crate) fn watch_exit(pid: i32) -> ExitWatch {
     if let Some(p) = Pid::from_raw(pid)
         && let Ok(fd) = pidfd_open(p, PidfdFlags::empty())
-        && let Ok(async_fd) = AsyncFd::new(fd)
+        && let Ok(async_fd) = register_pidfd(fd)
     {
         return ExitWatch::Pidfd(async_fd);
     }
     ExitWatch::Poll(pid)
+}
+
+/// Register an owned pidfd with the reactor.
+///
+/// tokio deprecated its safe constructors because an arbitrary `AsRawFd` can hand back a descriptor
+/// it does not own, or a different one on each call. An `OwnedFd` can do neither: the descriptor is
+/// open, owned by the value moved in here, and fixed until the `AsyncFd` drops it. That is exactly
+/// the contract the `unsafe` replacement asks for, so the deprecated path is sound for this type and
+/// keeps the crate free of `unsafe`.
+#[allow(deprecated)]
+fn register_pidfd(fd: std::os::fd::OwnedFd) -> std::io::Result<AsyncFd<std::os::fd::OwnedFd>> {
+    AsyncFd::new(fd)
 }
 
 /// Resolve when the watched process exits.

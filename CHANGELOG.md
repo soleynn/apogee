@@ -133,6 +133,9 @@ is tagged with its change type. Versioning aims to follow
 - Add explicit login contracts and shell driver (#250) _(added)_
 - Complete launcher setup and recovery surfaces (#251) _(added)_
 
+### deps
+- Clear published security advisories and restore CI on main (#301) _(fixed)_
+
 ### nightly
 - Cache fuzz corpus per target across nightly runs (#150) _(ci)_
 
