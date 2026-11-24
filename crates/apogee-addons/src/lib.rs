@@ -97,8 +97,8 @@ pub use backup::{BackupError, Selection};
 // keep working rather than one.
 pub use dalamud::{ClientLanguage, Dalamud, DalamudConfig, DalamudPaths, LoadEvidence};
 pub use external::{
-    AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon, GameContext,
-    Outcome, RunIn, Trigger,
+    AddonEvent, AddonEvents, AddonOutcome, AddonReport, AddonSession, ExternalAddon,
+    ExternalAddonProblem, GameContext, Outcome, RunIn, Trigger,
 };
 pub use launch::{Contribution, LaunchEdit, Redirect};
 pub use manifest::{ComponentManifest, ManifestError, VerifiedManifest};

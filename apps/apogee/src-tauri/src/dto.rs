@@ -5,6 +5,9 @@ pub(crate) mod first_run;
 mod frontier;
 mod import;
 pub(crate) mod path;
+pub(crate) mod secrets;
+pub(crate) mod startup;
+pub(crate) mod store;
 
 use apogee_core::{
     AddonEvent, Event, FlowState, Notice, Outcome, PatchProgress, PrefixReport, ProgramStatus,
@@ -13,7 +16,7 @@ use apogee_core::{
 use serde::Serialize;
 use ts_rs::TS;
 
-use error::CoreErrorDto;
+pub(crate) use error::{CoreErrorDto, IpcErrorDto};
 use first_run::FirstRunDto;
 use frontier::FrontierDto;
 use import::ImportDto;

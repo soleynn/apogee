@@ -46,6 +46,20 @@ pub enum Trigger {
     OnClose,
 }
 
+/// A configuration defect visible without resolving a launch environment.
+///
+/// This intentionally carries no arbitrary field name or parser prose. A shell needs to distinguish
+/// an entry it can edit from one this build must preserve unchanged, but it does not need to receive
+/// untrusted keys to do that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExternalAddonProblem {
+    /// The configured program is empty or relative.
+    InvalidProgram,
+    /// The record contains fields this build does not understand and must preserve.
+    UnsupportedFields,
+}
+
 /// A companion tool the user configured: what to run, what to pass it, where it runs, and when.
 ///
 /// There is no elevation field. Asking for elevation interrupts the launch with a prompt and, in the
@@ -160,6 +174,22 @@ impl ExternalAddon {
     /// Turn it on or off without losing the entry.
     pub const fn set_enabled(&mut self, on: bool) {
         self.enabled = on;
+    }
+
+    /// A defect in the stored record itself, independent of the launch it may join.
+    ///
+    /// An unsupported entry remains readable so a newer build's fields survive a round trip, but a
+    /// caller must not present it as an ordinary editable entry. The details stay inside the domain
+    /// layer: only the safe classification crosses to a shell.
+    #[must_use]
+    pub fn configuration_problem(&self) -> Option<ExternalAddonProblem> {
+        if !self.unsupported.is_empty() {
+            Some(ExternalAddonProblem::UnsupportedFields)
+        } else if self.program.as_os_str().is_empty() || !self.program.is_absolute() {
+            Some(ExternalAddonProblem::InvalidProgram)
+        } else {
+            None
+        }
     }
 
     /// Whether the game's exit leaves it running.
@@ -369,6 +399,27 @@ mod tests {
             Err(AddonError::UnsupportedField { field, .. }) => assert_eq!(field, "run_as_admin"),
             other => panic!("expected the field to be named, got {other:?}"),
         }
+        assert_eq!(
+            addon.configuration_problem(),
+            Some(ExternalAddonProblem::UnsupportedFields)
+        );
+    }
+
+    /// Preserving fields this build cannot edit outranks correcting another field on the same row.
+    #[test]
+    fn unsupported_fields_dominate_an_invalid_program() {
+        let addon: ExternalAddon = serde_json::from_value(serde_json::json!({
+            "program": "relative/tool",
+            "run_in": "host",
+            "trigger": "on_close",
+            "future_field": true
+        }))
+        .expect("shape-valid persisted entry");
+
+        assert_eq!(
+            addon.configuration_problem(),
+            Some(ExternalAddonProblem::UnsupportedFields)
+        );
     }
 
     /// An unknown key survives a load and save by an older build, so a newer build's setting is not

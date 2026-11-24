@@ -8,50 +8,39 @@
 //! that come back, and the types it puts on the wire are declared here rather than borrowed from the
 //! domain model, so the JSON the frontend binds to is this crate's to change.
 //!
-//! The startup snapshot and primary login-to-play flow are the first implemented slice.
+//! Startup store reads and the complete command/event stream use the same core instance.
 
 mod command;
 mod dto;
 mod supervisor;
 
+use std::future::Future;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use apogee_core::{Core, CoreConfig, Region, StableCode, Uuid};
-use serde::Serialize;
+use apogee_core::{Core, CoreConfig, Uuid};
 use tauri::Manager;
 use tauri::ipc::Channel;
+use tokio::sync::{Notify, OnceCell};
 
 use command::CommandDto;
-use dto::EventWireDto;
+use dto::secrets::SecretsReportDto;
+use dto::startup::StartupDto;
+use dto::{EventWireDto, IpcErrorDto};
 use supervisor::{RunAdmissionError, RunClass, Runs};
-
-/// The first thing the frontend asks for.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Startup {
-    /// This binary's version, as its manifest declares it.
-    version: &'static str,
-    /// The service region a profile connects to when nothing has chosen one.
-    default_region: &'static str,
-}
-
-#[tauri::command]
-fn startup() -> Startup {
-    Startup {
-        version: env!("CARGO_PKG_VERSION"),
-        default_region: region_label(Region::default()),
-    }
-}
 
 enum CoreStatus {
     Starting,
     Ready(Arc<Core>),
-    Failed(&'static str),
+    Failed(IpcErrorDto),
 }
 
 struct ShellState {
     core: Mutex<CoreStatus>,
+    core_ready: Notify,
+    #[cfg(test)]
+    core_waiting: Notify,
+    startup: OnceCell<StartupDto>,
     runs: Runs,
 }
 
@@ -59,44 +48,127 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             core: Mutex::new(CoreStatus::Starting),
+            core_ready: Notify::new(),
+            #[cfg(test)]
+            core_waiting: Notify::new(),
+            startup: OnceCell::new(),
             runs: Runs::default(),
         }
     }
 }
 
 impl ShellState {
+    #[cfg(test)]
     fn install_core(&self, core: Result<Core, apogee_core::CoreError>) {
-        if let Ok(mut slot) = self.core.lock() {
-            *slot = match core {
-                Ok(core) => CoreStatus::Ready(Arc::new(core)),
-                Err(error) => CoreStatus::Failed(error.code()),
-            };
+        self.install_core_result(core.map_err(|error| IpcErrorDto::core(&error)));
+    }
+
+    fn install_core_result(&self, core: Result<Core, IpcErrorDto>) {
+        let mut slot = match self.core.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = match core {
+            Ok(core) => CoreStatus::Ready(Arc::new(core)),
+            Err(error) => CoreStatus::Failed(error),
+        };
+        drop(slot);
+        self.core_ready.notify_waiters();
+    }
+
+    fn install_core_failure(&self, error: IpcErrorDto) {
+        let mut slot = match self.core.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = CoreStatus::Failed(error);
+        drop(slot);
+        self.core_ready.notify_waiters();
+    }
+
+    async fn ready_core(&self) -> Result<Arc<Core>, IpcErrorDto> {
+        loop {
+            let ready = self.core_ready.notified();
+            {
+                let slot = match self.core.lock() {
+                    Ok(slot) => slot,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match &*slot {
+                    CoreStatus::Starting => {
+                        #[cfg(test)]
+                        self.core_waiting.notify_waiters();
+                    }
+                    CoreStatus::Ready(core) => return Ok(Arc::clone(core)),
+                    CoreStatus::Failed(error) => return Err(error.clone()),
+                }
+            }
+            ready.await;
         }
     }
 
-    fn ready_core(&self) -> Result<Arc<Core>, ShellError> {
-        let slot = self
-            .core
-            .lock()
-            .map_err(|_| ShellError::new("shell.state.unavailable"))?;
-        match &*slot {
-            CoreStatus::Starting => Err(ShellError::new("shell.core.starting")),
-            CoreStatus::Ready(core) => Ok(Arc::clone(core)),
-            CoreStatus::Failed(code) => Err(ShellError::new(code)),
-        }
+    async fn initial_snapshot(&self) -> Result<StartupDto, IpcErrorDto> {
+        self.startup
+            .get_or_try_init(|| async {
+                let core = self.ready_core().await?;
+                run_blocking(move || StartupDto::read(&core)).await?
+            })
+            .await
+            .cloned()
+    }
+
+    async fn ready_core_after<T, B>(&self, bootstrap: B) -> Result<Arc<Core>, IpcErrorDto>
+    where
+        B: Future<Output = Result<T, IpcErrorDto>>,
+    {
+        bootstrap.await?;
+        self.ready_core().await
     }
 }
 
-/// A failure at the IPC boundary. Only a stable code crosses; core's display text can carry paths
-/// and protocol excerpts and is never serialized here.
-#[derive(Serialize)]
-struct ShellError {
-    code: &'static str,
+/// Read the complete local store only after composition finishes. Failed reads remain retryable
+/// after recovery; the first successful snapshot is fixed before any flow starts.
+#[tauri::command]
+async fn startup(state: tauri::State<'_, ShellState>) -> Result<StartupDto, IpcErrorDto> {
+    startup_snapshot(&state).await
 }
 
-impl ShellError {
-    const fn new(code: &'static str) -> Self {
-        Self { code }
+async fn startup_snapshot(state: &ShellState) -> Result<StartupDto, IpcErrorDto> {
+    state.initial_snapshot().await
+}
+
+/// Probe the configured credential backend away from the window thread.
+#[tauri::command]
+async fn secrets_report(
+    state: tauri::State<'_, ShellState>,
+) -> Result<SecretsReportDto, IpcErrorDto> {
+    secrets_report_snapshot(&state).await
+}
+
+async fn secrets_report_snapshot(state: &ShellState) -> Result<SecretsReportDto, IpcErrorDto> {
+    let core = state.ready_core().await?;
+    run_blocking(move || SecretsReportDto::new(&core.secrets_report(), core.secrets_path())).await
+}
+
+async fn run_blocking<T, F>(task: F) -> Result<T, IpcErrorDto>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|_| IpcErrorDto::shell("shell.task.failed"))
+}
+
+async fn initialize_state<T, F, I>(state: &ShellState, task: F, install: I)
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    I: FnOnce(&ShellState, T),
+{
+    match run_blocking(task).await {
+        Ok(value) => install(state, value),
+        Err(error) => state.install_core_failure(error),
     }
 }
 
@@ -106,14 +178,16 @@ async fn execute(
     state: tauri::State<'_, ShellState>,
     command: CommandDto,
     on_event: Channel<EventWireDto>,
-) -> Result<Uuid, ShellError> {
+) -> Result<Uuid, IpcErrorDto> {
     // Consume credential bytes before touching any other state, so the IPC allocation is guarded by
     // core's write-only Secret for the rest of the command body.
     let command = command
         .into_core()
-        .map_err(|_| ShellError::new("shell.command.invalid"))?;
+        .map_err(|_| IpcErrorDto::shell("shell.command.invalid"))?;
     let class = RunClass::for_command(&command);
-    let core = state.ready_core()?;
+    // The first store snapshot is the bootstrap boundary. No mutating flow starts before it has read
+    // a single pre-flow view of every startup record.
+    let core = state.ready_core_after(state.initial_snapshot()).await?;
     let run_id = Uuid::new_v4();
     let cancel = state
         .runs
@@ -127,32 +201,21 @@ async fn execute(
     Ok(run_id)
 }
 
-fn run_admission_error(error: RunAdmissionError) -> ShellError {
+fn run_admission_error(error: RunAdmissionError) -> IpcErrorDto {
     match error {
-        RunAdmissionError::Duplicate => ShellError::new("shell.run.duplicate"),
-        RunAdmissionError::Busy => ShellError::new("shell.run.busy"),
-        RunAdmissionError::Unavailable => ShellError::new("shell.state.unavailable"),
+        RunAdmissionError::Duplicate => IpcErrorDto::shell("shell.run.duplicate"),
+        RunAdmissionError::Busy => IpcErrorDto::shell("shell.run.busy"),
+        RunAdmissionError::Unavailable => IpcErrorDto::shell("shell.state.unavailable"),
     }
 }
 
 /// Ask a running core command to stop at its cancellation boundary.
 #[tauri::command]
-async fn cancel(state: tauri::State<'_, ShellState>, run_id: Uuid) -> Result<bool, ShellError> {
+async fn cancel(state: tauri::State<'_, ShellState>, run_id: Uuid) -> Result<bool, IpcErrorDto> {
     state
         .runs
         .cancel(run_id)
-        .map_err(|_| ShellError::new("shell.state.unavailable"))
-}
-
-/// The wildcard arm is required rather than defensive: `Region` is `#[non_exhaustive]`, so a variant
-/// added to the domain model has to reach a frontend built before it existed.
-fn region_label(region: Region) -> &'static str {
-    match region {
-        Region::Global => "global",
-        Region::Korea => "korea",
-        Region::China => "china",
-        _ => "unknown",
-    }
+        .map_err(|_| IpcErrorDto::shell("shell.state.unavailable"))
 }
 
 fn main() -> ExitCode {
@@ -171,13 +234,27 @@ fn main() -> ExitCode {
         .manage(ShellState::default())
         .setup(|app| {
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let core = CoreConfig::try_from_env().and_then(Core::new);
-                handle.state::<ShellState>().install_core(core);
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<ShellState>();
+                initialize_state(
+                    &state,
+                    || {
+                        CoreConfig::try_from_env()
+                            .and_then(Core::new)
+                            .map_err(|error| IpcErrorDto::core(&error))
+                    },
+                    ShellState::install_core_result,
+                )
+                .await;
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![startup, execute, cancel])
+        .invoke_handler(tauri::generate_handler![
+            startup,
+            secrets_report,
+            execute,
+            cancel
+        ])
         .run(context)
     {
         Ok(()) => ExitCode::SUCCESS,
@@ -194,17 +271,277 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_named_region_has_a_label() {
-        assert_eq!(region_label(Region::Global), "global");
-        assert_eq!(region_label(Region::Korea), "korea");
-        assert_eq!(region_label(Region::China), "china");
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[tokio::test]
+    async fn startup_waits_for_core_initialization() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let config = CoreConfig::with_base(temporary.path());
+        std::fs::create_dir_all(&config.store_dir)?;
+        std::fs::write(config.store_dir.join("settings.json"), b"not-json")?;
+        let state = Arc::new(ShellState::default());
+        let observed = state.core_waiting.notified();
+        let waiting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { startup_snapshot(&state).await })
+        };
+        observed.await;
+        assert!(!waiting.is_finished());
+
+        state.install_core(Core::new(config));
+        let result = waiting.await?;
+        let Err(error) = result else {
+            return Err(std::io::Error::other("corrupt startup unexpectedly succeeded").into());
+        };
+        let json = serde_json::to_string(&error)?;
+        assert!(json.contains("err-store"));
+        assert!(!json.contains("shell.core.starting"));
+        Ok(())
     }
 
-    #[test]
-    fn the_default_region_reaches_the_frontend_named() {
-        let startup = startup();
-        assert_eq!(startup.default_region, "global");
-        assert_eq!(startup.version, env!("CARGO_PKG_VERSION"));
+    #[tokio::test]
+    async fn bootstrap_gate_blocks_core_access_until_the_snapshot_boundary() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let core = Core::new(CoreConfig::with_base(temporary.path()))?;
+        let state = Arc::new(ShellState::default());
+        state.install_core(Ok(core));
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let gated = {
+            let state = Arc::clone(&state);
+            let entered = Arc::clone(&entered);
+            tokio::spawn(async move {
+                state
+                    .ready_core_after(async move {
+                        entered.wait().await;
+                        released
+                            .await
+                            .map_err(|_| IpcErrorDto::shell("shell.test.release"))?;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+
+        entered.wait().await;
+        assert!(!gated.is_finished());
+        assert!(release.send(()).is_ok());
+        assert!(gated.await?.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_reads_an_empty_store_and_core_defaults() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let core = Core::new(CoreConfig::with_base(temporary.path()))?;
+        let state = ShellState::default();
+        state.install_core(Ok(core));
+
+        let snapshot = startup_snapshot(&state).await.map_err(ipc_test_error)?;
+        let json = serde_json::to_string(&snapshot)?;
+        assert!(json.contains(r#""profiles":[]"#));
+        assert!(json.contains(r#""accounts":[]"#));
+        assert!(json.contains(r#""region":"global""#));
+        assert!(json.contains(env!("CARGO_PKG_VERSION")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocking_core_reads_leave_the_async_caller_thread() -> TestResult {
+        let caller = std::thread::current().id();
+        let worker = run_blocking(|| std::thread::current().id())
+            .await
+            .map_err(ipc_test_error)?;
+
+        assert_ne!(worker, caller);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn panicking_core_initialization_is_a_terminal_failure() -> TestResult {
+        let state = Arc::new(ShellState::default());
+        let waiting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.ready_core().await })
+        };
+
+        initialize_state(
+            &state,
+            || std::panic::resume_unwind(Box::new("construction failed")),
+            |_, ()| {},
+        )
+        .await;
+
+        let Err(error) = waiting.await? else {
+            return Err(std::io::Error::other("panicking initialization became ready").into());
+        };
+        assert_eq!(
+            serde_json::to_string(&error)?,
+            r#"{"code":"shell.task.failed","error":null}"#
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn poisoned_core_slot_can_still_publish_and_read_a_terminal_state() -> TestResult {
+        let state = Arc::new(ShellState::default());
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let state = Arc::clone(&state);
+            move || {
+                let _slot = match state.core.lock() {
+                    Ok(slot) => slot,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                std::panic::resume_unwind(Box::new("poison core slot"));
+            }
+        }));
+        assert!(poisoned.is_err());
+
+        let temporary = tempfile::TempDir::new()?;
+        let core = Core::new(CoreConfig::with_base(temporary.path()))?;
+        state.install_core(Ok(core));
+
+        assert!(state.ready_core().await.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_projects_saved_records_without_replacing_core_defaults() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let core = Core::new(CoreConfig::with_base(temporary.path()))?;
+        let account = apogee_core::Account::new(
+            "person@example.invalid",
+            apogee_core::AccountKind::Steam { app_id: 39_210 },
+        );
+        core.save_account(&account)?;
+        let mut profile =
+            apogee_core::Profile::new("Main", account.id, temporary.path().join("game"));
+        profile.launch.region = apogee_core::Region::Korea;
+        core.save_profile(&profile)?;
+        let mut settings = core.settings()?;
+        settings.language = "ja".to_owned();
+        settings.close_after_launch = true;
+        core.save_settings(&settings)?;
+        let state = ShellState::default();
+        state.install_core(Ok(core));
+
+        let snapshot = startup_snapshot(&state).await.map_err(ipc_test_error)?;
+        let json = serde_json::to_string(&snapshot)?;
+        assert!(json.contains("person@example.invalid"));
+        assert!(json.contains(r#""name":"Main""#));
+        assert!(json.contains(r#""language":"ja""#));
+        assert!(json.contains(r#""closeAfterLaunch":true"#));
+        assert!(json.contains(r#""region":"korea""#));
+        assert!(json.contains(r#""region":"global""#));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_startup_store_keeps_recovery_paths_and_omits_detail() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let config = CoreConfig::with_base(temporary.path());
+        std::fs::create_dir_all(&config.store_dir)?;
+        let settings = config.store_dir.join("settings.json");
+        let store_dir = config.store_dir.clone();
+        std::fs::write(&settings, br#"{"token":"planted-secret"}"#)?;
+        let state = ShellState::default();
+        state.install_core(Core::new(config));
+
+        let Err(error) = startup_snapshot(&state).await else {
+            return Err(std::io::Error::other("corrupt settings unexpectedly loaded").into());
+        };
+        let json = serde_json::to_string(&error)?;
+        assert!(json.contains("err-store"));
+        assert!(json.contains(r#""kind":"corrupt""#));
+        assert!(json.contains(r#""display":"#));
+        assert!(json.contains("settings.json"));
+        assert!(!json.contains("planted-secret"));
+        assert!(settings.exists());
+        let has_backup = std::fs::read_dir(store_dir)?
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt"));
+        assert!(has_backup);
+
+        std::fs::remove_file(settings)?;
+        assert!(startup_snapshot(&state).await.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn profile_corruption_after_core_construction_reaches_startup_recovery() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let config = CoreConfig::with_base(temporary.path());
+        let profiles = config.store_dir.join("profiles");
+        let core = Core::new(config)?;
+        std::fs::create_dir_all(&profiles)?;
+        let profile = profiles.join("broken.json");
+        std::fs::write(&profile, br#"{"token":"planted-secret"}"#)?;
+        let state = ShellState::default();
+        state.install_core(Ok(core));
+
+        let Err(error) = startup_snapshot(&state).await else {
+            return Err(std::io::Error::other("corrupt profile unexpectedly loaded").into());
+        };
+        let json = serde_json::to_string(&error)?;
+        assert!(json.contains("err-store"));
+        assert!(json.contains(r#""kind":"corrupt""#));
+        assert!(json.contains("broken.json"));
+        assert!(!json.contains("planted-secret"));
+        assert!(profile.exists());
+        let has_backup = std::fs::read_dir(profiles)?
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt"));
+        assert!(has_backup);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_startup_callers_share_the_pre_write_snapshot() -> TestResult {
+        let temporary = tempfile::TempDir::new()?;
+        let core = Core::new(CoreConfig::with_base(temporary.path()))?;
+        let state = Arc::new(ShellState::default());
+        state.install_core(Ok(core));
+        let entered = Arc::new(tokio::sync::Barrier::new(3));
+        let first = {
+            let state = Arc::clone(&state);
+            let entered = Arc::clone(&entered);
+            tokio::spawn(async move {
+                entered.wait().await;
+                startup_snapshot(&state).await
+            })
+        };
+        let second = {
+            let state = Arc::clone(&state);
+            let entered = Arc::clone(&entered);
+            tokio::spawn(async move {
+                entered.wait().await;
+                startup_snapshot(&state).await
+            })
+        };
+
+        entered.wait().await;
+        let before = first.await?.map_err(ipc_test_error)?;
+        let alongside = second.await?.map_err(ipc_test_error)?;
+        assert_eq!(
+            serde_json::to_string(&before)?,
+            serde_json::to_string(&alongside)?
+        );
+
+        let core = state.ready_core().await.map_err(ipc_test_error)?;
+        let account = apogee_core::Account::new("later", apogee_core::AccountKind::Standard);
+        core.save_account(&account)?;
+        let after = startup_snapshot(&state).await.map_err(ipc_test_error)?;
+
+        assert_eq!(
+            serde_json::to_string(&before)?,
+            serde_json::to_string(&after)?
+        );
+        assert!(!serde_json::to_string(&after)?.contains("later"));
+        Ok(())
+    }
+
+    fn ipc_test_error(error: IpcErrorDto) -> std::io::Error {
+        let code = serde_json::to_string(&error).unwrap_or_else(|_| "IPC failure".to_owned());
+        std::io::Error::other(code)
     }
 }

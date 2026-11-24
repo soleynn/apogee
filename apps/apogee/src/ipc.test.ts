@@ -1,7 +1,15 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { cancel, execute, startup } from './ipc';
+import {
+  IpcFailure,
+  cancel,
+  corruptStoreRecovery,
+  execute,
+  secretsReport,
+  selectActiveProfile,
+  startup,
+} from './ipc';
 
 vi.mock('@tauri-apps/api/core', () => ({
   Channel: vi.fn(function MockChannel(this: { onmessage?: unknown }) {
@@ -12,15 +20,123 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  const values = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+  });
 });
 
 describe('startup', () => {
   it('names the desktop command and hands back what it answered', async () => {
-    const answer = { version: '0.0.0', defaultRegion: 'global' };
+    const answer = {
+      version: '0.0.0',
+      profiles: [],
+      accounts: [],
+      settings: {},
+      defaults: {},
+    };
     vi.mocked(invoke).mockResolvedValue(answer);
 
-    await expect(startup()).resolves.toEqual(answer);
+    await expect(startup()).resolves.toEqual({ ...answer, activeProfile: null });
     expect(invoke).toHaveBeenCalledWith('startup');
+  });
+
+  it('restores only a last-used profile that still exists', async () => {
+    const profile = { id: 'present-profile' };
+    localStorage.setItem('apogee.activeProfile', profile.id);
+    vi.mocked(invoke).mockResolvedValue({
+      version: '0.0.0',
+      profiles: [profile],
+      accounts: [],
+      settings: {},
+      defaults: {},
+    });
+
+    await expect(startup()).resolves.toMatchObject({ activeProfile: profile.id });
+
+    localStorage.setItem('apogee.activeProfile', 'deleted-profile');
+    await expect(startup()).resolves.toMatchObject({ activeProfile: null });
+    expect(localStorage.getItem('apogee.activeProfile')).toBeNull();
+  });
+
+  it('leaves missing and zero-profile selections empty', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      version: '0.0.0',
+      profiles: [],
+      accounts: [],
+      settings: {},
+      defaults: {},
+    });
+
+    await expect(startup()).resolves.toMatchObject({ activeProfile: null });
+    expect(selectActiveProfile('missing', [])).toBeNull();
+    expect(localStorage.getItem('apogee.activeProfile')).toBeNull();
+  });
+
+  it('normalizes corrupt-store failures and keeps the recovery paths', async () => {
+    vi.mocked(invoke).mockRejectedValue({
+      code: 'err-store',
+      error: {
+        kind: 'store',
+        store: {
+          kind: 'corrupt',
+          path: { display: 'settings.json', value: { kind: 'utf8', value: 'settings.json' } },
+          backup: {
+            display: 'settings.json.corrupt',
+            value: { kind: 'utf8', value: 'settings.json.corrupt' },
+          },
+        },
+      },
+    });
+
+    const failure = await startup().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(IpcFailure);
+    expect(corruptStoreRecovery(failure)).toEqual({
+      code: 'err-store',
+      path: 'settings.json',
+      backup: 'settings.json.corrupt',
+    });
+  });
+
+  it('does not throw while selecting recovery from a malformed future error', async () => {
+    vi.mocked(invoke).mockRejectedValue({ code: 'err-store', error: { kind: 'store' } });
+
+    const failure = await startup().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(IpcFailure);
+    expect(corruptStoreRecovery(failure)).toBeNull();
+  });
+
+  it('treats denied marker storage as optional', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => { throw new Error('denied'); },
+      setItem: () => { throw new Error('denied'); },
+      removeItem: () => { throw new Error('denied'); },
+    });
+    vi.mocked(invoke).mockResolvedValue({
+      version: '0.0.0',
+      profiles: [],
+      accounts: [],
+      settings: {},
+      defaults: {},
+    });
+
+    await expect(startup()).resolves.toMatchObject({ activeProfile: null });
+    expect(selectActiveProfile('missing', [])).toBeNull();
+  });
+
+  it('keeps credential probing out of the startup call', async () => {
+    const answer = {
+      backend: 'null',
+      state: 'notStoring',
+      sandbox: null,
+      secretsPath: { display: 'secrets.bin', value: { kind: 'utf8', value: 'secrets.bin' } },
+    };
+    vi.mocked(invoke).mockResolvedValue(answer);
+
+    await expect(secretsReport()).resolves.toEqual(answer);
+    expect(invoke).toHaveBeenCalledWith('secrets_report');
   });
 });
 

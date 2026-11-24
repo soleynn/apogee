@@ -1,7 +1,11 @@
 <script lang="ts">
-  import { startup } from './ipc';
+  import { corruptStoreRecovery, failureCode, startup } from './ipc';
 
-  const pending = startup();
+  let pending = startup();
+
+  function retryStartup() {
+    pending = startup();
+  }
 </script>
 
 <main>
@@ -9,9 +13,20 @@
   {#await pending}
     <p>Starting.</p>
   {:then info}
-    <p>Version {info.version}, default region {info.defaultRegion}.</p>
+    <p>Version {info.version}, default region {info.defaults.launch.region}.</p>
   {:catch error}
-    <p>{error}</p>
+    {@const recovery = corruptStoreRecovery(error)}
+    {#if recovery}
+      <section aria-labelledby="corrupt-store-title">
+        <h2 id="corrupt-store-title">Stored settings need attention</h2>
+        <p>Apogee could not read {recovery.path}.</p>
+        <p>The original was kept and a recovery copy is at {recovery.backup}.</p>
+        <p>Code: {recovery.code}</p>
+        <button type="button" onclick={retryStartup}>Try again</button>
+      </section>
+    {:else}
+      <p>Startup failed with {failureCode(error)}.</p>
+    {/if}
   {/await}
 </main>
 

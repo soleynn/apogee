@@ -144,10 +144,8 @@ else
   report "the exempted build script is gone; the exemption can go with it" "$shell_build"
 fi
 
-# 6b.1. Commands that can reach the composition root never block Tauri's main thread. `startup` is
-#     the one synchronous command: it returns two compile-time constants and has no state parameter.
-#     Everything else is required to be async, so a newly added command fails closed until its
-#     threading model is explicit.
+# 6b.1. Commands that can reach the composition root never block Tauri's main thread. Every command
+#     is required to be async, so a newly added one fails closed until its threading model is explicit.
 hits=$(find apps/apogee/src-tauri/src -type f -name '*.rs' -exec awk '
   FNR == 1 { in_attribute = 0; awaiting = 0; declaration = ""; start = 0 }
   /#\[tauri::command/ { in_attribute = 1; start = FNR }
@@ -159,8 +157,7 @@ hits=$(find apps/apogee/src-tauri/src -type f -name '*.rs' -exec awk '
     if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*\/\// || $0 ~ /^[[:space:]]*#\[/) next
     declaration = declaration " " $0
     if (declaration ~ /[[:space:]]fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/) {
-      if (declaration !~ /(^|[[:space:]])async[[:space:]]+fn[[:space:]]+/ &&
-          declaration !~ /(^|[[:space:]])fn[[:space:]]+startup[[:space:]]*\(/) {
+      if (declaration !~ /(^|[[:space:]])async[[:space:]]+fn[[:space:]]+/) {
         print FILENAME ":" start ":" declaration
       }
       awaiting = 0; declaration = ""; start = 0
