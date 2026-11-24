@@ -58,7 +58,7 @@ jobs:
       # `build-windows-cross` does in CI: a plain apt package, no MSVC SDK and no second runner.
       - name: Install the MinGW-w64 cross toolchain
         if: steps.tag.outputs.prerelease == 'false'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+        run: .github/scripts/apt-install.sh --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
       - name: Build and package the Linux CLI
         id: package
         if: steps.tag.outputs.prerelease == 'false'
