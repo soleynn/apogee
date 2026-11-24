@@ -130,6 +130,9 @@ is tagged with its change type. Versioning aims to follow
 ### ci
 - Backfill changelog scope and harden the regeneration workflow (#94) _(fixed)_
 
+### cli
+- Complete shell command parity (#260) _(added)_
+
 ### core
 - Add explicit login contracts and shell driver (#250) _(added)_
 - Complete launcher setup and recovery surfaces (#251) _(added)_
