@@ -144,6 +144,7 @@ is tagged with its change type. Versioning aims to follow
 
 ### shell
 - Complete the typed IPC boundary (#252) _(added)_
+- Add startup and credential snapshots (#253) _(added)_
 
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
