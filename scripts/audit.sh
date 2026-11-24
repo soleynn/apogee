@@ -144,6 +144,43 @@ else
   report "the exempted build script is gone; the exemption can go with it" "$shell_build"
 fi
 
+# 6b.1. Commands that can reach the composition root never block Tauri's main thread. `startup` is
+#     the one synchronous command: it returns two compile-time constants and has no state parameter.
+#     Everything else is required to be async, so a newly added command fails closed until its
+#     threading model is explicit.
+hits=$(find apps/apogee/src-tauri/src -type f -name '*.rs' -exec awk '
+  FNR == 1 { in_attribute = 0; awaiting = 0; declaration = ""; start = 0 }
+  /#\[tauri::command/ { in_attribute = 1; start = FNR }
+  in_attribute {
+    if ($0 ~ /]/) { in_attribute = 0; awaiting = 1 }
+    next
+  }
+  awaiting {
+    if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*\/\// || $0 ~ /^[[:space:]]*#\[/) next
+    declaration = declaration " " $0
+    if (declaration ~ /[[:space:]]fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/) {
+      if (declaration !~ /(^|[[:space:]])async[[:space:]]+fn[[:space:]]+/ &&
+          declaration !~ /(^|[[:space:]])fn[[:space:]]+startup[[:space:]]*\(/) {
+        print FILENAME ":" start ":" declaration
+      }
+      awaiting = 0; declaration = ""; start = 0
+    }
+  }
+' {} +)
+[ -z "$hits" ] || report "a shell command can block the window thread" "$hits"
+
+# 6b.2. Core errors are only accessible to the explicit DTO selector and the composition root's
+#     initialization status. The channel itself accepts only the wire DTO, so keeping CoreError out
+#     of every other shell module makes accidental Display serialization a type-level dead end.
+hits=$(grep -rnE '\bCoreError\b' apps/apogee/src-tauri/src --include='*.rs' \
+  | grep -vE '^apps/apogee/src-tauri/src/dto/error\.rs:' \
+  | grep -vE '^apps/apogee/src-tauri/src/main\.rs:[0-9]+:[[:space:]]*fn install_core\(&self, core: Result<Core, apogee_core::CoreError>\) \{' \
+  || true)
+[ -z "$hits" ] || report "CoreError escaped its two shell boundary sites" "$hits"
+hits=$(grep -nE 'error\.(to_string|to_owned)[[:space:]]*\(|format(_args)?![^(]*\([^)]*error' \
+  apps/apogee/src-tauri/src/dto/error.rs || true)
+[ -z "$hits" ] || report "the CoreError selector formats its input" "$hits"
+
 # 6c. No dynamic loading: the other way to reach a native artifact without declaring a dependency.
 hits=$(src_grep -E '\b(libloading|dlopen|dlsym|LoadLibraryW?|GetProcAddress)\b' \
   --include='*.rs' --include='Cargo.toml' || true)
