@@ -142,6 +142,9 @@ is tagged with its change type. Versioning aims to follow
 ### release
 - Ship a Windows archive with the elevated worker (#213) _(ci)_
 
+### shell
+- Complete the typed IPC boundary (#252) _(added)_
+
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
 - Close the defects found by the adversarial pass (#97) _(fixed)_
