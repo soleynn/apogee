@@ -283,6 +283,7 @@ struct Inner {
     fetcher: Fetcher,
     paths: RuntimePaths,
     confinement: Confinement,
+    catalog_fetch: tokio::sync::Mutex<()>,
 }
 
 /// The Wine and Proton runner manager.
@@ -311,6 +312,7 @@ impl Runtime {
                 fetcher,
                 paths,
                 confinement,
+                catalog_fetch: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -383,6 +385,56 @@ impl Runtime {
         self.inner.paths.runners.join(".catalog")
     }
 
+    async fn catalog_publication_lock(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<std::fs::File, RuntimeError> {
+        let cache = self.catalog_cache();
+        tokio::fs::create_dir_all(&cache)
+            .await
+            .map_err(|source| RuntimeError::Io {
+                path: cache.clone(),
+                source,
+            })?;
+        let path = cache.join(".fetch.lock");
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .await
+            .map_err(|source| RuntimeError::Io {
+                path: path.clone(),
+                source,
+            })?
+            .into_std()
+            .await;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(RuntimeError::from_fetch(
+                    apogee_fetch::FetchError::Cancelled,
+                ));
+            }
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            return Err(RuntimeError::from_fetch(
+                                apogee_fetch::FetchError::Cancelled,
+                            ));
+                        },
+                        () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    }
+                }
+                Err(std::fs::TryLockError::Error(source)) => {
+                    return Err(RuntimeError::Io { path, source });
+                }
+            }
+        }
+    }
+
     /// Fetch the signed runner catalog and verify it against the keys compiled into this build.
     ///
     /// # Errors
@@ -396,6 +448,14 @@ impl Runtime {
         signature_url: &url::Url,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
+        let _fetch = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(RuntimeError::from_fetch(apogee_fetch::FetchError::Cancelled));
+            },
+            guard = self.inner.catalog_fetch.lock() => guard,
+        };
+        let _publication = self.catalog_publication_lock(cancel).await?;
         install::fetch_catalog(
             &self.inner.fetcher,
             manifest_url,
@@ -425,6 +485,14 @@ impl Runtime {
         keys: &[[u8; 32]],
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Catalog, RuntimeError> {
+        let _fetch = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(RuntimeError::from_fetch(apogee_fetch::FetchError::Cancelled));
+            },
+            guard = self.inner.catalog_fetch.lock() => guard,
+        };
+        let _publication = self.catalog_publication_lock(cancel).await?;
         install::fetch_catalog(
             &self.inner.fetcher,
             manifest_url,

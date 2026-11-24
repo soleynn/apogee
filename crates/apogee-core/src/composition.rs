@@ -3,6 +3,7 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use apogee_addons::backup::{ArchiveRecord, BackupReport, PruneReport, Retain};
 use apogee_addons::backup::{RestorePlan, RestoreReport};
@@ -40,6 +41,26 @@ use crate::patch::patcher_backend::PatcherBackend;
 use crate::steam::{NoSteam, SteamBackend};
 use crate::store::{Store, StoreError};
 use crate::transport::HttpTransport;
+
+async fn blocking_read<T, F>(label: &'static str, task: F) -> Result<T, CoreError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, Box<CoreError>> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| CoreError::Init {
+            detail: format!("{label} task failed: {error}"),
+        })?
+        .map_err(|error| *error)
+}
+
+fn stored_profile(store: &Store, id: Uuid) -> Result<Profile, CoreError> {
+    store.load_profile(id).map_err(|error| match error {
+        StoreError::NotFound { .. } => CoreError::NoProfile(id),
+        other => other.into(),
+    })
+}
 
 /// Filesystem locations the core reads and writes.
 #[derive(Debug, Clone)]
@@ -530,27 +551,34 @@ impl Core {
     /// Returns [`CoreError::NoProfile`] for an unknown profile or [`CoreError::Store`] when its
     /// persisted state cannot be read.
     pub async fn next_action(&self, profile: Uuid) -> Result<crate::NextAction, CoreError> {
-        let profile = self.profile(profile)?;
-        let status = self.store.load_status(profile.id)?;
-        let cached = self.store.load_uid_cache(profile.account).ok().flatten();
-        let max_expansion = cached.as_ref().map_or(0, |entry| entry.max_expansion);
-        let report = sqex_proto::VersionReport::from_install(
-            &sqex_proto::InstallPaths::new(&profile.game_path),
-            max_expansion,
-        )
-        .ok();
-        let cache_valid = report.as_ref().is_some_and(|report| {
-            cached
-                .as_ref()
-                .is_some_and(|entry| entry.is_valid((self.clock)(), report.game_version()))
-        });
-        let game_running = match apogee_runtime::game_running(&profile.game_path) {
-            Ok(running) => running,
-            Err(error) => {
-                tracing::warn!(%error, "could not inspect the running game while reading status");
-                false
-            }
-        };
+        let store = self.store.clone();
+        let clock = Arc::clone(&self.clock);
+        let (status, install_ready, cache_valid, game_running) =
+            blocking_read("next-action", move || {
+                let profile = stored_profile(&store, profile)?;
+                let status = store.load_status(profile.id).map_err(CoreError::from)?;
+                let cached = store.load_uid_cache(profile.account).ok().flatten();
+                let max_expansion = cached.as_ref().map_or(0, |entry| entry.max_expansion);
+                let report = sqex_proto::VersionReport::from_install(
+                    &sqex_proto::InstallPaths::new(&profile.game_path),
+                    max_expansion,
+                )
+                .ok();
+                let cache_valid = report.as_ref().is_some_and(|report| {
+                    cached
+                        .as_ref()
+                        .is_some_and(|entry| entry.is_valid(clock(), report.game_version()))
+                });
+                let game_running = match apogee_runtime::game_running(&profile.game_path) {
+                    Ok(running) => running,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not inspect the running game while reading status");
+                        false
+                    }
+                };
+                Ok((status, report.is_some(), cache_valid, game_running))
+            })
+            .await?;
         let resumable =
             if let Some(pending) = status.as_ref().and_then(|status| status.pending.as_ref()) {
                 crate::status::has_staged_patch(&self.patch_store, pending).await
@@ -559,7 +587,7 @@ impl Core {
             };
         Ok(crate::status::derive_next_action(
             status.as_ref(),
-            report.is_some(),
+            install_ready,
             cache_valid,
             resumable,
             game_running,
@@ -603,7 +631,14 @@ impl Core {
     /// Read the authenticated runner catalog and local installation state.
     pub async fn runner_catalog(&self) -> Result<Vec<apogee_runtime::CatalogViewEntry>, CoreError> {
         let catalog = self.runtime_catalog().await?;
-        Ok(self.runtime.runner_catalog_view(&catalog)?)
+        let runtime = self.runtime.clone();
+        blocking_read("runner-catalog", move || {
+            runtime
+                .runner_catalog_view(&catalog)
+                .map_err(CoreError::from)
+                .map_err(Box::new)
+        })
+        .await
     }
 
     /// Read the authenticated DXVK catalog and the selected prefix's recorded installation state.
@@ -611,10 +646,22 @@ impl Core {
         &self,
         profile: Uuid,
     ) -> Result<Vec<apogee_runtime::CatalogViewEntry>, CoreError> {
-        let profile = self.profile(profile)?;
+        let store = self.store.clone();
+        let prefixes_dir = self.prefixes_dir.clone();
+        let prefix = blocking_read("DXVK profile", move || {
+            let profile = stored_profile(&store, profile)?;
+            Ok(prefixes_dir.join(crate::flow::prefix_name(&profile)))
+        })
+        .await?;
         let catalog = self.runtime_catalog().await?;
-        let prefix = self.prefixes_dir.join(crate::flow::prefix_name(&profile));
-        Ok(self.runtime.dxvk_catalog_view(&catalog, Some(&prefix))?)
+        let runtime = self.runtime.clone();
+        blocking_read("DXVK catalog", move || {
+            runtime
+                .dxvk_catalog_view(&catalog, Some(&prefix))
+                .map_err(CoreError::from)
+                .map_err(Box::new)
+        })
+        .await
     }
 
     /// Resolve the selected profile's runner, synchronization, graphics, prefix, and injection
@@ -624,85 +671,105 @@ impl Core {
         profile: Uuid,
     ) -> Result<Vec<crate::ResolvedSetup>, CoreError> {
         use crate::{Provenance, ResolvedSetup, SetupValue};
-        let profile = self.profile(profile)?;
-        let prefix = self.prefixes_dir.join(crate::flow::prefix_name(&profile));
-        let metadata =
-            apogee_runtime::PrefixMetadata::load(&prefix.join(apogee_runtime::PREFIX_JSON))?;
-        let (runner_name, runner_version, runner_source, host) = match &profile.runner {
-            crate::RunnerSelection::Managed { name, version } => {
-                let catalog = self.runtime_catalog().await?;
-                let runner = catalog
-                    .runner(name, version)
-                    .ok_or_else(|| CoreError::Launch {
-                        detail: format!(
-                            "runner {name} {version} is not in the authenticated catalog"
-                        ),
-                    })?;
-                (
-                    name.clone(),
-                    Some(version.clone()),
-                    Provenance::Catalog,
-                    apogee_runtime::HostCaps::detect().for_runner(runner),
-                )
-            }
-            crate::RunnerSelection::SystemWine => (
-                "system-wine".to_owned(),
-                system_wine_version(),
-                Provenance::Host,
-                apogee_runtime::HostCaps::detect(),
-            ),
+        let store = self.store.clone();
+        let prefixes_dir = self.prefixes_dir.clone();
+        let (profile, metadata) = blocking_read("resolved-setup profile", move || {
+            let profile = stored_profile(&store, profile)?;
+            let prefix = prefixes_dir.join(crate::flow::prefix_name(&profile));
+            let metadata =
+                apogee_runtime::PrefixMetadata::load(&prefix.join(apogee_runtime::PREFIX_JSON))
+                    .map_err(CoreError::from)?;
+            Ok((profile, metadata))
+        })
+        .await?;
+        let catalog = if matches!(profile.runner, crate::RunnerSelection::Managed { .. }) {
+            Some(self.runtime_catalog().await?)
+        } else {
+            None
         };
-        let environment = apogee_runtime::compute_environment(
-            &apogee_runtime::EnvConfig {
-                sync: profile.launch.sync,
-                gpu: profile.launch.gpu.clone(),
-                ..Default::default()
-            },
-            &host,
-        );
-        let (dxvk_version, nvapi) = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.dxvk.as_ref())
-            .map_or((None, false), |dxvk| {
-                (Some(dxvk.version.clone()), dxvk.nvapi)
-            });
-        Ok(vec![
-            ResolvedSetup {
-                value: SetupValue::Runner {
-                    name: runner_name,
-                    version: runner_version,
+        let wine_version = if matches!(profile.runner, crate::RunnerSelection::SystemWine) {
+            bounded_system_wine_version().await
+        } else {
+            None
+        };
+        blocking_read("resolved-setup host", move || {
+            let (runner_name, runner_version, runner_source, host) = match &profile.runner {
+                crate::RunnerSelection::Managed { name, version } => {
+                    let runner = catalog
+                        .as_ref()
+                        .and_then(|catalog| catalog.runner(name, version))
+                        .ok_or_else(|| CoreError::Launch {
+                            detail: format!(
+                                "runner {name} {version} is not in the authenticated catalog"
+                            ),
+                        })?;
+                    (
+                        name.clone(),
+                        Some(version.clone()),
+                        Provenance::Catalog,
+                        apogee_runtime::HostCaps::detect().for_runner(runner),
+                    )
+                }
+                crate::RunnerSelection::SystemWine => (
+                    "system-wine".to_owned(),
+                    wine_version,
+                    Provenance::Host,
+                    apogee_runtime::HostCaps::detect(),
+                ),
+            };
+            let environment = apogee_runtime::compute_environment(
+                &apogee_runtime::EnvConfig {
+                    sync: profile.launch.sync,
+                    gpu: profile.launch.gpu.clone(),
+                    ..Default::default()
                 },
-                source: runner_source,
-            },
-            ResolvedSetup {
-                value: SetupValue::Sync(environment.sync),
-                source: Provenance::Host,
-            },
-            ResolvedSetup {
-                value: SetupValue::Gpu {
-                    selection: profile.launch.gpu.clone(),
-                    identity: None,
+                &host,
+            );
+            let (dxvk_version, nvapi) = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.dxvk.as_ref())
+                .map_or((None, false), |dxvk| {
+                    (Some(dxvk.version.clone()), dxvk.nvapi)
+                });
+            Ok(vec![
+                ResolvedSetup {
+                    value: SetupValue::Runner {
+                        name: runner_name,
+                        version: runner_version,
+                    },
+                    source: runner_source,
                 },
-                source: Provenance::Profile,
-            },
-            ResolvedSetup {
-                value: SetupValue::Dxvk {
-                    version: dxvk_version,
-                    nvapi,
+                ResolvedSetup {
+                    value: SetupValue::Sync(environment.sync),
+                    source: Provenance::Host,
                 },
-                source: if metadata.is_some() {
-                    Provenance::Prefix
-                } else {
-                    Provenance::Default
+                ResolvedSetup {
+                    value: SetupValue::Gpu {
+                        selection: profile.launch.gpu.clone(),
+                        identity: None,
+                    },
+                    source: Provenance::Profile,
                 },
-            },
-            ResolvedSetup {
-                value: SetupValue::Dalamud {
-                    enabled: profile.launch.dalamud,
+                ResolvedSetup {
+                    value: SetupValue::Dxvk {
+                        version: dxvk_version,
+                        nvapi,
+                    },
+                    source: if metadata.is_some() {
+                        Provenance::Prefix
+                    } else {
+                        Provenance::Default
+                    },
                 },
-                source: Provenance::Profile,
-            },
-        ])
+                ResolvedSetup {
+                    value: SetupValue::Dalamud {
+                        enabled: profile.launch.dalamud,
+                    },
+                    source: Provenance::Profile,
+                },
+            ])
+        })
+        .await
     }
 
     /// Compose the fixed public diagnostic report, optionally including one profile's resolved
@@ -740,29 +807,42 @@ impl Core {
     /// Load the persisted first-run checkpoint and fill core-owned discovery readings that have not
     /// been recorded yet.
     pub async fn first_run(&self) -> Result<crate::FirstRunCheckpoint, CoreError> {
-        let mut checkpoint = self.store.load_first_run()?;
+        let store = self.store.clone();
+        let mut checkpoint = blocking_read("first-run load", move || {
+            store
+                .load_first_run()
+                .map_err(CoreError::from)
+                .map_err(Box::new)
+        })
+        .await?;
         if matches!(
             crate::first_incomplete(&checkpoint),
             crate::FirstRunPosition::WaitingForImportDiscovery
         ) {
-            let candidates = crate::xiv_import::candidate_roots()
-                .into_iter()
-                .filter(|path| crate::xiv_import::scan(path).is_ok())
-                .map(|path| crate::FirstRunImportCandidate {
-                    source: if path.to_string_lossy().contains(".var/app/") {
-                        crate::FirstRunImportSource::Flatpak
-                    } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore") {
-                        crate::FirstRunImportSource::Core
-                    } else {
-                        crate::FirstRunImportSource::Native
-                    },
-                    path,
-                })
-                .collect();
-            checkpoint = crate::first_run::transition(
-                &checkpoint,
-                crate::FirstRunTransition::RecordImportDiscovery(candidates),
-            )?;
+            checkpoint = blocking_read("first-run discovery", move || {
+                let candidates = crate::xiv_import::candidate_roots()
+                    .into_iter()
+                    .filter(|path| crate::xiv_import::scan(path).is_ok())
+                    .map(|path| crate::FirstRunImportCandidate {
+                        source: if path.to_string_lossy().contains(".var/app/") {
+                            crate::FirstRunImportSource::Flatpak
+                        } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore")
+                        {
+                            crate::FirstRunImportSource::Core
+                        } else {
+                            crate::FirstRunImportSource::Native
+                        },
+                        path,
+                    })
+                    .collect();
+                crate::first_run::transition(
+                    &checkpoint,
+                    crate::FirstRunTransition::RecordImportDiscovery(candidates),
+                )
+                .map_err(CoreError::from)
+                .map_err(Box::new)
+            })
+            .await?;
         }
         if checkpoint.runners.is_empty()
             && matches!(
@@ -772,9 +852,15 @@ impl Core {
             )
         {
             let catalog = self.runtime_catalog().await?;
-            checkpoint.runners = self
-                .runtime
-                .runner_catalog_view(&catalog)?
+            let runtime = self.runtime.clone();
+            let rows = blocking_read("first-run runner catalog", move || {
+                runtime
+                    .runner_catalog_view(&catalog)
+                    .map_err(CoreError::from)
+                    .map_err(Box::new)
+            })
+            .await?;
+            checkpoint.runners = rows
                 .into_iter()
                 .map(|row| crate::RunnerReading {
                     selection: crate::FirstRunRunnerSelection::Managed {
@@ -786,7 +872,7 @@ impl Core {
                     available: row.available,
                 })
                 .collect();
-            let system_version = system_wine_version();
+            let system_version = bounded_system_wine_version().await;
             checkpoint.runners.push(crate::RunnerReading {
                 selection: crate::FirstRunRunnerSelection::SystemWine {
                     version: system_version.clone(),
@@ -796,8 +882,15 @@ impl Core {
                 available: system_version.is_some(),
             });
         }
-        self.store.save_first_run(&checkpoint)?;
-        Ok(checkpoint)
+        let store = self.store.clone();
+        blocking_read("first-run save", move || {
+            store
+                .save_first_run(&checkpoint)
+                .map_err(CoreError::from)
+                .map_err(Box::new)?;
+            Ok(checkpoint)
+        })
+        .await
     }
 
     /// Apply and persist one validated first-run transition.
@@ -881,10 +974,7 @@ impl Core {
     /// Returns [`CoreError::NoProfile`] if no such profile exists, or a [`CoreError::Store`] if its
     /// file is corrupt.
     pub fn profile(&self, id: Uuid) -> Result<Profile, CoreError> {
-        self.store.load_profile(id).map_err(|e| match e {
-            StoreError::NotFound { .. } => CoreError::NoProfile(id),
-            other => other.into(),
-        })
+        stored_profile(&self.store, id)
     }
 
     /// Every stored account.
@@ -1406,10 +1496,25 @@ impl Core {
 }
 
 fn system_wine_version() -> Option<String> {
-    let output = std::process::Command::new("wine")
-        .arg("--version")
-        .output()
+    wine_version_from_output(
+        std::process::Command::new("wine")
+            .arg("--version")
+            .output()
+            .ok()?,
+    )
+}
+
+async fn bounded_system_wine_version() -> Option<String> {
+    let mut command = tokio::process::Command::new("wine");
+    command.arg("--version").kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .ok()?
         .ok()?;
+    wine_version_from_output(output)
+}
+
+fn wine_version_from_output(output: std::process::Output) -> Option<String> {
     if !output.status.success() {
         return None;
     }
@@ -1436,6 +1541,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let core = Core::new(CoreConfig::with_base(dir.path())).unwrap();
         (dir, core)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn synchronous_read_segments_leave_the_async_caller_thread() {
+        let caller = std::thread::current().id();
+        let worker = super::blocking_read("test", move || Ok(std::thread::current().id()))
+            .await
+            .expect("blocking read");
+
+        assert_ne!(worker, caller);
     }
 
     /// An account that keeps nothing must not have the other launcher's password read at all.
