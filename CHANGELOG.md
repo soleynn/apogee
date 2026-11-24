@@ -155,6 +155,7 @@ is tagged with its change type. Versioning aims to follow
 - Expose direct core reads (#255) _(added)_
 - Add sealed store lifecycle (#257) _(added)_
 - Add safe direct mutations (#259) _(added)_
+- Confine link and folder opening, add first-run and lifecycle recovery (#300) _(added)_
 
 ### sqex-crypto
 - Obfuscate the authentication ticket for the login query (#95) _(added)_
