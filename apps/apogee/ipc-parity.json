@@ -1,0 +1,203 @@
+{
+  "commands": [
+    {
+      "ipc": "startup",
+      "cli": [
+        ["--version"],
+        ["account", "list"],
+        ["profile", "list"],
+        ["settings", "show"],
+        ["settings", "defaults"]
+      ],
+      "equivalence": "The desktop composes the same version, public profile and account rows, stored settings, and defaults that the terminal exposes as separate readings."
+    },
+    {
+      "ipc": "secrets_report",
+      "cli": [["secrets", "status"]],
+      "equivalence": "Credential-backend health report."
+    },
+    {
+      "ipc": "next_action",
+      "cli": [["status", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Core-selected next action for a profile."
+    },
+    {
+      "ipc": "defaults",
+      "cli": [["settings", "defaults"]],
+      "equivalence": "Core-owned launcher and launch-setting defaults."
+    },
+    {
+      "ipc": "resolved_setup",
+      "cli": [["setup", "show", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Resolved setup values with provenance."
+    },
+    {
+      "ipc": "runner_catalog",
+      "cli": [["runner", "list"]],
+      "equivalence": "Signed runner catalog view."
+    },
+    {
+      "ipc": "dxvk_catalog",
+      "cli": [["dxvk", "list", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Signed graphics-translation catalog view."
+    },
+    {
+      "ipc": "system_report",
+      "cli": [["system-report", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Core-owned public system report."
+    },
+    {
+      "ipc": "support_bundle_contents",
+      "cli": [["support-bundle", "--contents"]],
+      "equivalence": "Print the same stable core-owned disclosure list without creating an archive."
+    },
+    {
+      "ipc": "secrets_file_status",
+      "cli": [["secrets", "status"]],
+      "equivalence": "Sealed-file state and backend health."
+    },
+    {
+      "ipc": "unlock_secrets_file",
+      "cli": [],
+      "shell_local": "The desktop can keep the unsealed key in its long-lived process cache. A one-shot CLI process would discard that key immediately on exit, so its next mutation prompts normally instead.",
+      "equivalence": "Process-lifetime credential-store control only; it does not change persisted launcher state."
+    },
+    {
+      "ipc": "create_secrets_file",
+      "cli": [["secrets", "create-file"]],
+      "equivalence": "Create the sealed file after the same confirmation and passphrase decisions without changing the selected backend."
+    },
+    {
+      "ipc": "change_secrets_file_passphrase",
+      "cli": [["secrets", "passphrase"]],
+      "equivalence": "Re-seal the existing file under a replacement passphrase."
+    },
+    {
+      "ipc": "remove_secrets_file",
+      "cli": [["secrets", "destroy-file"]],
+      "equivalence": "Confirmed deletion of the sealed file and all secrets it contains."
+    },
+    {
+      "ipc": "seal_secrets_file",
+      "cli": [],
+      "shell_local": "The desktop can erase a key retained by its long-lived process. The CLI retains no key after any invocation exits, so it is already sealed at that boundary.",
+      "equivalence": "Process-lifetime credential-store control only; both shells retain no key after their process ends."
+    },
+    {
+      "ipc": "answer_passphrase_prompt",
+      "cli": [],
+      "shell_local": "The desktop needs an IPC reply channel for its ambient prompt; the CLI passphrase source reads the controlling terminal directly, so there is no domain operation or subcommand to mirror.",
+      "equivalence": "Prompt transport only; core receives the same zeroizing passphrase answer from either shell."
+    },
+    {
+      "ipc": "update_account",
+      "cli": [["account", "edit", "--account", "00000000-0000-0000-0000-000000000001", "--square-enix-id", "updated-user"]],
+      "equivalence": "Path-free edit of public account fields."
+    },
+    {
+      "ipc": "update_profile",
+      "cli": [["profile", "edit", "--profile", "00000000-0000-0000-0000-000000000001", "--name", "Updated profile"]],
+      "equivalence": "Edit profile display and launch fields without replacing ownership or paths."
+    },
+    {
+      "ipc": "update_settings",
+      "cli": [
+        ["settings", "set", "--language", "en-US"],
+        ["secrets", "backend", "--to", "platform"],
+        ["otp", "listener", "--bind", "127.0.0.1"]
+      ],
+      "equivalence": "Persist launcher-wide settings through core validation; security-sensitive backend and listener fields retain their dedicated terminal decisions."
+    },
+    {
+      "ipc": "store_password",
+      "cli": [["secrets", "save", "--account", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Write-only account password storage."
+    },
+    {
+      "ipc": "import_totp_secret",
+      "cli": [["secrets", "totp", "--account", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Write-only TOTP-secret import with deviation reporting."
+    },
+    {
+      "ipc": "use_pushed_codes",
+      "cli": [["otp", "listen", "--account", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Confirmed listener delivery for an account."
+    },
+    {
+      "ipc": "disable_pushed_codes",
+      "cli": [["otp", "ask", "--account", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Return listener delivery to typed codes."
+    },
+    {
+      "ipc": "delete_secret",
+      "cli": [["secrets", "delete", "--account", "00000000-0000-0000-0000-000000000001", "--kind", "password"]],
+      "equivalence": "Confirmed deletion of one write-only secret."
+    },
+    {
+      "ipc": "forget_secrets",
+      "cli": [["secrets", "forget", "--account", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Sweep every stored secret for an account."
+    },
+    {
+      "ipc": "set_never_store",
+      "cli": [["secrets", "never-store", "--account", "00000000-0000-0000-0000-000000000001", "--on"]],
+      "equivalence": "Change the account-scoped keep-nothing policy through core's ordered sweep."
+    },
+    {
+      "ipc": "plan_profile_removal",
+      "cli": [["profile", "remove", "--profile", "00000000-0000-0000-0000-000000000001", "--dry-run"]],
+      "equivalence": "Preview core's account-sharing-aware removal plan."
+    },
+    {
+      "ipc": "cancel_profile_removal",
+      "cli": [],
+      "shell_local": "The desktop confirmation spans IPC calls and must invalidate its pending capability explicitly; the CLI plans and confirms in one synchronous command and retains nothing when declined.",
+      "equivalence": "Confirmation-lifetime control only; both shells consume a plan only after confirmation."
+    },
+    {
+      "ipc": "remove_profile",
+      "cli": [["profile", "remove", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Consume a freshly confirmed core removal plan."
+    },
+    {
+      "ipc": "execute",
+      "operations": [
+        {"shell": "login", "cli": [["login", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate one profile with the same password and one-time-password sources."},
+        {"shell": "launch", "cli": [["launch", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Launch from the same cached-session requirement."},
+        {"shell": "patchAndPlay", "cli": [["play", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate, patch when needed, and launch through the same core flow."},
+        {"shell": "patch", "cli": [["patch", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Authenticate and apply the same patch plan without launching."},
+        {"shell": "install", "cli": [["install", "--profile", "00000000-0000-0000-0000-000000000001", "--password-source", "stored"]], "equivalence": "Install from nothing and launch through the same core flow."},
+        {"shell": "repair", "cli": [["repair", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Verify and repair the selected profile through the same signed indexes."},
+        {"shell": "supportBundle", "cli": [["support-bundle", "--output", "apogee-support.zip"]], "equivalence": "Assemble the same core-owned redacted archive."},
+        {"shell": "prefix.create", "cli": [["prefix", "create", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Create and prepare the selected profile prefix."},
+        {"shell": "prefix.check", "cli": [["prefix", "health", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Read the same composed prefix health report."},
+        {"shell": "prefix.fix", "cli": [["prefix", "fix", "--profile", "00000000-0000-0000-0000-000000000001"]], "equivalence": "Apply the same targeted prefix repairs."},
+        {"shell": "prefix.recreate", "cli": [["prefix", "recreate", "--profile", "00000000-0000-0000-0000-000000000001", "--yes", "--backup-config"]], "equivalence": "Back up configuration and recreate the prefix through the same core action."},
+        {"shell": "firstRun.read", "cli": [["first-run"]], "equivalence": "Read the persisted setup checkpoint and core-owned discovery."},
+        {"shell": "firstRun.advance.confirmLegibility", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"confirm_legibility\",\"value\":{\"gpu\":null,\"driver\":null,\"session\":\"unknown\",\"render_tier\":0}}"]], "equivalence": "Record the same render facts after a person confirms the surface is legible."},
+        {"shell": "firstRun.advance.recordImportDiscovery", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"record_import_discovery\",\"value\":[]}"]], "equivalence": "Persist the same import discovery reading."},
+        {"shell": "firstRun.advance.decideImport", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"decide_import\",\"value\":{\"choice\":\"skip\"}}"]], "equivalence": "Persist the same reviewed import decision."},
+        {"shell": "firstRun.advance.saveAccount", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"save_account\",\"value\":{\"square_enix_id\":\"person\",\"kind\":\"standard\",\"never_save_password\":true,\"steam_client\":\"not_required\"}}"]], "equivalence": "Persist the same non-secret account choice."},
+        {"shell": "firstRun.advance.recordGameCandidates", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"record_game_candidates\",\"value\":[]}"]], "equivalence": "Persist the same verified game candidate reading."},
+        {"shell": "firstRun.advance.selectGame", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_game\",\"value\":{\"choice\":\"install\",\"value\":{\"path\":\"game\",\"approximate_bytes\":1,\"exact_download_bytes\":1}}}"]], "equivalence": "Select one core-validated game destination and reading."},
+        {"shell": "firstRun.advance.recordCredentialBackends", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"record_credential_backends\",\"value\":[]}"]], "equivalence": "Persist the same credential backend reading."},
+        {"shell": "firstRun.advance.selectCredential", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_credential\",\"value\":{\"choice\":\"do_not_save\"}}"]], "equivalence": "Persist the same credential-storage decision."},
+        {"shell": "firstRun.advance.recordRunners", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"record_runners\",\"value\":[]}"]], "equivalence": "Persist the same runner catalog reading."},
+        {"shell": "firstRun.advance.finishRunnerAndPrefix", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"finish_runner_and_prefix\",\"value\":{\"runner\":{\"kind\":\"system_wine\",\"value\":{\"version\":null}},\"prefix\":{\"state\":\"ready\"}}}"]], "equivalence": "Persist the same runner and prefix preparation result."},
+        {"shell": "firstRun.advance.startReady", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"start_ready\",\"value\":{\"action\":\"play\"}}"]], "equivalence": "Start the same core-validated final setup action."},
+        {"shell": "importXivLauncher.scan", "cli": [["import", "xivlauncher", "--dry-run"]], "equivalence": "Scan and print the same typed import findings without writes."},
+        {"shell": "importXivLauncher.apply", "cli": [["import", "xivlauncher", "--accept", "account:0"]], "equivalence": "Apply only the same reviewed finding identifiers after a fresh scan."},
+        {"shell": "frontier.news", "cli": [["news"], ["--events-json", "news"]], "equivalence": "Fetch the same public news rows; the second route proves the stable JSONL event surface."},
+        {"shell": "frontier.gate", "cli": [["gate"]], "equivalence": "Fetch the same public gate reading."},
+        {"shell": "frontier.banners", "cli": [["banners"]], "equivalence": "Fetch and validate the same public banner rows."}
+      ],
+      "equivalence": "The generic desktop stream carries the same core flow families exposed as terminal subcommands."
+    },
+    {
+      "ipc": "cancel",
+      "cli": [],
+      "shell_local": "The desktop can own several named runs and therefore needs an IPC cancellation selector; the CLI owns one foreground run and cancels it through the process interrupt signal.",
+      "equivalence": "Run-control transport only; both paths cancel the same core token."
+    }
+  ]
+}

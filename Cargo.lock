@@ -122,6 +122,7 @@ dependencies = [
  "clap",
  "rpassword",
  "rustix",
+ "serde",
  "serde_json",
  "sha1",
  "tempfile",

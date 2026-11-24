@@ -340,13 +340,45 @@ pub fn assemble_support_archive(
 
 /// Write a core-assembled entry set as a deterministic ZIP archive.
 ///
-/// The destination is published by rename only after every entry and the container footer have
-/// been flushed. An existing destination is left untouched.
+/// The destination is published atomically only after the complete container has been flushed. An
+/// existing destination is left untouched, including when another writer wins the publication race.
 pub fn write_support_bundle(
     destination: impl AsRef<Path>,
     archive: &SupportArchive,
 ) -> Result<(), SupportError> {
-    let destination = destination.as_ref();
+    publish_new(destination.as_ref(), |temporary| {
+        write_temporary(temporary, archive)
+    })
+}
+
+pub(crate) fn write_encoded_support_bundle(
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<(), SupportError> {
+    publish_new(destination, |temporary| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary)
+            .map_err(|source| SupportError::Io {
+                path: temporary.to_path_buf(),
+                source,
+            })?;
+        file.write_all(bytes).map_err(|source| SupportError::Io {
+            path: temporary.to_path_buf(),
+            source,
+        })?;
+        file.sync_all().map_err(|source| SupportError::Io {
+            path: temporary.to_path_buf(),
+            source,
+        })
+    })
+}
+
+fn publish_new(
+    destination: &Path,
+    write_staged: impl FnOnce(&Path) -> Result<(), SupportError>,
+) -> Result<(), SupportError> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| SupportError::Io {
         path: parent.to_path_buf(),
@@ -359,24 +391,15 @@ pub fn write_support_bundle(
         uuid::Uuid::new_v4()
     ));
     let temporary = PathBuf::from(temporary);
-    let result = write_temporary(&temporary, archive).and_then(|()| {
-        if destination.exists() {
-            return Err(SupportError::Io {
-                path: destination.to_path_buf(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "destination already exists",
-                ),
-            });
-        }
-        std::fs::rename(&temporary, destination).map_err(|source| SupportError::Io {
+    let result = (|| {
+        write_staged(&temporary)?;
+        std::fs::hard_link(&temporary, destination).map_err(|source| SupportError::Io {
             path: destination.to_path_buf(),
             source,
-        })
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
+        })?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
     result
 }
 
@@ -921,6 +944,122 @@ mod tests {
         assert_eq!(
             rewrite_home(&format!("x{literal}/game"), Some(&home)),
             format!("x{literal}/game")
+        );
+    }
+
+    #[test]
+    fn encoded_archive_publish_is_atomic_and_never_replaces() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("support.zip");
+
+        write_encoded_support_bundle(&destination, b"first archive").unwrap();
+        let second = write_encoded_support_bundle(&destination, b"replacement");
+
+        assert!(second.is_err());
+        assert_eq!(std::fs::read(destination).unwrap(), b"first archive");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn assembled_archive_publish_never_replaces_an_existing_bundle() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("support.zip");
+        let first = SupportArchive {
+            entries: vec![BundleEntry {
+                part: BundlePart::RecentLogs,
+                bytes: b"first writer".to_vec(),
+            }],
+        };
+        let second = SupportArchive {
+            entries: vec![BundleEntry {
+                part: BundlePart::RecentLogs,
+                bytes: b"second writer".to_vec(),
+            }],
+        };
+
+        write_support_bundle(&destination, &first).unwrap();
+        let expected = std::fs::read(&destination).unwrap();
+        let error = write_support_bundle(&destination, &second).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SupportError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(std::fs::read(destination).unwrap(), expected);
+    }
+
+    #[test]
+    fn archive_publish_has_one_winner_under_a_two_writer_race() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let destination = directory.path().join("support.zip");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+        let spawn_writer = |payload: &'static [u8]| {
+            let destination = destination.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let result = publish_new(&destination, |temporary| {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(temporary)
+                        .map_err(|source| SupportError::Io {
+                            path: temporary.to_path_buf(),
+                            source,
+                        })?;
+                    file.write_all(payload).map_err(|source| SupportError::Io {
+                        path: temporary.to_path_buf(),
+                        source,
+                    })?;
+                    file.sync_all().map_err(|source| SupportError::Io {
+                        path: temporary.to_path_buf(),
+                        source,
+                    })?;
+                    barrier.wait();
+                    Ok(())
+                });
+                (result, payload)
+            })
+        };
+        let first_writer = spawn_writer(b"first writer");
+        let second_writer = spawn_writer(b"second writer");
+        barrier.wait();
+        let (first_result, first_payload) = first_writer.join().unwrap();
+        let (second_result, second_payload) = second_writer.join().unwrap();
+
+        assert_ne!(first_result.is_ok(), second_result.is_ok());
+        let published = std::fs::read(&destination).unwrap();
+        let winner = if first_result.is_ok() {
+            first_payload
+        } else {
+            second_payload
+        };
+        let loser = if first_result.is_err() {
+            first_result
+        } else {
+            second_result
+        };
+        assert!(matches!(
+            loser,
+            Err(SupportError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(published, winner);
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

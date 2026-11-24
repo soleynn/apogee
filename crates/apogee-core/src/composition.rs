@@ -870,89 +870,11 @@ impl Core {
     /// Load the persisted first-run checkpoint and fill core-owned discovery readings that have not
     /// been recorded yet.
     pub async fn first_run(&self) -> Result<crate::FirstRunCheckpoint, CoreError> {
-        let store = self.store.clone();
-        let mut checkpoint = blocking_read("first-run load", move || {
-            store
-                .load_first_run()
-                .map_err(CoreError::from)
-                .map_err(Box::new)
-        })
-        .await?;
-        if matches!(
-            crate::first_incomplete(&checkpoint),
-            crate::FirstRunPosition::WaitingForImportDiscovery
-        ) {
-            checkpoint = blocking_read("first-run discovery", move || {
-                let candidates = crate::xiv_import::candidate_roots()
-                    .into_iter()
-                    .filter(|path| crate::xiv_import::scan(path).is_ok())
-                    .map(|path| crate::FirstRunImportCandidate {
-                        source: if path.to_string_lossy().contains(".var/app/") {
-                            crate::FirstRunImportSource::Flatpak
-                        } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore")
-                        {
-                            crate::FirstRunImportSource::Core
-                        } else {
-                            crate::FirstRunImportSource::Native
-                        },
-                        path,
-                    })
-                    .collect();
-                crate::first_run::transition(
-                    &checkpoint,
-                    crate::FirstRunTransition::RecordImportDiscovery(candidates),
-                )
-                .map_err(CoreError::from)
-                .map_err(Box::new)
-            })
-            .await?;
-        }
-        if checkpoint.runners.is_empty()
-            && matches!(
-                crate::first_incomplete(&checkpoint),
-                crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
-                    | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
-            )
-        {
-            let catalog = self.runtime_catalog().await?;
-            let runtime = self.runtime.clone();
-            let rows = blocking_read("first-run runner catalog", move || {
-                runtime
-                    .runner_catalog_view(&catalog)
-                    .map_err(CoreError::from)
-                    .map_err(Box::new)
-            })
-            .await?;
-            checkpoint.runners = rows
-                .into_iter()
-                .map(|row| crate::RunnerReading {
-                    selection: crate::FirstRunRunnerSelection::Managed {
-                        name: row.name,
-                        version: row.version.clone(),
-                    },
-                    version: Some(row.version),
-                    recommended: row.recommended,
-                    available: row.available,
-                })
-                .collect();
-            let system_version = bounded_system_wine_version().await;
-            checkpoint.runners.push(crate::RunnerReading {
-                selection: crate::FirstRunRunnerSelection::SystemWine {
-                    version: system_version.clone(),
-                },
-                version: system_version.clone(),
-                recommended: false,
-                available: system_version.is_some(),
-            });
-        }
-        let store = self.store.clone();
-        blocking_read("first-run save", move || {
-            store
-                .save_first_run(&checkpoint)
-                .map_err(CoreError::from)
-                .map_err(Box::new)?;
-            Ok(checkpoint)
-        })
+        read_first_run_checkpoint(
+            self.store.clone(),
+            self.runtime.clone(),
+            CancellationToken::new(),
+        )
         .await
     }
 
@@ -971,36 +893,7 @@ impl Core {
         &self,
         profile: Option<Uuid>,
     ) -> Result<crate::SystemReportInput, CoreError> {
-        let selected = profile.map(|id| self.profile(id)).transpose()?;
-        let runner = selected.as_ref().map(|profile| match &profile.runner {
-            crate::RunnerSelection::SystemWine => system_wine_version().map_or_else(
-                || "system-wine".to_owned(),
-                |version| format!("system-wine {version}"),
-            ),
-            crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
-        });
-        let prefix_state = selected
-            .as_ref()
-            .map(|profile| self.prefixes_dir.join(crate::flow::prefix_name(profile)))
-            .map(|path| {
-                if path.join(apogee_runtime::PREFIX_JSON).is_file() {
-                    "present"
-                } else {
-                    "absent"
-                }
-                .to_owned()
-            });
-        Ok(crate::SystemReportInput {
-            application_version: env!("CARGO_PKG_VERSION").to_owned(),
-            target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
-            operating_system: Some(std::env::consts::OS.to_owned()),
-            kernel: None,
-            architecture: Some(std::env::consts::ARCH.to_owned()),
-            gpu: None,
-            driver: None,
-            runner,
-            prefix_state,
-        })
+        system_report_input(&self.store, &self.prefixes_dir, profile)
     }
 
     /// Persist the launcher-wide settings.
@@ -1688,6 +1581,7 @@ impl Core {
         FlowContext {
             transport: self.transport.clone(),
             patch: self.patch.clone(),
+            runtime: self.runtime.clone(),
             launch: self.launch.clone(),
             addons: self.addons.clone(),
             steam: self.steam.clone(),
@@ -1702,6 +1596,173 @@ impl Core {
             frontier: self.frontier.clone(),
         }
     }
+}
+
+pub(crate) fn system_report_input(
+    store: &Store,
+    prefixes_dir: &Path,
+    profile: Option<Uuid>,
+) -> Result<crate::SystemReportInput, CoreError> {
+    let selected = profile.map(|id| stored_profile(store, id)).transpose()?;
+    let system_wine = selected
+        .as_ref()
+        .is_some_and(|profile| matches!(&profile.runner, crate::RunnerSelection::SystemWine))
+        .then(system_wine_version)
+        .flatten();
+    Ok(system_report_input_from_profile(
+        selected,
+        prefixes_dir,
+        system_wine,
+    ))
+}
+
+pub(crate) async fn bounded_system_report_input(
+    store: &Store,
+    prefixes_dir: &Path,
+    profile: Option<Uuid>,
+) -> Result<crate::SystemReportInput, CoreError> {
+    let selected = profile.map(|id| stored_profile(store, id)).transpose()?;
+    let system_wine = if selected
+        .as_ref()
+        .is_some_and(|profile| matches!(&profile.runner, crate::RunnerSelection::SystemWine))
+    {
+        bounded_system_wine_version().await
+    } else {
+        None
+    };
+    Ok(system_report_input_from_profile(
+        selected,
+        prefixes_dir,
+        system_wine,
+    ))
+}
+
+fn system_report_input_from_profile(
+    selected: Option<Profile>,
+    prefixes_dir: &Path,
+    system_wine: Option<String>,
+) -> crate::SystemReportInput {
+    let runner = selected.as_ref().map(|profile| match &profile.runner {
+        crate::RunnerSelection::SystemWine => system_wine.map_or_else(
+            || "system-wine".to_owned(),
+            |version| format!("system-wine {version}"),
+        ),
+        crate::RunnerSelection::Managed { name, version } => format!("{name} {version}"),
+    });
+    let prefix_state = selected
+        .as_ref()
+        .map(|profile| prefixes_dir.join(crate::flow::prefix_name(profile)))
+        .map(|path| {
+            if path.join(apogee_runtime::PREFIX_JSON).is_file() {
+                "present"
+            } else {
+                "absent"
+            }
+            .to_owned()
+        });
+    crate::SystemReportInput {
+        application_version: env!("CARGO_PKG_VERSION").to_owned(),
+        target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
+        operating_system: Some(std::env::consts::OS.to_owned()),
+        kernel: None,
+        architecture: Some(std::env::consts::ARCH.to_owned()),
+        gpu: None,
+        driver: None,
+        runner,
+        prefix_state,
+    }
+}
+
+pub(crate) async fn read_first_run_checkpoint(
+    store: Store,
+    runtime: Runtime,
+    cancel: CancellationToken,
+) -> Result<crate::FirstRunCheckpoint, CoreError> {
+    let read_store = store.clone();
+    let mut checkpoint = blocking_read("first-run load", move || {
+        read_store
+            .load_first_run()
+            .map_err(CoreError::from)
+            .map_err(Box::new)
+    })
+    .await?;
+    if matches!(
+        crate::first_incomplete(&checkpoint),
+        crate::FirstRunPosition::WaitingForImportDiscovery
+    ) {
+        checkpoint = blocking_read("first-run discovery", move || {
+            let candidates = crate::xiv_import::candidate_roots()
+                .into_iter()
+                .filter(|path| crate::xiv_import::scan(path).is_ok())
+                .map(|path| crate::FirstRunImportCandidate {
+                    source: if path.to_string_lossy().contains(".var/app/") {
+                        crate::FirstRunImportSource::Flatpak
+                    } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore") {
+                        crate::FirstRunImportSource::Core
+                    } else {
+                        crate::FirstRunImportSource::Native
+                    },
+                    path,
+                })
+                .collect();
+            crate::first_run::transition(
+                &checkpoint,
+                crate::FirstRunTransition::RecordImportDiscovery(candidates),
+            )
+            .map_err(CoreError::from)
+            .map_err(Box::new)
+        })
+        .await?;
+    }
+    if checkpoint.runners.is_empty()
+        && matches!(
+            crate::first_incomplete(&checkpoint),
+            crate::FirstRunPosition::Step(crate::FirstRunStep::RunnerAndPrefix)
+                | crate::FirstRunPosition::Step(crate::FirstRunStep::Ready)
+        )
+    {
+        let (manifest, signature) = crate::launch::runtime_backend::catalog_urls()?;
+        let catalog = runtime
+            .fetch_catalog(&manifest, &signature, &cancel)
+            .await?;
+        let catalog_runtime = runtime.clone();
+        let rows = blocking_read("first-run runner catalog", move || {
+            catalog_runtime
+                .runner_catalog_view(&catalog)
+                .map_err(CoreError::from)
+                .map_err(Box::new)
+        })
+        .await?;
+        checkpoint.runners = rows
+            .into_iter()
+            .map(|row| crate::RunnerReading {
+                selection: crate::FirstRunRunnerSelection::Managed {
+                    name: row.name,
+                    version: row.version.clone(),
+                },
+                version: Some(row.version),
+                recommended: row.recommended,
+                available: row.available,
+            })
+            .collect();
+        let system_version = bounded_system_wine_version().await;
+        checkpoint.runners.push(crate::RunnerReading {
+            selection: crate::FirstRunRunnerSelection::SystemWine {
+                version: system_version.clone(),
+            },
+            version: system_version.clone(),
+            recommended: false,
+            available: system_version.is_some(),
+        });
+    }
+    blocking_read("first-run save", move || {
+        store
+            .save_first_run(&checkpoint)
+            .map_err(CoreError::from)
+            .map_err(Box::new)?;
+        Ok(checkpoint)
+    })
+    .await
 }
 
 fn system_wine_version() -> Option<String> {

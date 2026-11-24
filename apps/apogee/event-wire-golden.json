@@ -1,0 +1,116 @@
+{
+  "state": {
+    "kind": "state",
+    "code": "state-patches-pending",
+    "state": {
+      "kind": "patchesPending",
+      "count": 7,
+      "bytes": 4096
+    }
+  },
+  "progress": {
+    "kind": "progress",
+    "code": "event-progress",
+    "completed": 64,
+    "total": 128,
+    "recoveries": {
+      "retries": 1,
+      "rotations": 2,
+      "stalls": 3,
+      "blocksRefetched": 4,
+      "sourcesDropped": 5,
+      "demoted": true
+    }
+  },
+  "frontierNews": {
+    "kind": "frontier",
+    "code": "event-frontier",
+    "frontier": {
+      "kind": "news",
+      "value": {
+        "news": [
+          {
+            "id": "headline-1",
+            "date": "2026-08-24",
+            "title": "Launcher news",
+            "tag": "news"
+          }
+        ],
+        "topics": [],
+        "pinned": []
+      }
+    }
+  },
+  "frontierGate": {
+    "kind": "frontier",
+    "code": "event-frontier",
+    "frontier": {
+      "kind": "gate",
+      "value": {
+        "open": false,
+        "messages": ["Maintenance"],
+        "news": ["notice-1"]
+      }
+    }
+  },
+  "frontierBanners": {
+    "kind": "frontier",
+    "code": "event-frontier",
+    "frontier": {
+      "kind": "banners",
+      "value": [
+        {
+          "id": "banner-1",
+          "artwork": null,
+          "orderPriority": "1",
+          "fixOrder": "2"
+        }
+      ]
+    }
+  },
+  "supportBundle": {
+    "kind": "supportBundle",
+    "code": "event-support-bundle",
+    "bytes": [1, 2, 3]
+  },
+  "firstRun": {
+    "kind": "firstRun",
+    "code": "event-first-run",
+    "firstRun": {
+      "legibility": null,
+      "import": {
+        "state": "discoveryPending"
+      },
+      "account": null,
+      "gameCandidates": [],
+      "game": null,
+      "credentialBackends": [],
+      "credential": null,
+      "runners": [],
+      "runnerAndPrefix": null,
+      "ready": {
+        "state": "pending"
+      }
+    }
+  },
+  "notice": {
+    "kind": "notice",
+    "code": "notice-clock-skew",
+    "notice": {
+      "kind": "clockSkew",
+      "seconds": -45
+    }
+  },
+  "error": {
+    "kind": "error",
+    "code": "err-launch",
+    "error": {
+      "kind": "launch"
+    }
+  },
+  "outcome": {
+    "kind": "outcome",
+    "code": "event-outcome-cancelled",
+    "outcome": "cancelled"
+  }
+}

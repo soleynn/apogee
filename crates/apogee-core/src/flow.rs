@@ -70,6 +70,7 @@ const UID_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 pub(crate) struct FlowContext {
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) patch: Arc<dyn PatchBackend>,
+    pub(crate) runtime: apogee_runtime::Runtime,
     pub(crate) launch: Arc<dyn LaunchBackend>,
     pub(crate) addons: Arc<dyn AddonBackend>,
     pub(crate) steam: Arc<dyn SteamBackend>,
@@ -228,10 +229,12 @@ async fn run_command(
             local_indexes,
         } => repair(&ctx, profile, local_indexes, &tx, &cancel).await,
         Command::Prefix { profile, action } => prefix(&ctx, profile, action, &tx, &cancel).await,
-        Command::FirstRun(request) => first_run(&ctx, request, &tx),
+        Command::FirstRun(request) => first_run(&ctx, request, &tx, &cancel).await,
         Command::ImportXivLauncher(command) => import_xivlauncher(&ctx, command, &tx),
         Command::Frontier(query) => frontier(&ctx, query, &tx, &cancel).await,
-        Command::SupportBundle { facts } => support_bundle(&ctx, facts, &tx),
+        Command::SupportBundle { profile, facts } => {
+            support_bundle(&ctx, profile, facts, &tx).await
+        }
     };
     match result {
         Ok(()) => {}
@@ -246,45 +249,28 @@ async fn run_command(
     }
 }
 
-fn first_run(
+async fn first_run(
     ctx: &FlowContext,
     request: FirstRunRequest,
     tx: &UnboundedSender<Event>,
+    cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
-    let mut checkpoint = ctx.store.load_first_run()?;
-    match request {
+    let checkpoint = match request {
         FirstRunRequest::Read => {
-            if matches!(
-                crate::first_incomplete(&checkpoint),
-                crate::FirstRunPosition::WaitingForImportDiscovery
-            ) {
-                let candidates = crate::xiv_import::candidate_roots()
-                    .into_iter()
-                    .filter(|path| crate::xiv_import::scan(path).is_ok())
-                    .map(|path| crate::FirstRunImportCandidate {
-                        source: if path.to_string_lossy().contains(".var/app/") {
-                            crate::FirstRunImportSource::Flatpak
-                        } else if path.file_name().and_then(|name| name.to_str()) == Some(".xlcore")
-                        {
-                            crate::FirstRunImportSource::Core
-                        } else {
-                            crate::FirstRunImportSource::Native
-                        },
-                        path,
-                    })
-                    .collect();
-                checkpoint = crate::first_run::transition(
-                    &checkpoint,
-                    crate::FirstRunTransition::RecordImportDiscovery(candidates),
-                )?;
-                ctx.store.save_first_run(&checkpoint)?;
-            }
+            crate::composition::read_first_run_checkpoint(
+                ctx.store.clone(),
+                ctx.runtime.clone(),
+                cancel.clone(),
+            )
+            .await?
         }
         FirstRunRequest::Advance(change) => {
-            checkpoint = crate::first_run::transition(&checkpoint, change)?;
+            let checkpoint = ctx.store.load_first_run()?;
+            let checkpoint = crate::first_run::transition(&checkpoint, change)?;
             ctx.store.save_first_run(&checkpoint)?;
+            checkpoint
         }
-    }
+    };
     let _ = tx.send(Event::FirstRun(Box::new(checkpoint)));
     Ok(())
 }
@@ -304,24 +290,17 @@ fn import_xivlauncher(
     Ok(())
 }
 
-fn support_bundle(
+async fn support_bundle(
     ctx: &FlowContext,
+    profile: Option<Uuid>,
     facts: Vec<(String, String)>,
     tx: &UnboundedSender<Event>,
 ) -> Result<(), CoreError> {
     let profiles = ctx.store.list_profiles()?;
     let settings = ctx.store.load_settings()?;
-    let system = crate::SystemReportInput {
-        application_version: env!("CARGO_PKG_VERSION").to_owned(),
-        target: option_env!("TARGET").unwrap_or("unknown").to_owned(),
-        operating_system: Some(std::env::consts::OS.to_owned()),
-        kernel: None,
-        architecture: Some(std::env::consts::ARCH.to_owned()),
-        gpu: None,
-        driver: None,
-        runner: None,
-        prefix_state: None,
-    };
+    let system =
+        crate::composition::bounded_system_report_input(&ctx.store, &ctx.prefixes_dir, profile)
+            .await?;
     let caller_facts = crate::ValidatedCallerFacts::new(facts);
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
