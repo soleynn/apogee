@@ -1,6 +1,7 @@
 # git-cliff configuration: https://git-cliff.org
-# CHANGELOG.md is generated from the commit history, so it is not edited by hand; the changelog
-# workflow (.github/workflows/changelog.yml) regenerates it on each merge to main.
+# CHANGELOG.md is generated from the commit history, so it is not edited by hand. It is regenerated
+# in the release pull request when a stable version is prepared (see RELEASING.md); the release
+# workflow builds each release's notes from the same history with this file.
 
 [changelog]
 header = """
@@ -92,8 +93,8 @@ commit_parsers = [
   { message = "^revert", group = "Reverted" },
   { message = "^chore\\(release\\)", skip = true },
   { message = "^chore\\(deps\\)", skip = true },
-  # The changelog workflow's own auto-commit: exclude it so regeneration is idempotent (no perpetual
-  # one-behind diff) and the changelog carries no "regenerate changelog" noise.
+  # Automated changelog commits from before regeneration moved to release time: keep them out of the
+  # changelog and the release notes.
   { message = "^chore: regenerate changelog", skip = true },
   { message = "^chore", group = "Miscellaneous" },
   { body = ".*[Ss]ecurity", group = "Security" },
