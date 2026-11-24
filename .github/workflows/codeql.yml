@@ -1,16 +1,25 @@
 name: CodeQL
 
+# Changes that touch only prose or the static site hold no Rust to analyze.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "**/*.md"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "**/*.md"
   schedule:
     - cron: "23 5 * * 1"
 
+# Same shape as CI: a pull request's newer push supersedes its older run, while every commit on
+# main gets an analysis in a group of its own, so a burst of merges cannot cancel or replace one.
 concurrency:
-  group: codeql-${{ github.ref }}
-  cancel-in-progress: true
+  group: codeql-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -19,6 +28,7 @@ jobs:
   analyze:
     name: analyze (rust)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       security-events: write
