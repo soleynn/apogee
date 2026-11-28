@@ -12,7 +12,6 @@
 //! its exit status is.
 
 use std::error::Error;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apogee_fetch::Fetcher;

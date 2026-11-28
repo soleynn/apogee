@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

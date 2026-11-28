@@ -7,7 +7,6 @@
 //! against the `winepath` oracle.
 
 use std::error::Error;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 

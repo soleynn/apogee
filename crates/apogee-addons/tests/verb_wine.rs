@@ -13,7 +13,6 @@
 //! `reg delete`.
 
 use std::error::Error;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apogee_addons::{AddonPaths, Addons, SetupEvents, SetupState, VerifiedManifest};
