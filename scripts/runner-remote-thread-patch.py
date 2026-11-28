@@ -34,10 +34,13 @@ Usage (python3 stdlib only):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
+import io
 import os
 import shutil
+import stat
 import struct
 import sys
 import tarfile
@@ -311,17 +314,24 @@ def kernelbase_targets(root: Path) -> list[Path]:
     return targets
 
 
-def safe_extract(fileobj, dest: Path) -> Path:
-    """Extract into `dest`, which must end up holding exactly one top-level directory."""
+def safe_extract(fileobj, dest: Path) -> tuple[Path, dict]:
+    """Extract into `dest`, which must end up holding exactly one top-level directory.
+
+    Returns that directory and each member's (kind, mode, mtime), keyed by its path components
+    below the top-level directory, for `repack` to write back."""
+    members: dict[tuple[str, ...], tuple[str, int, int]] = {}
     with tarfile.open(fileobj=fileobj, mode="r:*") as tf:
         tops = set()
         for m in tf:
             name = m.name.removeprefix("./")
-            if not name or name.startswith("/") or ".." in Path(name).parts:
+            parts = Path(name).parts
+            if not name or name.startswith("/") or ".." in parts:
                 raise PatchError(f"archive member with unsafe path: {m.name!r}")
             if not (m.isfile() or m.isdir() or m.issym()):
                 raise PatchError(f"archive member of unexpected type: {m.name!r}")
-            tops.add(Path(name).parts[0])
+            tops.add(parts[0])
+            kind = "dir" if m.isdir() else "sym" if m.issym() else "file"
+            members[parts[1:]] = (kind, m.mode, int(m.mtime))
         if len(tops) != 1:
             raise PatchError(f"archive has {len(tops)} top-level entries, expected one directory")
         tf.extractall(dest, filter="data")
@@ -337,26 +347,62 @@ def safe_extract(fileobj, dest: Path) -> Path:
     top = dest / tops.pop()
     if not top.is_dir() or top.is_symlink():
         raise PatchError("archive's top-level entry is not a directory")
-    return top
+    return top, members
 
 
-def repack(root: Path, out: Path, top: str) -> None:
-    """Deterministic tar.gz: sorted entries, root ownership, original mtimes, gzip mtime 0."""
-    with open(out, "xb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, compresslevel=6) as gz:
+def repack(root: Path, out: Path, top: str, members: dict | None = None) -> None:
+    """Write `root` as a tar.gz that does not depend on where or by whom it was built.
+
+    Entries are sorted and owned by root, the gzip header carries no file name and an mtime of 0.
+    Contents, entry types and link targets are read from the tree. With `members` (what
+    `safe_extract` returned for the archive the tree came from) every mode and mtime is the source
+    archive's, so the builder's umask and the extraction time leave no trace; a directory the
+    archive only implied gets mode 755 and mtime 0. Without it (a runner given as a directory) modes
+    and mtimes are the tree's own, so the result is only as reproducible as that tree's metadata.
+    Either way group and other write bits are stripped, from directories as well as files.
+
+    Two builds are byte-identical only if they also run the same zlib: the deflate stream depends
+    on the compressor's implementation and version. The tar inside does not."""
+    with open(out, "xb") as raw, gzip.GzipFile(
+        filename="", fileobj=raw, mode="wb", mtime=0, compresslevel=6
+    ) as gz:
         with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
 
-            def norm(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+            def walk(path: Path, arc: str, key: tuple[str, ...]) -> None:
+                st = os.lstat(path)
+                ti = tarfile.TarInfo(arc)
+                if stat.S_ISLNK(st.st_mode):
+                    kind, ti.type, ti.linkname = "sym", tarfile.SYMTYPE, os.readlink(path)
+                elif stat.S_ISDIR(st.st_mode):
+                    kind, ti.type = "dir", tarfile.DIRTYPE
+                elif stat.S_ISREG(st.st_mode):
+                    kind, ti.type, ti.size = "file", tarfile.REGTYPE, st.st_size
+                else:
+                    raise PatchError(f"{arc} is not a file, a directory or a symlink")
+                if members is None:
+                    mode, mtime = stat.S_IMODE(st.st_mode), int(st.st_mtime)
+                elif key in members:
+                    was, mode, mtime = members[key]
+                    if was != kind:
+                        raise PatchError(f"{arc} is not the kind of entry the archive had there")
+                elif kind == "dir":
+                    mode, mtime = 0o755, 0
+                else:
+                    raise PatchError(f"{arc} is not in the archive the tree was extracted from")
+                ti.mode = mode if kind == "sym" else mode & 0o755
+                ti.mtime = mtime
                 ti.uid = ti.gid = 0
                 ti.uname = ti.gname = "root"
-                return ti
+                if kind == "file":
+                    with open(path, "rb") as f:
+                        tf.addfile(ti, f)
+                else:
+                    tf.addfile(ti)
+                if kind == "dir":
+                    for child in sorted(os.listdir(path)):
+                        walk(path / child, f"{arc}/{child}", key + (child,))
 
-            def walk(path: Path, arc: str) -> None:
-                tf.add(path, arcname=arc, recursive=False, filter=norm)
-                if path.is_dir() and not path.is_symlink():
-                    for child in sorted(path.iterdir(), key=lambda c: c.name):
-                        walk(child, f"{arc}/{child.name}")
-
-            walk(root, top)
+            walk(root, top, ())
 
 
 def build(args: argparse.Namespace) -> int:
@@ -378,6 +424,7 @@ def build(args: argparse.Namespace) -> int:
         raise PatchError("output must not be inside the source runner")
 
     work = Path(tempfile.mkdtemp(prefix=f".{out.name}.partial-", dir=out.parent))
+    members = None
     try:
         if src.is_file():
             # Hash and extract through one open file so the bytes extracted are the bytes verified.
@@ -386,7 +433,7 @@ def build(args: argparse.Namespace) -> int:
                 if got != expected:
                     raise PatchError(f"input sha256 is {got}, expected {expected}")
                 f.seek(0)
-                tree = safe_extract(f, work)
+                tree, members = safe_extract(f, work)
         elif src.is_dir():
             stock = kernelbase_targets(src)
             got = sha256_file(stock[0])
@@ -426,7 +473,7 @@ def build(args: argparse.Namespace) -> int:
         os.rename(tree, out)
         if repack_to:
             try:
-                repack(out, repack_to, args.name or out.name)
+                repack(out, repack_to, args.name or out.name, members)
             except BaseException:
                 repack_to.unlink(missing_ok=True)
                 shutil.rmtree(out, ignore_errors=True)
@@ -580,6 +627,8 @@ def self_test() -> int:
     good = _make([0x40])
     expect_fail("truncated", good[:0x500], "")
 
+    _test_repack_is_reproducible(failures, good)
+
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)
     print(f"self-test: {'ok' if not failures else f'{len(failures)} failure(s)'}")
@@ -595,6 +644,85 @@ def _make_outside() -> bytes:
     site = _fill_site(at, iat_rvas, func_rva, EXPECTED_IMPORTS)
     off = pe.off(func_rva + at, len(site))
     return image[:off] + site + image[off + len(site) :]
+
+
+def _tar_bytes(entries) -> bytes:
+    """A gzip tarball of `(name, type, mode, payload)` entries; the payload is a file's bytes or a
+    link's target."""
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.GNU_FORMAT) as tf:
+        for i, (name, kind, mode, payload) in enumerate(entries):
+            ti = tarfile.TarInfo(name)
+            ti.type, ti.mode, ti.mtime = kind, mode, 1_700_000_000 + i
+            if kind == tarfile.REGTYPE:
+                ti.size = len(payload)
+                tf.addfile(ti, io.BytesIO(payload))
+            else:
+                ti.linkname = payload or ""
+                tf.addfile(ti)
+    return raw.getvalue()
+
+
+def _runner_entries(dll: bytes, top: str = "runner") -> list:
+    """A runner in miniature: the DLL, the prefix template's symlink to it, a group-writable
+    directory, a read-only file, and directories the archive names no member for."""
+    lib, pfx = (str(Path(top, rel)) for rel in KERNELBASE_PATHS)
+    return [
+        (top, tarfile.DIRTYPE, 0o755, None),
+        (f"{top}/files", tarfile.DIRTYPE, 0o775, None),
+        (f"{top}/files/lib", tarfile.DIRTYPE, 0o700, None),
+        (lib, tarfile.REGTYPE, 0o644, dll),
+        (pfx, tarfile.SYMTYPE, 0o777, os.path.relpath(lib, os.path.dirname(pfx))),
+        (f"{top}/version", tarfile.REGTYPE, 0o464, b"synthetic\n"),
+    ]
+
+
+def _build_quietly(**kw) -> None:
+    args = argparse.Namespace(**{"repack": None, "name": None, **kw})
+    with contextlib.redirect_stdout(io.StringIO()):
+        build(args)
+
+
+def _test_repack_is_reproducible(failures: list, dll: bytes) -> None:
+    """The same archive built under two umasks and to two file names repacks to the same bytes."""
+    source = _tar_bytes(_runner_entries(dll))
+    digest = hashlib.sha256(source).hexdigest()
+    built = []
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "source.tar.gz")
+        src.write_bytes(source)
+        for umask, stem in ((0o022, "first"), (0o077, "second-with-another-name")):
+            previous = os.umask(umask)
+            try:
+                _build_quietly(input=str(src), sha256=digest, output=str(Path(tmp, stem)),
+                               repack=str(Path(tmp, stem + ".tar.gz")), name="runner")
+            except (PatchError, OSError, tarfile.TarError) as e:
+                failures.append(f"reproducible repack: build under umask {umask:o} failed: {e}")
+                return
+            finally:
+                os.umask(previous)
+            built.append(Path(tmp, stem + ".tar.gz").read_bytes())
+    if built[0] != built[1]:
+        failures.append("reproducible repack: the umask or the output name changed the tarball")
+    if built[0][3] & 0x08:
+        failures.append("reproducible repack: the gzip header carries a file name")
+    with tarfile.open(fileobj=io.BytesIO(built[0]), mode="r:gz") as tf:
+        got = {m.name: (m.mode, m.mtime, m.uname) for m in tf}
+    patched, _ = patch_kernelbase(dll)
+    want = {
+        "runner": (0o755, 1_700_000_000, "root"),
+        "runner/files": (0o755, 1_700_000_001, "root"),       # group write stripped
+        "runner/files/lib": (0o700, 1_700_000_002, "root"),
+        "runner/files/lib/wine": (0o755, 0, "root"),          # implied by the archive, not in it
+        "runner/files/share": (0o755, 0, "root"),
+        "runner/version": (0o444, 1_700_000_005, "root"),
+    }
+    for name, meta in want.items():
+        if got.get(name) != meta:
+            failures.append(f"reproducible repack: {name} is {got.get(name)}, expected {meta}")
+    with tarfile.open(fileobj=io.BytesIO(built[0]), mode="r:gz") as tf:
+        if tf.extractfile(str(Path("runner", KERNELBASE_PATHS[0]))).read() != patched:
+            failures.append("reproducible repack: the tarball does not carry the patched DLL")
 
 
 def main() -> int:
