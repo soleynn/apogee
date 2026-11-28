@@ -559,8 +559,10 @@ def load_config(path):
             raise SweepError(f"cell {c['name']}: role must be candidate or reference")
         c.setdefault("role", "candidate")
     aa = cfg.get("aa_control")
-    if aa not in names:
+    if aa not in [c["name"] for c in cfg["cells"] if c["role"] == "candidate"]:
         raise SweepError("aa_control must name a candidate cell")
+    if f"{aa}-aa" in names:
+        raise SweepError(f"cell name {aa}-aa is the name of {aa}'s A/A control; rename the cell")
     control = dict(next(c for c in cfg["cells"] if c["name"] == aa))
     control.update(name=f"{aa}-aa", role="control", control_of=aa)
     cfg["cells"] = cfg["cells"] + [control]
@@ -808,8 +810,29 @@ def global_glcache():
 
 
 def empty(path):
+    """Leave `path` an empty directory, or stop the sweep: a cold run over a cache that could not
+    be cleared is a warm run that says it is cold."""
+    if path.is_symlink():
+        raise SweepError(f"{path} is a symlink; a cache directory is not emptied through one")
     shutil.rmtree(path, ignore_errors=True)
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        left = len(os.listdir(path))
+    except OSError as e:
+        raise SweepError(f"could not empty {path}: {e}") from e
+    if left:
+        raise SweepError(f"could not empty {path}: {left} entries are still in it")
+
+
+def json_safe(value):
+    """`value` with every float JSON cannot write (an infinity, a NaN) replaced by None."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
 
 
 def atomic_json(path, data):
@@ -1444,7 +1467,9 @@ def analyze(cfg, args):
     report["drift"] = session_drift(cells, report["threshold_pct"])
     report["incomplete_redos"] = incomplete_redos
     if args.json:
-        print(json.dumps(report, indent=2, default=str))
+        # A cell whose cold runs never reached steady state carries an infinite time to steady, which
+        # the decision ranks last; in JSON it is null.
+        print(json.dumps(json_safe(report), indent=2, default=str, allow_nan=False))
     else:
         print_report(report)
     return 0 if report["winner"] else 1
@@ -1511,6 +1536,44 @@ class SelfTest(unittest.TestCase):
                 with self.assertRaises(SweepError, msg=f"{key}={bad!r}"):
                     load_config(f.name)
                 os.unlink(f.name)
+
+    def test_the_aa_control_must_be_a_candidate_and_its_name_must_be_free(self):
+        import tempfile
+
+        def load(**changes):
+            cfg = dict(EXAMPLE_CONFIG, **changes)
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, "sweep.json").write_text(json.dumps(cfg))
+                return load_config(Path(d, "sweep.json"))
+
+        first = EXAMPLE_CONFIG["cells"][0]
+        aa = EXAMPLE_CONFIG["aa_control"]
+        self.assertEqual(first["name"], aa)
+        with self.assertRaisesRegex(SweepError, "must name a candidate"):
+            load(cells=[dict(first, role="reference")] + EXAMPLE_CONFIG["cells"][1:])
+        with self.assertRaisesRegex(SweepError, f"{aa}-aa is the name of"):
+            load(cells=EXAMPLE_CONFIG["cells"] + [dict(first, name=f"{aa}-aa")])
+
+    def test_emptying_a_cache_fails_loudly(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d, "cache")
+            cache.mkdir()
+            (cache / "pipelines.bin").write_text("x")
+            # A removal that silently did nothing must not pass for an empty cache.
+            with mock.patch.object(shutil, "rmtree", lambda *a, **k: None):
+                with self.assertRaisesRegex(SweepError, "1 entries are still in it"):
+                    empty(cache)
+            link = Path(d, "link")
+            link.symlink_to(cache)
+            with self.assertRaisesRegex(SweepError, "symlink"):
+                empty(link)
+            self.assertTrue((cache / "pipelines.bin").exists())
+            empty(cache)
+            self.assertEqual(os.listdir(cache), [])
+            empty(Path(d, "absent", "nested"))
+            self.assertTrue(Path(d, "absent", "nested").is_dir())
 
     def test_wilcoxon_all_one_sign_hits_the_smallest_p(self):
         _, p, n = wilcoxon_signed_rank([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
@@ -1725,7 +1788,7 @@ class SelfTest(unittest.TestCase):
                 "stats": stats, "stalls_over_50ms": {"count": stalls}, "jitter_ms": 1.0,
                 "p99_9_ms": 30.0}}}
 
-        with tempfile.TemporaryDirectory(dir=Path.home()) as d:
+        with tempfile.TemporaryDirectory() as d:
             cfg = dict(EXAMPLE_CONFIG, output=d, cell_root=d)
             cfg["cells"] = [
                 {"name": "ge", "kind": "proton", "runner": "/x", "role": "candidate"},
@@ -1740,10 +1803,15 @@ class SelfTest(unittest.TestCase):
             lows = {"ge": lambda b: 50.0 + (b % 3) * 0.1,
                     "ge-aa": lambda b: 50.0 + (b % 3) * 0.1 + (0.1 if b % 2 else -0.1),
                     "xiv": lambda b: 44.0 + (b % 3) * 0.1}
+            # A cold run that never comes within reach of the warm frame rate.
+            never_steady = Path(d) / "cold.csv"
+            never_steady.write_text("fps,frametime,elapsed\n" + "33,30,1e15\n" * 700)
             for name, low in lows.items():
                 runs = [{"phase": "warm", "block": b, "outcome": "ok", "invalid_reasons": [],
                          "csv": str(csv), "analyze": report(low(b)), "score": {}}
                         for b in range(1, 11)]
+                if name == "xiv":
+                    runs.append(dict(runs[0], phase="cold", block="cold-1", csv=str(never_steady)))
                 # A noisy block 4 for ge, re-run for every cell at the end: the redo is what counts.
                 if name == "ge":
                     runs[3]["invalid_reasons"] = ["host noise"]
@@ -1753,7 +1821,10 @@ class SelfTest(unittest.TestCase):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = analyze(cfg, argparse.Namespace(json=True))
-            result = json.loads(out.getvalue())
+            # Strict JSON: a time to steady that was never reached is null, not an Infinity token.
+            result = json.loads(out.getvalue(), parse_constant=self.fail)
+            self.assertIsNone(result["cells"]["xiv"]["time_to_steady_s"])
+            self.assertIsNone(result["cells"]["ge"]["time_to_steady_s"])
             self.assertEqual(code, 0)
             self.assertEqual(result["winner"], "ge")
             self.assertEqual(result["cells"]["ge"]["invalid_runs"], 0)
