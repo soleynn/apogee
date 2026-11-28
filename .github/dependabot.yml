@@ -24,6 +24,24 @@ updates:
       cargo-major:
         update-types:
           - "major"
+    # Three crates the desktop shell cannot move on its own; patch releases still come through.
+    # wry and rfd are the copies Tauri links, so a newer one of either only adds a second copy beside
+    # Tauri's: they move when a Tauri release moves them. Newer nix takes an owned or borrowed
+    # descriptor in fcntl, and the shell's instance lock keeps a raw one inherited across a re-exec,
+    # which only unsafe code could wrap. Drop that entry if the lock stops holding a raw descriptor.
+    ignore:
+      - dependency-name: "wry"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: "rfd"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      - dependency-name: "nix"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: npm
     directory: "/apps/apogee"
