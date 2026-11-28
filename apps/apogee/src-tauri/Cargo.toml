@@ -71,10 +71,10 @@ zeroize = { version = "1", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
-nix = { version = "0.26.4", default-features = false, features = ["fs"] }
-rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
+nix = { version = "0.32.0", default-features = false, features = ["fs"] }
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
 rustix = { version = "1", features = ["fs"] }
-wry = "0.55"
+wry = "0.57"
 zbus = { version = "5", features = ["blocking-api"] }
 
 [dev-dependencies]
