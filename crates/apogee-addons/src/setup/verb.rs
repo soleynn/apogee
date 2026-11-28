@@ -49,8 +49,8 @@ use super::event::SetupEvents;
 /// that is not there once every op has reported success.
 ///
 /// `staged` places a files op's archive through staging and returns every file it placed, which is
-/// what a program step does so its install can be checked file by file before each start. A base verb
-/// places straight into its destination and returns nothing.
+/// what a program step does so its install can be checked file by file when a launch is planned. A
+/// base verb places straight into its destination and returns nothing.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn apply(
     runtime: &Runtime,

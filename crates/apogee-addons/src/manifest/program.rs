@@ -82,7 +82,8 @@ pub enum UpdaterKeyFormat {
 ///
 /// A program that updates itself replaces pinned bytes with whatever its publisher serves next, with
 /// none of the checks the row's pins carry. The row's seeded configuration turns each one off once;
-/// this is what is read before every start, because the user can turn it back on inside the program.
+/// this is what is read each time a launch is planned, before the game is spawned, because the user
+/// can turn it back on inside the program.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct UpdaterKey {
@@ -116,13 +117,15 @@ pub struct ProgramStep {
     /// Whether this step seeds configuration the program then owns.
     ///
     /// A seeded step is applied when the prefix does not record it or a path it states is gone, and is
-    /// otherwise left alone: not reinstalled when the row's version moves, and not re-hashed before a
-    /// start. The program rewrites its own settings as the user changes them, so treating them as
-    /// pinned bytes would either undo the user's settings or disable the program on its next start.
+    /// otherwise left alone: not reinstalled when the row's version moves, and not re-hashed when a
+    /// launch is planned. The program rewrites its own settings as the user changes them, so treating
+    /// them as pinned bytes would either undo the user's settings or disable the program on its next
+    /// start.
     pub seeded: bool,
 }
 
-/// A curated program: installed by pinned steps, gated before every start, run beside the game.
+/// A curated program: installed by pinned steps, gated when each launch is planned, run beside the
+/// game.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ProgramEntry {
@@ -145,7 +148,7 @@ pub struct ProgramEntry {
     pub steps: Vec<ProgramStep>,
     /// How it is started.
     pub start: ProgramStart,
-    /// Self-updater switches that must read off before it is started.
+    /// Self-updater switches that must read off when a launch is planned, or it is not started.
     pub updater_keys: Vec<UpdaterKey>,
     /// Where it proves it came up, if it leaves any proof.
     pub evidence: Option<ProgramEvidence>,

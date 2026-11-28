@@ -14,7 +14,8 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# Each file a program step places is recorded by its BLAKE3 digest and hashed again before a start.
+# Each file a program step places is recorded by its BLAKE3 digest and hashed again when a launch is
+# planned.
 blake3.workspace = true
 # Dalamud's distribution publishes an MD5 map for its trees and a SHA1 per asset; these check what it
 # served against what it said it served.

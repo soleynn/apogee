@@ -4,8 +4,8 @@
 //! the prefix a week later: the program's own updater, a careless tool or the user can have replaced
 //! any of them. So a step's archive is unpacked into staging first, every file it holds is hashed
 //! there, and only then moved into place, and the list is kept outside the prefix under the addons
-//! root. Before each start every listed file is hashed again, walking from `C:` without following a
-//! link.
+//! root. When a launch is planned, before the game is spawned, every listed file is hashed again,
+//! walking from `C:` without following a link.
 //!
 //! The list lives in the launcher's own data directory, which a process running as the same user
 //! can rewrite as easily as the files it describes. It catches self-updates and accidents, not a
