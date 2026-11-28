@@ -171,15 +171,15 @@ pub(crate) fn place_staged(
                 reason: "a directory stands where a file goes",
             });
         }
-        // A rename replaces a link at `to` rather than writing through it.
-        if std::fs::rename(&from, &to).is_err() {
-            std::fs::copy(&from, &to).map_err(|source| AddonError::Io {
-                what: what.to_owned(),
-                step: "place a file",
-                path: to.clone(),
-                source: Box::new(source),
-            })?;
-        }
+        // A rename replaces a link at `to` rather than writing through it. Staging sits beside the
+        // target on the same volume, so a failed rename is refused rather than retried as a copy: a
+        // copy opens `to` and would write through a link planted there.
+        std::fs::rename(&from, &to).map_err(|source| AddonError::Io {
+            what: what.to_owned(),
+            step: "place a file",
+            path: to.clone(),
+            source: Box::new(source),
+        })?;
         placed.push(PlacedFile {
             path: slashed(&into.join(&rel)),
             size,
