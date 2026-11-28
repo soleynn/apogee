@@ -1159,6 +1159,38 @@ def cache_check(manifest, record, first):
     return problems
 
 
+class RedoList:
+    """The blocks waiting to be re-run because host noise spoiled one of their runs. Written to the
+    output directory on every change, so a sweep interrupted before or during the redo still redoes
+    them, whole, when it is run again."""
+
+    def __init__(self, out):
+        self.path = out / "redo.json"
+        self.blocks = json.loads(self.path.read_text())["blocks"] if self.path.exists() else []
+
+    def add(self, block):
+        if block not in self.blocks:
+            self.blocks.append(block)
+            atomic_json(self.path, {"blocks": self.blocks})
+
+    def discard(self, block):
+        self.blocks.remove(block)
+        atomic_json(self.path, {"blocks": self.blocks})
+
+
+def run_redos(cfg, manifests, redo, record_run):
+    """Re-run every pending block: all of its cells, in its planned order, so its runs stay paired.
+    A cell that already has its redo run (an earlier, interrupted attempt) is not run again; a block
+    leaves the list only once every cell has one."""
+    for b in list(redo.blocks):
+        for pos, name in enumerate(block_order(cfg["seed"], b, list(manifests))):
+            if any(r.get("redo_of") == b for r in manifests[name].runs("warm")):
+                continue
+            record_run(name, "warm", {"block": f"{b}r", "redo_of": b, "position": pos},
+                       expand(cfg["output"]) / "cells" / name / "runs" / f"block-{b}r")
+        redo.discard(b)
+
+
 def stall_count(record):
     report = (record.get("analyze") or {}).get("report") or {}
     return ((report.get("measured") or {}).get("stalls_over_50ms") or {}).get("count")
@@ -1206,7 +1238,7 @@ def sweep(cfg, args):
               f"{', '.join(rec['invalid_reasons']) or 'valid'}", flush=True)
         return rec
 
-    redo = []
+    redo = RedoList(out)
     for step in steps:
         name, phase = step["cell"], step["phase"]
         cell, m = cells[name], manifests[name]
@@ -1263,16 +1295,12 @@ def sweep(cfg, args):
                     raise SweepError("the driver or kernel changed mid-sweep; start a new output")
             rec = record_run(name, "warm", {"block": b, "position": step["position"]},
                              run_root / f"block-{b}")
-            if "host noise" in rec["invalid_reasons"] and b not in redo:
-                redo.append(b)
+            if "host noise" in rec["invalid_reasons"]:
+                redo.add(b)
     # A run spoiled by host noise is re-run at the end in the same position of a fresh block,
-    # which repeats the whole block in its planned order so its runs stay paired.
-    for b in redo:
-        for pos, name in enumerate(block_order(cfg["seed"], b, list(cells))):
-            if any(r.get("redo_of") == b for r in manifests[name].runs("warm")):
-                continue
-            record_run(name, "warm", {"block": f"{b}r", "redo_of": b, "position": pos},
-                       out / "cells" / name / "runs" / f"block-{b}r")
+    # which repeats the whole block in its planned order so its runs stay paired. The list
+    # includes whatever an earlier, interrupted invocation left pending.
+    run_redos(cfg, manifests, redo, record_run)
     return 0
 
 
@@ -1362,20 +1390,31 @@ def analyze(cfg, args):
     if len(prints) > 1:
         raise SweepError("cells were recorded under different fingerprints; they are not comparable")
 
+    # A block's redo replaces its original runs only when every cell has its redo run. A redo cut
+    # short would otherwise pair one cell's re-run with another cell's original, from another pass.
+    redone = [{str(r["redo_of"]) for r in manifests.get(cell["name"], {"runs": []})["runs"]
+               if r["phase"] == "warm" and r.get("redo_of")} for cell in cfg["cells"]]
+    complete_redos = set.intersection(*redone)
+    incomplete_redos = sorted(set.union(*redone) - complete_redos)
+
     cells = {}
     for cell in cfg["cells"]:
         m = manifests.get(cell["name"], {"runs": []})
-        runs = {}
-        warm = [r for r in m["runs"] if r["phase"] == "warm"]
-        for r in warm:
+        runs, chosen = {}, {}
+        for r in m["runs"]:
+            if r["phase"] != "warm":
+                continue
             key = str(r.get("redo_of") or r["block"])
+            if r.get("redo_of") and key not in complete_redos:
+                continue
             if r.get("redo_of") or key not in runs:
                 rep = (r.get("analyze") or {}).get("report")
                 metrics = run_metrics(rep) if rep else {"low_1pct": None, "valid": False}
                 metrics["valid"] = bool(rep) and not r["invalid_reasons"] and \
                     metrics.get("low_1pct") is not None
                 metrics["session"] = r.get("session")
-                runs[key] = metrics
+                runs[key], chosen[key] = metrics, r
+        warm = list(chosen.values())
         warm_rolling = [rolling_fps(split_loading(csv_frames(r["csv"])))
                         for r in warm if r.get("csv") and not r["invalid_reasons"]]
         cold = [r for r in m["runs"] if r["phase"] == "cold" and r.get("csv")]
@@ -1403,6 +1442,7 @@ def analyze(cfg, args):
         row.update(pooled_low_0_1pct=cell["pooled_low_0_1pct"], dxvk=cell["dxvk"],
                    cold_scores=cell["cold_scores"])
     report["drift"] = session_drift(cells, report["threshold_pct"])
+    report["incomplete_redos"] = incomplete_redos
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
@@ -1441,6 +1481,9 @@ def print_report(r):
               f"p {comp['p']:.4f}  holm {comp['p_holm']:.4f}  beats {comp['leader_beats']}")
     for d in r.get("drift", []):
         print(f"  DRIFT: {d}")
+    for b in r.get("incomplete_redos", []):
+        print(f"  NOTE: the redo of block {b} did not finish for every cell; its original runs are "
+              "used for all of them")
     for why in r["invalid"]:
         print(f"  INVALID: {why}")
     print(f"winner: {r['winner']}  (tie-breaks: {r['tie_break']})")
@@ -1701,10 +1744,10 @@ class SelfTest(unittest.TestCase):
                 runs = [{"phase": "warm", "block": b, "outcome": "ok", "invalid_reasons": [],
                          "csv": str(csv), "analyze": report(low(b)), "score": {}}
                         for b in range(1, 11)]
-                # A noisy block 4 for ge, re-run at the end: the redo is what counts.
+                # A noisy block 4 for ge, re-run for every cell at the end: the redo is what counts.
                 if name == "ge":
                     runs[3]["invalid_reasons"] = ["host noise"]
-                    runs.append(dict(runs[0], block="4r", redo_of=4, analyze=report(50.1)))
+                runs.append(dict(runs[0], block="4r", redo_of=4, analyze=report(low(4))))
                 atomic_json(Path(d) / "cells" / name / "manifest.json",
                             {"fingerprint": fp, "runs": runs})
             out = io.StringIO()
@@ -1716,6 +1759,24 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(result["cells"]["ge"]["invalid_runs"], 0)
             self.assertEqual(result["comparisons"][0]["n"], 10)
             self.assertAlmostEqual(result["cells"]["ge"]["pooled_low_0_1pct"], 100.0)
+            self.assertEqual(result["incomplete_redos"], [])
+
+            # The same redo cut short before its last cell: nobody's redo run is used, so ge is
+            # back to its noisy original and the block pairs originals with originals.
+            m = Path(d) / "cells" / "xiv" / "manifest.json"
+            data = json.loads(m.read_text())
+            whole = dict(data)
+            data["runs"] = [r for r in data["runs"] if not r.get("redo_of")]
+            atomic_json(m, data)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                analyze(cfg, argparse.Namespace(json=True))
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["incomplete_redos"], ["4"])
+            self.assertEqual(result["cells"]["ge"]["invalid_runs"], 1)
+            self.assertEqual(result["cells"]["ge-aa"]["runs"], 10)
+            self.assertEqual(result["comparisons"][0]["n"], 9)
+            atomic_json(m, whole)
 
             # A cell recorded under another driver cannot be compared with the rest.
             m = Path(d) / "cells" / "xiv" / "manifest.json"
@@ -1724,6 +1785,51 @@ class SelfTest(unittest.TestCase):
             atomic_json(m, data)
             with self.assertRaises(SweepError):
                 analyze(cfg, argparse.Namespace(json=True))
+
+    def test_an_interrupted_redo_is_resumed_whole(self):
+        import tempfile
+
+        class Interrupted(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = dict(EXAMPLE_CONFIG, output=d)
+            names = ["ge", "xiv", "ge-aa"]
+            manifests = {n: Manifest(cfg, {"name": n}) for n in names}
+            ran = []
+
+            def record_run(name, phase, extra, run_dir, stop_after=None):
+                if stop_after is not None and len(ran) >= stop_after:
+                    raise Interrupted
+                ran.append((name, extra["position"]))
+                manifests[name].data["runs"].append({"phase": phase, **extra})
+                manifests[name].save()
+
+            # Interrupted after the noisy block was noted and before anything was redone: the next
+            # invocation finds the block on disk and redoes it for every cell in the planned order.
+            RedoList(Path(d)).add(4)
+            RedoList(Path(d)).add(7)
+            redo = RedoList(Path(d))
+            self.assertEqual(redo.blocks, [4, 7])
+            with self.assertRaises(Interrupted):
+                run_redos(cfg, manifests, redo,
+                          lambda *a: record_run(*a, stop_after=len(names) + 1))
+            order4 = block_order(cfg["seed"], 4, names)
+            self.assertEqual(ran[:3], [(n, i) for i, n in enumerate(order4)])
+
+            # Interrupted again one run into block 7: block 4 is finished and gone from the list,
+            # block 7 is still pending, and resuming runs only the cells it had not reached.
+            manifests = {n: Manifest(cfg, {"name": n}) for n in names}
+            redo = RedoList(Path(d))
+            self.assertEqual(redo.blocks, [7])
+            del ran[:]
+            run_redos(cfg, manifests, redo, record_run)
+            order7 = block_order(cfg["seed"], 7, names)
+            self.assertEqual(ran, [(n, i) for i, n in enumerate(order7)][1:])
+            self.assertEqual(RedoList(Path(d)).blocks, [])
+            for n in names:
+                redone = [r["redo_of"] for r in Manifest(cfg, {"name": n}).runs("warm")]
+                self.assertEqual(sorted(redone), [4, 7])
 
     def test_ini_score_reads_both_encodings(self):
         import tempfile
