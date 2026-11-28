@@ -1,0 +1,39 @@
+name: Rust toolchain
+description: >-
+  Install the toolchain a rust-toolchain.toml names, so a toolchain bump is an edit to that file and
+  nothing in the workflows. Cargo picks the same file up on its own from the directory it runs in.
+
+inputs:
+  file:
+    description: The rust-toolchain.toml whose channel to install.
+    required: false
+    default: rust-toolchain.toml
+  targets:
+    description: Extra targets to install, comma-separated.
+    required: false
+    default: ""
+  components:
+    description: Extra components to install, comma-separated.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - id: channel
+      name: Read the channel
+      shell: bash
+      env:
+        FILE: ${{ inputs.file }}
+      run: |
+        channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$FILE")
+        if [ -z "$channel" ]; then
+          echo "::error file=$FILE::no channel = \"...\" line in $FILE" >&2
+          exit 1
+        fi
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
+      with:
+        toolchain: ${{ steps.channel.outputs.channel }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}

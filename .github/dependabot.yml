@@ -49,8 +49,11 @@ updates:
         versions:
           - "7.x"
 
+  # The local composite action pins an action of its own, which a scan of the workflows alone misses.
   - package-ecosystem: github-actions
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/rust-toolchain"
     schedule:
       interval: monthly
     cooldown:
