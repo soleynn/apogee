@@ -200,6 +200,8 @@ pub(crate) fn merge_overrides(game: Option<&str>, ours: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -347,5 +349,66 @@ mod tests {
         assert!(check(&env(&[("WINEDLLOVERRIDES", "")]), &game).is_err());
         assert_eq!(check(&env(&[("MONO_PATH", "C:\\libs")]), &game), Ok(()));
         assert_eq!(GameOverrides::of(None), GameOverrides::none());
+    }
+
+    /// Keys worth trying: anything at all, and near misses of the allowed ones (another case, a
+    /// neighbouring character on either side), which arbitrary strings would almost never reach.
+    fn any_key() -> impl Strategy<Value = String> {
+        let allowed = proptest::sample::select(ALLOWED_KEYS.to_vec());
+        prop_oneof![
+            any::<String>(),
+            allowed.clone().prop_map(str::to_owned),
+            (
+                allowed,
+                proptest::collection::vec(any::<bool>(), 16),
+                "\\PC{0,2}",
+                "\\PC{0,2}"
+            )
+                .prop_map(|(key, lower, before, after)| {
+                    let recased: String = key
+                        .chars()
+                        .zip(lower.iter().cycle())
+                        .map(|(c, lower)| if *lower { c.to_ascii_lowercase() } else { c })
+                        .collect();
+                    format!("{before}{recased}{after}")
+                }),
+        ]
+    }
+
+    /// Values worth trying for an allowed key: anything at all, a well-formed value with one
+    /// arbitrary character dropped into it, and lengths on both sides of the cap.
+    fn any_value() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            (any::<char>(), 0_usize..=9).prop_map(|(c, at)| {
+                let mut value = "winhttp=n".to_owned();
+                value.insert(at, c);
+                value
+            }),
+            (MAX_VALUE_BYTES - 2..MAX_VALUE_BYTES + 3).prop_map(|len| "a".repeat(len)),
+        ]
+    }
+
+    proptest! {
+        /// A key is accepted exactly when it is one of the allowed keys, byte for byte. The value is
+        /// one both keys take, so the key alone decides.
+        #[test]
+        fn a_key_is_accepted_only_when_it_is_exactly_an_allowed_one(key in any_key()) {
+            let accepted = check(&env(&[(&key, "winhttp=n")]), &GameOverrides::none()).is_ok();
+            prop_assert_eq!(accepted, ALLOWED_KEYS.contains(&key.as_str()));
+        }
+
+        /// Whatever value an allowed key is given, one that is accepted is short enough for an
+        /// environment and carries no control character, a null byte included.
+        #[test]
+        fn an_accepted_value_is_bounded_and_carries_no_control_character(
+            key in proptest::sample::select(ALLOWED_KEYS.to_vec()),
+            value in any_value(),
+        ) {
+            if check(&env(&[(key, &value)]), &GameOverrides::none()).is_ok() {
+                prop_assert!(value.len() <= MAX_VALUE_BYTES);
+                prop_assert!(!value.chars().any(char::is_control));
+            }
+        }
     }
 }
