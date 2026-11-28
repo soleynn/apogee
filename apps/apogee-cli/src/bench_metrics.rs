@@ -14,9 +14,12 @@ use serde::Serialize;
 
 /// A frame whose FPS is below this is a loading-screen candidate.
 const LOADING_FPS: f64 = 5.0;
-/// A run of loading-candidate frames counts as a loading window only once it lasts this long. A
-/// single long frame mid-scene is a stall to be counted, not a load to be excluded.
+/// A run of consecutive loading-candidate frames counts as a loading window only when its summed
+/// frametime reaches this and it holds at least [`LOADING_MIN_FRAMES`] frames.
 const LOADING_MIN_MS: f64 = 1000.0;
+/// The fewest consecutive loading-candidate frames a loading window can hold. A single long frame
+/// mid-scene, however long, is a stall to be counted, not a load to be excluded.
+const LOADING_MIN_FRAMES: usize = 2;
 /// The two fixed stall thresholds, in milliseconds.
 const STALL_MS: [f64; 2] = [50.0, 100.0];
 /// A frame over this multiple of the rolling median frametime is a stall relative to its scene.
@@ -224,6 +227,10 @@ fn parse_frames(text: &str) -> Vec<Frame> {
 }
 
 /// Split the frames into the measured stretches between loading windows.
+///
+/// A loading window is a maximal run of at least [`LOADING_MIN_FRAMES`] consecutive frames, each
+/// below [`LOADING_FPS`], whose frametimes sum to at least [`LOADING_MIN_MS`]. Any other slow frame
+/// stays in the stretch it sits in.
 fn split_loading(frames: &[Frame]) -> (Vec<Vec<Frame>>, Loading) {
     let slow = |f: &Frame| f.fps.unwrap_or(1000.0 / f.ft_ms) < LOADING_FPS;
     let mut segments = Vec::new();
@@ -245,7 +252,7 @@ fn split_loading(frames: &[Frame]) -> (Vec<Vec<Frame>>, Loading) {
             .map_or(frames.len(), |n| i + n);
         let run = &frames[i..end];
         let run_ms: f64 = run.iter().map(|f| f.ft_ms).sum();
-        if run_ms >= LOADING_MIN_MS {
+        if run.len() >= LOADING_MIN_FRAMES && run_ms >= LOADING_MIN_MS {
             loading.windows += 1;
             loading.seconds += run_ms / 1000.0;
             segments.push(std::mem::take(&mut current));
@@ -404,6 +411,36 @@ mod tests {
         assert_eq!(m.stalls_over_100ms.count, 1);
         assert_eq!(m.stalls_over_2x_median.count, 1);
         assert!((m.stalls_over_100ms.total_ms - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_single_frame_over_the_loading_length_is_still_a_stall() {
+        // One 1.5 s frame between ordinary ones: long enough for a load, but a load never presents
+        // as exactly one frame, so it has to show up in every tail figure.
+        let mut rows = steady(200, 10.0);
+        rows[100] = (1500.0, 60.0, 1800.0);
+        let report = analyze(&csv(&rows)).unwrap();
+        assert_eq!(report.loading.windows, 0);
+        assert_eq!(report.loading.seconds, 0.0);
+        let m = report.measured.unwrap();
+        assert_eq!(m.stats.frame_count, 200);
+        assert_eq!(m.stalls_over_50ms.count, 1);
+        assert_eq!(m.stalls_over_100ms.count, 1);
+        assert!((m.stalls_over_100ms.total_ms - 1500.0).abs() < 1e-9);
+        assert_eq!(m.p99_9_ms, 1500.0);
+    }
+
+    #[test]
+    fn two_slow_frames_reaching_the_loading_length_are_a_load() {
+        let mut rows = steady(100, 10.0);
+        rows.extend(steady(2, 500.0));
+        rows.extend(steady(100, 10.0));
+        let report = analyze(&csv(&rows)).unwrap();
+        assert_eq!(report.loading.windows, 1);
+        assert!((report.loading.seconds - 1.0).abs() < 1e-9);
+        let m = report.measured.unwrap();
+        assert_eq!(m.stats.frame_count, 200);
+        assert_eq!(m.stalls_over_50ms.count, 0);
     }
 
     #[test]

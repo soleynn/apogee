@@ -94,6 +94,7 @@ CLOCK_DIP_FRACTION = 0.05
 CLOCK_DIP_MAX_S = 2.0
 LOADING_FPS = 5.0
 LOADING_MIN_MS = 1000.0
+LOADING_MIN_FRAMES = 2
 NVIDIA_CACHE_SIZE = "10737418240"
 BOOTSTRAP_RESAMPLES = 10000
 
@@ -230,8 +231,9 @@ def converged(sizes, stalls):
 
 
 def split_loading(frames):
-    """Drop loading windows from `(frametime_ms, fps or None)` frames. A window is a run of frames
-    under 5 FPS lasting at least a second; shorter runs are stalls and stay."""
+    """Drop loading windows from `(frametime_ms, fps or None)` frames. A window is a run of at least
+    two consecutive frames under 5 FPS whose frametimes sum to at least a second. Anything else slow
+    is a stall and stays, including a single frame however long (the same rule as the CLI)."""
     out, i = [], 0
     slow = lambda f: (f[1] if f[1] is not None else 1000.0 / f[0]) < LOADING_FPS  # noqa: E731
     while i < len(frames):
@@ -243,7 +245,7 @@ def split_loading(frames):
         while j < len(frames) and slow(frames[j]):
             j += 1
         run = frames[i:j]
-        if sum(f[0] for f in run) < LOADING_MIN_MS:
+        if len(run) < LOADING_MIN_FRAMES or sum(f[0] for f in run) < LOADING_MIN_MS:
             out.extend(f[0] for f in run)
         i = j
     return out
@@ -1529,6 +1531,17 @@ class SelfTest(unittest.TestCase):
         kept = split_loading(frames)
         self.assertIn(400, kept)
         self.assertEqual(len(kept), 11)
+
+    def test_loading_split_keeps_a_single_long_frame(self):
+        # One 1.5 s frame is long enough for a load, but a load is never exactly one frame.
+        frames = [(10, 100)] * 100 + [(1500, 1000 / 1500)] + [(10, 100)] * 99
+        kept = split_loading(frames)
+        self.assertEqual(len(kept), 200)
+        self.assertEqual([ft for ft in kept if ft > 50], [1500])
+        self.assertEqual([ft for ft in kept if ft > 100], [1500])
+        # Two slow frames that reach a second between them are a load.
+        frames = [(10, 100)] * 100 + [(500, 2)] * 2 + [(10, 100)] * 100
+        self.assertEqual(split_loading(frames), [10] * 200)
 
     def test_time_to_steady(self):
         warm = [rolling_fps([10.0] * 3000) for _ in range(3)]
