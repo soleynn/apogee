@@ -2,4 +2,4 @@
 # reads the channel from this file, so moving the fuzz toolchain is an edit here. Pinned rather than
 # floating so a nightly regression shows up as a reviewed bump, not a red main.
 [toolchain]
-channel = "nightly-2026-11-27"
+channel = "nightly-2026-11-26"
