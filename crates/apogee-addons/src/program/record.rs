@@ -252,6 +252,68 @@ pub(crate) fn expected(
     Ok(map)
 }
 
+/// Remove every file `previous` lists that `placed` does not: what an earlier install of a step put
+/// in place and the install that just finished no longer carries.
+///
+/// Without this a file a newer version dropped would stay in the program's directory, loadable by
+/// the program and listed by no record. Only a path this launcher recorded is ever touched, so what
+/// the program or the user wrote beside its files is left alone.
+///
+/// `into` holds the step's destinations relative to `C:`. A recorded path is checked as a manifest
+/// path is and must lie below one of them, so a rewritten record cannot aim a removal anywhere else.
+/// The directories above a file are walked without following a link, and a path reached only through
+/// one is left alone. A link standing at a recorded path is itself removed, never what it points to;
+/// a directory or special file there is left alone, and a file already gone is fine.
+///
+/// # Errors
+/// [`AddonError::Io`] if a file that should go cannot be removed.
+pub(crate) fn remove_dropped(
+    drive_c: &Path,
+    into: &[PathBuf],
+    previous: &[PlacedFile],
+    placed: &[PlacedFile],
+    what: &str,
+) -> Result<()> {
+    for file in previous {
+        if placed.iter().any(|kept| kept.path == file.path) {
+            continue;
+        }
+        let Ok(rel) = ComponentPath::parse(&file.path, what) else {
+            continue;
+        };
+        let rel = rel.as_path();
+        let (Some(parent), Some(name)) = (rel.parent(), rel.file_name()) else {
+            continue;
+        };
+        if !into.iter().any(|dir| parent.starts_with(dir)) {
+            continue;
+        }
+        let Ok(dir) = paths::walk_dirs(drive_c, parent, false, what) else {
+            continue;
+        };
+        let path = dir.join(name);
+        let removable = std::fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.file_type().is_file() || meta.file_type().is_symlink());
+        if !removable {
+            continue;
+        }
+        // Unlinking never follows: a link swapped in after the check loses the link, not its target.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(AddonError::Io {
+                    what: what.to_owned(),
+                    step: "remove a file an earlier version placed",
+                    path,
+                    source: Box::new(source),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The first file in `expected` that is no longer what was placed, or `None` when all are.
 ///
 /// A record path is checked as a manifest path is before it is opened, so a rewritten record cannot
@@ -343,6 +405,62 @@ mod tests {
             first_changed(&drive_c, &expected).is_some(),
             "a missing file is a change"
         );
+    }
+
+    /// Only a recorded file below the step's own destination is removed. A record rewritten to name
+    /// a path that climbs out, a file elsewhere in the prefix, or a file reached through a linked
+    /// directory removes nothing, and neither does a directory standing at a recorded path.
+    #[test]
+    fn a_dropped_file_is_removed_only_from_below_its_steps_destination() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let drive_c = root.path().join("drive_c");
+        let outside = root.path().join("outside");
+        for dir in [
+            drive_c.join("Apogee/ACT/kept-dir.dll"),
+            drive_c.join("Apogee/Other"),
+            outside.clone(),
+        ] {
+            std::fs::create_dir_all(dir).expect("dirs");
+        }
+        let survivors = [
+            root.path().join("secret"),
+            drive_c.join("Apogee/Other/theirs.dll"),
+            outside.join("linked.dll"),
+        ];
+        for file in &survivors {
+            std::fs::write(file, b"keep").expect("file");
+        }
+        std::os::unix::fs::symlink(&outside, drive_c.join("Apogee/ACT/Plugins")).expect("link");
+        std::fs::write(drive_c.join("Apogee/ACT/old.dll"), b"old").expect("file");
+
+        let listed = |path: &str| PlacedFile {
+            path: path.to_owned(),
+            size: 0,
+            blake3: String::new(),
+        };
+        let previous = [
+            listed("Apogee/ACT/old.dll"),
+            listed("Apogee/ACT/never-there.dll"),
+            listed("Apogee/ACT/kept-dir.dll"),
+            listed("Apogee/ACT/Plugins/linked.dll"),
+            listed("Apogee/ACT/../../../secret"),
+            listed("Apogee/Other/theirs.dll"),
+            listed("/etc/hostname"),
+        ];
+        remove_dropped(
+            &drive_c,
+            &[PathBuf::from("Apogee/ACT")],
+            &previous,
+            &[],
+            "act-files",
+        )
+        .expect("nothing here is an error");
+
+        assert!(!drive_c.join("Apogee/ACT/old.dll").exists());
+        assert!(drive_c.join("Apogee/ACT/kept-dir.dll").is_dir());
+        for file in &survivors {
+            assert!(file.exists(), "{} must survive", file.display());
+        }
     }
 
     /// A record rewritten to point outside the prefix is a change, not a hash of whatever it names.

@@ -33,6 +33,11 @@ fn runner() -> RunnerRef {
 
 /// ACT's archive: the executable and its settings file under a wrapping directory.
 fn act_zip(updater: &str) -> Vec<u8> {
+    act_zip_with(updater, &[])
+}
+
+/// [`act_zip`] with `extra` files beside the executable, each holding its own name.
+fn act_zip_with(updater: &str, extra: &[&str]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let plain = SimpleFileOptions::DEFAULT.last_modified_time(zip::DateTime::default());
     writer
@@ -41,6 +46,10 @@ fn act_zip(updater: &str) -> Vec<u8> {
     writer.write_all(b"MZ act").unwrap();
     writer.start_file("top/act.json", plain).unwrap();
     write!(writer, r#"{{"cbAutoCheck": "{updater}"}}"#).unwrap();
+    for name in extra {
+        writer.start_file(format!("top/{name}"), plain).unwrap();
+        writer.write_all(name.as_bytes()).unwrap();
+    }
     writer.finish().unwrap().into_inner()
 }
 
@@ -387,6 +396,52 @@ async fn a_version_bump_reinstalls_the_program_and_keeps_its_settings() {
             .unwrap()
             .contains("theirs")
     );
+    assert!(gates(&addons, &bumped, &prefix).skipped().is_empty());
+}
+
+/// A newer version that no longer ships a file takes the earlier version's copy out of the install
+/// directory, so nothing unrecorded is left for the program to load. Only what the earlier install
+/// recorded goes: a file the user put beside the program stays, and a link standing where a dropped
+/// file was is removed without touching what it points to.
+#[cfg_attr(not(target_os = "linux"), ignore = "placing files is Linux-only")]
+#[tokio::test]
+async fn a_reinstall_removes_what_the_earlier_version_placed_and_nothing_else() {
+    async fn serving(extra: &[&str]) -> (ChaosServer, String) {
+        let zip = act_zip_with("False", extra);
+        let pin = hex(&sha256_of(&zip));
+        (ChaosServer::serving(zip).start().await.unwrap(), pin)
+    }
+
+    let (first, first_pin) = serving(&["a.dll", "old.dll", "Plugins/gone.dll"]).await;
+    let (second, second_pin) = serving(&["a.dll"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = scratch(dir.path());
+    let addons = addons(dir.path());
+    install(&addons, &manifest_with(&[act(&first, &first_pin)]), &prefix).await;
+
+    let installed = prefix.drive_c().join("Apogee/ACT");
+    assert!(installed.join("old.dll").is_file());
+    let theirs = installed.join("notes.txt");
+    std::fs::write(&theirs, b"the user's own").unwrap();
+    let target = dir.path().join("target.dll");
+    std::fs::write(&target, b"somewhere else").unwrap();
+    let link = installed.join("Plugins/gone.dll");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let mut bumped = act(&second, &second_pin);
+    bumped["version"] = "3.8.5.289".into();
+    let bumped = manifest_with(&[bumped]);
+    install(&addons, &bumped, &prefix).await;
+
+    assert!(installed.join("a.dll").is_file());
+    assert!(!installed.join("old.dll").exists());
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "the link is gone"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"somewhere else");
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own");
     assert!(gates(&addons, &bumped, &prefix).skipped().is_empty());
 }
 

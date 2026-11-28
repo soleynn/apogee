@@ -827,6 +827,22 @@ async fn apply_verb(
             // The list of what it placed is written before the prefix records the step, so a step the
             // prefix calls installed always has one.
             if !seeded {
+                // What an earlier install of this step placed and this one no longer carries goes
+                // first, while the earlier list still says what that was: a failure here leaves that
+                // list in place and the step unrecorded, so the next pass tries again.
+                if let Ok(earlier) = record::read(records, &row.name)
+                    && earlier.program == program.name
+                    && earlier.step == row.name
+                {
+                    let into = destinations(prefix, row)?;
+                    record::remove_dropped(
+                        &prefix.drive_c(),
+                        &into,
+                        &earlier.files,
+                        &placed,
+                        &row.name,
+                    )?;
+                }
                 record::write(
                     records,
                     &record::StepRecord {
@@ -850,6 +866,19 @@ async fn apply_verb(
         verb: row.name.clone(),
     });
     Ok(())
+}
+
+/// Where `row`'s files ops place, each relative to the prefix's `C:`.
+fn destinations(prefix: &Prefix, row: &Verb) -> Result<Vec<std::path::PathBuf>> {
+    row.ops
+        .iter()
+        .filter_map(|op| match op {
+            crate::manifest::VerbOp::Files { into, .. } => {
+                Some(crate::program::under_drive_c(prefix, into, &row.name))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
