@@ -611,6 +611,11 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
       - run: bash scripts/audit.sh
+      # The runner scripts' offline self-tests: the sweep's statistics and name confinement, and the
+      # patch script's fail-closed branches on a synthetic PE. Neither touches the network or a
+      # real runner, so they cost seconds here rather than waiting for someone to run them by hand.
+      - run: python3 -I scripts/runner-sweep.py selftest
+      - run: python3 -I scripts/runner-remote-thread-patch.py --self-test
 
   # The hostile-input fuzz smoke, split into four jobs grouped by the crates their targets build, so
   # a run's wall clock is one shard rather than the sum of all twenty-seven targets. Only the parsers

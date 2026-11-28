@@ -1613,6 +1613,7 @@ impl Core {
             store: self.store.clone(),
             clock: self.clock.clone(),
             game_tick: host::game_tick,
+            driver_version: crate::launch::driver_cache::nvidia_driver_version,
             computer_id: self.computer_id,
             prefixes_dir: self.prefixes_dir.clone(),
             backups_dir: self.backups_dir.clone(),

@@ -83,6 +83,8 @@ pub(crate) struct FlowContext {
     pub(crate) store: Store,
     pub(crate) clock: Clock,
     pub(crate) game_tick: host::TickSource,
+    /// Which GPU driver is loaded, read at launch to decide whether a prefix's driver cache is stale.
+    pub(crate) driver_version: crate::launch::driver_cache::DriverVersionSource,
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
     pub(crate) backups_dir: std::path::PathBuf,
@@ -1025,6 +1027,26 @@ async fn resolve_password(
     }
 }
 
+/// Bring the prefix's driver cache up to the installed driver, off the async path: reading the
+/// driver's version and emptying a cache after a driver change are both blocking, and the second can
+/// take seconds. No failure here stops the launch; the driver falls back to its default cache.
+async fn prepare_driver_cache(
+    prefix: std::path::PathBuf,
+    driver_version: crate::launch::driver_cache::DriverVersionSource,
+) -> Option<std::path::PathBuf> {
+    let prepared = tokio::task::spawn_blocking(move || {
+        crate::launch::driver_cache::prepare(&prefix, driver_version().as_deref())
+    })
+    .await;
+    match prepared {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(%error, "driver cache task failed; launching without it");
+            None
+        }
+    }
+}
+
 /// Verify the profile's install against its signed block indexes and re-fetch only the broken ranges.
 /// A repo named in `local_indexes` reads that `.apzi` instead of resolving through the hosted
 /// catalog; the rest resolve as always.
@@ -1869,8 +1891,17 @@ async fn launch_game(
         .await?;
 
     let steam = is_steam(account);
+    let driver_cache = match prepared.prefix.as_ref() {
+        Some(prefix) => prepare_driver_cache(prefix.path().to_path_buf(), ctx.driver_version).await,
+        None => None,
+    };
     let environment = compute_environment(
-        &launch_env(profile, prepared.dxvk.clone(), steam),
+        &launch_env(
+            profile,
+            prepared.dxvk.clone(),
+            steam,
+            driver_cache.as_deref(),
+        ),
         &prepared.caps,
     );
     let mut plan = LaunchPlan::new(
@@ -2157,9 +2188,24 @@ async fn create_prefix(
 /// merges last and innermost respectively, so a user's setting still outranks anything computed for
 /// them. Note that the addon layer composes onto the plan *after* this, so what it contributes
 /// outranks both: setup a launch cannot run without is not a preference.
-fn launch_env(profile: &Profile, dxvk: Option<apogee_runtime::DxvkEnv>, steam: bool) -> EnvConfig {
+///
+/// `driver_cache` is the prefix's own GPU driver cache, when the launch has a prefix to keep one in.
+/// The drivers are pointed there rather than at their per-user default, where every game on the
+/// machine shares one capped cache and can evict this one's.
+fn launch_env(
+    profile: &Profile,
+    dxvk: Option<apogee_runtime::DxvkEnv>,
+    steam: bool,
+    driver_cache: Option<&std::path::Path>,
+) -> EnvConfig {
     let mut env: std::collections::BTreeMap<String, String> =
         profile.launch.extra_env.iter().cloned().collect();
+    if let Some(root) = driver_cache {
+        // Under the profile's own variables, so a user who points a cache elsewhere still wins.
+        for (name, value) in crate::launch::driver_cache::env(root) {
+            env.entry(name.to_owned()).or_insert(value);
+        }
+    }
     if steam {
         // The reference launcher sets this beside the `IsSteam` argument, both being what the game
         // sees when its own boot binary is started as a Steam launch. Inserted only where the profile

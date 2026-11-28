@@ -8,21 +8,21 @@ use std::error::Error;
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use apogee_core::{
-    ALL_CODES, Account, AccountKind, AddonEvent, BenchStats, CatalogViewEntry, Command, Consent,
-    Core, CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon, FileState,
-    FirstRunAccountInput, FirstRunAccountKind, FirstRunAction as CoreFirstRunAction,
-    FirstRunRequest, FirstRunRunnerSelection, FlowState, ForeignCredentialStore, ForeignKey,
-    ForeignSecretsFile, FrameLog, FrontierData, FrontierQuery, Gamescope, GpuSelect, HealthIssue,
-    Hud, ImportDecision, ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher,
-    LaunchProgramExit, ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand,
-    NextVerb, Notice, OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress,
-    PrefixAction, PrefixReport, Profile, Recoveries, Region, Repo, RunIn, RunOutcome,
-    RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind,
-    SecretSweep, SecretsError, Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
+    ALL_CODES, Account, AccountKind, AddonEvent, CatalogViewEntry, Command, Consent, Core,
+    CoreConfig, CredentialChoice, Deviation, Event, ExternalAddon, FileState, FirstRunAccountInput,
+    FirstRunAccountKind, FirstRunAction as CoreFirstRunAction, FirstRunRequest,
+    FirstRunRunnerSelection, FlowState, ForeignCredentialStore, ForeignKey, ForeignSecretsFile,
+    FrontierData, FrontierQuery, Gamescope, GpuSelect, HealthIssue, Hud, ImportDecision,
+    ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
+    ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand, NextVerb, Notice,
+    OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction, PrefixReport,
+    Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID,
+    STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep, SecretsError,
+    Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -32,6 +32,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use zeroize::Zeroizing;
 
+mod bench_metrics;
 mod event_json;
 #[cfg(feature = "fixtures")]
 mod fixtures;
@@ -743,6 +744,10 @@ struct BenchAnalyzeArgs {
     /// MangoHud CSV files, or directories to scan (non-recursively) for `*.csv`.
     #[arg(required = true)]
     paths: Vec<PathBuf>,
+    /// Print one JSON array with every metric per log instead of the table. A log that fails to
+    /// parse is an object with `file` and `error`.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -2157,58 +2162,93 @@ fn is_link_local(address: IpAddr) -> bool {
     }
 }
 
-/// Frame-consistency analysis over MangoHud frametime logs. Offline: reads CSVs and prints a table;
-/// the metrics themselves live in the library.
+/// Frame-consistency analysis over MangoHud frametime logs. Offline: reads CSVs and prints a table
+/// or JSON. The frame-consistency figures live in the library; the comparison metrics on top of
+/// them are in [`bench_metrics`].
 fn bench(action: BenchAction) -> Result<ExitCode, CliError> {
     match action {
-        BenchAction::Analyze(args) => bench_analyze(&args.paths),
+        BenchAction::Analyze(args) => bench_analyze(&args.paths, args.json),
     }
 }
 
-fn bench_analyze(paths: &[PathBuf]) -> Result<ExitCode, CliError> {
+fn bench_analyze(paths: &[PathBuf], json: bool) -> Result<ExitCode, CliError> {
     let files = collect_csv_files(paths)?;
     if files.is_empty() {
         return Err("no CSV files found in the given paths".into());
     }
-    println!(
-        "{:<32}  {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>8}  {:>7}",
-        "file", "frames", "dur(s)", "avg", "1%low", "0.1%low", "ft(ms)", "ft(sd)"
-    );
     let mut failed = false;
+    let mut rows = Vec::new();
+    if !json {
+        println!(
+            "{:<32}  {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>8}  {:>7}  {:>8}  {:>5}",
+            "file",
+            "frames",
+            "dur(s)",
+            "avg",
+            "1%low",
+            "0.1%low",
+            "ft(ms)",
+            "ft(sd)",
+            "p99(ms)",
+            "st50"
+        );
+    }
     for file in files {
         let name = file.file_name().map_or_else(
             || file.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        match analyze_one(&file) {
-            Ok(s) => println!(
-                "{:<32}  {:>6}  {:>7.3}  {:>7.2}  {:>7.2}  {:>8.2}  {:>8.3}  {:>7.3}",
-                truncate(&name, 32),
-                s.frame_count,
-                s.duration_s,
-                s.average_fps,
-                s.low_1pct,
-                s.low_0_1pct,
-                s.frametime_mean_ms,
-                s.frametime_stddev_ms,
-            ),
-            Err(err) => {
-                failed = true;
-                println!("{:<32}  error: {err}", truncate(&name, 32));
-            }
+        let report = std::fs::read_to_string(&file)
+            .map_err(CliError::from)
+            .and_then(|text| bench_metrics::analyze(&text));
+        failed |= report.is_err();
+        if json {
+            // Lossily: a path that is not UTF-8 has no JSON string of its own, and one unreadable
+            // name must not cost the report for every other log.
+            let file = file.to_string_lossy();
+            rows.push(match report {
+                Ok(report) => serde_json::json!({ "file": file, "report": report }),
+                Err(err) => serde_json::json!({ "file": file, "error": err.to_string() }),
+            });
+            continue;
         }
+        match report {
+            Ok(r) => {
+                let s = r.all_frames;
+                let (p99, st50) = r.measured.as_ref().map_or_else(
+                    || ("-".to_owned(), "-".to_owned()),
+                    |m| {
+                        (
+                            format!("{:.3}", m.p99_ms),
+                            m.stalls_over_50ms.count.to_string(),
+                        )
+                    },
+                );
+                println!(
+                    "{:<32}  {:>6}  {:>7.3}  {:>7.2}  {:>7.2}  {:>8.2}  {:>8.3}  {:>7.3}  {:>8}  {:>5}",
+                    truncate(&name, 32),
+                    s.frame_count,
+                    s.duration_s,
+                    s.average_fps,
+                    s.low_1pct,
+                    s.low_0_1pct,
+                    s.frametime_mean_ms,
+                    s.frametime_stddev_ms,
+                    p99,
+                    st50,
+                );
+            }
+            Err(err) => println!("{:<32}  error: {err}", truncate(&name, 32)),
+        }
+    }
+    if json {
+        println!("{}", serde_json::Value::Array(rows));
     }
     Ok(if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     })
-}
-
-/// Parse one MangoHud CSV into frame-consistency metrics.
-fn analyze_one(file: &Path) -> Result<BenchStats, CliError> {
-    let text = std::fs::read_to_string(file)?;
-    Ok(FrameLog::from_mangohud_csv(&text)?.stats()?)
 }
 
 /// Expand the given paths: files are kept as-is, directories are scanned (non-recursively, sorted)

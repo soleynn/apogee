@@ -384,8 +384,9 @@ fn apply_dxvk(vars: &mut BTreeMap<String, String>, dxvk: &DxvkEnv) {
     }
     vars.insert("WINEDLLOVERRIDES".into(), overrides);
     if let Some(cache) = &dxvk.state_cache {
-        // Both spellings. The 2.x builds read the first and the 3.x builds renamed it to the second,
-        // and which one a prefix has is a catalog row rather than something decided here. A build
+        // Both names, for two different caches. Builds up to 2.6 keep a pipeline state cache under
+        // the first; 2.7 removed that cache, and 3.0 added a shader cache read from the second.
+        // Which build a prefix has is a catalog row rather than something decided here. A build
         // that does not know a name simply does not read it, so naming both costs nothing and
         // getting it wrong costs the cache silently landing outside the prefix it belongs to.
         let path = cache.to_string_lossy().into_owned();

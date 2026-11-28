@@ -1,0 +1,11 @@
+---
+source: crates/apogee-core/src/flow/tests.rs
+expression: config.env
+---
+{
+    "IS_FFXIV_LAUNCH_FROM_STEAM": "1",
+    "MESA_SHADER_CACHE_DIR": "/prefix/driver_cache/mesa",
+    "__GL_SHADER_DISK_CACHE_PATH": "/prefix/driver_cache/nv",
+    "__GL_SHADER_DISK_CACHE_SIZE": "10737418240",
+    "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP": "1",
+}

@@ -1,0 +1,877 @@
+#!/usr/bin/env python3
+"""Build a GE-Proton runner whose CreateRemoteThreadEx does not push the caller's activation context
+onto the new thread's TEB.
+
+Why: wine's kernelbase CreateRemoteThreadEx, after NtCreateThreadEx succeeds, calls
+RtlActivateActivationContextEx(0, teb, actctx, &cookie) whenever the calling thread has an active
+activation context. `teb` is the new thread's TEB address. When the thread was created in another
+process, that address belongs to the other process, but RtlActivateActivationContextEx reads and
+writes it in the caller's address space. A .NET or WinForms injector (which usually runs with an
+activation context active) then crashes or corrupts its own state while injecting a DLL by remote
+thread.
+
+The change: the `jz` that skips the activate/release pair when there is no context becomes a short
+`jmp` straight to the release call. The reference taken by RtlGetActiveActivationContext is still
+dropped (RtlReleaseActivationContext(NULL) is a no-op), and the activation is skipped for every new
+thread. Side effect: threads created in the same process no longer inherit the creator's active
+activation context.
+
+How the site is found: CreateRemoteThreadEx is located through the PE export table, its extent through
+the .pdata entry that starts at that address, and the site by a byte signature whose relocated and
+frame-relative operands are wildcards. The signature must match exactly once inside the function, its
+three RIP-relative calls must go through the ntdll import slots for NtCreateThreadEx,
+RtlActivateActivationContextEx and RtlReleaseActivationContext, and the branch must be the expected
+`74 1a`. Anything else stops the script before any output is left behind.
+
+Usage (python3 stdlib only):
+    python3 -I scripts/runner-remote-thread-patch.py --input GE-Proton11-12.tar.gz \
+        --sha256 <tarball sha256> --output out/GE-Proton11-12-rt [--repack out/GE-Proton11-12-rt.tar.gz]
+    python3 -I scripts/runner-remote-thread-patch.py --input <extracted runner dir> \
+        --sha256 <sha256 of its stock x86_64 kernelbase.dll> --output ...
+    python3 -I scripts/runner-remote-thread-patch.py --self-test
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import gzip
+import hashlib
+import io
+import itertools
+import os
+import shutil
+import stat
+import struct
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+# The 64-bit kernelbase.dll and the prefix template's copy of it (a relative symlink in GE-Proton
+# releases, a separate file in some builds). The 32-bit copies are left alone.
+KERNELBASE_PATHS = (
+    "files/lib/wine/x86_64-windows/kernelbase.dll",
+    "files/share/default_pfx/drive_c/windows/system32/kernelbase.dll",
+)
+
+TARGET_EXPORT = b"CreateRemoteThreadEx"
+
+# (bytes, None for a wildcard). Wildcards cover IAT displacements, the frame offsets of locals and the
+# failure branch target, which all move between builds, and the two bytes of the branch this script
+# rewrites: those are checked after the site is found, so an image that is already patched, or whose
+# branch is something else, is reported as that rather than as "no match".
+W = None
+SIGNATURE: tuple[int | None, ...] = (
+    0xFF, 0x15, W, W, W, W,              # call [rip+NtCreateThreadEx]
+    0x85, 0xC0,                          # test eax, eax
+    0x0F, 0x85, W, W, W, W,              # jnz  <failure path>
+    0x4C, 0x8B, 0x45, W,                 # mov  r8, [rbp+actctx]
+    0x4D, 0x85, 0xC0,                    # test r8, r8
+    W, W,                                # jz   <after release>        <- 74 1a, patched
+    0x31, 0xC9,                          # xor  ecx, ecx
+    0x48, 0x8B, 0x55, W,                 # mov  rdx, [rbp+teb]
+    0x4C, 0x8D, 0x4D, W,                 # lea  r9, [rbp+cookie]
+    0xFF, 0x15, W, W, W, W,              # call [rip+RtlActivateActivationContextEx]
+    0x48, 0x8B, 0x4D, W,                 # mov  rcx, [rbp+actctx]
+    0xFF, 0x15, W, W, W, W,              # call [rip+RtlReleaseActivationContext]
+)
+# Offsets within SIGNATURE.
+CALL_CREATE = 0
+LOAD_ACTCTX_DISP = 17
+BRANCH = 21
+CALL_ACTIVATE = 33
+RELEASE_LOAD = 39
+RELEASE_ACTCTX_DISP = 42
+CALL_RELEASE = 43
+EXPECT = bytes((0x74, 0x1A))
+# jmp short to the `mov rcx, [rbp+actctx]` that feeds the release call.
+WRITE = bytes((0xEB, RELEASE_LOAD - (BRANCH + 2)))
+EXPECTED_IMPORTS = {
+    CALL_CREATE: "NtCreateThreadEx",
+    CALL_ACTIVATE: "RtlActivateActivationContextEx",
+    CALL_RELEASE: "RtlReleaseActivationContext",
+}
+
+
+class PatchError(Exception):
+    """Any input that is not exactly what the patch was derived from."""
+
+
+# --------------------------------------------------------------------------------------------------
+# PE reading (PE32+ only)
+
+
+class Pe:
+    def __init__(self, data: bytes):
+        self.data = data
+        if len(data) < 0x40 or data[:2] != b"MZ":
+            raise PatchError("not a PE file (no MZ header)")
+        lfanew = self.u32(0x3C)
+        if self.read(lfanew, 4) != b"PE\0\0":
+            raise PatchError("not a PE file (no PE signature)")
+        coff = lfanew + 4
+        machine, nsections = struct.unpack_from("<HH", data, self.bounds(coff, 20))
+        opt_size = self.u16(coff + 16)
+        if machine != 0x8664:
+            raise PatchError(f"not an x86-64 image (machine {machine:#x})")
+        opt = coff + 20
+        if self.u16(opt) != 0x20B:
+            raise PatchError("not a PE32+ optional header")
+        ndirs = self.u32(opt + 108)
+        self.dirs = []
+        for i in range(min(ndirs, 16)):
+            self.dirs.append(struct.unpack_from("<II", data, self.bounds(opt + 112 + 8 * i, 8)))
+        self.sections = []
+        sec = opt + opt_size
+        for i in range(nsections):
+            raw = self.read(sec + 40 * i, 40)
+            vsize, va, rsize, rptr = struct.unpack_from("<IIII", raw, 8)
+            chars = struct.unpack_from("<I", raw, 36)[0]
+            self.sections.append((raw[:8].rstrip(b"\0"), va, max(vsize, rsize), rsize, rptr, chars))
+
+    def bounds(self, off: int, n: int) -> int:
+        if off < 0 or n < 0 or off + n > len(self.data):
+            raise PatchError(f"read past end of file at {off:#x}")
+        return off
+
+    def read(self, off: int, n: int) -> bytes:
+        return self.data[self.bounds(off, n) : off + n]
+
+    def u16(self, off: int) -> int:
+        return struct.unpack_from("<H", self.data, self.bounds(off, 2))[0]
+
+    def u32(self, off: int) -> int:
+        return struct.unpack_from("<I", self.data, self.bounds(off, 4))[0]
+
+    def u64(self, off: int) -> int:
+        return struct.unpack_from("<Q", self.data, self.bounds(off, 8))[0]
+
+    def section_of(self, rva: int):
+        for s in self.sections:
+            if s[1] <= rva < s[1] + s[2]:
+                return s
+        raise PatchError(f"RVA {rva:#x} is in no section")
+
+    def off(self, rva: int, n: int = 1) -> int:
+        _, va, _, rsize, rptr, _ = self.section_of(rva)
+        if rva + n > va + rsize:
+            raise PatchError(f"RVA {rva:#x} has no file backing")
+        return self.bounds(rptr + (rva - va), n)
+
+    def cstr(self, rva: int, limit: int = 256) -> bytes:
+        start = self.off(rva)
+        end = self.data.find(b"\0", start, start + limit)
+        if end < 0:
+            raise PatchError(f"unterminated string at RVA {rva:#x}")
+        return self.data[start:end]
+
+    def directory(self, index: int) -> tuple[int, int]:
+        if index >= len(self.dirs) or self.dirs[index][0] == 0:
+            raise PatchError(f"data directory {index} is absent")
+        return self.dirs[index]
+
+    def export_rva(self, name: bytes) -> int:
+        erva, esize = self.directory(0)
+        e = self.off(erva, 40)
+        nfuncs, nnames, funcs, names, ords = struct.unpack_from("<IIIII", self.data, e + 20)
+        hits = []
+        for i in range(nnames):
+            if self.cstr(self.u32(self.off(names + 4 * i, 4))) == name:
+                ordinal = self.u16(self.off(ords + 2 * i, 2))
+                if ordinal >= nfuncs:
+                    raise PatchError("export ordinal out of range")
+                hits.append(self.u32(self.off(funcs + 4 * ordinal, 4)))
+        if len(hits) != 1:
+            raise PatchError(f"export {name.decode()} found {len(hits)} times, expected once")
+        rva = hits[0]
+        if erva <= rva < erva + esize:
+            raise PatchError(f"export {name.decode()} is a forwarder, not code")
+        if not self.section_of(rva)[5] & 0x20000000:
+            raise PatchError(f"export {name.decode()} is not in an executable section")
+        return rva
+
+    def function_end(self, begin: int) -> int:
+        prva, psize = self.directory(3)
+        hits = []
+        for i in range(psize // 12):
+            b, e, _ = struct.unpack_from("<III", self.data, self.off(prva + 12 * i, 12))
+            if b == begin:
+                hits.append(e)
+        if len(hits) != 1:
+            raise PatchError(f"{len(hits)} .pdata entries start at {begin:#x}, expected exactly one")
+        if hits[0] <= begin:
+            raise PatchError(f"the .pdata entry at {begin:#x} ends before it begins")
+        return hits[0]
+
+    def imports(self) -> dict[int, tuple[str, str]]:
+        """IAT slot RVA -> (dll, symbol) for imports by name."""
+        irva, _ = self.directory(1)
+        slots: dict[int, tuple[str, str]] = {}
+        for i in range(4096):
+            d = self.off(irva + 20 * i, 20)
+            oft, _, _, name, ft = struct.unpack_from("<IIIII", self.data, d)
+            if oft == 0 and name == 0 and ft == 0:
+                return slots
+            dll = self.cstr(name).decode("ascii", "replace").lower()
+            lookup = oft or ft
+            for j in range(65536):
+                entry = self.u64(self.off(lookup + 8 * j, 8))
+                if entry == 0:
+                    break
+                if not entry >> 63:
+                    sym = self.cstr((entry & 0x7FFFFFFF) + 2).decode("ascii", "replace")
+                    slots[ft + 8 * j] = (dll, sym)
+        raise PatchError("import directory has no terminator")
+
+
+# --------------------------------------------------------------------------------------------------
+# Locating and patching
+
+
+def find_signature(blob: bytes, start: int, end: int) -> list[int]:
+    n = len(SIGNATURE)
+    first = SIGNATURE[0]
+    hits = []
+    i = blob.find(bytes((first,)), start, end)
+    while 0 <= i <= end - n:
+        if all(s is None or blob[i + k] == s for k, s in enumerate(SIGNATURE)):
+            hits.append(i)
+        i = blob.find(bytes((first,)), i + 1, end)
+    return hits
+
+
+def patch_kernelbase(data: bytes) -> tuple[bytes, dict]:
+    """Return the patched image and a provenance record, or raise PatchError."""
+    pe = Pe(data)
+    begin = pe.export_rva(TARGET_EXPORT)
+    end = pe.function_end(begin)
+    fstart = pe.off(begin, end - begin)
+    hits = find_signature(data, fstart, fstart + (end - begin))
+    if len(hits) != 1:
+        raise PatchError(
+            f"signature matched {len(hits)} times inside CreateRemoteThreadEx "
+            f"(RVA {begin:#x}..{end:#x}), expected exactly once"
+        )
+    site = hits[0]
+    rva_of = lambda off: begin + (off - fstart)  # noqa: E731 (function lies in one section)
+
+    if data[site + LOAD_ACTCTX_DISP] != data[site + RELEASE_ACTCTX_DISP]:
+        raise PatchError("the tested and the released activation context are different locals")
+    slots = pe.imports()
+    for at, want in EXPECTED_IMPORTS.items():
+        disp = struct.unpack_from("<i", data, site + at + 2)[0]
+        slot = rva_of(site + at) + 6 + disp
+        got = slots.get(slot)
+        if got != ("ntdll.dll", want):
+            raise PatchError(
+                f"call at RVA {rva_of(site + at):#x} goes through {got or 'no named import'}, "
+                f"expected ntdll.dll!{want}"
+            )
+    branch = site + BRANCH
+    found = data[branch : branch + 2]
+    if found == WRITE:
+        raise PatchError(
+            f"already patched: the branch at RVA {rva_of(branch):#x} is {found.hex(' ')}"
+        )
+    if found != EXPECT:
+        raise PatchError(
+            f"bytes at the branch (RVA {rva_of(branch):#x}) are {found.hex(' ')}, "
+            f"expected {EXPECT.hex(' ')}"
+        )
+    out = bytearray(data)
+    out[branch : branch + 2] = WRITE
+    return bytes(out), {
+        "function_rva": begin,
+        "site_rva": rva_of(branch),
+        "site_offset": branch,
+        "expect": EXPECT.hex(" "),
+        "write": WRITE.hex(" "),
+    }
+
+
+# --------------------------------------------------------------------------------------------------
+# Runner trees
+
+
+def sha256_fileobj(f) -> str:
+    h = hashlib.sha256()
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    with open(path, "rb") as f:
+        return sha256_fileobj(f)
+
+
+def kernelbase_targets(root: Path) -> list[Path]:
+    """The distinct regular files behind KERNELBASE_PATHS, each confined to `root`."""
+    real_root = root.resolve()
+    targets: list[Path] = []
+    for rel in KERNELBASE_PATHS:
+        p = root / rel
+        if not p.exists():
+            raise PatchError(f"{rel} is missing")
+        real = p.resolve()
+        if real_root not in real.parents:
+            raise PatchError(f"{rel} resolves outside the runner tree")
+        if not real.is_file():
+            raise PatchError(f"{rel} is not a regular file")
+        if real not in targets:
+            targets.append(real)
+    if len(targets) == 2 and targets[0].read_bytes() != targets[1].read_bytes():
+        raise PatchError("the two kernelbase.dll copies differ")
+    return targets
+
+
+def safe_extract(fileobj, dest: Path) -> tuple[Path, dict]:
+    """Extract into `dest`, which must end up holding exactly one top-level directory.
+
+    Returns that directory and each member's (kind, mode, mtime), keyed by its path components
+    below the top-level directory, for `repack` to write back."""
+    members: dict[tuple[str, ...], tuple[str, int, int]] = {}
+    with tarfile.open(fileobj=fileobj, mode="r:*") as tf:
+        tops = set()
+        for m in tf:
+            name = m.name.removeprefix("./")
+            parts = Path(name).parts
+            if not name or name.startswith("/") or ".." in parts:
+                raise PatchError(f"archive member with unsafe path: {m.name!r}")
+            if not parts:
+                raise PatchError(f"archive member names the extraction directory itself: {m.name!r}")
+            if not (m.isfile() or m.isdir() or m.issym()):
+                raise PatchError(f"archive member of unexpected type: {m.name!r}")
+            tops.add(parts[0])
+            kind = "dir" if m.isdir() else "sym" if m.issym() else "file"
+            members[parts[1:]] = (kind, m.mode, int(m.mtime))
+        if len(tops) != 1:
+            raise PatchError(f"archive has {len(tops)} top-level entries, expected one directory")
+        tf.extractall(dest, filter="data")
+        # The "data" filter adds owner write to files and tarfile leaves symlink mtimes at "now";
+        # put both back as the archive has them so a repack reproduces upstream metadata. Group and
+        # other write bits stay stripped: a runner has no business shipping world-writable files.
+        for m in tf.getmembers():
+            path = dest / m.name
+            if m.issym():
+                os.utime(path, ns=(m.mtime * 10**9,) * 2, follow_symlinks=False)
+            elif m.isfile():
+                os.chmod(path, m.mode & 0o755)
+    top = dest / tops.pop()
+    if not top.is_dir() or top.is_symlink():
+        raise PatchError("archive's top-level entry is not a directory")
+    return top, members
+
+
+def repack(root: Path, out: Path, top: str, members: dict | None = None) -> None:
+    """Write `root` as a tar.gz that does not depend on where or by whom it was built.
+
+    Entries are sorted and owned by root, the gzip header carries no file name and an mtime of 0.
+    Contents, entry types and link targets are read from the tree. With `members` (what
+    `safe_extract` returned for the archive the tree came from) every mode and mtime is the source
+    archive's, so the builder's umask and the extraction time leave no trace; a directory the
+    archive only implied gets mode 755 and mtime 0. Without it (a runner given as a directory) modes
+    and mtimes are the tree's own, so the result is only as reproducible as that tree's metadata.
+    Either way group and other write bits are stripped, from directories as well as files.
+
+    Two builds are byte-identical only if they also run the same zlib: the deflate stream depends
+    on the compressor's implementation and version. The tar inside does not."""
+    with open(out, "xb") as raw, gzip.GzipFile(
+        filename="", fileobj=raw, mode="wb", mtime=0, compresslevel=6
+    ) as gz:
+        with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
+
+            def walk(path: Path, arc: str, key: tuple[str, ...]) -> None:
+                st = os.lstat(path)
+                ti = tarfile.TarInfo(arc)
+                if stat.S_ISLNK(st.st_mode):
+                    kind, ti.type, ti.linkname = "sym", tarfile.SYMTYPE, os.readlink(path)
+                elif stat.S_ISDIR(st.st_mode):
+                    kind, ti.type = "dir", tarfile.DIRTYPE
+                elif stat.S_ISREG(st.st_mode):
+                    kind, ti.type, ti.size = "file", tarfile.REGTYPE, st.st_size
+                else:
+                    raise PatchError(f"{arc} is not a file, a directory or a symlink")
+                if members is None:
+                    mode, mtime = stat.S_IMODE(st.st_mode), int(st.st_mtime)
+                elif key in members:
+                    was, mode, mtime = members[key]
+                    if was != kind:
+                        raise PatchError(f"{arc} is not the kind of entry the archive had there")
+                elif kind == "dir":
+                    mode, mtime = 0o755, 0
+                else:
+                    raise PatchError(f"{arc} is not in the archive the tree was extracted from")
+                ti.mode = mode if kind == "sym" else mode & 0o755
+                ti.mtime = mtime
+                ti.uid = ti.gid = 0
+                ti.uname = ti.gname = "root"
+                if kind == "file":
+                    with open(path, "rb") as f:
+                        tf.addfile(ti, f)
+                else:
+                    tf.addfile(ti)
+                if kind == "dir":
+                    for child in sorted(os.listdir(path)):
+                        walk(path / child, f"{arc}/{child}", key + (child,))
+
+            walk(root, top, ())
+
+
+def build(args: argparse.Namespace) -> int:
+    src = Path(args.input)
+    out = Path(args.output)
+    repack_to = Path(args.repack) if args.repack else None
+    expected = args.sha256.lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise PatchError("--sha256 must be 64 hex digits")
+    if out.exists() or out.is_symlink():
+        raise PatchError(f"output {out} already exists; refusing to overwrite")
+    if repack_to and (repack_to.exists() or repack_to.is_symlink()):
+        raise PatchError(f"repack target {repack_to} already exists; refusing to overwrite")
+    if not out.parent.is_dir():
+        raise PatchError(f"output parent {out.parent} does not exist")
+    real_src = src.resolve()
+    real_out_parent = out.parent.resolve()
+    if src.is_dir() and (real_out_parent == real_src or real_src in real_out_parent.parents):
+        raise PatchError("output must not be inside the source runner")
+
+    work = Path(tempfile.mkdtemp(prefix=f".{out.name}.partial-", dir=out.parent))
+    members = None
+    try:
+        if src.is_file():
+            # Hash and extract through one open file so the bytes extracted are the bytes verified.
+            with open(src, "rb") as f:
+                got = sha256_fileobj(f)
+                if got != expected:
+                    raise PatchError(f"input sha256 is {got}, expected {expected}")
+                f.seek(0)
+                tree, members = safe_extract(f, work)
+        elif src.is_dir():
+            stock = kernelbase_targets(src)
+            got = sha256_file(stock[0])
+            if got != expected:
+                raise PatchError(f"stock kernelbase.dll sha256 is {got}, expected {expected}")
+            tree = work / src.name
+            shutil.copytree(src, tree, symlinks=True)
+        else:
+            raise PatchError(f"input {src} is neither a file nor a directory")
+
+        targets = kernelbase_targets(tree)
+        stock_bytes = targets[0].read_bytes()
+        if src.is_dir() and hashlib.sha256(stock_bytes).hexdigest() != expected:
+            raise PatchError("kernelbase.dll changed while the runner was being copied")
+        patched, info = patch_kernelbase(stock_bytes)
+        for t in targets:
+            parent = t.parent.stat()
+            st = t.stat()
+            tmp = t.with_name(t.name + ".new")
+            with open(tmp, "xb") as f:
+                f.write(patched)
+            os.chmod(tmp, st.st_mode & 0o7777)
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.replace(tmp, t)
+            os.utime(t.parent, ns=(parent.st_atime_ns, parent.st_mtime_ns))
+
+        report = [
+            f"input            {src} (sha256 {got}, verified)",
+            f"function         CreateRemoteThreadEx at RVA {info['function_rva']:#x}",
+            f"site             RVA {info['site_rva']:#x}, file offset {info['site_offset']:#x}: "
+            f"{info['expect']} -> {info['write']}",
+            f"stock sha256     {hashlib.sha256(stock_bytes).hexdigest()}",
+        ]
+        for rel in KERNELBASE_PATHS:
+            report.append(f"patched sha256   {sha256_file(tree / rel)}  {rel}")
+
+        os.rename(tree, out)
+        if repack_to:
+            try:
+                repack(out, repack_to, args.name or out.name, members)
+            except BaseException:
+                repack_to.unlink(missing_ok=True)
+                shutil.rmtree(out, ignore_errors=True)
+                raise
+            report.append(f"tarball sha256   {sha256_file(repack_to)}  {repack_to}")
+        report.append(f"output           {out}")
+        print("\n".join(report))
+        return 0
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------------------------------
+# Offline self-test on a synthetic PE
+
+
+# Where the synthetic image keeps what the self-test damages.
+_COFF_MACHINE, _OPT_MAGIC, _EXCEPTION_DIR_SIZE = 0x84, 0x98, 0x98 + 136 + 4   # file offsets
+_EXPORT_DIR_RVA, _EXPORT_FUNCS_RVA, _RDATA_RVA, _PDATA_RVA = 0x2400, 0x2428, 0x2000, 0x3000
+_MAX_IMPORT_DESCRIPTORS = 4096
+
+
+def _synthetic_pe(body: bytes, *, imports: dict[str, int] | None = None, export_twice: bool = False,
+                  unterminated_imports: bool = False) -> bytes:
+    """A minimal PE32+ with .text (the function), .rdata (exports, imports, IAT) and .pdata.
+    File alignment 0x200, section alignment 0x1000, so RVA and file offset differ.
+    `unterminated_imports` repeats the import descriptor to the reader's limit, up to the last byte
+    of .rdata, and moves .pdata out of the way."""
+    text_rva, rdata_rva = 0x1000, 0x2000
+    func_rva = text_rva + 0x10
+    names = list(imports or EXPECTED_IMPORTS.values())
+
+    # .rdata: IAT, hint/name table, import descriptor, dll name, export directory.
+    rd = bytearray(0x800)
+    iat_off, hn_off, desc_off, dll_off, exp_off = 0x000, 0x100, 0x300, 0x340, 0x400
+    hn = hn_off
+    iat_rvas = {}
+    for i, sym in enumerate(names):
+        struct.pack_into("<Q", rd, iat_off + 8 * i, rdata_rva + hn)
+        struct.pack_into("<H", rd, hn, 0)
+        rd[hn + 2 : hn + 2 + len(sym)] = sym.encode()
+        iat_rvas[sym] = rdata_rva + iat_off + 8 * i
+        hn += 2 + len(sym) + 1 + ((len(sym) + 1) & 1)
+    rd[dll_off : dll_off + 10] = b"ntdll.dll\0"
+    descriptor = struct.pack("<IIIII", 0, 0, 0, rdata_rva + dll_off, rdata_rva + iat_off)
+    if unterminated_imports:
+        desc_off = len(rd)
+        rd += descriptor * _MAX_IMPORT_DESCRIPTORS
+    else:
+        rd[desc_off : desc_off + 20] = descriptor
+    pdata_rva = rdata_rva + (len(rd) + 0xFFF & ~0xFFF)
+    nexp = 2 if export_twice else 1
+    funcs, nmtab, ords, nm = exp_off + 40, exp_off + 48, exp_off + 56, exp_off + 64
+    struct.pack_into("<IIIII", rd, exp_off + 20, nexp, nexp, rdata_rva + funcs, rdata_rva + nmtab, rdata_rva + ords)
+    for i in range(nexp):
+        struct.pack_into("<I", rd, funcs + 4 * i, func_rva)
+        struct.pack_into("<I", rd, nmtab + 4 * i, rdata_rva + nm)
+        struct.pack_into("<H", rd, ords + 2 * i, i)
+    rd[nm : nm + len(TARGET_EXPORT) + 1] = TARGET_EXPORT + b"\0"
+
+    # .text: padding, then the function body with call displacements fixed up to the IAT slots.
+    tx = bytearray(0x10) + bytearray(body)
+    tx += bytes(0x400 - len(tx))
+    pd = bytearray(0x200)
+    struct.pack_into("<III", pd, 0, func_rva, func_rva + len(body), 0)
+
+    hdr = bytearray(0x400)
+    hdr[:2] = b"MZ"
+    struct.pack_into("<I", hdr, 0x3C, 0x80)
+    hdr[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<HHIIIHH", hdr, 0x84, 0x8664, 3, 0, 0, 0, 240, 0x2022)
+    opt = 0x98
+    struct.pack_into("<H", hdr, opt, 0x20B)
+    struct.pack_into("<I", hdr, opt + 108, 16)
+    struct.pack_into("<II", hdr, opt + 112, rdata_rva + exp_off, 0x100)       # export
+    struct.pack_into("<II", hdr, opt + 120, rdata_rva + desc_off, 40)         # import
+    struct.pack_into("<II", hdr, opt + 136, pdata_rva, 12)                    # exception
+    sec = opt + 240
+    layout = [(b".text", text_rva, tx, 0x60000020), (b".rdata", rdata_rva, rd, 0x40000040),
+              (b".pdata", pdata_rva, pd, 0x40000040)]
+    raw = 0x400
+    image = bytearray(hdr)
+    for i, (name, va, blob, chars) in enumerate(layout):
+        s = sec + 40 * i
+        hdr_bytes = name.ljust(8, b"\0") + struct.pack("<IIII", len(blob), va, len(blob), raw)
+        hdr_bytes += bytes(12) + struct.pack("<I", chars)
+        image[s : s + 40] = hdr_bytes
+        raw += len(blob)
+    for _, _, blob, _ in layout:
+        image += blob
+
+    return bytes(image), iat_rvas, func_rva
+
+
+def _fill_site(sig_at: int, iat_rvas: dict[str, int], func_rva: int, symbols: dict[int, str]) -> bytes:
+    """The signature with concrete operands, as it would sit at body offset `sig_at`."""
+    b = bytearray(s if s is not None else 0x20 for s in SIGNATURE)
+    for at, sym in symbols.items():
+        rip = func_rva + sig_at + at + 6
+        struct.pack_into("<i", b, at + 2, iat_rvas[sym] - rip)
+    b[LOAD_ACTCTX_DISP] = b[RELEASE_ACTCTX_DISP] = 0xE0
+    b[BRANCH : BRANCH + 2] = EXPECT
+    return bytes(b)
+
+
+def _make(sites: list[int], *, body_len: int = 0x120, symbols=None, edit=None, **kw) -> bytes:
+    symbols = symbols or EXPECTED_IMPORTS
+    body = bytearray(b"\xcc" * body_len)
+    # First pass to learn the IAT layout (it does not depend on the body).
+    _, iat_rvas, func_rva = _synthetic_pe(bytes(body), **kw)
+    for at in sites:
+        body[at : at + len(SIGNATURE)] = _fill_site(at, iat_rvas, func_rva, symbols)
+    if edit:
+        edit(body)
+    image, _, _ = _synthetic_pe(bytes(body), **kw)
+    return image
+
+
+def self_test() -> int:
+    failures = []
+    layout_ok = (
+        all(SIGNATURE[at : at + 2] == (0xFF, 0x15) for at in EXPECTED_IMPORTS)
+        and SIGNATURE[BRANCH : BRANCH + 2] == (None, None) and EXPECT == bytes((0x74, 0x1A))
+        and SIGNATURE[RELEASE_LOAD : RELEASE_LOAD + 3] == (0x48, 0x8B, 0x4D)
+        and SIGNATURE[LOAD_ACTCTX_DISP] is None and SIGNATURE[RELEASE_ACTCTX_DISP] is None
+        and WRITE == bytes((0xEB, 0x10))
+    )
+    if not layout_ok:
+        failures.append("signature offsets do not line up with the signature bytes")
+
+    def expect_ok(label, image):
+        try:
+            out, info = patch_kernelbase(image)
+        except PatchError as e:
+            failures.append(f"{label}: unexpected failure: {e}")
+            return
+        diff = [i for i in range(len(image)) if image[i] != out[i]]
+        if diff != [info["site_offset"], info["site_offset"] + 1] or out[diff[0] : diff[0] + 2] != WRITE:
+            failures.append(f"{label}: wrong bytes changed: {diff}")
+        expect_fail(f"{label}, patched twice", out, "already patched")
+
+    def expect_fail(label, image, needle):
+        _expect_refusal(failures, label, lambda: patch_kernelbase(image), needle)
+
+    expect_ok("one site", _make([0x40]))
+    expect_fail("no site", _make([]), "matched 0 times")
+    expect_fail("two sites", _make([0x10, 0x80]), "matched 2 times")
+    expect_fail("site outside the function", _make_outside(), "matched 0 times")
+    swapped = {CALL_CREATE: "NtCreateThreadEx", CALL_ACTIVATE: "RtlReleaseActivationContext",
+               CALL_RELEASE: "RtlReleaseActivationContext"}
+    expect_fail("wrong import", _make([0x40], symbols=swapped), "expected ntdll.dll!RtlActivateActivationContextEx")
+
+    def other_local(body):
+        body[0x40 + RELEASE_ACTCTX_DISP] = 0xD8
+    expect_fail("different locals", _make([0x40], edit=other_local), "different locals")
+    expect_fail("duplicate export", _make([0x40], export_twice=True), "found 2 times")
+    expect_fail("not a PE", b"\0" * 0x400, "no MZ")
+    good = _make([0x40])
+    expect_fail("truncated", good[:0x500], "")
+
+    def other_branch(body):
+        body[0x40 + BRANCH] = 0x75
+    expect_fail("another branch at the site", _make([0x40], edit=other_branch), "are 75 1a, expected 74 1a")
+
+    def damaged(*edits):
+        """`good` with (where, bytes) written over it; `where` is an RVA, or a file offset in the
+        headers."""
+        image, pe = bytearray(good), Pe(good)
+        for where, data in edits:
+            at = where if where < 0x400 else pe.off(where, len(data))
+            image[at : at + len(data)] = data
+        return bytes(image)
+
+    u16, u32 = (lambda v: struct.pack("<H", v)), (lambda v: struct.pack("<I", v))
+    expect_fail("32-bit x86 machine", damaged((_COFF_MACHINE, u16(0x14C))), "not an x86-64 image")
+    expect_fail("PE32 optional header", damaged((_OPT_MAGIC, u16(0x10B))), "not a PE32+")
+    expect_fail("forwarder export", damaged((_EXPORT_FUNCS_RVA, u32(_EXPORT_DIR_RVA + 0x80))), "is a forwarder")
+    expect_fail("export in a data section", damaged((_EXPORT_FUNCS_RVA, u32(_RDATA_RVA))),
+                "not in an executable section")
+    expect_fail("no unwind entry", damaged((_PDATA_RVA, bytes(12))), "0 .pdata entries")
+    entry = Pe(good).read(Pe(good).off(_PDATA_RVA, 12), 12)
+    expect_fail("two unwind entries", damaged((_EXCEPTION_DIR_SIZE, u32(24)), (_PDATA_RVA + 12, entry)),
+                "2 .pdata entries")
+    expect_fail("unterminated import directory", _make([0x40], unterminated_imports=True),
+                "import directory has no terminator")
+    _test_tree_refusals(failures, good)
+
+    _test_repack_is_reproducible(failures, good)
+
+    for f in failures:
+        print(f"FAIL {f}", file=sys.stderr)
+    print(f"self-test: {'ok' if not failures else f'{len(failures)} failure(s)'}")
+    return 1 if failures else 0
+
+
+def _make_outside() -> bytes:
+    """A valid site placed in .text just past the function's .pdata extent."""
+    body = bytearray(b"\xcc" * 0x40)
+    image, iat_rvas, func_rva = _synthetic_pe(bytes(body))
+    pe = Pe(image)
+    at = len(body)  # first byte after the function
+    site = _fill_site(at, iat_rvas, func_rva, EXPECTED_IMPORTS)
+    off = pe.off(func_rva + at, len(site))
+    return image[:off] + site + image[off + len(site) :]
+
+
+def _expect_refusal(failures: list, label: str, attempt, needle: str, errors=(PatchError,)) -> None:
+    try:
+        attempt()
+        failures.append(f"{label}: did not fail")
+    except errors as e:
+        if needle not in str(e):
+            failures.append(f"{label}: failed for the wrong reason: {e}")
+
+
+def _tar_bytes(entries) -> bytes:
+    """A gzip tarball of `(name, type, mode, payload)` entries; the payload is a file's bytes or a
+    link's target."""
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.GNU_FORMAT) as tf:
+        for i, (name, kind, mode, payload) in enumerate(entries):
+            ti = tarfile.TarInfo(name)
+            ti.type, ti.mode, ti.mtime = kind, mode, 1_700_000_000 + i
+            if kind == tarfile.REGTYPE:
+                ti.size = len(payload)
+                tf.addfile(ti, io.BytesIO(payload))
+            else:
+                ti.linkname = payload or ""
+                tf.addfile(ti)
+    return raw.getvalue()
+
+
+def _runner_entries(dll: bytes, top: str = "runner") -> list:
+    """A runner in miniature: the DLL, the prefix template's symlink to it, a group-writable
+    directory, a read-only file, and directories the archive names no member for."""
+    lib, pfx = (str(Path(top, rel)) for rel in KERNELBASE_PATHS)
+    return [
+        (top, tarfile.DIRTYPE, 0o755, None),
+        (f"{top}/files", tarfile.DIRTYPE, 0o775, None),
+        (f"{top}/files/lib", tarfile.DIRTYPE, 0o700, None),
+        (lib, tarfile.REGTYPE, 0o644, dll),
+        (pfx, tarfile.SYMTYPE, 0o777, os.path.relpath(lib, os.path.dirname(pfx))),
+        (f"{top}/version", tarfile.REGTYPE, 0o464, b"synthetic\n"),
+    ]
+
+
+def _build_quietly(**kw) -> None:
+    args = argparse.Namespace(**{"repack": None, "name": None, **kw})
+    with contextlib.redirect_stdout(io.StringIO()):
+        build(args)
+
+
+def _test_repack_is_reproducible(failures: list, dll: bytes) -> None:
+    """The same archive built under two umasks and to two file names repacks to the same bytes."""
+    source = _tar_bytes(_runner_entries(dll))
+    digest = hashlib.sha256(source).hexdigest()
+    built = []
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "source.tar.gz")
+        src.write_bytes(source)
+        for umask, stem in ((0o022, "first"), (0o077, "second-with-another-name")):
+            previous = os.umask(umask)
+            try:
+                _build_quietly(input=str(src), sha256=digest, output=str(Path(tmp, stem)),
+                               repack=str(Path(tmp, stem + ".tar.gz")), name="runner")
+            except (PatchError, OSError, tarfile.TarError) as e:
+                failures.append(f"reproducible repack: build under umask {umask:o} failed: {e}")
+                return
+            finally:
+                os.umask(previous)
+            built.append(Path(tmp, stem + ".tar.gz").read_bytes())
+    if built[0] != built[1]:
+        failures.append("reproducible repack: the umask or the output name changed the tarball")
+    if built[0][3] & 0x08:
+        failures.append("reproducible repack: the gzip header carries a file name")
+    with tarfile.open(fileobj=io.BytesIO(built[0]), mode="r:gz") as tf:
+        got = {m.name: (m.mode, m.mtime, m.uname) for m in tf}
+    patched, _ = patch_kernelbase(dll)
+    want = {
+        "runner": (0o755, 1_700_000_000, "root"),
+        "runner/files": (0o755, 1_700_000_001, "root"),       # group write stripped
+        "runner/files/lib": (0o700, 1_700_000_002, "root"),
+        "runner/files/lib/wine": (0o755, 0, "root"),          # implied by the archive, not in it
+        "runner/files/share": (0o755, 0, "root"),
+        "runner/version": (0o444, 1_700_000_005, "root"),
+    }
+    for name, meta in want.items():
+        if got.get(name) != meta:
+            failures.append(f"reproducible repack: {name} is {got.get(name)}, expected {meta}")
+    with tarfile.open(fileobj=io.BytesIO(built[0]), mode="r:gz") as tf:
+        if tf.extractfile(str(Path("runner", KERNELBASE_PATHS[0]))).read() != patched:
+            failures.append("reproducible repack: the tarball does not carry the patched DLL")
+
+
+def _test_tree_refusals(failures: list, dll: bytes) -> None:
+    """Every refusal above the PE: the archive's members, the tree's two DLL copies, the hash and
+    the output paths. Each must also leave nothing behind."""
+    lib, pfx = (str(Path("runner", rel)) for rel in KERNELBASE_PATHS)
+    stock = _runner_entries(dll)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "taken").mkdir()
+        (tmp / "taken.tar.gz").write_bytes(b"")
+        count = itertools.count()
+
+        def build_from(entries, needle, label, errors=(PatchError,), **kw):
+            src = tmp / f"source-{next(count)}.tar.gz"
+            src.write_bytes(_tar_bytes(entries))
+            kw.setdefault("sha256", sha256_file(src))
+            kw.setdefault("output", str(tmp / "out"))
+            before = sorted(os.listdir(tmp))
+            _expect_refusal(failures, label, lambda: _build_quietly(input=str(src), **kw), needle, errors)
+            if sorted(os.listdir(tmp)) != before:
+                failures.append(f"{label}: left something behind")
+                shutil.rmtree(tmp / "out", ignore_errors=True)
+
+        def plus(*entries):
+            return stock + list(entries)
+
+        build_from(stock, "input sha256 is", "tarball hash mismatch", sha256="0" * 64)
+        build_from(stock, "must be 64 hex digits", "malformed hash", sha256="abc")
+        build_from(stock, "already exists; refusing to overwrite", "output exists", output=str(tmp / "taken"))
+        build_from(stock, "repack target", "repack target exists", repack=str(tmp / "taken.tar.gz"))
+        build_from(plus(("/abs", tarfile.REGTYPE, 0o644, b"")), "unsafe path: '/abs'", "absolute member")
+        build_from(plus(("runner/../up", tarfile.REGTYPE, 0o644, b"")), "unsafe path: 'runner/../up'",
+                   "member with a parent component")
+        build_from(plus((".", tarfile.DIRTYPE, 0o755, None)), "names the extraction directory itself",
+                   "member naming the root")
+        build_from(plus(("runner/dev", tarfile.CHRTYPE, 0o644, None)), "unexpected type: 'runner/dev'",
+                   "device member")
+        build_from(plus(("runner/hard", tarfile.LNKTYPE, 0o644, lib)), "unexpected type: 'runner/hard'",
+                   "hard link member")
+        build_from(plus(("other", tarfile.DIRTYPE, 0o755, None)), "2 top-level entries", "two top-level entries")
+        build_from([("runner", tarfile.REGTYPE, 0o644, b"")], "top-level entry is not a directory",
+                   "top-level file")
+        differing = [e if e[0] != pfx else (pfx, tarfile.REGTYPE, 0o644, dll + b"\0") for e in stock]
+        build_from(differing, "the two kernelbase.dll copies differ", "differing DLL copies")
+        # A link out of the archive never reaches the tree: the extraction filter refuses it.
+        escaping = [e if e[0] != pfx else (pfx, tarfile.SYMTYPE, 0o777, "/etc/hostname") for e in stock]
+        build_from(escaping, "", "link out of the archive", errors=(PatchError, tarfile.TarError))
+
+        # A runner given as a directory is not filtered by anything but this script.
+        outside = tmp / "outside.dll"
+        outside.write_bytes(dll)
+        tree = tmp / "tree"
+        for rel in KERNELBASE_PATHS:
+            (tree / rel).parent.mkdir(parents=True)
+        (tree / KERNELBASE_PATHS[0]).write_bytes(dll)
+        (tree / KERNELBASE_PATHS[1]).symlink_to(outside)
+        digest = hashlib.sha256(dll).hexdigest()
+        before = sorted(os.listdir(tmp))
+
+        def build_tree(needle, label, sha256=digest):
+            _expect_refusal(failures, label, lambda: _build_quietly(
+                input=str(tree), sha256=sha256, output=str(tmp / "out")), needle)
+            if sorted(os.listdir(tmp)) != before:
+                failures.append(f"{label}: left something behind")
+
+        build_tree("resolves outside the runner tree", "DLL link out of the tree")
+        (tree / KERNELBASE_PATHS[1]).unlink()
+        build_tree(f"{KERNELBASE_PATHS[1]} is missing", "missing DLL copy")
+        (tree / KERNELBASE_PATHS[1]).write_bytes(dll)
+        build_tree("stock kernelbase.dll sha256 is", "directory hash mismatch", sha256="0" * 64)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--input", help="upstream runner tarball, or an extracted runner directory")
+    ap.add_argument("--sha256", help="expected sha256 of the tarball, or of a directory's stock x86_64 kernelbase.dll")
+    ap.add_argument("--output", help="directory to create for the patched runner (must not exist)")
+    ap.add_argument("--repack", help="also write the patched runner as this .tar.gz (must not exist)")
+    ap.add_argument("--name", help="top-level directory name inside the repacked tarball (default: output name)")
+    ap.add_argument("--self-test", action="store_true", help="run the offline self-test and exit")
+    args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    if not (args.input and args.sha256 and args.output):
+        ap.error("--input, --sha256 and --output are required")
+    try:
+        return build(args)
+    except (PatchError, OSError, tarfile.TarError, EOFError) as e:
+        print(f"error: {e}; no output written", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
