@@ -1,0 +1,73 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A security problem goes through a [private advisory](https://github.com/soleynn/apogee/security/advisories/new) instead, not a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what went wrong, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+  - type: input
+    id: version
+    attributes:
+      label: Apogee version
+      description: "`apogee-cli --version`, or the release or commit you built from."
+      placeholder: v0.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: frontend
+    attributes:
+      label: Where it happened
+      options:
+        - CLI (apogee-cli)
+        - Desktop app
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS or distro
+      placeholder: Fedora 43, Arch, SteamOS 3.8, Windows 11 …
+    validations:
+      required: true
+  - type: input
+    id: runner
+    attributes:
+      label: Runner
+      description: The Wine or Proton build the profile launches with (`apogee-cli runner list` shows them). Leave blank on Windows.
+      placeholder: GE-Proton10-25
+  - type: textarea
+    id: system-report
+    attributes:
+      label: System report
+      description: |
+        Paste the output of `apogee-cli system-report` (add `--profile <name>` for the profile that failed). It is built for public issue reports and carries host, runner and prefix facts, not account details.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: support-bundle
+    attributes:
+      label: Support bundle (optional)
+      description: |
+        For a crash, a failed patch or a launch that never starts, `apogee-cli support-bundle --profile <name>` writes a redacted `apogee-support.zip`. Run `apogee-cli support-bundle --contents` first to see what goes into it, then drag the archive here.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, logs, or what you already tried.

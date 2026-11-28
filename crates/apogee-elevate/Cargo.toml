@@ -1,9 +1,12 @@
 [package]
 name = "apogee-elevate"
 version = "0.0.0"
+description = "The privilege boundary a patch apply crosses when the FFXIV install tree is not writable by the user"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

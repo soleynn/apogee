@@ -1,9 +1,12 @@
 [package]
 name = "apogee-zipatch"
 version = "1.0.0"
+description = "ZiPatch parsing with hostile-input bounds, plus the seams for applying, indexing and repairing FFXIV installs"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

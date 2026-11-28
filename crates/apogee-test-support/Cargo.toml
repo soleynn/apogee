@@ -1,9 +1,12 @@
 [package]
 name = "apogee-test-support"
 version = "0.0.0"
+description = "Test-only harness for the Apogee crates: goldens, redaction, sandboxes and a fixture transport"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 tempfile.workspace = true

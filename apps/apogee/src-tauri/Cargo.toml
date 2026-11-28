@@ -28,6 +28,8 @@ dbg_macro   = "deny"
 [package]
 name         = "apogee"
 version      = "0.0.0"
+description = "The Apogee desktop shell: a thin Tauri window over apogee-core"
+repository  = "https://github.com/soleynn/apogee"
 edition      = "2024"
 rust-version = "1.89"
 license      = "GPL-3.0-or-later"

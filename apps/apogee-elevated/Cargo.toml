@@ -1,9 +1,12 @@
 [package]
 name = "apogee-elevated"
 version = "0.0.0"
+description = "Privileged worker that applies already-verified FFXIV patch files when the install is not user-writable"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 # The whole binary. Everything it does (the protocol, the re-verification, the confined writes, the

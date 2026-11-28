@@ -1,9 +1,12 @@
 [package]
 name = "apogee-fetch"
 version = "0.0.0"
+description = "Resumable, verified HTTP downloads that publish a file only after it passes its validator"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true
