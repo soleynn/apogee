@@ -435,6 +435,25 @@ grep -qE '^mod win_acl \{$' "$unsafe_home" \
   || report "the one module allowed to hold unsafe is gone; the workspace lint can go back to forbid" \
      "$unsafe_home"
 
+# 11. No production signing seed sits in this working tree. A catalog signed with a production seed is
+#     trusted by every shipped build, so that seed is generated and kept off this machine, and the
+#     staging seeds that do live here (under the ignored `.catalog-signing/`) are treated as exposed.
+#     Two ways that slips: a production seed copied in "just to sign one thing", which is found by
+#     name whether or not git ignores it, and any seed at all becoming tracked, which publishes it.
+hits=$(find_src . -name '*.seed' -not -path './References/*' -not -name '*staging*.seed' || true)
+[ -z "$hits" ] || report "a signing seed other than a staging one is in the working tree" "$hits"
+hits=$(git ls-files -- '*.seed' || true)
+[ -z "$hits" ] || report "a signing seed is tracked" "$hits"
+
+# 12. The scripts and tools that build what Apogee ships derive nothing from the reference launcher.
+#     Its source is cloned beside this tree as an interoperability spec and is GPL-3.0; a build script
+#     that read a file out of it, or a tool that took a table from it, would put its code in an artifact
+#     this project signs. Prose may name it; a path into the clone may not.
+hits=$(grep -rnE 'References/|FFXIVQuickLauncher' scripts tools \
+  --exclude-dir=target --exclude=audit.sh \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|//)' || true)
+[ -z "$hits" ] || report "a build script or tool reaches into the reference launcher's source" "$hits"
+
 # Informational: remaining stub markers (never fails).
 printf 'stub markers (todo!/unimplemented!): %s\n' \
   "$(grep -roE 'todo!|unimplemented!' crates/*/src --include='*.rs' | wc -l | tr -d ' ')"
