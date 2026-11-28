@@ -38,6 +38,7 @@ import contextlib
 import gzip
 import hashlib
 import io
+import itertools
 import os
 import shutil
 import stat
@@ -57,7 +58,9 @@ KERNELBASE_PATHS = (
 TARGET_EXPORT = b"CreateRemoteThreadEx"
 
 # (bytes, None for a wildcard). Wildcards cover IAT displacements, the frame offsets of locals and the
-# failure branch target, which all move between builds.
+# failure branch target, which all move between builds, and the two bytes of the branch this script
+# rewrites: those are checked after the site is found, so an image that is already patched, or whose
+# branch is something else, is reported as that rather than as "no match".
 W = None
 SIGNATURE: tuple[int | None, ...] = (
     0xFF, 0x15, W, W, W, W,              # call [rip+NtCreateThreadEx]
@@ -65,7 +68,7 @@ SIGNATURE: tuple[int | None, ...] = (
     0x0F, 0x85, W, W, W, W,              # jnz  <failure path>
     0x4C, 0x8B, 0x45, W,                 # mov  r8, [rbp+actctx]
     0x4D, 0x85, 0xC0,                    # test r8, r8
-    0x74, 0x1A,                          # jz   <after release>        <- patched
+    W, W,                                # jz   <after release>        <- 74 1a, patched
     0x31, 0xC9,                          # xor  ecx, ecx
     0x48, 0x8B, 0x55, W,                 # mov  rdx, [rbp+teb]
     0x4C, 0x8D, 0x4D, W,                 # lea  r9, [rbp+cookie]
@@ -195,8 +198,10 @@ class Pe:
             b, e, _ = struct.unpack_from("<III", self.data, self.off(prva + 12 * i, 12))
             if b == begin:
                 hits.append(e)
-        if len(hits) != 1 or hits[0] <= begin:
-            raise PatchError(f"no single .pdata entry starts at {begin:#x}")
+        if len(hits) != 1:
+            raise PatchError(f"{len(hits)} .pdata entries start at {begin:#x}, expected exactly one")
+        if hits[0] <= begin:
+            raise PatchError(f"the .pdata entry at {begin:#x} ends before it begins")
         return hits[0]
 
     def imports(self) -> dict[int, tuple[str, str]]:
@@ -265,8 +270,15 @@ def patch_kernelbase(data: bytes) -> tuple[bytes, dict]:
             )
     branch = site + BRANCH
     found = data[branch : branch + 2]
+    if found == WRITE:
+        raise PatchError(
+            f"already patched: the branch at RVA {rva_of(branch):#x} is {found.hex(' ')}"
+        )
     if found != EXPECT:
-        raise PatchError(f"bytes at the branch are {found.hex(' ')}, expected {EXPECT.hex(' ')}")
+        raise PatchError(
+            f"bytes at the branch (RVA {rva_of(branch):#x}) are {found.hex(' ')}, "
+            f"expected {EXPECT.hex(' ')}"
+        )
     out = bytearray(data)
     out[branch : branch + 2] = WRITE
     return bytes(out), {
@@ -327,6 +339,8 @@ def safe_extract(fileobj, dest: Path) -> tuple[Path, dict]:
             parts = Path(name).parts
             if not name or name.startswith("/") or ".." in parts:
                 raise PatchError(f"archive member with unsafe path: {m.name!r}")
+            if not parts:
+                raise PatchError(f"archive member names the extraction directory itself: {m.name!r}")
             if not (m.isfile() or m.isdir() or m.issym()):
                 raise PatchError(f"archive member of unexpected type: {m.name!r}")
             tops.add(parts[0])
@@ -490,10 +504,19 @@ def build(args: argparse.Namespace) -> int:
 # Offline self-test on a synthetic PE
 
 
-def _synthetic_pe(body: bytes, *, imports: dict[str, int] | None = None, export_twice: bool = False) -> bytes:
+# Where the synthetic image keeps what the self-test damages.
+_COFF_MACHINE, _OPT_MAGIC, _EXCEPTION_DIR_SIZE = 0x84, 0x98, 0x98 + 136 + 4   # file offsets
+_EXPORT_DIR_RVA, _EXPORT_FUNCS_RVA, _RDATA_RVA, _PDATA_RVA = 0x2400, 0x2428, 0x2000, 0x3000
+_MAX_IMPORT_DESCRIPTORS = 4096
+
+
+def _synthetic_pe(body: bytes, *, imports: dict[str, int] | None = None, export_twice: bool = False,
+                  unterminated_imports: bool = False) -> bytes:
     """A minimal PE32+ with .text (the function), .rdata (exports, imports, IAT) and .pdata.
-    File alignment 0x200, section alignment 0x1000, so RVA and file offset differ."""
-    text_rva, rdata_rva, pdata_rva = 0x1000, 0x2000, 0x3000
+    File alignment 0x200, section alignment 0x1000, so RVA and file offset differ.
+    `unterminated_imports` repeats the import descriptor to the reader's limit, up to the last byte
+    of .rdata, and moves .pdata out of the way."""
+    text_rva, rdata_rva = 0x1000, 0x2000
     func_rva = text_rva + 0x10
     names = list(imports or EXPECTED_IMPORTS.values())
 
@@ -509,7 +532,13 @@ def _synthetic_pe(body: bytes, *, imports: dict[str, int] | None = None, export_
         iat_rvas[sym] = rdata_rva + iat_off + 8 * i
         hn += 2 + len(sym) + 1 + ((len(sym) + 1) & 1)
     rd[dll_off : dll_off + 10] = b"ntdll.dll\0"
-    struct.pack_into("<IIIII", rd, desc_off, 0, 0, 0, rdata_rva + dll_off, rdata_rva + iat_off)
+    descriptor = struct.pack("<IIIII", 0, 0, 0, rdata_rva + dll_off, rdata_rva + iat_off)
+    if unterminated_imports:
+        desc_off = len(rd)
+        rd += descriptor * _MAX_IMPORT_DESCRIPTORS
+    else:
+        rd[desc_off : desc_off + 20] = descriptor
+    pdata_rva = rdata_rva + (len(rd) + 0xFFF & ~0xFFF)
     nexp = 2 if export_twice else 1
     funcs, nmtab, ords, nm = exp_off + 40, exp_off + 48, exp_off + 56, exp_off + 64
     struct.pack_into("<IIIII", rd, exp_off + 20, nexp, nexp, rdata_rva + funcs, rdata_rva + nmtab, rdata_rva + ords)
@@ -560,6 +589,7 @@ def _fill_site(sig_at: int, iat_rvas: dict[str, int], func_rva: int, symbols: di
         rip = func_rva + sig_at + at + 6
         struct.pack_into("<i", b, at + 2, iat_rvas[sym] - rip)
     b[LOAD_ACTCTX_DISP] = b[RELEASE_ACTCTX_DISP] = 0xE0
+    b[BRANCH : BRANCH + 2] = EXPECT
     return bytes(b)
 
 
@@ -580,7 +610,7 @@ def self_test() -> int:
     failures = []
     layout_ok = (
         all(SIGNATURE[at : at + 2] == (0xFF, 0x15) for at in EXPECTED_IMPORTS)
-        and tuple(SIGNATURE[BRANCH : BRANCH + 2]) == tuple(EXPECT)
+        and SIGNATURE[BRANCH : BRANCH + 2] == (None, None) and EXPECT == bytes((0x74, 0x1A))
         and SIGNATURE[RELEASE_LOAD : RELEASE_LOAD + 3] == (0x48, 0x8B, 0x4D)
         and SIGNATURE[LOAD_ACTCTX_DISP] is None and SIGNATURE[RELEASE_ACTCTX_DISP] is None
         and WRITE == bytes((0xEB, 0x10))
@@ -597,19 +627,10 @@ def self_test() -> int:
         diff = [i for i in range(len(image)) if image[i] != out[i]]
         if diff != [info["site_offset"], info["site_offset"] + 1] or out[diff[0] : diff[0] + 2] != WRITE:
             failures.append(f"{label}: wrong bytes changed: {diff}")
-        try:
-            patch_kernelbase(out)
-            failures.append(f"{label}: patching twice did not fail")
-        except PatchError:
-            pass
+        expect_fail(f"{label}, patched twice", out, "already patched")
 
     def expect_fail(label, image, needle):
-        try:
-            patch_kernelbase(image)
-            failures.append(f"{label}: did not fail")
-        except PatchError as e:
-            if needle not in str(e):
-                failures.append(f"{label}: failed for the wrong reason: {e}")
+        _expect_refusal(failures, label, lambda: patch_kernelbase(image), needle)
 
     expect_ok("one site", _make([0x40]))
     expect_fail("no site", _make([]), "matched 0 times")
@@ -626,6 +647,33 @@ def self_test() -> int:
     expect_fail("not a PE", b"\0" * 0x400, "no MZ")
     good = _make([0x40])
     expect_fail("truncated", good[:0x500], "")
+
+    def other_branch(body):
+        body[0x40 + BRANCH] = 0x75
+    expect_fail("another branch at the site", _make([0x40], edit=other_branch), "are 75 1a, expected 74 1a")
+
+    def damaged(*edits):
+        """`good` with (where, bytes) written over it; `where` is an RVA, or a file offset in the
+        headers."""
+        image, pe = bytearray(good), Pe(good)
+        for where, data in edits:
+            at = where if where < 0x400 else pe.off(where, len(data))
+            image[at : at + len(data)] = data
+        return bytes(image)
+
+    u16, u32 = (lambda v: struct.pack("<H", v)), (lambda v: struct.pack("<I", v))
+    expect_fail("32-bit x86 machine", damaged((_COFF_MACHINE, u16(0x14C))), "not an x86-64 image")
+    expect_fail("PE32 optional header", damaged((_OPT_MAGIC, u16(0x10B))), "not a PE32+")
+    expect_fail("forwarder export", damaged((_EXPORT_FUNCS_RVA, u32(_EXPORT_DIR_RVA + 0x80))), "is a forwarder")
+    expect_fail("export in a data section", damaged((_EXPORT_FUNCS_RVA, u32(_RDATA_RVA))),
+                "not in an executable section")
+    expect_fail("no unwind entry", damaged((_PDATA_RVA, bytes(12))), "0 .pdata entries")
+    entry = Pe(good).read(Pe(good).off(_PDATA_RVA, 12), 12)
+    expect_fail("two unwind entries", damaged((_EXCEPTION_DIR_SIZE, u32(24)), (_PDATA_RVA + 12, entry)),
+                "2 .pdata entries")
+    expect_fail("unterminated import directory", _make([0x40], unterminated_imports=True),
+                "import directory has no terminator")
+    _test_tree_refusals(failures, good)
 
     _test_repack_is_reproducible(failures, good)
 
@@ -644,6 +692,15 @@ def _make_outside() -> bytes:
     site = _fill_site(at, iat_rvas, func_rva, EXPECTED_IMPORTS)
     off = pe.off(func_rva + at, len(site))
     return image[:off] + site + image[off + len(site) :]
+
+
+def _expect_refusal(failures: list, label: str, attempt, needle: str, errors=(PatchError,)) -> None:
+    try:
+        attempt()
+        failures.append(f"{label}: did not fail")
+    except errors as e:
+        if needle not in str(e):
+            failures.append(f"{label}: failed for the wrong reason: {e}")
 
 
 def _tar_bytes(entries) -> bytes:
@@ -723,6 +780,77 @@ def _test_repack_is_reproducible(failures: list, dll: bytes) -> None:
     with tarfile.open(fileobj=io.BytesIO(built[0]), mode="r:gz") as tf:
         if tf.extractfile(str(Path("runner", KERNELBASE_PATHS[0]))).read() != patched:
             failures.append("reproducible repack: the tarball does not carry the patched DLL")
+
+
+def _test_tree_refusals(failures: list, dll: bytes) -> None:
+    """Every refusal above the PE: the archive's members, the tree's two DLL copies, the hash and
+    the output paths. Each must also leave nothing behind."""
+    lib, pfx = (str(Path("runner", rel)) for rel in KERNELBASE_PATHS)
+    stock = _runner_entries(dll)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "taken").mkdir()
+        (tmp / "taken.tar.gz").write_bytes(b"")
+        count = itertools.count()
+
+        def build_from(entries, needle, label, errors=(PatchError,), **kw):
+            src = tmp / f"source-{next(count)}.tar.gz"
+            src.write_bytes(_tar_bytes(entries))
+            kw.setdefault("sha256", sha256_file(src))
+            kw.setdefault("output", str(tmp / "out"))
+            before = sorted(os.listdir(tmp))
+            _expect_refusal(failures, label, lambda: _build_quietly(input=str(src), **kw), needle, errors)
+            if sorted(os.listdir(tmp)) != before:
+                failures.append(f"{label}: left something behind")
+                shutil.rmtree(tmp / "out", ignore_errors=True)
+
+        def plus(*entries):
+            return stock + list(entries)
+
+        build_from(stock, "input sha256 is", "tarball hash mismatch", sha256="0" * 64)
+        build_from(stock, "must be 64 hex digits", "malformed hash", sha256="abc")
+        build_from(stock, "already exists; refusing to overwrite", "output exists", output=str(tmp / "taken"))
+        build_from(stock, "repack target", "repack target exists", repack=str(tmp / "taken.tar.gz"))
+        build_from(plus(("/abs", tarfile.REGTYPE, 0o644, b"")), "unsafe path: '/abs'", "absolute member")
+        build_from(plus(("runner/../up", tarfile.REGTYPE, 0o644, b"")), "unsafe path: 'runner/../up'",
+                   "member with a parent component")
+        build_from(plus((".", tarfile.DIRTYPE, 0o755, None)), "names the extraction directory itself",
+                   "member naming the root")
+        build_from(plus(("runner/dev", tarfile.CHRTYPE, 0o644, None)), "unexpected type: 'runner/dev'",
+                   "device member")
+        build_from(plus(("runner/hard", tarfile.LNKTYPE, 0o644, lib)), "unexpected type: 'runner/hard'",
+                   "hard link member")
+        build_from(plus(("other", tarfile.DIRTYPE, 0o755, None)), "2 top-level entries", "two top-level entries")
+        build_from([("runner", tarfile.REGTYPE, 0o644, b"")], "top-level entry is not a directory",
+                   "top-level file")
+        differing = [e if e[0] != pfx else (pfx, tarfile.REGTYPE, 0o644, dll + b"\0") for e in stock]
+        build_from(differing, "the two kernelbase.dll copies differ", "differing DLL copies")
+        # A link out of the archive never reaches the tree: the extraction filter refuses it.
+        escaping = [e if e[0] != pfx else (pfx, tarfile.SYMTYPE, 0o777, "/etc/hostname") for e in stock]
+        build_from(escaping, "", "link out of the archive", errors=(PatchError, tarfile.TarError))
+
+        # A runner given as a directory is not filtered by anything but this script.
+        outside = tmp / "outside.dll"
+        outside.write_bytes(dll)
+        tree = tmp / "tree"
+        for rel in KERNELBASE_PATHS:
+            (tree / rel).parent.mkdir(parents=True)
+        (tree / KERNELBASE_PATHS[0]).write_bytes(dll)
+        (tree / KERNELBASE_PATHS[1]).symlink_to(outside)
+        digest = hashlib.sha256(dll).hexdigest()
+        before = sorted(os.listdir(tmp))
+
+        def build_tree(needle, label, sha256=digest):
+            _expect_refusal(failures, label, lambda: _build_quietly(
+                input=str(tree), sha256=sha256, output=str(tmp / "out")), needle)
+            if sorted(os.listdir(tmp)) != before:
+                failures.append(f"{label}: left something behind")
+
+        build_tree("resolves outside the runner tree", "DLL link out of the tree")
+        (tree / KERNELBASE_PATHS[1]).unlink()
+        build_tree(f"{KERNELBASE_PATHS[1]} is missing", "missing DLL copy")
+        (tree / KERNELBASE_PATHS[1]).write_bytes(dll)
+        build_tree("stock kernelbase.dll sha256 is", "directory hash mismatch", sha256="0" * 64)
 
 
 def main() -> int:
