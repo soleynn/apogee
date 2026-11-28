@@ -87,6 +87,10 @@ pub(crate) struct FlowContext {
     pub(crate) driver_version: crate::launch::driver_cache::DriverVersionSource,
     pub(crate) computer_id: ComputerId,
     pub(crate) prefixes_dir: std::path::PathBuf,
+    /// The desktop's data home for the game's taskbar identity, `None` to leave the desktop alone.
+    pub(crate) desktop_dir: Option<std::path::PathBuf>,
+    /// The desktop's configuration home for the overlay window rule, `None` to leave it alone.
+    pub(crate) desktop_config_dir: Option<std::path::PathBuf>,
     pub(crate) backups_dir: std::path::PathBuf,
     pub(crate) frontier: crate::frontier::FrontierAssets,
 }
@@ -1950,6 +1954,34 @@ async fn launch_game(
         .prepare(&PrefixRequest::try_from(profile)?, &prefix_dir, cancel, tx)
         .await?;
 
+    if let Some(home) = ctx.desktop_dir.clone() {
+        // Off the launch's path: it reads the executable once, and a desktop that cannot be told
+        // about the game is no reason to hold or fail the launch.
+        let exe = game_dir.join("ffxiv_dx11.exe");
+        let class = crate::launch::desktop::window_class(prepared.runner);
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::launch::desktop::ensure(&home, &exe, class) {
+                tracing::warn!(%error, "the game's taskbar icon was not installed");
+            }
+        });
+    }
+    let on_kde = std::env::var("XDG_CURRENT_DESKTOP")
+        .is_ok_and(|desktop| desktop.split(':').any(|d| d.eq_ignore_ascii_case("KDE")));
+    if let Some(home) = ctx
+        .desktop_config_dir
+        .clone()
+        .filter(|_| on_kde && profile.launch.act)
+    {
+        // ACT's overlays are the only windows that must sit above the game.
+        let class = crate::launch::desktop::window_class(prepared.runner);
+        tokio::task::spawn_blocking(move || {
+            match crate::launch::kwin::ensure_overlay_rule(&home, class) {
+                Ok(true) => crate::launch::kwin::reload(),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "the overlay window rule was not installed"),
+            }
+        });
+    }
     let steam = is_steam(account);
     let driver_cache = match prepared.prefix.as_ref() {
         Some(prefix) => prepare_driver_cache(prefix.path().to_path_buf(), ctx.driver_version).await,
@@ -1993,6 +2025,21 @@ async fn launch_game(
         .addons
         .prepare_launch(prepared.prefix, request, &mut plan, cancel, tx)
         .await;
+    // ACT's own taskbar entry, from the copy its program row has just placed, when it runs beside the
+    // game. After the programs are installed rather than with the game's entry, which comes earlier:
+    // on a fresh prefix ACT is not there yet at that point.
+    if let (Some(home), Some(prefix)) = (ctx.desktop_dir.clone(), plan.prefix())
+        && profile.launch.act
+    {
+        let act = prefix
+            .drive_c()
+            .join("Apogee/ACT/Advanced Combat Tracker.exe");
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::launch::desktop::ensure_act(&home, &act) {
+                tracing::warn!(%error, "ACT's taskbar icon was not installed");
+            }
+        });
+    }
     let in_prefix_companion = prepared_addons.programs.any()
         || profile
             .external
@@ -2045,6 +2092,28 @@ async fn launch_game(
     for failure in failures {
         let _ = tx.send(Event::Error(failure));
     }
+    // A program started into the game's container is stopped above through the process that asked the
+    // container to start it, which ends that process and not always the program. Once the game has
+    // exited, whatever is still running in the launch's own tree is ended with it, unless the user
+    // asked for one of their tools to outlive the game.
+    let keep_after_close = profile.external.iter().any(|addon| {
+        addon.enabled()
+            && matches!(
+                addon.trigger(),
+                apogee_addons::Trigger::WithGame {
+                    keep_after_close: true
+                }
+            )
+    });
+    #[cfg(target_os = "linux")]
+    if !keep_after_close
+        && let Some(prefix) = handle.prefix()
+        && !apogee_runtime::game_running(&profile.game_path).unwrap_or(true)
+    {
+        crate::launch::leftover::end_recorded(prefix.path()).await;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = keep_after_close;
     result?;
     emit(tx, FlowState::Exited);
     Ok(())

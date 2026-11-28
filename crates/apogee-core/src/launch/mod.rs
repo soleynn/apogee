@@ -18,7 +18,11 @@ use crate::command::Event;
 use crate::error::CoreError;
 use crate::model::{Profile, RunnerSelection};
 
+pub(crate) mod desktop;
 pub(crate) mod driver_cache;
+pub(crate) mod kwin;
+#[cfg(target_os = "linux")]
+pub(crate) mod leftover;
 pub(crate) mod runtime_backend;
 
 /// What a profile asks its prefix to be: the runner that builds it, and the graphics options that are

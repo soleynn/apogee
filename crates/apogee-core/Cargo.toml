@@ -19,6 +19,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
 url.workspace = true
+md-5.workspace = true
 sha2.workspace = true
 image.workspace = true
 zip.workspace = true
@@ -35,7 +36,7 @@ apogee-otp = { path = "../apogee-otp" }
 # The monotonic clock the game re-derives its launch key from. Linux-only, so the windows-gnu
 # cross-build never pulls rustix's `time` backend, which is unimplemented there.
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true, features = ["time"] }
+rustix = { workspace = true, features = ["process", "time"] }
 
 [dev-dependencies]
 apogee-test-support = { path = "../apogee-test-support" }

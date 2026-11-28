@@ -103,6 +103,12 @@ pub struct CoreConfig {
     pub addons_dir: PathBuf,
     /// Where validated public display artwork is cached after normalization.
     pub frontier_dir: PathBuf,
+    /// The desktop's data home, where the game's hidden desktop entry and icon go so its taskbar task
+    /// carries the game's own icon. `None` leaves the desktop alone.
+    pub desktop_dir: Option<PathBuf>,
+    /// The desktop's configuration home, where a KWin rule keeping ACT's overlays above the game goes.
+    /// `None` leaves the desktop's configuration alone.
+    pub desktop_config_dir: Option<PathBuf>,
 }
 
 impl CoreConfig {
@@ -129,6 +135,8 @@ impl CoreConfig {
             backups_dir: base.join("backups"),
             addons_dir: base.join("addons"),
             frontier_dir: base.join("frontier"),
+            desktop_dir: None,
+            desktop_config_dir: None,
         }
     }
 
@@ -147,8 +155,9 @@ impl CoreConfig {
         let windows_config = cfg!(windows).then_some("APPDATA");
         let windows_local = cfg!(windows).then_some("LOCALAPPDATA");
         let data = base_dir("XDG_DATA_HOME", ".local/share", windows_local)?;
+        let config = base_dir("XDG_CONFIG_HOME", ".config", windows_config)?;
         Ok(Self {
-            store_dir: base_dir("XDG_CONFIG_HOME", ".config", windows_config)?.join("apogee"),
+            store_dir: config.join("apogee"),
             runners_dir: data.join("apogee/runners"),
             prefixes_dir: data.join("apogee/prefixes"),
             patch_store: base_dir("XDG_CACHE_HOME", ".cache", windows_local)?
@@ -159,6 +168,8 @@ impl CoreConfig {
             // third party, so a cache cleaner removing it turns the next launch into a download.
             addons_dir: data.join("apogee/addons"),
             frontier_dir: data.join("apogee/frontier"),
+            desktop_dir: cfg!(target_os = "linux").then(|| data.clone()),
+            desktop_config_dir: cfg!(target_os = "linux").then_some(config),
         })
     }
 }
@@ -383,6 +394,8 @@ pub struct Core {
     clock: Clock,
     /// Where Wine prefixes live, so the flow can resolve a profile's prefix directory.
     prefixes_dir: PathBuf,
+    desktop_dir: Option<PathBuf>,
+    desktop_config_dir: Option<PathBuf>,
     backups_dir: PathBuf,
     patch_store: PathBuf,
     frontier: crate::frontier::FrontierAssets,
@@ -502,6 +515,8 @@ impl Core {
             backups_dir,
             addons_dir,
             frontier_dir,
+            desktop_dir,
+            desktop_config_dir,
         } = config;
         let store = Store::new(store_dir);
         // The keep-patches preference is read once here (a corrupt settings file defaults it off; the
@@ -563,6 +578,8 @@ impl Core {
             computer_id,
             clock: host::system_clock(),
             prefixes_dir,
+            desktop_dir,
+            desktop_config_dir,
             backups_dir,
             patch_store,
             frontier,
@@ -1740,6 +1757,8 @@ impl Core {
             driver_version: crate::launch::driver_cache::nvidia_driver_version,
             computer_id: self.computer_id,
             prefixes_dir: self.prefixes_dir.clone(),
+            desktop_dir: self.desktop_dir.clone(),
+            desktop_config_dir: self.desktop_config_dir.clone(),
             backups_dir: self.backups_dir.clone(),
             frontier: self.frontier.clone(),
         }

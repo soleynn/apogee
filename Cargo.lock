@@ -151,6 +151,7 @@ dependencies = [
  "async-trait",
  "image",
  "insta",
+ "md-5",
  "proptest",
  "reqwest",
  "rstest",
