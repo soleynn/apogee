@@ -22,7 +22,7 @@ pub(crate) const ALLOWED_KEYS: [&str; 2] = ["MONO_PATH", "WINEDLLOVERRIDES"];
 /// The renderer chain (every Direct3D generation and DXGI, which DXVK and VKD3D replace), the NVIDIA
 /// vendor libraries the nvapi option overrides, and the input and loader libraries a proxy-DLL shaped
 /// injector would hijack.
-const RESERVED_LIBRARIES: [&str; 13] = [
+const RESERVED_LIBRARIES: [&str; 14] = [
     "d3d8",
     "d3d9",
     "d3d10",
@@ -35,6 +35,7 @@ const RESERVED_LIBRARIES: [&str; 13] = [
     "nvapi",
     "nvapi64",
     "nvngx",
+    "nvofapi64",
     "dinput8",
 ];
 
@@ -49,13 +50,40 @@ pub(crate) struct EnvRefusal {
     pub reason: &'static str,
 }
 
+/// What the game's own launch environment says about library overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GameOverrides {
+    /// The libraries the game's `WINEDLLOVERRIDES` names, normalized. Empty when it sets none.
+    Named(Vec<String>),
+    /// The game carries a `WINEDLLOVERRIDES` this module cannot read, so which libraries it decides
+    /// is unknown and no companion override can be shown to leave them alone.
+    Unreadable,
+}
+
+impl GameOverrides {
+    /// A launch that overrides nothing beyond the fixed set.
+    pub(crate) const fn none() -> Self {
+        Self::Named(Vec::new())
+    }
+
+    /// Read the game's own `WINEDLLOVERRIDES`, if it has one.
+    pub(crate) fn of(value: Option<&str>) -> Self {
+        match value.map(override_names) {
+            None => Self::none(),
+            Some(Ok(names)) => Self::Named(names),
+            Some(Err(_)) => Self::Unreadable,
+        }
+    }
+}
+
 /// Check every variable in `env`, refusing the first that breaks a rule.
 ///
 /// `game_overrides` are the libraries the game's own launch environment overrides, beyond the fixed
-/// set, so an addition naming one is refused as well.
+/// set, so an addition naming one is refused as well. When the game's list could not be read, every
+/// `WINEDLLOVERRIDES` is refused: an addition cannot be told from a replacement.
 pub(crate) fn check(
     env: &BTreeMap<String, String>,
-    game_overrides: &[String],
+    game_overrides: &GameOverrides,
 ) -> Result<(), EnvRefusal> {
     for (key, value) in env {
         let refuse = |reason: &'static str| EnvRefusal {
@@ -76,10 +104,13 @@ pub(crate) fn check(
             return Err(refuse("its value carries a control character"));
         }
         if key == "WINEDLLOVERRIDES" {
+            let GameOverrides::Named(game) = game_overrides else {
+                return Err(refuse(
+                    "the game's own library overrides could not be read, so none may be added",
+                ));
+            };
             for library in override_names(value).map_err(refuse)? {
-                if RESERVED_LIBRARIES.contains(&library.as_str())
-                    || game_overrides.contains(&library)
-                {
+                if RESERVED_LIBRARIES.contains(&library.as_str()) || game.contains(&library) {
                     return Err(refuse(
                         "it overrides a library the game's own launch decides",
                     ));
@@ -97,7 +128,8 @@ pub(crate) fn check(
 ///
 /// Strict about shape, because the value is parsed again by wine and anything this reads differently
 /// is an override this check did not see. Each `;`-separated entry is `names=mode`, the names
-/// `,`-separated, the mode made only of `n`, `b` and `,` (or empty, which disables the library).
+/// `,`-separated, the mode one or two of `n`, `b`, `native` and `builtin` in any case, `,`-separated
+/// (or empty, which disables the library).
 pub(crate) fn override_names(value: &str) -> Result<Vec<String>, &'static str> {
     let mut names = Vec::new();
     for entry in value.split(';') {
@@ -107,7 +139,7 @@ pub(crate) fn override_names(value: &str) -> Result<Vec<String>, &'static str> {
         let Some((libraries, mode)) = entry.split_once('=') else {
             return Err("an override entry names no load order");
         };
-        if !mode.chars().all(|c| matches!(c, 'n' | 'b' | ',')) || mode.len() > 3 {
+        if !is_load_order(mode) {
             return Err("an override entry's load order is not one wine reads");
         }
         for library in libraries.split(',') {
@@ -115,6 +147,27 @@ pub(crate) fn override_names(value: &str) -> Result<Vec<String>, &'static str> {
         }
     }
     Ok(names)
+}
+
+/// Whether `mode` is a load order wine reads the way it is written.
+///
+/// Wine looks only at the first letter of each `,`-separated word, so `nonsense` would load native.
+/// Only the spellings that mean what they say are taken: the letters and the two whole words.
+fn is_load_order(mode: &str) -> bool {
+    if mode.is_empty() {
+        return true;
+    }
+    let mut words = 0_usize;
+    for word in mode.split(',') {
+        words += 1;
+        let known = ["n", "b", "native", "builtin"]
+            .iter()
+            .any(|spelling| word.eq_ignore_ascii_case(spelling));
+        if !known || words > 2 {
+            return false;
+        }
+    }
+    true
 }
 
 /// One library name as wine compares it.
@@ -183,7 +236,7 @@ mod tests {
             "MONO_PATH ",
             "",
         ] {
-            let refused = check(&env(&[(key, "x")]), &[]).expect_err(key);
+            let refused = check(&env(&[(key, "x")]), &GameOverrides::none()).expect_err(key);
             assert_eq!(refused.key, key);
         }
     }
@@ -202,7 +255,7 @@ mod tests {
             "winhttp=n;DXGI.DLL=n",
         ] {
             assert!(
-                check(&env(&[("WINEDLLOVERRIDES", value)]), &[]).is_err(),
+                check(&env(&[("WINEDLLOVERRIDES", value)]), &GameOverrides::none()).is_err(),
                 "{value} must be refused"
             );
         }
@@ -210,7 +263,7 @@ mod tests {
         assert!(
             check(
                 &env(&[("WINEDLLOVERRIDES", "winhttp=n")]),
-                &["winhttp".to_owned()]
+                &GameOverrides::Named(vec!["winhttp".to_owned()])
             )
             .is_err()
         );
@@ -223,12 +276,17 @@ mod tests {
             "winhttp",
             "winhttp=x",
             "winhttp=nnnn",
+            "winhttp=nonsense",
+            "winhttp=n,",
+            "winhttp=,",
+            "winhttp=n,b,n",
+            "winhttp= native",
             "=n",
             "win http=n",
             "winhttp=n\nd3d11=n",
         ] {
             assert!(
-                check(&env(&[("WINEDLLOVERRIDES", value)]), &[]).is_err(),
+                check(&env(&[("WINEDLLOVERRIDES", value)]), &GameOverrides::none()).is_err(),
                 "{value:?} must be refused"
             );
         }
@@ -239,15 +297,55 @@ mod tests {
     fn an_allowed_addition_passes() {
         let ok = env(&[
             ("MONO_PATH", "C:\\Apogee\\act\\libs"),
-            ("WINEDLLOVERRIDES", "mscoree=b;winhttp=n,b"),
+            (
+                "WINEDLLOVERRIDES",
+                "mscoree=b;winhttp=n,b;version=Native,Builtin;xaudio2_7=",
+            ),
         ]);
-        assert_eq!(check(&ok, &[]), Ok(()));
+        assert_eq!(check(&ok, &GameOverrides::none()), Ok(()));
         assert_eq!(
-            merge_overrides(Some("d3d11,dxgi=n"), "winhttp=n"),
-            "d3d11,dxgi=n;winhttp=n"
+            merge_overrides(Some("d3d11,dxgi=native"), "winhttp=n"),
+            "d3d11,dxgi=native;winhttp=n"
         );
         assert_eq!(merge_overrides(None, "winhttp=n"), "winhttp=n");
-        assert!(check(&env(&[("MONO_PATH", "")]), &[]).is_err());
-        assert!(check(&env(&[("MONO_PATH", &"a".repeat(5000))]), &[]).is_err());
+        assert!(check(&env(&[("MONO_PATH", "")]), &GameOverrides::none()).is_err());
+        assert!(
+            check(
+                &env(&[("MONO_PATH", &"a".repeat(5000))]),
+                &GameOverrides::none()
+            )
+            .is_err()
+        );
+    }
+
+    /// The spelling the game's launch really carries is read: its native group and the group it
+    /// disables both count as decided, so a companion cannot turn back on what the launch turned off.
+    #[test]
+    fn the_games_own_spelling_is_read_and_its_disabled_libraries_stay_decided() {
+        let game = GameOverrides::of(Some(
+            "d3d10core,d3d11,d3d9,dxgi=native;nvapi,nvapi64,nvofapi64,winhttp=",
+        ));
+        let GameOverrides::Named(names) = &game else {
+            panic!("the launch's own value must parse");
+        };
+        assert!(names.iter().any(|name| name == "winhttp"));
+        assert!(check(&env(&[("WINEDLLOVERRIDES", "winhttp=n")]), &game).is_err());
+        assert!(check(&env(&[("WINEDLLOVERRIDES", "nvofapi64=n")]), &game).is_err());
+        assert_eq!(
+            check(&env(&[("WINEDLLOVERRIDES", "mscoree=b")]), &game),
+            Ok(())
+        );
+    }
+
+    /// A game value this cannot read refuses every companion override, the harmless ones included,
+    /// and still leaves a companion that asks for none alone.
+    #[test]
+    fn an_unreadable_game_value_refuses_every_companion_override() {
+        let game = GameOverrides::of(Some("d3d11=native;dxgi"));
+        assert_eq!(game, GameOverrides::Unreadable);
+        assert!(check(&env(&[("WINEDLLOVERRIDES", "mscoree=b")]), &game).is_err());
+        assert!(check(&env(&[("WINEDLLOVERRIDES", "")]), &game).is_err());
+        assert_eq!(check(&env(&[("MONO_PATH", "C:\\libs")]), &game), Ok(()));
+        assert_eq!(GameOverrides::of(None), GameOverrides::none());
     }
 }

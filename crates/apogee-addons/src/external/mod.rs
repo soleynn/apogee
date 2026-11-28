@@ -164,7 +164,8 @@ impl GameContext {
     /// Never the launch plan's whole environment. A host companion is not given these.
     ///
     /// A `WINEDLLOVERRIDES` here is the game's, and a companion's own override list is appended to it
-    /// rather than replacing it; a companion override naming one of these libraries is refused.
+    /// rather than replacing it; a companion override naming one of these libraries is refused, and
+    /// so is every companion override when this value is not one wine's override grammar reads.
     ///
     /// # Examples
     ///
@@ -192,11 +193,13 @@ impl GameContext {
     }
 
     /// The libraries the game's shared environment overrides, which a companion may not override.
-    fn game_overrides(&self) -> Vec<String> {
-        self.launch_env
-            .get("WINEDLLOVERRIDES")
-            .and_then(|value| crate::env_rules::override_names(value).ok())
-            .unwrap_or_default()
+    ///
+    /// A value that does not parse is reported as unreadable rather than as no overrides, so a
+    /// companion's own list is refused instead of being checked against nothing.
+    fn game_overrides(&self) -> crate::env_rules::GameOverrides {
+        crate::env_rules::GameOverrides::of(
+            self.launch_env.get("WINEDLLOVERRIDES").map(String::as_str),
+        )
     }
 }
 
@@ -487,6 +490,10 @@ mod tests {
 
     use super::*;
 
+    /// The override list a launch with the NVIDIA companion turned off carries, as the runtime
+    /// spells it.
+    const GAME_OVERRIDES: &str = "d3d10core,d3d11,d3d9,dxgi=native;nvapi,nvapi64,nvofapi64=";
+
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -512,7 +519,7 @@ mod tests {
             .with_launch_env(env(&[
                 ("WINEFSYNC", "1"),
                 ("UMU_CONTAINER_NSENTER", "1"),
-                ("WINEDLLOVERRIDES", "d3d11,dxgi=n"),
+                ("WINEDLLOVERRIDES", GAME_OVERRIDES),
                 ("APOGEE_GAME_PID", "1"),
             ]));
         let trigger = Trigger::WithGame {
@@ -526,16 +533,43 @@ mod tests {
         let got = child_env(&inside, &game);
         assert_eq!(got["WINEFSYNC"], "1");
         assert_eq!(got["UMU_CONTAINER_NSENTER"], "1");
-        assert_eq!(got["WINEDLLOVERRIDES"], "d3d11,dxgi=n;mscoree=b");
+        assert_eq!(
+            got["WINEDLLOVERRIDES"],
+            format!("{GAME_OVERRIDES};mscoree=b")
+        );
         assert_eq!(got["APOGEE_GAME_PID"], "4321");
 
-        // The game's own overrides are ones a companion may not name.
-        let clash = inside.with_env(env(&[("WINEDLLOVERRIDES", "mscoree=b;D3D11=b")]));
-        assert!(
-            clash
-                .validate_against(0, true, &game.game_overrides())
-                .is_err()
+        // The game's own list is read as the runtime spells it, the group it disables included, so
+        // a companion cannot turn back on a library the launch turned off.
+        let decided = game.game_overrides();
+        let names = [
+            "d3d10core",
+            "d3d11",
+            "d3d9",
+            "dxgi",
+            "nvapi",
+            "nvapi64",
+            "nvofapi64",
+        ];
+        assert_eq!(
+            decided,
+            crate::env_rules::GameOverrides::Named(names.map(str::to_owned).to_vec())
         );
+        for clash in ["mscoree=b;D3D11=b", "nvofapi64=n"] {
+            let clash = inside.clone().with_env(env(&[("WINEDLLOVERRIDES", clash)]));
+            assert!(clash.validate_against(0, true, &decided).is_err());
+        }
+        assert!(inside.validate_against(0, true, &decided).is_ok());
+
+        // A game value that cannot be read refuses the companion's override rather than letting it
+        // through unchecked.
+        let unreadable = game
+            .clone()
+            .with_launch_env(env(&[("WINEDLLOVERRIDES", "d3d11=native;dxgi")]));
+        let refused = inside
+            .validate_against(0, true, &unreadable.game_overrides())
+            .expect_err("an override beside an unreadable game list");
+        assert!(matches!(refused, AddonError::InvalidAddon { .. }));
 
         let host = ExternalAddon::new(&program, vec![], RunIn::Host, trigger).expect("addon");
         let got = child_env(&host, &game);

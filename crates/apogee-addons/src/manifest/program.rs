@@ -401,11 +401,13 @@ fn build_start(component: &str, raw: RawStart) -> Result<ProgramStart, ManifestE
         },
         other => return Err(unknown(component, "trigger", other)),
     };
-    crate::env_rules::check(&raw.env, &[]).map_err(|refused| ManifestError::BadEnv {
-        component: component.to_owned(),
-        key: refused.key,
-        reason: refused.reason,
-    })?;
+    crate::env_rules::check(&raw.env, &crate::env_rules::GameOverrides::none()).map_err(
+        |refused| ManifestError::BadEnv {
+            component: component.to_owned(),
+            key: refused.key,
+            reason: refused.reason,
+        },
+    )?;
     Ok(ProgramStart {
         program,
         args: raw.args,

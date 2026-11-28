@@ -248,7 +248,9 @@ impl ExternalAddon {
             Some(ExternalAddonProblem::UnsupportedFields)
         } else if self.program.as_os_str().is_empty() || !self.program.is_absolute() {
             Some(ExternalAddonProblem::InvalidProgram)
-        } else if crate::env_rules::check(&self.env, &[]).is_err() {
+        } else if crate::env_rules::check(&self.env, &crate::env_rules::GameOverrides::none())
+            .is_err()
+        {
             Some(ExternalAddonProblem::InvalidEnv)
         } else {
             None
@@ -301,7 +303,7 @@ impl ExternalAddon {
     }
 
     pub(crate) fn validate(&self, index: usize, has_prefix: bool) -> Result<()> {
-        self.validate_against(index, has_prefix, &[])
+        self.validate_against(index, has_prefix, &crate::env_rules::GameOverrides::none())
     }
 
     /// [`Self::validate`], with `game_overrides` naming the libraries the game's launch environment
@@ -310,7 +312,7 @@ impl ExternalAddon {
         &self,
         index: usize,
         has_prefix: bool,
-        game_overrides: &[String],
+        game_overrides: &crate::env_rules::GameOverrides,
     ) -> Result<()> {
         self.check_program(index)?;
         if let Some(field) = self.unsupported.keys().next() {
@@ -555,7 +557,11 @@ mod tests {
         // An override the game's own launch environment adds is refused as well.
         assert!(
             allowed
-                .validate_against(0, true, &["winhttp".to_owned()])
+                .validate_against(
+                    0,
+                    true,
+                    &crate::env_rules::GameOverrides::Named(vec!["winhttp".to_owned()])
+                )
                 .is_err()
         );
 
