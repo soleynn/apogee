@@ -45,8 +45,7 @@ exit 127
 "#;
 
 fn write_script(path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
-    std::fs::write(path, body)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    apogee_test_support::exec::write_executable(path, body)?;
     Ok(())
 }
 

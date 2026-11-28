@@ -5,7 +5,6 @@
 
 use std::error::Error;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apogee_fetch::{DigestPin, Fetcher};
@@ -62,8 +61,7 @@ async fn prepared(runtime: &Runtime, root: &Path) -> Result<Prefix, Box<dyn Erro
     let runner_dir = root.join("runner");
     let bin = runner_dir.join("bin");
     std::fs::create_dir_all(&bin)?;
-    std::fs::write(bin.join("wine"), FAKE_WINE)?;
-    std::fs::set_permissions(bin.join("wine"), std::fs::Permissions::from_mode(0o755))?;
+    apogee_test_support::exec::write_executable(bin.join("wine"), FAKE_WINE)?;
     Ok(runtime
         .prepare_custom(
             &runner_dir,

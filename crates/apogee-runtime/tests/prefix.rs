@@ -6,7 +6,6 @@
 //! proves the same against stock wine and cross-checks path translation against the `winepath` oracle.
 
 use std::error::Error;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apogee_fetch::Fetcher;
@@ -30,8 +29,7 @@ fn fake_runner(dir: &Path) -> Result<(), Box<dyn Error>> {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin)?;
     let wine = bin.join("wine");
-    std::fs::write(&wine, FAKE_WINE)?;
-    std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755))?;
+    apogee_test_support::exec::write_executable(&wine, FAKE_WINE)?;
     Ok(())
 }
 

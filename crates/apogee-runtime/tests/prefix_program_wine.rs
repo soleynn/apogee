@@ -28,8 +28,7 @@ fn wine_runner(dir: &Path) -> Result<(), Box<dyn Error>> {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin)?;
     let wine = bin.join("wine");
-    std::fs::write(&wine, "#!/bin/sh\nexec wine \"$@\"\n")?;
-    std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755))?;
+    apogee_test_support::exec::write_executable(&wine, "#!/bin/sh\nexec wine \"$@\"\n")?;
     Ok(())
 }
 

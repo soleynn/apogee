@@ -151,5 +151,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --no-fail-fast --summary-only
+          tool: cargo-llvm-cov,nextest
+      # The default nextest profile, which retries nothing: CI's profile retries a failing test, so a
+      # flaky one passes there and only fails here, and a failure here is the signal that one is back.
+      - run: cargo llvm-cov nextest --workspace --no-tests=pass --no-report
+      - name: Publish the coverage summary
+        if: always()
+        run: |
+          {
+            echo '## Coverage'
+            echo
+            echo '```text'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
