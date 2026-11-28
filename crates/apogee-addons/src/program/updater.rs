@@ -72,7 +72,11 @@ impl UpdaterKey {
 }
 
 /// The key's value as a top-level member of a JSON object, in its string form.
+///
+/// A leading UTF-8 byte order mark is skipped: the programs this reads write their settings with
+/// one, and the JSON parser takes it for a stray character.
 fn json_values(settings: &[u8], key: &str) -> Vec<String> {
+    let settings = settings.strip_prefix(b"\xef\xbb\xbf").unwrap_or(settings);
     let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(settings)
     else {
         return Vec::new();
@@ -208,6 +212,19 @@ mod tests {
         ] {
             assert!(matches!(key.state_in(on), UpdaterState::On { .. }));
         }
+        // A byte order mark in front changes nothing, in either direction; a second one is not JSON.
+        assert_eq!(
+            key.state_in(b"\xef\xbb\xbf{\"cbAutoCheck\": \"False\"}"),
+            UpdaterState::Off
+        );
+        assert!(matches!(
+            key.state_in(b"\xef\xbb\xbf{\"cbAutoCheck\": true}"),
+            UpdaterState::On { .. }
+        ));
+        assert_eq!(
+            key.state_in(b"\xef\xbb\xbf\xef\xbb\xbf{\"cbAutoCheck\": false}"),
+            UpdaterState::Missing
+        );
         assert_eq!(key.state_in(b"[]"), UpdaterState::Missing);
         let huge = vec![b' '; usize::try_from(MAX_SETTINGS_BYTES).unwrap() + 1];
         assert_eq!(key.state_in(&huge), UpdaterState::Missing);
