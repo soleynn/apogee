@@ -43,9 +43,19 @@ pub(crate) fn nvidia_driver_version() -> Option<String> {
 /// `driver` is `None` on a host with no NVIDIA driver loaded. That leaves the recorded version alone:
 /// Mesa keys its own entries by driver build, so there is nothing to invalidate, and a recorded
 /// NVIDIA version still says what the `nv` half was filled by if that driver comes back.
+///
+/// A cache root that is a symbolic link is refused: nothing is created, emptied or recorded through
+/// it, the link and whatever it names are left as they are, and the result is `None`.
+///
+/// This touches the disk and can spend seconds emptying a large cache, so an async caller runs it on
+/// a blocking thread.
 pub(crate) fn prepare(prefix: &Path, driver: Option<&str>) -> Option<PathBuf> {
     let root = cache_root(prefix);
     let stamp = stamp_path(prefix);
+    if std::fs::symlink_metadata(&root).is_ok_and(|meta| meta.is_symlink()) {
+        tracing::warn!(path = %root.display(), "driver cache root is a link; not used");
+        return None;
+    }
     if let Some(driver) = driver {
         let recorded = std::fs::read_to_string(&stamp).ok();
         // A missing record with a cache present is a cache of unknown origin, so it is emptied too.
@@ -134,6 +144,25 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
         assert!(!std::fs::symlink_metadata(&stamp).unwrap().is_symlink());
         assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "NVRM 595.84");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_the_cache_root_is_refused_and_left_alone() {
+        let prefix = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fill(elsewhere.path());
+        let root = cache_root(prefix.path());
+        std::os::unix::fs::symlink(elsewhere.path(), &root).unwrap();
+
+        // With a driver known (which would empty the cache) and without one (which would only
+        // create its halves): neither reaches through the link.
+        assert!(prepare(prefix.path(), Some("NVRM 595.84")).is_none());
+        assert!(prepare(prefix.path(), None).is_none());
+        assert!(std::fs::symlink_metadata(&root).unwrap().is_symlink());
+        assert!(elsewhere.path().join("entry").exists());
+        assert!(!elsewhere.path().join("nv").exists() && !elsewhere.path().join("mesa").exists());
+        assert!(!stamp_path(prefix.path()).exists());
     }
 
     fn fill(dir: &Path) {

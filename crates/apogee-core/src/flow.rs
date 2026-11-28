@@ -1027,6 +1027,26 @@ async fn resolve_password(
     }
 }
 
+/// Bring the prefix's driver cache up to the installed driver, off the async path: reading the
+/// driver's version and emptying a cache after a driver change are both blocking, and the second can
+/// take seconds. No failure here stops the launch; the driver falls back to its default cache.
+async fn prepare_driver_cache(
+    prefix: std::path::PathBuf,
+    driver_version: crate::launch::driver_cache::DriverVersionSource,
+) -> Option<std::path::PathBuf> {
+    let prepared = tokio::task::spawn_blocking(move || {
+        crate::launch::driver_cache::prepare(&prefix, driver_version().as_deref())
+    })
+    .await;
+    match prepared {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(%error, "driver cache task failed; launching without it");
+            None
+        }
+    }
+}
+
 /// Verify the profile's install against its signed block indexes and re-fetch only the broken ranges.
 /// A repo named in `local_indexes` reads that `.apzi` instead of resolving through the hosted
 /// catalog; the rest resolve as always.
@@ -1871,9 +1891,10 @@ async fn launch_game(
         .await?;
 
     let steam = is_steam(account);
-    let driver_cache = prepared.prefix.as_ref().and_then(|prefix| {
-        crate::launch::driver_cache::prepare(prefix.path(), (ctx.driver_version)().as_deref())
-    });
+    let driver_cache = match prepared.prefix.as_ref() {
+        Some(prefix) => prepare_driver_cache(prefix.path().to_path_buf(), ctx.driver_version).await,
+        None => None,
+    };
     let environment = compute_environment(
         &launch_env(
             profile,
