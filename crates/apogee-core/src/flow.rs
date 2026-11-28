@@ -426,9 +426,6 @@ async fn advance_first_run(
                         version: version.clone(),
                     }
                 }
-                crate::FirstRunRunnerSelection::SystemWine { .. } => {
-                    crate::RunnerSelection::SystemWine
-                }
             };
             ctx.store.save_profile(&profile)?;
             match create_prefix(ctx, &profile, tx, cancel).await {
@@ -621,7 +618,12 @@ fn materialize_first_run_identities(
         let existing = matches.into_iter().next();
         let is_new = existing.is_none();
         let profile = existing.unwrap_or_else(|| {
-            crate::Profile::new(&account.square_enix_id, account_id, game_path.clone())
+            crate::Profile::new(
+                &account.square_enix_id,
+                account_id,
+                game_path.clone(),
+                first_run_runner(checkpoint),
+            )
         });
         if is_new {
             ctx.store.save_profile(&profile)?;
@@ -629,6 +631,25 @@ fn materialize_first_run_identities(
         checkpoint.profile_id = Some(profile.id);
     }
     Ok(())
+}
+
+/// The runner a profile made during setup starts with: the catalog's recommended row when setup has
+/// read the catalog already, and none otherwise. The runner step replaces it either way.
+fn first_run_runner(checkpoint: &crate::FirstRunCheckpoint) -> crate::RunnerSelection {
+    checkpoint
+        .runners
+        .iter()
+        .find(|reading| reading.recommended && reading.available)
+        .map_or(crate::RunnerSelection::Unchosen, |reading| {
+            match &reading.selection {
+                crate::FirstRunRunnerSelection::Managed { name, version } => {
+                    crate::RunnerSelection::Managed {
+                        name: name.clone(),
+                        version: version.clone(),
+                    }
+                }
+            }
+        })
 }
 
 fn select_first_run_game(
@@ -664,10 +685,14 @@ fn select_first_run_game(
         .filter(|profile| profile.account == account_id && profile.game_path == path)
         .collect::<Vec<_>>();
     matches.sort_by_key(|profile| profile.id);
-    let profile = matches
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| crate::Profile::new(&account.square_enix_id, account_id, path));
+    let profile = matches.into_iter().next().unwrap_or_else(|| {
+        crate::Profile::new(
+            &account.square_enix_id,
+            account_id,
+            path,
+            first_run_runner(&checkpoint),
+        )
+    });
     let next = crate::first_run::transition(
         &checkpoint,
         crate::first_run::FirstRunTransition::SelectGame {
@@ -702,9 +727,7 @@ async fn support_bundle(
 ) -> Result<(), CoreError> {
     let profiles = ctx.store.list_profiles()?;
     let settings = ctx.store.load_settings()?;
-    let system =
-        crate::composition::bounded_system_report_input(&ctx.store, &ctx.prefixes_dir, profile)
-            .await?;
+    let system = crate::composition::system_report_input(&ctx.store, &ctx.prefixes_dir, profile)?;
     let caller_facts = crate::ValidatedCallerFacts::new(facts);
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -947,7 +970,7 @@ async fn login(
         } => {
             if pending_patches.is_empty() {
                 let session = build_session(ctx, &auth, &report, unique_id.expose());
-                ctx.store.save_uid_cache(profile.account, &session)?;
+                keep_session(ctx, &profile, &session)?;
                 record_current(ctx, profile.id)?;
             } else {
                 record_pending(ctx, profile.id, &pending_patches, None)?;
@@ -977,6 +1000,12 @@ async fn play(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, account) = resolve(ctx, profile_id)?;
+    // Refused before anything is asked of the user: signing in and patching for a launch that cannot
+    // start would spend a one-time code and a download on nothing.
+    if launch {
+        crate::launch::managed_runner(&profile)?;
+    }
+    drop_session_at_rest(ctx, &profile)?;
     if mode == InstallMode::Update
         && launch
         && let Some(session) = valid_cached_session(ctx, &profile)?
@@ -1103,6 +1132,9 @@ async fn launch_cached(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let (profile, account) = resolve(ctx, profile_id)?;
+    // A runner it cannot launch outranks a missing session: signing in would not make it startable.
+    crate::launch::managed_runner(&profile)?;
+    drop_session_at_rest(ctx, &profile)?;
     match valid_cached_session(ctx, &profile)? {
         Some(session) => launch_game(ctx, &profile, &account, &session, tx, cancel).await,
         None => {
@@ -1207,7 +1239,8 @@ async fn authenticate(
         // pin, which is strictly wider than whatever the user configured, and the state a shell
         // renders carries only the port so nothing would look different.
         let settings = ctx.store.load_settings()?;
-        match wait_for_push(&settings.otp_listener, tx, cancel).await? {
+        let companions = crate::program::companions_configured(profile);
+        match wait_for_push(&settings.otp_listener, companions, tx, cancel).await? {
             Some(code) => Some(code),
             None => return Ok(None),
         }
@@ -1391,11 +1424,22 @@ enum Sourcing<'a> {
 /// [`hold_for`]. The listener is consumed by its own wait, so the port is gone on every path out of
 /// here including the error paths and including a cancel: there is no drop to remember and no early
 /// return to audit.
+///
+/// `companions` is whether a companion is configured on the profile logging in. A companion runs
+/// with the launcher's access on this machine, so it can reach a listener that admits any source,
+/// or take its port first; with one configured, a listener that is not pinned to a source is not
+/// opened, and the code is asked for instead.
 async fn wait_for_push(
     settings: &ListenerSettings,
+    companions: bool,
     tx: &UnboundedSender<Event>,
     cancel: &CancellationToken,
 ) -> Result<Option<Code>, CoreError> {
+    if companions && matches!(settings.sources, ListenerSources::Any) {
+        let _ = tx.send(Event::Notice(Notice::PushedCodesNeedAPinnedSource));
+        emit(tx, FlowState::NeedsOtp);
+        return Ok(None);
+    }
     let Some(cfg) = listener_config(settings) else {
         // A machine configured to admit nobody cannot receive a code, which is the same disposition
         // as an account with no way to produce one. Answered rather than bound: opening a port that
@@ -1403,7 +1447,17 @@ async fn wait_for_push(
         emit(tx, FlowState::NeedsOtp);
         return Ok(None);
     };
-    let listener = Listener::bind(cfg).await?;
+    let listener = match Listener::bind(cfg).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            // Whatever holds the port would receive a code pushed now. Said before the failure,
+            // because the failure reads as "try again" and sending the code is the wrong retry.
+            if let OtpError::ListenerBind { port } = &err {
+                let _ = tx.send(Event::Notice(Notice::OtpPortHeld { port: *port }));
+            }
+            return Err(err.into());
+        }
+    };
     let port = listener.local_addr().port();
     let wait = Duration::from_secs(settings.wait_seconds);
     emit(
@@ -1556,7 +1610,7 @@ async fn patch_to_current(
             } => {
                 if pending_patches.is_empty() {
                     let session = build_session(ctx, auth, &report, unique_id.expose());
-                    ctx.store.save_uid_cache(profile.account, &session)?;
+                    keep_session(ctx, profile, &session)?;
                     record_current(ctx, profile.id)?;
                     return Ok(Some(session));
                 }
@@ -1881,13 +1935,19 @@ async fn launch_game(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let settings = ctx.store.load_settings()?;
+    if crate::program::companions_configured(profile)
+        && settings.secret_backend == crate::model::SecretBackend::Platform
+        && !account.never_store
+    {
+        let _ = tx.send(Event::Notice(Notice::CompanionCanReadKeyring));
+    }
     let game_dir = profile.game_path.join("game");
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
 
     emit(tx, FlowState::PreparingPrefix);
     let prepared = ctx
         .launch
-        .prepare(&PrefixRequest::from(profile), &prefix_dir, cancel, tx)
+        .prepare(&PrefixRequest::try_from(profile)?, &prefix_dir, cancel, tx)
         .await?;
 
     let steam = is_steam(account);
@@ -1922,31 +1982,40 @@ async fn launch_game(
     // Comes back with the proof to watch for when something took the launch over, which is the
     // companion layer's answer rather than something read back off the plan: what a redirect leaves in
     // a plan is the shape one happened to take, and the companion that composed it is gone by the time
-    // the proof lands.
-    let confirming = ctx
+    // the proof lands. It also installs and gates the curated programs the profile turns on, before the
+    // spawn: a program that misses a gate is narrated and left out, and the game starts regardless.
+    let request = crate::addons::LaunchPrograms {
+        dalamud: dalamud_config(profile, session, &settings),
+        programs: crate::addons::LaunchPrograms::enabled(&profile.launch),
+        game_version: session.game_version.clone(),
+    };
+    let prepared_addons = ctx
         .addons
-        .prepare_launch(
-            prepared.prefix,
-            dalamud_config(profile, session, &settings),
-            &mut plan,
-            cancel,
-            tx,
-        )
+        .prepare_launch(prepared.prefix, request, &mut plan, cancel, tx)
         .await;
+    let in_prefix_companion = prepared_addons.programs.any()
+        || profile
+            .external
+            .iter()
+            .any(|addon| addon.enabled() && addon.run_in() == apogee_addons::RunIn::Prefix);
+    let shared_env = join_session(&mut plan, prepared.runner, in_prefix_companion);
 
     emit(tx, FlowState::Launching);
     let handle = ctx.launch.launch(plan, cancel, tx).await?;
     tracing::debug!(pid = handle.game_pid(), "game process running");
     emit(tx, FlowState::Running);
 
-    // Started once the game is up, so a companion that looks for it finds it.
+    // Started once the game is up, so a companion that looks for it finds it: the curated programs
+    // that passed their gates first, then the user's own.
     let addons = ctx
         .addons
         .start(
             handle.game_pid(),
             handle.prefix(),
+            shared_env,
+            prepared_addons.programs,
             profile.external.clone(),
-            confirming,
+            prepared_addons.confirming,
             cancel,
             tx,
         )
@@ -1978,6 +2047,34 @@ async fn launch_game(
     }
     result?;
     emit(tx, FlowState::Exited);
+    Ok(())
+}
+
+/// Write `session` to the account's session cache, unless a companion is configured on `profile`.
+///
+/// A companion runs with the launcher's own access, and the cached session is a ticket that launches
+/// the game as this account with no sign-in. While anything of the kind is configured there is no
+/// ticket at rest for it to read: the launch uses the session it holds in memory, and the next one
+/// signs in again.
+fn keep_session(
+    ctx: &FlowContext,
+    profile: &Profile,
+    session: &UidCacheEntry,
+) -> Result<(), CoreError> {
+    if crate::program::companions_configured(profile) {
+        return Ok(());
+    }
+    Ok(ctx.store.save_uid_cache(profile.account, session)?)
+}
+
+/// Remove the account's cached session when a companion is configured on `profile`, before anything
+/// else in the flow reads it. One left from before the companion was configured would otherwise be
+/// launched from, and stay at rest for the whole session. A removal that fails stops the run rather
+/// than leaving the ticket where the companion can read it.
+fn drop_session_at_rest(ctx: &FlowContext, profile: &Profile) -> Result<(), CoreError> {
+    if crate::program::companions_configured(profile) {
+        ctx.store.clear_uid_cache(profile.account)?;
+    }
     Ok(())
 }
 
@@ -2088,7 +2185,10 @@ async fn prefix(
 ) -> Result<(), CoreError> {
     let profile = ctx.store.load_profile(profile_id)?;
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(&profile));
-    let request = PrefixRequest::from(&profile);
+    let request = PrefixRequest::try_from(&profile)?;
+    // The curated programs the profile turns on are part of the setup a prefix is checked against
+    // and repaired to, so the action that resolves what a check reports installs them too.
+    let programs = crate::addons::LaunchPrograms::enabled(&profile.launch);
 
     match action {
         PrefixAction::Create => {
@@ -2105,7 +2205,10 @@ async fn prefix(
                     // Both halves are read, neither is applied. A prefix whose structure is intact but
                     // which has none of the setup the catalog publishes is a prefix with something
                     // wrong, and reporting only the runtime's half is how it reads as fine.
-                    let missing = ctx.addons.missing_setup(examined.prefix, cancel, tx).await;
+                    let missing = ctx
+                        .addons
+                        .missing_setup(examined.prefix, &programs, cancel, tx)
+                        .await;
                     let _ = tx.send(Event::Prefix(PrefixReport {
                         health: examined.health,
                         missing_setup: missing,
@@ -2128,7 +2231,10 @@ async fn prefix(
                 // Applied at all because this is the action that resolves what a check reports, and a
                 // check reports both halves: leaving the setup out would name something as wrong in one
                 // command and refuse to act on it in the one that exists to act.
-                let missing = ctx.addons.apply_setup(examined.prefix, cancel, tx).await;
+                let missing = ctx
+                    .addons
+                    .apply_setup(examined.prefix, &programs, cancel, tx)
+                    .await;
                 // What is left after the fix, which is what a user has to decide about. An empty
                 // report is the fix having resolved everything.
                 let _ = tx.send(Event::Prefix(PrefixReport {
@@ -2159,7 +2265,7 @@ async fn prefix(
             // A rebuilt prefix is a new one, so it needs the setup a new one gets. Without this, the
             // command that exists to put a prefix back in a known state leaves it in one no other
             // path produces.
-            ctx.addons.apply_setup(fresh, cancel, tx).await;
+            ctx.addons.apply_setup(fresh, &programs, cancel, tx).await;
         }
     }
     Ok(())
@@ -2172,13 +2278,16 @@ async fn create_prefix(
     cancel: &CancellationToken,
 ) -> Result<(), CoreError> {
     let prefix_dir = ctx.prefixes_dir.join(prefix_name(profile));
-    let request = PrefixRequest::from(profile);
+    let request = PrefixRequest::try_from(profile)?;
     emit(tx, FlowState::PreparingPrefix);
     let prepared = ctx
         .launch
         .prepare(&request, &prefix_dir, cancel, tx)
         .await?;
-    ctx.addons.apply_setup(prepared.prefix, cancel, tx).await;
+    let programs = crate::addons::LaunchPrograms::enabled(&profile.launch);
+    ctx.addons
+        .apply_setup(prepared.prefix, &programs, cancel, tx)
+        .await;
     Ok(())
 }
 
@@ -2223,6 +2332,41 @@ fn launch_env(
         wrappers: profile.launch.wrappers.clone(),
         dxvk,
     }
+}
+
+/// Make the game's wine session one a companion can join, and return what a companion inside the
+/// prefix must share with the game to join it.
+///
+/// Under a umu runner each `umu-run` builds its own container, and a companion started in a second
+/// container cannot see the game's wine server: it starts its own, and nothing it does reaches the
+/// game. umu's own join is a variable on both launches, the game's announcing its container on the
+/// session bus and the companion's entering it. It is set on the game only when an in-prefix
+/// companion is enabled, because an announced container is something any session-bus client the
+/// service admits can run a program in, and a launch with nothing to join offers that for nothing.
+/// Inside the container the runner sets the synchronization variables itself, so nothing else is
+/// shared.
+///
+/// Under plain wine there is no container: a companion given the same prefix is a client of the
+/// game's server by construction, and what it must share is the synchronization the game was started
+/// with, since a client whose settings differ from its server's is a known way to hang both.
+fn join_session(
+    plan: &mut LaunchPlan,
+    runner: Option<apogee_runtime::RunnerKind>,
+    in_prefix_companion: bool,
+) -> std::collections::BTreeMap<String, String> {
+    if runner == Some(apogee_runtime::RunnerKind::ProtonUmu) {
+        if !in_prefix_companion {
+            return std::collections::BTreeMap::new();
+        }
+        let join = ("UMU_CONTAINER_NSENTER".to_owned(), "1".to_owned());
+        plan.env_mut().insert(join.0.clone(), join.1.clone());
+        return std::collections::BTreeMap::from([join]);
+    }
+    plan.env()
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "WINEFSYNC" | "WINEESYNC"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 /// The prefix directory name for a profile: its named prefix, or the profile id when unnamed.

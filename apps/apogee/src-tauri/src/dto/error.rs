@@ -64,8 +64,21 @@ pub(crate) enum CoreErrorDto {
     NoProfile {
         profile: String,
     },
+    RunnerUnchosen {
+        profile: String,
+    },
+    RunnerUnsupported {
+        profile: String,
+        runner: String,
+    },
     NoAccount {
         account: String,
+    },
+    /// A profile write that would newly run code beside the game, refused because it carried no
+    /// consent. `what` is the program switch or companion row's program.
+    ConsentRequired {
+        profile: String,
+        what: String,
     },
     RemovalPlanChanged {
         profile: String,
@@ -118,8 +131,19 @@ impl From<&CoreError> for CoreErrorDto {
             CoreError::NoProfile(profile) => Self::NoProfile {
                 profile: profile.to_string(),
             },
+            CoreError::RunnerUnchosen { profile } => Self::RunnerUnchosen {
+                profile: profile.to_string(),
+            },
+            CoreError::RunnerUnsupported { profile, runner } => Self::RunnerUnsupported {
+                profile: profile.to_string(),
+                runner: runner.clone(),
+            },
             CoreError::NoAccount(account) => Self::NoAccount {
                 account: account.to_string(),
+            },
+            CoreError::ConsentRequired { profile, what } => Self::ConsentRequired {
+                profile: profile.to_string(),
+                what: what.clone(),
             },
             CoreError::RemovalPlanChanged { profile } => Self::RemovalPlanChanged {
                 profile: profile.to_string(),

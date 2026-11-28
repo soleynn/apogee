@@ -99,7 +99,7 @@ trait Migrate: Sized {
 }
 
 impl Migrate for Profile {
-    const CURRENT_VERSION: u32 = 4;
+    const CURRENT_VERSION: u32 = 5;
     fn migrate_step(from: u32, mut value: serde_json::Value) -> Result<serde_json::Value, String> {
         let obj = value
             .as_object_mut()
@@ -135,6 +135,35 @@ impl Migrate for Profile {
                 launch
                     .as_object_mut()
                     .ok_or_else(|| "profile launch settings are not a json object".to_string())?;
+            }
+            // Gained the XivAlexander and ACT toggles beside the Dalamud one. Both arrive off: each
+            // runs third-party code beside the client, and a profile that predates the setting never
+            // asked for either. An ACT entry in the curated set the 2-to-3 step shed does not come
+            // back here, because what that entry named is not what the toggle now runs.
+            //
+            // The host's Wine stopped being a runner at the same version. A profile that chose it
+            // keeps loading, marked as naming a runner this build does not launch, so its launch is
+            // refused with a way forward rather than the whole record being set aside as unreadable.
+            // It is not rewritten to a managed runner: that would rebuild the prefix unasked.
+            4 => {
+                if obj.get("runner") == Some(&serde_json::Value::from("SystemWine")) {
+                    obj.insert(
+                        "runner".to_owned(),
+                        serde_json::json!({ "Unsupported": { "runner": "system_wine" } }),
+                    );
+                }
+                let launch = obj
+                    .entry("launch")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                let launch = launch
+                    .as_object_mut()
+                    .ok_or_else(|| "profile launch settings are not a json object".to_string())?;
+                launch
+                    .entry("xivalexander")
+                    .or_insert(serde_json::Value::Bool(false));
+                launch
+                    .entry("act")
+                    .or_insert(serde_json::Value::Bool(false));
             }
             other => return Err(format!("no migration from schema version {other}")),
         }
@@ -211,7 +240,7 @@ impl Migrate for StatusRecord {
 }
 
 impl Migrate for FirstRunCheckpoint {
-    const CURRENT_VERSION: u32 = 3;
+    const CURRENT_VERSION: u32 = 4;
 
     fn migrate_step(from: u32, value: serde_json::Value) -> Result<serde_json::Value, String> {
         match from {
@@ -225,6 +254,33 @@ impl Migrate for FirstRunCheckpoint {
                     .ok_or_else(|| "first-run payload is not a JSON object".to_owned())?
                     .entry("prefix_failure")
                     .or_insert(serde_json::Value::Null);
+                Ok(value)
+            }
+            // The host's Wine stopped being a runner. Its availability row goes, and a choice or a
+            // failed attempt that named it is cleared, so setup asks for a runner again instead of
+            // the whole checkpoint failing to read. Nothing else a person chose is touched.
+            3 => {
+                let mut value = value;
+                let obj = value
+                    .as_object_mut()
+                    .ok_or_else(|| "first-run payload is not a JSON object".to_owned())?;
+                let names_system_wine = |selection: Option<&serde_json::Value>| {
+                    selection
+                        .and_then(|selection| selection.get("kind"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("system_wine")
+                };
+                if let Some(runners) = obj
+                    .get_mut("runners")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    runners.retain(|reading| !names_system_wine(reading.get("selection")));
+                }
+                for key in ["prefix_failure", "runner_and_prefix"] {
+                    if names_system_wine(obj.get(key).and_then(|choice| choice.get("runner"))) {
+                        obj.insert(key.to_owned(), serde_json::Value::Null);
+                    }
+                }
                 Ok(value)
             }
             other => Err(format!("no migration from schema version {other}")),

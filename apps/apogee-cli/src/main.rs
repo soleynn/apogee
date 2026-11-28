@@ -20,9 +20,10 @@ use apogee_core::{
     ImportFindingResult, ImportOutcome, ImportSource, ImportXivLauncher, LaunchProgramExit,
     ListenerConsent, ListenerSettings, ListenerSources, NextAction, NextCommand, NextVerb, Notice,
     OtpDelivery, OtpSource, Passphrase, PasswordSource, PatchProgress, PrefixAction, PrefixReport,
-    Profile, Recoveries, Region, Repo, RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID,
-    STEAM_FREE_TRIAL_APP_ID, Secret, SecretBackend, SecretKind, SecretSweep, SecretsError,
-    Settings, SetupEvent, SetupValue, SyncChoice, Trigger, Uuid,
+    Profile, ProgramConsent, ProgramName, ProgramSetting, ProgramTier, Recoveries, Region, Repo,
+    RunIn, RunOutcome, RunnerSelection, STEAM_APP_ID, STEAM_FREE_TRIAL_APP_ID, Secret,
+    SecretBackend, SecretKind, SecretSweep, SecretsError, Settings, SetupEvent, SetupValue,
+    SyncChoice, Trigger, Uuid,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio_stream::StreamExt;
@@ -180,6 +181,11 @@ enum Commands {
     Dalamud {
         #[command(subcommand)]
         action: DalamudAction,
+    },
+    /// Run Dalamud, XivAlexander or ACT with the game, or leave them out.
+    Program {
+        #[command(subcommand)]
+        action: ProgramAction,
     },
     /// Choose where an account's one-time code comes from, and tune the local listener.
     ///
@@ -614,6 +620,45 @@ enum DalamudAction {
 }
 
 #[derive(Subcommand)]
+enum ProgramAction {
+    /// Say which programs this profile runs with the game.
+    List(TargetArgs),
+    /// Say what the signed catalog says about one program, and whether this profile runs it.
+    Status(ProgramArgs),
+    /// Run it with the game from the next launch on. It is installed on that launch, or by a prefix
+    /// fix, not now.
+    Enable(ProgramArgs),
+    /// Stop running it. Nothing is deleted, and nothing contacts its sources while it is off.
+    Disable(ProgramArgs),
+}
+
+#[derive(Args)]
+struct ProgramArgs {
+    /// Which program.
+    #[arg(value_enum)]
+    program: ProgramArg,
+    #[command(flatten)]
+    target: TargetArgs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ProgramArg {
+    Dalamud,
+    Xivalexander,
+    Act,
+}
+
+impl From<ProgramArg> for ProgramName {
+    fn from(arg: ProgramArg) -> Self {
+        match arg {
+            ProgramArg::Dalamud => Self::Dalamud,
+            ProgramArg::Xivalexander => Self::Xivalexander,
+            ProgramArg::Act => Self::Act,
+        }
+    }
+}
+
+#[derive(Subcommand)]
 enum OtpAction {
     /// Say where this profile's account gets its one-time code, and where the listener would sit.
     Status(AccountTargetArgs),
@@ -781,7 +826,8 @@ struct ProfileEditArgs {
     /// Replacement display name.
     #[arg(long)]
     name: Option<String>,
-    /// Replacement runner: `system` or `managed:<name>@<version>`.
+    /// Replacement runner: `recommended` (the catalog's recommended row) or
+    /// `managed:<name>@<version>`.
     #[arg(long)]
     runner: Option<String>,
     /// Service region: `global`, `korea`, or `china`.
@@ -861,6 +907,12 @@ struct ProfileEditArgs {
     /// Whether to load Dalamud into the game.
     #[arg(long)]
     dalamud: Option<bool>,
+    /// Whether to run XivAlexander beside the game.
+    #[arg(long)]
+    xivalexander: Option<bool>,
+    /// Whether to run ACT with its FFXIV parsing plugin beside the game.
+    #[arg(long)]
+    act: Option<bool>,
 }
 
 #[derive(Args)]
@@ -884,8 +936,8 @@ struct ProfileAddArgs {
     /// The game installation directory (the parent of `boot/` and `game/`).
     #[arg(long)]
     game_path: PathBuf,
-    /// The runner: `system` (host wine) or `managed:<name>@<version>`.
-    #[arg(long, default_value = "system")]
+    /// The runner: `recommended` (the catalog's recommended row) or `managed:<name>@<version>`.
+    #[arg(long, default_value = "recommended")]
     runner: String,
     /// The account uses a one-time password.
     #[arg(long)]
@@ -1028,7 +1080,7 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Profile { action } => {
-            profile(&core, action)?;
+            profile(&core, action).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Status(args) => {
@@ -1136,6 +1188,11 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
                         SetupValue::Dalamud { enabled } => {
                             println!("dalamud\tenabled={enabled}\t{:?}", item.source)
                         }
+                        SetupValue::Program { program, enabled } => println!(
+                            "program\t{}\tenabled={enabled}\t{:?}",
+                            program.key(),
+                            item.source
+                        ),
                         _ => println!("setup\tunknown\t{:?}", item.source),
                     }
                 }
@@ -1253,6 +1310,10 @@ async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Commands::Dalamud { action } => {
             dalamud(&core, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Program { action } => {
+            program(&core, action).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Otp { action } => {
@@ -1990,6 +2051,107 @@ fn dalamud(core: &Core, action: DalamudAction) -> Result<(), CliError> {
     Ok(())
 }
 
+/// What every program run with the game is granted, said wherever one is described or turned on.
+///
+/// The same sentence for all three: each runs in the game's wine session, and nothing about any one
+/// of them narrows that.
+const TRUST_SENTENCE: &str = "Runs in the game's wine session with the same access to the game, \
+your files and your stored sign-in as Apogee itself.";
+
+/// The program switches, read from and written back to the profile that owns them.
+///
+/// Switching one on or off installs and contacts nothing, exactly like the Dalamud toggle: a launch
+/// or a prefix fix is what installs it. Turning a companion on is the user's consent to run it,
+/// which typing the command is.
+async fn program(core: &Core, action: ProgramAction) -> Result<(), CliError> {
+    match action {
+        ProgramAction::List(args) => {
+            let profile = resolve_profile(core, &args.profile)?;
+            for name in ProgramName::ALL {
+                println!(
+                    "{}\t{}",
+                    name.key(),
+                    if name.is_on(&profile.launch) {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
+            Ok(())
+        }
+        ProgramAction::Status(args) => {
+            let profile = resolve_profile(core, &args.target.profile)?;
+            let name = ProgramName::from(args.program);
+            let setting = core
+                .program_settings(profile.id)
+                .await?
+                .into_iter()
+                .find(|setting| setting.program == name)
+                .ok_or("the program has no setting on this profile")?;
+            print_program_status(&setting);
+            Ok(())
+        }
+        ProgramAction::Enable(args) => {
+            let profile = resolve_profile(core, &args.target.profile)?;
+            let name = ProgramName::from(args.program);
+            let profile = core.enable_program(profile.id, name, ProgramConsent::granted())?;
+            println!("enabled {} for {}", name.key(), profile.name);
+            println!("{TRUST_SENTENCE}");
+            println!("it is installed on the next launch or prefix fix");
+            Ok(())
+        }
+        ProgramAction::Disable(args) => {
+            let profile = resolve_profile(core, &args.target.profile)?;
+            let name = ProgramName::from(args.program);
+            let profile = core.disable_program(profile.id, name)?;
+            println!("disabled {} for {}", name.key(), profile.name);
+            Ok(())
+        }
+    }
+}
+
+fn print_program_status(setting: &ProgramSetting) {
+    println!(
+        "{} is {}",
+        setting.program.key(),
+        if setting.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!("trust: {TRUST_SENTENCE}");
+    let Some(row) = &setting.row else {
+        println!("catalog: no row could be read for it");
+        return;
+    };
+    match &row.tier {
+        ProgramTier::BestEffort { note } => {
+            println!("tier: best effort");
+            println!("note: {note}");
+        }
+        _ => println!("tier: first class"),
+    }
+    for caveat in &row.caveats {
+        println!("caveat: {caveat}");
+    }
+    if let Some(version) = &row.version {
+        println!("version: {version}");
+    }
+    if !row.game_versions.is_empty() {
+        println!("game versions: {}", row.game_versions.join(", "));
+    }
+    if !row.runners.is_empty() {
+        let runners: Vec<String> = row
+            .runners
+            .iter()
+            .map(|(name, version)| format!("{name} {version}"))
+            .collect();
+        println!("runners: {}", runners.join(", "));
+    }
+}
+
 /// Where an account's one-time code comes from, and where the listener that can receive one sits.
 fn otp(core: &Core, action: OtpAction) -> Result<(), CliError> {
     match action {
@@ -2419,15 +2581,15 @@ fn apply_account_edit(account: &mut Account, args: &AccountEditArgs) -> Result<(
     Ok(())
 }
 
-fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
+async fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
     match action {
         ProfileAction::Add(args) => {
             let account = Account {
                 use_otp: args.otp,
                 ..Account::new(args.user, parse_licence(&args.licence)?)
             };
-            let mut profile = Profile::new(args.name, account.id, args.game_path);
-            profile.runner = parse_runner(&args.runner)?;
+            let runner = resolve_runner(core, &args.runner).await?;
+            let mut profile = Profile::new(args.name, account.id, args.game_path, runner);
             profile.launch.region = parse_region(&args.region)?;
             core.save_account(&account)?;
             core.save_profile(&profile)?;
@@ -2483,8 +2645,13 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
         }
         ProfileAction::Edit(args) => {
             let mut profile = resolve_profile(core, &args.profile)?;
-            apply_profile_edit(&mut profile, &args)?;
-            core.save_profile(&profile)?;
+            let runner = match &args.runner {
+                Some(spec) => Some(resolve_runner(core, spec).await?),
+                None => None,
+            };
+            apply_profile_edit(&mut profile, &args, runner)?;
+            // The user typed every flag on this line, including any that turns a companion on.
+            core.save_profile_with_consent(&profile, ProgramConsent::granted())?;
             println!("updated profile {} \"{}\"", profile.id, profile.name);
             Ok(())
         }
@@ -2495,13 +2662,19 @@ fn profile(core: &Core, action: ProfileAction) -> Result<(), CliError> {
 /// Apply only the editable record projection exposed by both user interfaces. Building a complete
 /// replacement first means a malformed environment entry cannot leave an in-memory record half
 /// changed, while identity, ownership, paths, prefix, and companion tools remain untouched.
-fn apply_profile_edit(profile: &mut Profile, args: &ProfileEditArgs) -> Result<(), CliError> {
+///
+/// The runner arrives already resolved, because `recommended` is answered by the signed catalog.
+fn apply_profile_edit(
+    profile: &mut Profile,
+    args: &ProfileEditArgs,
+    runner: Option<RunnerSelection>,
+) -> Result<(), CliError> {
     let mut next = profile.clone();
     if let Some(value) = &args.name {
         next.name.clone_from(value);
     }
-    if let Some(value) = &args.runner {
-        next.runner = parse_runner(value)?;
+    if let Some(value) = runner {
+        next.runner = value;
     }
     if let Some(value) = &args.region {
         next.launch.region = parse_region(value)?;
@@ -2585,6 +2758,12 @@ fn apply_profile_edit(profile: &mut Profile, args: &ProfileEditArgs) -> Result<(
     }
     if let Some(value) = args.dalamud {
         next.launch.dalamud = value;
+    }
+    if let Some(value) = args.xivalexander {
+        next.launch.xivalexander = value;
+    }
+    if let Some(value) = args.act {
+        next.launch.act = value;
     }
     *profile = next;
     Ok(())
@@ -2910,7 +3089,7 @@ fn addon(core: &Core, action: AddonAction) -> Result<(), CliError> {
                 profile.external.len()
             );
             profile.external.push(addon);
-            core.save_profile(&profile)?;
+            core.save_profile_with_consent(&profile, ProgramConsent::granted())?;
             Ok(())
         }
         AddonAction::Remove(args) => {
@@ -2933,7 +3112,7 @@ fn set_enabled(core: &Core, args: &AddonIndexArgs, on: bool) -> Result<(), CliEr
         .ok_or_else(|| out_of_range(args.index))?;
     addon.set_enabled(on);
     let program = addon.program().display().to_string();
-    core.save_profile(&profile)?;
+    core.save_profile_with_consent(&profile, ProgramConsent::granted())?;
     println!("{} tool {program}", if on { "enabled" } else { "disabled" });
     Ok(())
 }
@@ -2996,10 +3175,18 @@ fn render_trigger(trigger: Trigger) -> &'static str {
     }
 }
 
-fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
-    if spec == "system" {
-        return Ok(RunnerSelection::SystemWine);
+/// Resolve a runner argument, reading the signed catalog only for `recommended`.
+async fn resolve_runner(core: &Core, spec: &str) -> Result<RunnerSelection, CliError> {
+    if spec == "recommended" {
+        return core
+            .recommended_runner()
+            .await?
+            .ok_or_else(|| "the runner catalog recommends no runner".into());
     }
+    parse_runner(spec)
+}
+
+fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
     if let Some(rest) = spec.strip_prefix("managed:") {
         let (name, version) = rest
             .split_once('@')
@@ -3009,7 +3196,10 @@ fn parse_runner(spec: &str) -> Result<RunnerSelection, CliError> {
             version: version.to_owned(),
         });
     }
-    Err(format!("unknown runner {spec:?} (expected `system` or `managed:<name>@<version>`)").into())
+    Err(
+        format!("unknown runner {spec:?} (expected `recommended` or `managed:<name>@<version>`)")
+            .into(),
+    )
 }
 
 fn parse_licence(licence: &str) -> Result<AccountKind, CliError> {
@@ -3137,6 +3327,7 @@ fn render_next_action(action: &NextAction) -> String {
         NextVerb::AcceptTerms => "Accept the terms",
         NextVerb::WaitForMaintenance => "Wait for maintenance",
         NextVerb::CloseGameFirst => "Close the game first",
+        NextVerb::ChooseRunner => "Choose a runner",
         _ => "Unknown",
     };
     let command = match action.command {
@@ -3146,6 +3337,7 @@ fn render_next_action(action: &NextAction) -> String {
         NextCommand::Repair => "repair",
         NextCommand::Login => "login",
         NextCommand::WaitForGate => "gate --wait",
+        NextCommand::ChooseRunner => "profile edit --runner recommended",
         _ => "unknown",
     };
     let mut output = format!(
@@ -3343,6 +3535,19 @@ fn render_notice(notice: &Notice) -> String {
         Notice::OtpListenerFlood { from, refused } => format!(
             "warning: {from} spent the one-time-code listener's attempt budget while this login \
              waited; {refused} connections were turned away and the login was unaffected"
+        ),
+        Notice::CompanionCanReadKeyring => "warning: a companion program is configured on this \
+             profile, and this account's password and one-time-password seed are in the system \
+             keyring, which anything running in this session can read; the passphrase-sealed \
+             secrets file keeps them out of its reach"
+            .to_owned(),
+        Notice::PushedCodesNeedAPinnedSource => "warning: a companion program is configured on \
+             this profile and the one-time-code listener admits any source, so pushed codes are \
+             off for this login; pin the listener to your phone's address to use them"
+            .to_owned(),
+        Notice::OtpPortHeld { port } => format!(
+            "warning: something else on this machine holds port {port}; do not send the code from \
+             your phone, because whatever holds the port would receive it"
         ),
         _ => "warning: an unrecognized advisory".to_owned(),
     }
@@ -3800,6 +4005,10 @@ mod tests {
             "true",
             "--dalamud",
             "true",
+            "--xivalexander",
+            "true",
+            "--act",
+            "true",
         ])
         .expect("complete profile edit parses");
         let Some(Commands::Profile {
@@ -3813,7 +4022,12 @@ mod tests {
         let game_path = std::env::current_dir()
             .expect("working directory")
             .join("game");
-        let mut profile = Profile::new("Main", account, game_path.clone());
+        let mut profile = Profile::new(
+            "Main",
+            account,
+            game_path.clone(),
+            RunnerSelection::Unchosen,
+        );
         profile.prefix.name = "owned-prefix".to_owned();
         profile.external.push(
             ExternalAddon::new(
@@ -3837,7 +4051,13 @@ mod tests {
         let id = profile.id;
         let external = profile.external.clone();
 
-        apply_profile_edit(&mut profile, &args).expect("valid edit applies");
+        let runner = args
+            .runner
+            .as_deref()
+            .map(parse_runner)
+            .transpose()
+            .expect("runner parses");
+        apply_profile_edit(&mut profile, &args, runner).expect("valid edit applies");
 
         assert_eq!(profile.id, id);
         assert_eq!(profile.account, account);
@@ -3879,6 +4099,16 @@ mod tests {
         );
         assert!(profile.launch.gamemode);
         assert!(profile.launch.dalamud);
+        assert!(profile.launch.xivalexander);
+        assert!(profile.launch.act);
+    }
+
+    /// The host's Wine is not a runner any more, and its old spelling is refused rather than quietly
+    /// read as something else.
+    #[test]
+    fn the_host_wine_is_not_a_runner_argument() {
+        let error = parse_runner("system").expect_err("the host wine is refused");
+        assert!(error.to_string().contains("recommended"), "{error}");
     }
 
     #[test]
@@ -3901,10 +4131,16 @@ mod tests {
         else {
             panic!("profile edit should select its command arm");
         };
-        let mut profile = Profile::new("unchanged", Uuid::new_v4(), PathBuf::from("game"));
+        let mut profile = Profile::new(
+            "unchanged",
+            Uuid::new_v4(),
+            PathBuf::from("game"),
+            RunnerSelection::Unchosen,
+        );
         let before = profile.clone();
 
-        let error = apply_profile_edit(&mut profile, &args).expect_err("missing '=' is refused");
+        let error =
+            apply_profile_edit(&mut profile, &args, None).expect_err("missing '=' is refused");
 
         assert!(error.to_string().contains("NAME=VALUE"));
         assert_eq!(profile, before);

@@ -35,15 +35,24 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// A new profile with a freshly minted identity and empty selections.
+    /// A new profile with a freshly minted identity, the given runner, and empty selections.
+    ///
+    /// The runner is an argument because no default is honest: the one to offer is the catalog's
+    /// recommended row, which only a caller that has read the catalog knows. A caller that has not
+    /// passes [`RunnerSelection::Unchosen`], and the profile asks for one before it launches.
     #[must_use]
-    pub fn new(name: impl Into<String>, account: Uuid, game_path: PathBuf) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        account: Uuid,
+        game_path: PathBuf,
+        runner: RunnerSelection,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
             account,
             game_path,
-            runner: RunnerSelection::SystemWine,
+            runner,
             prefix: PrefixSelection::default(),
             external: Vec::new(),
             launch: LaunchSettings::default(),
@@ -127,13 +136,24 @@ pub const STEAM_APP_ID: u32 = 39_210;
 pub const STEAM_FREE_TRIAL_APP_ID: u32 = 312_060;
 
 /// Which Wine/Proton runner a profile launches under.
+///
+/// Only [`RunnerSelection::Managed`] launches. The other two are states a stored profile can be in,
+/// kept so it loads and the user is asked for a runner instead of losing the profile: a launch refuses
+/// them with a typed error, and the profile's next action offers the catalog's recommended row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RunnerSelection {
-    /// The Wine already on the host `PATH`.
-    SystemWine,
     /// A managed runner pinned by name and version.
     Managed { name: String, version: String },
+    /// No runner has been chosen yet: a profile made before its runner was known, such as one
+    /// created partway through first-run setup or imported from another launcher.
+    Unchosen,
+    /// A runner this build no longer launches, named as the profile stored it.
+    ///
+    /// Only reading an older profile produces this. The host's own Wine was once a choice, and a
+    /// profile that chose it is not rewritten to a guessed replacement, because switching runners
+    /// rebuilds the prefix and that is the user's decision to make.
+    Unsupported { runner: String },
 }
 
 /// Which prefix a profile uses, named within the runtime's prefix set.
@@ -182,6 +202,10 @@ pub struct LaunchSettings {
     /// because one account's raiding profile and another's are not the same decision. While it is off,
     /// nothing here contacts its distribution.
     pub dalamud: bool,
+    /// Run XivAlexander beside the game. Off by default and per profile.
+    pub xivalexander: bool,
+    /// Run ACT with the FFXIV parsing plugin beside the game. Off by default and per profile.
+    pub act: bool,
 }
 
 /// The service region a profile connects to.

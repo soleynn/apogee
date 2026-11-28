@@ -90,14 +90,12 @@ impl UpdateProfileRequestDto {
 )]
 #[ts(export, export_to = "RunnerSelectionInput.ts")]
 enum RunnerSelectionInputDto {
-    SystemWine,
     Managed { name: String, version: String },
 }
 
 impl RunnerSelectionInputDto {
     fn into_core(self) -> RunnerSelection {
         match self {
-            Self::SystemWine => RunnerSelection::SystemWine,
             Self::Managed { name, version } => RunnerSelection::Managed { name, version },
         }
     }
@@ -118,6 +116,8 @@ struct LaunchSettingsInputDto {
     gamescope: Option<GamescopeInputDto>,
     gamemode: bool,
     dalamud: bool,
+    xivalexander: bool,
+    act: bool,
 }
 
 impl LaunchSettingsInputDto {
@@ -138,6 +138,8 @@ impl LaunchSettingsInputDto {
             gamescope: self.gamescope.map(GamescopeInputDto::into_core),
             gamemode: self.gamemode,
             dalamud: self.dalamud,
+            xivalexander: self.xivalexander,
+            act: self.act,
         }
     }
 }
@@ -441,6 +443,23 @@ impl UsePushedCodesRequestDto {
     }
 }
 
+/// Switch one program off for a profile. There is no request to switch one on: that grants a
+/// third-party program the launcher's access, and this shell has no native confirmation to ask with.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "DisableProgramRequest.ts")]
+pub(crate) struct DisableProgramRequestDto {
+    #[ts(type = "string")]
+    profile: Uuid,
+    program: super::read::ProgramNameDto,
+}
+
+impl DisableProgramRequestDto {
+    pub(crate) const fn into_parts(self) -> (Uuid, super::read::ProgramNameDto) {
+        (self.profile, self.program)
+    }
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export, export_to = "DisablePushedCodesRequest.ts")]
@@ -687,6 +706,8 @@ mod tests {
             "gamescope": null,
             "gamemode": false,
             "dalamud": false,
+            "xivalexander": false,
+            "act": false,
         })
     }
 
@@ -708,7 +729,7 @@ mod tests {
         let request = serde_json::json!({
             "profile": Uuid::nil(),
             "name": "updated",
-            "runner": { "kind": "systemWine" },
+            "runner": { "kind": "managed", "name": "wine-xiv", "version": "1" },
             "launch": launch_json(),
             "gamePath": "/planted/path",
         });
@@ -723,7 +744,7 @@ mod tests {
         let request = serde_json::json!({
             "profile": Uuid::nil(),
             "name": "updated",
-            "runner": { "kind": "systemWine" },
+            "runner": { "kind": "managed", "name": "wine-xiv", "version": "1" },
             "launch": launch,
         });
 
@@ -738,7 +759,7 @@ mod tests {
             let request = serde_json::json!({
                 "profile": Uuid::nil(),
                 "name": "updated",
-                "runner": { "kind": "systemWine" },
+                "runner": { "kind": "managed", "name": "wine-xiv", "version": "1" },
                 "launch": launch,
             });
 

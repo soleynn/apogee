@@ -32,6 +32,14 @@
       "equivalence": "Resolved setup values with provenance."
     },
     {
+      "ipc": "program_settings",
+      "cli": [
+        ["program", "list", "--profile", "00000000-0000-0000-0000-000000000001"],
+        ["program", "status", "act", "--profile", "00000000-0000-0000-0000-000000000001"]
+      ],
+      "equivalence": "Each program's switch with the signed catalog's row for it."
+    },
+    {
       "ipc": "runner_catalog",
       "cli": [["runner", "list"]],
       "equivalence": "Signed runner catalog view."
@@ -132,6 +140,11 @@
       "ipc": "disable_pushed_codes",
       "cli": [["otp", "ask", "--account", "00000000-0000-0000-0000-000000000001"]],
       "equivalence": "Return listener delivery to typed codes."
+    },
+    {
+      "ipc": "disable_program",
+      "cli": [["program", "disable", "act", "--profile", "00000000-0000-0000-0000-000000000001"]],
+      "equivalence": "Switch one program off; nothing is deleted. Switching one on needs consent the shell cannot yet ask for, so it is terminal-only."
     },
     {
       "ipc": "delete_secret",
@@ -239,7 +252,7 @@
         {"shell": "firstRun.advance.selectExistingGame", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_existing_game\",\"value\":{\"path\":\"game\"}}"]], "equivalence": "Select one core-verified existing installation."},
         {"shell": "firstRun.advance.selectInstallLocation", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_install_location\",\"value\":{\"path\":\"game\"}}"]], "equivalence": "Select one person-approved installation directory while core owns all size facts."},
         {"shell": "firstRun.advance.selectCredential", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_credential\",\"value\":{\"choice\":\"do_not_save\"}}"]], "equivalence": "Persist the same credential-storage decision."},
-        {"shell": "firstRun.advance.selectRunner", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_runner\",\"value\":{\"kind\":\"system_wine\",\"value\":{\"version\":null}}}"]], "equivalence": "Select one runner from the same core-published availability rows."},
+        {"shell": "firstRun.advance.selectRunner", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"select_runner\",\"value\":{\"kind\":\"managed\",\"value\":{\"name\":\"wine-xiv\",\"version\":\"1\"}}}"]], "equivalence": "Select one runner from the same core-published availability rows."},
         {"shell": "firstRun.advance.continueWithoutPrefix", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"continue_without_prefix\"}"]], "equivalence": "Continue only from the same persisted failed prefix attempt."},
         {"shell": "firstRun.advance.startReady", "cli": [["first-run", "advance", "--transition-json", "{\"kind\":\"start_ready\"}"]], "equivalence": "Start the same core-derived final setup action."},
         {"shell": "importXivLauncher.scan", "cli": [["import", "xivlauncher", "--dry-run"]], "equivalence": "Scan and print the same typed import findings without writes."},

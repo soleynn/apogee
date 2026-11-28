@@ -649,10 +649,6 @@ fn runner_selection_value(selection: &apogee_core::FirstRunRunnerSelection) -> V
             "name": name,
             "version": version,
         }),
-        apogee_core::FirstRunRunnerSelection::SystemWine { version } => json!({
-            "kind": "systemWine",
-            "version": version,
-        }),
         _ => json!({ "kind": "unknown" }),
     }
 }
@@ -853,6 +849,11 @@ fn notice_value(notice: &Notice) -> Value {
             "from": from.to_string(),
             "refused": refused,
         }),
+        Notice::CompanionCanReadKeyring => json!({ "kind": "companionCanReadKeyring" }),
+        Notice::PushedCodesNeedAPinnedSource => {
+            json!({ "kind": "pushedCodesNeedAPinnedSource" })
+        }
+        Notice::OtpPortHeld { port } => json!({ "kind": "otpPortHeld", "port": port }),
         _ => json!({ "kind": "unknown" }),
     }
 }

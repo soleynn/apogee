@@ -424,7 +424,14 @@ fn account_from_candidate(id: &ImportFindingId, candidate: &ImportCandidate) -> 
 }
 
 fn profile_from_candidate(id: &ImportFindingId, account: &Account, game_path: PathBuf) -> Profile {
-    let mut profile = Profile::new(account.sqex_id.clone(), account.id, game_path);
+    // The other launcher's Wine settings do not name a catalog row, so the imported profile asks for
+    // a runner before its first launch rather than inheriting a guess.
+    let mut profile = Profile::new(
+        account.sqex_id.clone(),
+        account.id,
+        game_path,
+        crate::RunnerSelection::Unchosen,
+    );
     profile.id = entity_id("profile", id);
     profile
 }

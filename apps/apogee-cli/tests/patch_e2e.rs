@@ -70,20 +70,21 @@ async fn patch_downloads_and_applies_a_game_patch_over_the_chaos_server()
             .env("XDG_CACHE_HOME", cache.path());
     };
 
-    // Create the profile (system wine, no one-time password).
+    // Create the profile (a runner the patch flow never prepares, no one-time password).
     let mut add = tokio::process::Command::new(bin);
     with_xdg(&mut add);
     add.args([
         "profile",
         "add",
+        "--runner",
+        "managed:wine-xiv@test",
         "--name",
         "patchtest",
         "--user",
         "player@example.invalid",
         "--game-path",
     ])
-    .arg(install.path())
-    .args(["--runner", "system"]);
+    .arg(install.path());
     let added = add.output().await?;
     assert!(
         added.status.success(),

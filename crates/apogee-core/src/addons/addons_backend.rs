@@ -5,9 +5,11 @@
 //! launch is over.
 
 use apogee_addons::{
-    AddonEvents, AddonReport, AddonSession, Addons, DalamudConfig, ExternalAddon, GameContext,
-    Injectable, LoadEvidence, Outcome, SetupEvent, SetupEvents, VerifiedManifest,
+    AddonError, AddonEvents, AddonReport, AddonSession, Addons, DalamudConfig, ExternalAddon,
+    GameContext, Injectable, LoadEvidence, Outcome, RunIn, SetupEvent, SetupEvents,
+    VerifiedManifest,
 };
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use apogee_runtime::{LaunchPlan, Prefix};
@@ -17,7 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{AddonBackend, AddonLifecycle};
+use super::{AddonBackend, AddonLifecycle, GatedPrograms, LaunchPrograms, PreparedAddons};
 use crate::command::Event;
 use crate::error::CoreError;
 
@@ -45,38 +47,63 @@ impl AddonBackend for AddonsBackend {
     async fn prepare_launch(
         &self,
         prefix: Option<Prefix>,
-        dalamud: Option<DalamudConfig>,
+        request: LaunchPrograms,
         plan: &mut LaunchPlan,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
-    ) -> Option<LoadEvidence> {
-        let prefix = prefix?;
+    ) -> PreparedAddons {
+        let Some(prefix) = prefix else {
+            return PreparedAddons::default();
+        };
         let (setup, relay) = relay_setup(events);
-        let Some(manifest) = self.setup_pass(&prefix, cancel, &setup).await.manifest else {
+        let Some(manifest) = self
+            .setup_pass(&prefix, &request.programs, cancel, &setup)
+            .await
+            .manifest
+        else {
             finish(setup, relay).await;
-            return None;
+            return PreparedAddons::default();
         };
 
-        let confirming = match dalamud {
+        let confirming = match request.dalamud {
             Some(config) => {
                 self.inject(&manifest, &prefix, config, plan, cancel, &setup)
                     .await
             }
             None => None,
         };
+        let programs = if request.programs.is_empty() {
+            GatedPrograms::default()
+        } else {
+            self.gate(
+                manifest,
+                prefix,
+                request.programs,
+                request.game_version,
+                &setup,
+            )
+            .await
+        };
         finish(setup, relay).await;
-        confirming
+        PreparedAddons {
+            confirming,
+            programs,
+        }
     }
 
     async fn apply_setup(
         &self,
         prefix: Option<Prefix>,
+        programs: &[String],
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Option<Vec<String>> {
         let prefix = prefix?;
         let (setup, relay) = relay_setup(events);
-        let left = self.setup_pass(&prefix, cancel, &setup).await.still_missing;
+        let left = self
+            .setup_pass(&prefix, programs, cancel, &setup)
+            .await
+            .still_missing;
         finish(setup, relay).await;
         left
     }
@@ -84,6 +111,7 @@ impl AddonBackend for AddonsBackend {
     async fn missing_setup(
         &self,
         prefix: Option<Prefix>,
+        programs: &[String],
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Option<Vec<String>> {
@@ -91,8 +119,13 @@ impl AddonBackend for AddonsBackend {
         let (setup, relay) = relay_setup(events);
         let manifest = self.catalog_manifest(cancel, &setup).await;
         let missing = manifest.and_then(|manifest| {
-            self.addons
-                .missing_setup(&manifest, &prefix)
+            let names: Vec<&str> = programs.iter().map(String::as_str).collect();
+            let missing = if names.is_empty() {
+                self.addons.missing_setup(&manifest, &prefix)
+            } else {
+                self.addons.missing_setup_for(&manifest, &prefix, &names)
+            };
+            missing
                 // The prefix's own record is unreadable, which is the same refusal an apply makes over
                 // it: with no record there is no telling setup that is needed from setup that is not,
                 // and answering "none" would be inventing the half that could not be read.
@@ -108,37 +141,90 @@ impl AddonBackend for AddonsBackend {
         missing
     }
 
+    async fn program_rows(
+        &self,
+        cancel: &CancellationToken,
+        events: &UnboundedSender<Event>,
+    ) -> Option<Vec<crate::ProgramRow>> {
+        let (setup, relay) = relay_setup(events);
+        let manifest = self.catalog_manifest(cancel, &setup).await;
+        finish(setup, relay).await;
+        let manifest = manifest?;
+        Some(
+            crate::ProgramName::ALL
+                .into_iter()
+                .filter_map(|name| crate::program::row(manifest.rows(), name))
+                .collect(),
+        )
+    }
+
     async fn start(
         &self,
         game_pid: i32,
         prefix: Option<Prefix>,
+        shared_env: BTreeMap<String, String>,
+        programs: GatedPrograms,
         addons: Vec<ExternalAddon>,
         confirming: Option<LoadEvidence>,
         cancel: &CancellationToken,
         events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
         let (addon_events, relay) = relay(events);
-        // Spawned rather than awaited: the proof lands seconds after the game does, and a launch that
-        // waited for it would hold the flow at the point it is supposed to report the game running.
-        // The token ends it on the path where the launch is stopped; the teardown below ends it on the
-        // path where the game simply exited, which is not a cancellation of anything.
-        let confirming = confirming.map(|evidence| {
-            let events = addon_events.clone();
-            tokio::spawn(evidence.watch(cancel.clone(), events))
-        });
         // A pid the runtime reported cannot be zero or negative, but building the context is
         // fallible, and a launch is not worth failing over a helper: an unusable context simply
         // means no companion runs.
-        let game = match prefix {
-            Some(prefix) => GameContext::in_prefix(game_pid, &prefix),
+        let game = match &prefix {
+            Some(prefix) => GameContext::in_prefix(game_pid, prefix),
             None => GameContext::new(game_pid),
-        };
+        }
+        .map(|game| game.with_launch_env(shared_env));
+        let mut watches = Vec::new();
         let session = match game {
-            Ok(game) => Some(
-                self.addons
-                    .start_external(&addons, &game, &addon_events)
-                    .await,
-            ),
+            Ok(game) => {
+                let (plan, program_evidence) = programs.into_parts();
+                // Built from the game's own context, never from a fresh prefix handle, so a program
+                // can only be started into the session the game is running in.
+                let mut list = match plan.map(|plan| plan.companions(&game)) {
+                    Some(Ok(list)) => list,
+                    Some(Err(err)) => {
+                        report_program_failure(events, &err);
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                };
+                let curated = list.len();
+                // Ahead of the user's own tools: a tool pointed at one of these expects it up.
+                list.extend(addons);
+                let session = self
+                    .addons
+                    .start_external(&list, &game, &addon_events)
+                    .await;
+                let mut evidence: Vec<LoadEvidence> = confirming.into_iter().collect();
+                if all_started(&session, curated) {
+                    evidence.extend(program_evidence);
+                } else if !program_evidence.is_empty() {
+                    // Something at a curated program's path was already running, or did not start.
+                    // Its proof would be proof of something this launch did not start, and the
+                    // evidence cannot be told apart per program from here, so none is watched.
+                    tracing::info!(
+                        "a curated program was not started by this launch, so its proof is not watched"
+                    );
+                }
+                watches.extend(evidence.into_iter().map(|evidence| {
+                    // Spawned rather than awaited: the proof lands seconds after the game does, and a
+                    // launch that waited for it would hold the flow at the point it is supposed to
+                    // report the game running. The token ends it on the path where the launch is
+                    // stopped; the teardown ends it on the path where the game simply exited.
+                    tokio::spawn(evidence.watch(cancel.clone(), addon_events.clone()))
+                }));
+                if list
+                    .iter()
+                    .any(|a| a.enabled() && a.run_in() == RunIn::Prefix)
+                {
+                    watches.push(self.shared_session_check(game, list, cancel, &addon_events));
+                }
+                Some(session)
+            }
             Err(err) => {
                 let _ = events.send(Event::Error(CoreError::Addons(err)));
                 None
@@ -147,9 +233,103 @@ impl AddonBackend for AddonsBackend {
         Box::new(RunningAddons {
             session,
             addon_events: Some(addon_events),
-            confirming,
+            watches,
             relay,
         })
+    }
+}
+
+/// How long after the companions start the shared-session check looks. A companion that missed the
+/// game's session starts its own server as it comes up, which is not instant under a container
+/// runtime, and a look taken before then would see one server and say nothing.
+const SHARED_SESSION_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether every one of the first `curated` entries was started by this launch.
+fn all_started(session: &AddonSession, curated: usize) -> bool {
+    session
+        .report()
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.index < curated)
+        .all(|outcome| matches!(outcome.outcome, Outcome::Started { .. }))
+}
+
+/// A curated program that could not be built into a companion, said on the setup stream under the
+/// program's own name. Not an [`Event::Error`]: the game is running and is unaffected.
+fn report_program_failure(events: &UnboundedSender<Event>, err: &AddonError) {
+    tracing::warn!(
+        reason = err.chain(),
+        "curated programs could not be started"
+    );
+    let _ = events.send(Event::Setup(SetupEvent::Failed {
+        what: match err {
+            AddonError::ProgramPrefixMismatch { program, .. } => program.clone(),
+            _ => "programs".to_owned(),
+        },
+        reason: err.chain(),
+    }));
+}
+
+impl AddonsBackend {
+    /// Check, a little after the companions start, that every one inside the prefix joined the
+    /// game's wine session. Its findings are narrated by the addon layer on the companion stream.
+    fn shared_session_check(
+        &self,
+        game: GameContext,
+        started: Vec<ExternalAddon>,
+        cancel: &CancellationToken,
+        events: &AddonEvents,
+    ) -> JoinHandle<()> {
+        let addons = self.addons.clone();
+        let cancel = cancel.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(SHARED_SESSION_DELAY) => {}
+                () = cancel.cancelled() => return,
+            }
+            for err in addons.check_shared_session(&game, &started, &events).await {
+                tracing::warn!(
+                    reason = err.chain(),
+                    "a companion is not on the game's session"
+                );
+            }
+        })
+    }
+
+    /// Gate the enabled programs against the prefix's own runner and this game version, off the
+    /// async runtime because the gates hash every file a program placed.
+    async fn gate(
+        &self,
+        manifest: VerifiedManifest,
+        prefix: Prefix,
+        programs: Vec<String>,
+        game_version: String,
+        setup: &SetupEvents,
+    ) -> GatedPrograms {
+        // Read the moment before the spawn: a program's proof is a file a previous session also
+        // wrote, and only a write after this moment is this launch's.
+        let since = SystemTime::now();
+        let addons = self.addons.clone();
+        let setup = setup.clone();
+        let gated = tokio::task::spawn_blocking(move || {
+            // The runner the prefix records, which is what each row was validated against; the handle
+            // the launch holds is the fallback for a prefix with no record to read.
+            let runner = match prefix.metadata() {
+                Ok(Some(metadata)) => metadata.runner,
+                _ => apogee_runtime::RunnerRef::from(prefix.runner()),
+            };
+            let names: Vec<&str> = programs.iter().map(String::as_str).collect();
+            addons.program_gates(&manifest, &prefix, &names, &game_version, &runner, &setup)
+        })
+        .await;
+        match gated {
+            Ok(plan) => GatedPrograms::from_plan(plan, since),
+            Err(err) => {
+                tracing::warn!(error = %err, "the program gates did not finish");
+                GatedPrograms::default()
+            }
+        }
     }
 }
 
@@ -166,20 +346,31 @@ struct SetupPass {
 
 impl AddonsBackend {
     /// Apply what the catalog publishes to `prefix`.
+    ///
+    /// With curated `programs` turned on, their install steps run after the base verbs; with none,
+    /// the pass is exactly the base setup, so a profile with every program off asks nothing new of
+    /// the catalog.
     async fn setup_pass(
         &self,
         prefix: &Prefix,
+        programs: &[String],
         cancel: &CancellationToken,
         setup: &SetupEvents,
     ) -> SetupPass {
         let Some(manifest) = self.catalog_manifest(cancel, setup).await else {
             return SetupPass::default();
         };
-        let still_missing = match self
-            .addons
-            .apply_setup(&manifest, prefix, cancel, setup)
-            .await
-        {
+        let applied = if programs.is_empty() {
+            self.addons
+                .apply_setup(&manifest, prefix, cancel, setup)
+                .await
+        } else {
+            let names: Vec<&str> = programs.iter().map(String::as_str).collect();
+            self.addons
+                .apply_setup_for(&manifest, prefix, &names, cancel, setup)
+                .await
+        };
+        let still_missing = match applied {
             Ok(report) => {
                 tracing::debug!(applied = report.present().len(), "prefix setup complete");
                 // What the pass just did, rather than a second reading of the prefix: this pass
@@ -304,8 +495,9 @@ struct RunningAddons {
     session: Option<AddonSession>,
     /// Dropped before the relay is awaited, which is what lets the relay task finish.
     addon_events: Option<AddonEvents>,
-    /// The wait for proof the redirected launch came up, if there was one to watch for.
-    confirming: Option<JoinHandle<()>>,
+    /// The waits for proof that what was loaded or started came up, and the shared-session check:
+    /// everything still watching the session on the side.
+    watches: Vec<JoinHandle<()>>,
     relay: JoinHandle<()>,
 }
 
@@ -325,9 +517,9 @@ impl RunningAddons {
         // its window: a user who quits a minute in would sit looking at a launcher that had nothing
         // left to do. Stopping it also *is* the right answer rather than a concession, since what it
         // would report is only worth knowing while the session is still running.
-        if let Some(confirming) = self.confirming.take() {
-            confirming.abort();
-            let _ = confirming.await;
+        for watch in std::mem::take(&mut self.watches) {
+            watch.abort();
+            let _ = watch.await;
         }
         let events = self.addon_events.take().unwrap_or_else(AddonEvents::none);
         let report = match self.session.take() {
@@ -436,6 +628,8 @@ mod tests {
             .start(
                 std::process::id().cast_signed(),
                 None,
+                BTreeMap::new(),
+                GatedPrograms::default(),
                 Vec::new(),
                 None,
                 &cancel,
@@ -476,6 +670,8 @@ mod tests {
             .start(
                 std::process::id().cast_signed(),
                 None,
+                BTreeMap::new(),
+                GatedPrograms::default(),
                 Vec::new(),
                 Some(evidence),
                 &cancel,
@@ -503,6 +699,8 @@ mod tests {
             .start(
                 std::process::id().cast_signed(),
                 None,
+                BTreeMap::new(),
+                GatedPrograms::default(),
                 Vec::new(),
                 None,
                 &cancel,
@@ -523,16 +721,18 @@ mod tests {
     /// This is the shape a test double hands back, and the shape a Windows launch will.
     #[tokio::test]
     async fn a_launch_with_no_prefix_prepares_nothing() -> Result<(), Box<dyn std::error::Error>> {
-        use std::collections::BTreeMap;
-
         let backend = backend()?;
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut plan = LaunchPlan::new("ffxiv_dx11.exe", "", BTreeMap::new());
 
-        let confirming = backend
+        let prepared = backend
             .prepare_launch(
                 None,
-                Some(DalamudConfig::default()),
+                LaunchPrograms {
+                    dalamud: Some(DalamudConfig::default()),
+                    programs: vec!["act".to_owned()],
+                    game_version: "2024.01.01.0000.0000".to_owned(),
+                },
                 &mut plan,
                 &CancellationToken::new(),
                 &tx,
@@ -540,8 +740,12 @@ mod tests {
             .await;
 
         assert!(
-            confirming.is_none(),
+            prepared.confirming.is_none(),
             "nothing composed this launch, so there is nothing to confirm"
+        );
+        assert!(
+            !prepared.programs.any(),
+            "nothing was gated without a prefix"
         );
         assert!(plan.inserted_args().is_empty());
         assert_eq!(plan.program(), "ffxiv_dx11.exe");

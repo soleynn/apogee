@@ -47,6 +47,7 @@ macro_rules! ipc_surface {
             direct::next_action,
             direct::defaults,
             direct::resolved_setup,
+            direct::program_settings,
             direct::runner_catalog,
             direct::dxvk_catalog,
             direct::system_report,
@@ -66,6 +67,7 @@ macro_rules! ipc_surface {
             mutation::import_totp_secret,
             mutation::use_pushed_codes,
             mutation::disable_pushed_codes,
+            mutation::disable_program,
             mutation::delete_secret,
             mutation::forget_secrets,
             mutation::set_never_store,
@@ -839,8 +841,12 @@ mod tests {
             apogee_core::AccountKind::Steam { app_id: 39_210 },
         );
         core.save_account(&account)?;
-        let mut profile =
-            apogee_core::Profile::new("Main", account.id, temporary.path().join("game"));
+        let mut profile = apogee_core::Profile::new(
+            "Main",
+            account.id,
+            temporary.path().join("game"),
+            apogee_core::RunnerSelection::Unchosen,
+        );
         profile.launch.region = apogee_core::Region::Korea;
         core.save_profile(&profile)?;
         let mut settings = core.settings()?;

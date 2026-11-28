@@ -34,6 +34,13 @@ impl StableCode for Event {
             Self::Prefix(_) => "event-prefix",
             Self::Notice(crate::Notice::ClockSkew { .. }) => "notice-clock-skew",
             Self::Notice(crate::Notice::OtpListenerFlood { .. }) => "notice-otp-listener-flood",
+            Self::Notice(crate::Notice::CompanionCanReadKeyring) => {
+                "notice-companion-can-read-keyring"
+            }
+            Self::Notice(crate::Notice::PushedCodesNeedAPinnedSource) => {
+                "notice-pushed-codes-need-a-pinned-source"
+            }
+            Self::Notice(crate::Notice::OtpPortHeld { .. }) => "notice-otp-port-held",
             Self::LaunchProgramExited(_) => "event-launch-program-exited",
             Self::Error(error) => error.code(),
             Self::Outcome(RunOutcome::Succeeded) => "event-outcome-succeeded",
@@ -93,7 +100,10 @@ impl StableCode for CoreError {
             Self::NoSteam => "err-no-steam",
             Self::NoTickSource => "err-no-tick-source",
             Self::NoProfile(_) => "err-no-profile",
+            Self::RunnerUnchosen { .. } => "err-runner-unchosen",
+            Self::RunnerUnsupported { .. } => "err-runner-unsupported",
             Self::NoAccount(_) => "err-no-account",
+            Self::ConsentRequired { .. } => "err-consent-required",
             Self::RemovalPlanChanged { .. } => "err-removal-plan-changed",
             Self::InvalidCredential => "err-invalid-credential",
             Self::Import { .. } => "err-import",
@@ -251,6 +261,7 @@ pub const ALL_CODES: &[&str] = &[
     "err-addon",
     "err-addons",
     "err-config",
+    "err-consent-required",
     "err-crypto",
     "err-fetch",
     "err-first-run",
@@ -278,6 +289,8 @@ pub const ALL_CODES: &[&str] = &[
     "err-proto-unknown",
     "err-removal-plan-changed",
     "err-repair",
+    "err-runner-unchosen",
+    "err-runner-unsupported",
     "err-runtime",
     "err-secrets",
     "err-store",
@@ -302,7 +315,10 @@ pub const ALL_CODES: &[&str] = &[
     "health-runner-mismatch",
     "health-unknown",
     "notice-clock-skew",
+    "notice-companion-can-read-keyring",
     "notice-otp-listener-flood",
+    "notice-otp-port-held",
+    "notice-pushed-codes-need-a-pinned-source",
     "preflight-game-running",
     "preflight-not-enough-space",
     "preflight-unknown",

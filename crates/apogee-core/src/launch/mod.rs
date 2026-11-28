@@ -25,23 +25,49 @@ pub(crate) mod runtime_backend;
 /// the user's to choose rather than the catalog's to publish.
 ///
 /// One value rather than a runner beside a loose flag, because all four prefix verbs need the whole of
-/// it and a bare `bool` next to a `&RunnerSelection` can be passed in the wrong place without anything
-/// saying so. It is not the profile itself: this seam has never needed an account, a game path, or a
-/// list of companions, and handing it one would let it start reading them.
+/// it and a bare `bool` next to a runner can be passed in the wrong place without anything saying so.
+/// It is not the profile itself: this seam has never needed an account, a game path, or a list of
+/// companions, and handing it one would let it start reading them.
+///
+/// It names a managed runner and nothing else. A profile whose runner is unchosen or no longer
+/// supported cannot be turned into one, so a backend never has to decide what to do with either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrefixRequest {
-    /// Which Wine/Proton builds and runs it.
-    pub(crate) runner: RunnerSelection,
+    /// The managed runner's name, as the catalog publishes it.
+    pub(crate) runner_name: String,
+    /// The managed runner's pinned version.
+    pub(crate) runner_version: String,
     /// Install DXVK's `dxvk-nvapi` companion and override the prefix's nvapi DLLs onto it.
     pub(crate) nvapi: bool,
 }
 
-impl From<&Profile> for PrefixRequest {
-    fn from(profile: &Profile) -> Self {
-        Self {
-            runner: profile.runner.clone(),
+impl TryFrom<&Profile> for PrefixRequest {
+    type Error = CoreError;
+
+    /// # Errors
+    /// [`CoreError::RunnerUnchosen`] or [`CoreError::RunnerUnsupported`] for a profile whose runner
+    /// is not a managed one.
+    fn try_from(profile: &Profile) -> Result<Self, CoreError> {
+        let (runner_name, runner_version) = managed_runner(profile)?;
+        Ok(Self {
+            runner_name: runner_name.to_owned(),
+            runner_version: runner_version.to_owned(),
             nvapi: profile.launch.nvapi,
-        }
+        })
+    }
+}
+
+/// The profile's managed runner, or the typed refusal for one that cannot launch.
+pub(crate) fn managed_runner(profile: &Profile) -> Result<(&str, &str), CoreError> {
+    match &profile.runner {
+        RunnerSelection::Managed { name, version } => Ok((name, version)),
+        RunnerSelection::Unchosen => Err(CoreError::RunnerUnchosen {
+            profile: profile.id,
+        }),
+        RunnerSelection::Unsupported { runner } => Err(CoreError::RunnerUnsupported {
+            profile: profile.id,
+            runner: runner.clone(),
+        }),
     }
 }
 
@@ -67,9 +93,9 @@ pub(crate) trait GameHandle: Send + Sync {
 /// [`apogee_runtime::HostCaps::for_runner`]).
 #[derive(Debug, Clone)]
 pub(crate) struct Prepared {
-    /// The initialized prefix. `None` means the backend has no real prefix to hand back: the test
-    /// double has no Wine, and native Windows launches directly through the operating system. A
-    /// caller that needs one treats that as nothing to do rather than as a failure.
+    /// The initialized prefix. `None` means the backend has no real prefix to hand back, which only
+    /// the test double does. A caller that needs one treats that as nothing to do rather than as a
+    /// failure.
     pub(crate) prefix: Option<apogee_runtime::Prefix>,
     /// What the host supports as seen through the runner that was just prepared.
     pub(crate) caps: apogee_runtime::HostCaps,
@@ -80,6 +106,9 @@ pub(crate) struct Prepared {
     /// The verified catalog this preparation already fetched, when it needed one. Carried so a
     /// caller that also needs it does not download and re-verify the same signed file twice.
     pub(crate) catalog: Option<apogee_runtime::Catalog>,
+    /// How the runner that built the prefix starts a program in it, which decides how a companion
+    /// joins the game's wine session. `None` is a backend that prepared no runner at all.
+    pub(crate) runner: Option<apogee_runtime::RunnerKind>,
 }
 
 /// A prefix that was looked at, and what the runtime made of it.
@@ -200,6 +229,8 @@ pub(crate) mod fake {
         caps: apogee_runtime::HostCaps,
         /// What `prepare` reports the prefix's graphics translation to be.
         dxvk: Option<apogee_runtime::DxvkEnv>,
+        /// What `prepare` reports the runner to be.
+        runner: Option<apogee_runtime::RunnerKind>,
         /// What a check reports, and what a fix is asked to resolve.
         health: Option<apogee_runtime::PrefixHealth>,
         /// What a fix reports is left afterwards.
@@ -252,6 +283,7 @@ pub(crate) mod fake {
                     fsync: false,
                 },
                 dxvk: None,
+                runner: Some(apogee_runtime::RunnerKind::Wine),
                 health: None,
                 residual: None,
                 fixed: Arc::new(AtomicBool::new(false)),
@@ -290,6 +322,12 @@ pub(crate) mod fake {
         /// preparation brought up to the published build.
         pub(crate) fn with_dxvk(mut self, dxvk: apogee_runtime::DxvkEnv) -> Self {
             self.dxvk = Some(dxvk);
+            self
+        }
+
+        /// Report a runner of `kind` from `prepare`.
+        pub(crate) fn on_runner(mut self, kind: apogee_runtime::RunnerKind) -> Self {
+            self.runner = Some(kind);
             self
         }
 
@@ -373,6 +411,7 @@ pub(crate) mod fake {
                 caps: self.caps,
                 dxvk: self.dxvk.clone(),
                 catalog: None,
+                runner: self.runner,
             })
         }
 
@@ -474,12 +513,12 @@ mod tests {
 
     use super::fake::FakeLaunchBackend;
     use super::{CancellationToken, LaunchBackend, LaunchPlan, PrefixRequest};
-    use crate::model::RunnerSelection;
 
-    /// A request for the host's own wine with nothing else asked for.
+    /// A request for a managed runner with nothing else asked for.
     fn request() -> PrefixRequest {
         PrefixRequest {
-            runner: RunnerSelection::SystemWine,
+            runner_name: "wine-xiv".to_owned(),
+            runner_version: "test".to_owned(),
             nvapi: false,
         }
     }

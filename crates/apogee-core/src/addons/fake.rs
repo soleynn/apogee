@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use apogee_addons::{DalamudConfig, ExternalAddon, LoadEvidence};
+use apogee_addons::{ExternalAddon, LoadEvidence, RunIn, SetupEvent, Trigger};
 use apogee_runtime::LaunchPlan;
 
-use super::{AddonBackend, AddonLifecycle};
+use super::{AddonBackend, AddonLifecycle, GatedPrograms, LaunchPrograms, PreparedAddons};
 use crate::command::Event;
 use crate::error::CoreError;
 
@@ -26,6 +26,12 @@ pub(crate) enum AddonCall {
         prefix: bool,
         dalamud: bool,
     },
+    /// A launch named curated programs to install and gate, against this game version. Recorded only
+    /// when it named any, so a test about an ordinary launch reads the same as it always has.
+    ProgramsRequested {
+        programs: Vec<String>,
+        game_version: String,
+    },
     /// The prefix was brought up to the catalog's setup with no launch around it.
     SetupApplied {
         prefix: bool,
@@ -33,6 +39,10 @@ pub(crate) enum AddonCall {
     /// The prefix was asked what setup it is missing, which changes nothing.
     SetupExamined {
         prefix: bool,
+    },
+    /// The same two, for a profile with curated programs on.
+    ProgramSetup {
+        programs: Vec<String>,
     },
     Started {
         game_pid: i32,
@@ -62,6 +72,10 @@ pub(crate) struct FakeAddons {
     /// add: a test not about the catalog should not have to say so.
     missing: Option<Vec<String>>,
     still_missing: Option<Vec<String>>,
+    /// The enabled programs the gates skip, as a gate missed on a game version would.
+    skipping: Vec<String>,
+    /// What the companions were told to share with the game, as the last start saw it.
+    shared_env: Arc<Mutex<Option<std::collections::BTreeMap<String, String>>>>,
 }
 
 impl FakeAddons {
@@ -87,6 +101,17 @@ impl FakeAddons {
         self.missing = None;
         self.still_missing = None;
         self
+    }
+
+    /// Let the gates skip `program`, as a row not validated on the launch's game version does.
+    pub(crate) fn skipping(mut self, program: &str) -> Self {
+        self.skipping.push(program.to_owned());
+        self
+    }
+
+    /// What the companions of the last start were told to share with the game.
+    pub(crate) fn shared_env(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        self.shared_env.lock().ok().and_then(|env| env.clone())
     }
 
     /// Say that this launch still owes teardown at exit.
@@ -132,68 +157,137 @@ impl AddonBackend for FakeAddons {
     async fn prepare_launch(
         &self,
         prefix: Option<Prefix>,
-        dalamud: Option<DalamudConfig>,
+        request: LaunchPrograms,
         plan: &mut LaunchPlan,
         _cancel: &CancellationToken,
-        _events: &UnboundedSender<Event>,
-    ) -> Option<LoadEvidence> {
+        events: &UnboundedSender<Event>,
+    ) -> PreparedAddons {
         self.record(AddonCall::Prepared {
             prefix: prefix.is_some(),
-            dalamud: dalamud.is_some(),
+            dalamud: request.dalamud.is_some(),
         });
+        if !request.programs.is_empty() {
+            self.record(AddonCall::ProgramsRequested {
+                programs: request.programs.clone(),
+                game_version: request.game_version.clone(),
+            });
+        }
+        // The gate a real catalog applies, reduced to the one a test scripts: a skipped program is
+        // narrated as a caveat under its own name and left out, and the rest pass.
+        let mut passed = Vec::new();
+        for program in &request.programs {
+            if self.skipping.contains(program) {
+                let _ = events.send(Event::Setup(SetupEvent::Caveat {
+                    what: program.clone(),
+                    note: format!("not validated on game version {}", request.game_version),
+                }));
+            } else {
+                passed.push(program.as_str());
+            }
+        }
+        let programs = GatedPrograms::passed(&passed);
         if self.inserted_args.is_empty() {
-            return None;
+            return PreparedAddons {
+                confirming: None,
+                programs,
+            };
         }
         plan.set_inserted_args(self.inserted_args.clone());
         // A companion that composed itself into the launch is one there is something to confirm about.
         // The path is never read: what a flow test asks is whether the proof reached the start.
-        Some(LoadEvidence::new(
-            "Fake",
-            std::path::Path::new("/nonexistent/fake.log"),
-            std::time::SystemTime::now(),
-        ))
+        PreparedAddons {
+            confirming: Some(LoadEvidence::new(
+                "Fake",
+                std::path::Path::new("/nonexistent/fake.log"),
+                std::time::SystemTime::now(),
+            )),
+            programs,
+        }
     }
 
     async fn apply_setup(
         &self,
         prefix: Option<Prefix>,
+        programs: &[String],
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Option<Vec<String>> {
         self.record(AddonCall::SetupApplied {
             prefix: prefix.is_some(),
         });
+        if !programs.is_empty() {
+            self.record(AddonCall::ProgramSetup {
+                programs: programs.to_vec(),
+            });
+        }
         self.still_missing.clone()
     }
 
     async fn missing_setup(
         &self,
         prefix: Option<Prefix>,
+        programs: &[String],
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Option<Vec<String>> {
         self.record(AddonCall::SetupExamined {
             prefix: prefix.is_some(),
         });
+        if !programs.is_empty() {
+            self.record(AddonCall::ProgramSetup {
+                programs: programs.to_vec(),
+            });
+        }
         self.missing.clone()
+    }
+
+    async fn program_rows(
+        &self,
+        _cancel: &CancellationToken,
+        _events: &UnboundedSender<Event>,
+    ) -> Option<Vec<crate::ProgramRow>> {
+        None
     }
 
     async fn start(
         &self,
         game_pid: i32,
         _prefix: Option<Prefix>,
+        shared_env: std::collections::BTreeMap<String, String>,
+        programs: GatedPrograms,
         addons: Vec<ExternalAddon>,
         confirming: Option<LoadEvidence>,
         _cancel: &CancellationToken,
         _events: &UnboundedSender<Event>,
     ) -> Box<dyn AddonLifecycle> {
+        // One stand-in entry per passed program, ahead of the user's own, as the real start builds
+        // them: the program's own row is what a real one is built from, and a test has none.
+        let mut list: Vec<ExternalAddon> = programs
+            .planned()
+            .iter()
+            .filter_map(|name| {
+                ExternalAddon::new(
+                    format!("/fake/programs/{name}.exe"),
+                    Vec::new(),
+                    RunIn::Prefix,
+                    Trigger::WithGame {
+                        keep_after_close: false,
+                    },
+                )
+                .ok()
+            })
+            .collect();
+        list.extend(addons);
         self.record(AddonCall::Started {
             game_pid,
             confirming: confirming.is_some(),
-            count: addons.len(),
+            count: list.len(),
         });
+        if let Ok(mut seen) = self.shared_env.lock() {
+            *seen = Some(shared_env);
+        }
         if let Ok(mut started) = self.started.lock() {
-            started.extend(addons);
+            started.extend(list);
         }
         Box::new(FakeLifecycle {
             calls: self.calls.clone(),

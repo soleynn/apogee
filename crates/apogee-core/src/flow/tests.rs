@@ -113,7 +113,15 @@ fn harness_full(use_otp: bool, kind: AccountKind, customize: impl FnOnce(&mut Pr
         use_otp,
         ..Account::new("testuser", kind)
     };
-    let mut profile = Profile::new("Main", account.id, game.path().to_path_buf());
+    let mut profile = Profile::new(
+        "Main",
+        account.id,
+        game.path().to_path_buf(),
+        crate::RunnerSelection::Managed {
+            name: "wine-xiv".to_owned(),
+            version: "test".to_owned(),
+        },
+    );
     customize(&mut profile);
     store.save_account(&account).unwrap();
     store.save_profile(&profile).unwrap();
@@ -304,7 +312,7 @@ async fn first_run_import_and_support_are_real_successful_streams() {
         .unwrap()
         .read_to_string(&mut report)
         .unwrap();
-    assert!(report.contains("runtime.runner=\"system-wine"));
+    assert!(report.contains("runtime.runner=\"wine-xiv test\""));
 }
 
 #[tokio::test]
@@ -498,12 +506,13 @@ async fn first_run_install_and_runner_actions_materialize_a_launchable_profile()
     );
 
     let mut checkpoint = h.store.load_first_run().unwrap();
-    let runner = crate::FirstRunRunnerSelection::SystemWine {
-        version: Some("test-wine".to_owned()),
+    let runner = crate::FirstRunRunnerSelection::Managed {
+        name: "wine-xiv".to_owned(),
+        version: "test".to_owned(),
     };
     checkpoint.runners = vec![crate::RunnerReading {
         selection: runner.clone(),
-        version: Some("test-wine".to_owned()),
+        version: Some("test".to_owned()),
         recommended: false,
         available: true,
     }];
@@ -1610,6 +1619,45 @@ async fn launch_without_a_cached_session_asks_to_log_in_first() {
 
     assert_eq!(states(&events), [FlowState::NeedsLogin]);
     assert_eq!(transport.recorded().len(), 0);
+}
+
+/// A profile that chose the host's Wine still loads, and every way of starting the game refuses it
+/// with the typed error before anything reaches the network or the prefix: a sign-in or a patch for
+/// a game that cannot then start would spend a one-time code and a download on nothing.
+#[tokio::test]
+async fn a_profile_on_a_withdrawn_runner_is_refused_before_sign_in_or_prefix() {
+    let h = harness_customized(false, |profile| {
+        profile.runner = crate::RunnerSelection::Unsupported {
+            runner: "system_wine".to_owned(),
+        };
+    });
+    for command in [
+        play_no_otp(h.profile),
+        Command::Launch { profile: h.profile },
+        Command::Prefix {
+            profile: h.profile,
+            action: crate::PrefixAction::Check,
+        },
+    ] {
+        let transport = Arc::new(FixtureTransport::new([]));
+        let launch = Arc::new(FakeLaunchBackend::exiting());
+        let ctx = context(&h, transport.clone(), launch.clone(), NOW);
+
+        let events = run(ctx, command).await;
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::Error(CoreError::RunnerUnsupported { runner, .. }),
+                    Event::Outcome(RunOutcome::Failed),
+                ] if runner == "system_wine"
+            ),
+            "{events:?}"
+        );
+        assert_eq!(transport.recorded().len(), 0);
+        assert_eq!(launch.launch_count(), 0);
+    }
 }
 
 #[tokio::test]
@@ -4306,7 +4354,12 @@ async fn a_flood_during_a_login_is_narrated_and_the_login_succeeds() {
 /// being set shows up as a reviewed diff.
 #[test]
 fn a_prefix_launch_env_is_byte_exact() {
-    let profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let profile = Profile::new(
+        "Main",
+        Uuid::nil(),
+        PathBuf::from("/game"),
+        crate::RunnerSelection::Unchosen,
+    );
     let config = super::launch_env(
         &profile,
         None,
@@ -4318,7 +4371,12 @@ fn a_prefix_launch_env_is_byte_exact() {
 
 #[test]
 fn a_profile_variable_outranks_the_driver_cache_it_names() {
-    let mut profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let mut profile = Profile::new(
+        "Main",
+        Uuid::nil(),
+        PathBuf::from("/game"),
+        crate::RunnerSelection::Unchosen,
+    );
     profile.launch.extra_env = vec![(
         "__GL_SHADER_DISK_CACHE_PATH".to_owned(),
         "/elsewhere".to_owned(),
@@ -4337,10 +4395,471 @@ fn a_profile_variable_outranks_the_driver_cache_it_names() {
 
 #[test]
 fn a_launch_without_a_prefix_leaves_the_driver_caches_at_their_defaults() {
-    let profile = Profile::new("Main", Uuid::nil(), PathBuf::from("/game"));
+    let profile = Profile::new(
+        "Main",
+        Uuid::nil(),
+        PathBuf::from("/game"),
+        crate::RunnerSelection::Unchosen,
+    );
     let env = super::launch_env(&profile, None, false, None).env;
     assert!(
         !env.keys()
             .any(|k| k.starts_with("__GL_") || k.starts_with("MESA_"))
     );
+}
+
+// ---- curated programs at launch ------------------------------------------------------------------
+
+/// A launch's addon seam and launch backend, wired over `h` for a login that reaches a current game.
+fn program_launch(
+    h: &Harness,
+    launch: Arc<FakeLaunchBackend>,
+    addons: Arc<FakeAddons>,
+) -> FlowContext {
+    context_with_addons(
+        h,
+        Arc::new(FixtureTransport::new(play_then_current())),
+        Arc::new(FakePatchBackend::new()),
+        launch,
+        addons,
+        NOW,
+    )
+}
+
+fn prefix_tool(path: &str, run_in: RunIn) -> ExternalAddon {
+    ExternalAddon::new(
+        absolute_fixture_path(path),
+        vec![],
+        run_in,
+        Trigger::WithGame {
+            keep_after_close: false,
+        },
+    )
+    .unwrap()
+}
+
+/// A program its row was not validated on this game version for is narrated under its own name and
+/// left out, and the game starts exactly as it would have without it. On a umu runner that also means
+/// no container join: the only thing that would have joined it was skipped.
+#[tokio::test]
+async fn a_program_off_its_game_version_is_skipped_and_the_game_still_starts() {
+    let h = harness_customized(false, |profile| profile.launch.act = true);
+    let launch =
+        Arc::new(FakeLaunchBackend::exiting().on_runner(apogee_runtime::RunnerKind::ProtonUmu));
+    let addons = Arc::new(FakeAddons::new().skipping("act"));
+
+    let events = run(
+        program_launch(&h, launch.clone(), addons.clone()),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Setup(apogee_addons::SetupEvent::Caveat { what, .. }) if what == "act"
+        )),
+        "the skip was not narrated: {events:?}"
+    );
+    assert!(addons.calls().contains(&AddonCall::ProgramsRequested {
+        programs: vec!["act".to_owned()],
+        game_version: GAME_VERSION.to_owned(),
+    }));
+    assert!(addons.started_programs().is_empty());
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("UMU_CONTAINER_NSENTER"));
+}
+
+/// The join is announced on the game's launch only when something will use it. An addon-free launch
+/// differs from a launch with a program by that one variable and nothing else, so a program turned on
+/// cannot quietly change how the game itself starts.
+#[tokio::test]
+async fn only_a_launch_with_an_in_prefix_companion_joins_the_umu_container() {
+    let umu =
+        || Arc::new(FakeLaunchBackend::exiting().on_runner(apogee_runtime::RunnerKind::ProtonUmu));
+
+    let plain = harness(false);
+    let plain_launch = umu();
+    let plain_addons = Arc::new(FakeAddons::new());
+    run(
+        program_launch(&plain, plain_launch.clone(), plain_addons.clone()),
+        play_no_otp(plain.profile),
+    )
+    .await;
+    let plain_env = plain_launch.last_plan().unwrap().env().clone();
+    assert!(!plain_env.contains_key("UMU_CONTAINER_NSENTER"));
+    assert_eq!(plain_addons.shared_env(), Some(Default::default()));
+
+    let with_act = harness_customized(false, |profile| profile.launch.act = true);
+    let act_launch = umu();
+    let act_addons = Arc::new(FakeAddons::new());
+    run(
+        program_launch(&with_act, act_launch.clone(), act_addons.clone()),
+        play_no_otp(with_act.profile),
+    )
+    .await;
+    let mut act_env = act_launch.last_plan().unwrap().env().clone();
+    assert_eq!(
+        act_env.remove("UMU_CONTAINER_NSENTER").as_deref(),
+        Some("1")
+    );
+    // Byte-identical once the join is taken out: the driver-cache paths name the profile's own
+    // prefix, so compare the names and every value that does not.
+    assert_eq!(
+        act_env.keys().collect::<Vec<_>>(),
+        plain_env.keys().collect::<Vec<_>>()
+    );
+    for (name, value) in &plain_env {
+        if !value.contains(&plain.profile.to_string()) {
+            assert_eq!(act_env.get(name), Some(value), "{name} differs");
+        }
+    }
+    // The companion is told to join the same container and nothing else: inside it the runner sets
+    // synchronization for both sides.
+    assert_eq!(
+        act_addons.shared_env(),
+        Some(std::collections::BTreeMap::from([(
+            "UMU_CONTAINER_NSENTER".to_owned(),
+            "1".to_owned()
+        )]))
+    );
+}
+
+/// A user's own tool inside the prefix needs the join as much as a curated program does; one on the
+/// host is not inside any container and does not.
+#[rstest::rstest]
+#[case(RunIn::Prefix, true)]
+#[case(RunIn::Host, false)]
+#[tokio::test]
+async fn a_users_own_tool_joins_the_container_only_when_it_runs_in_the_prefix(
+    #[case] run_in: RunIn,
+    #[case] joins: bool,
+) {
+    let h = harness_customized(false, |profile| {
+        profile.external.push(prefix_tool("tools/own.exe", run_in));
+    });
+    let launch =
+        Arc::new(FakeLaunchBackend::exiting().on_runner(apogee_runtime::RunnerKind::ProtonUmu));
+    run(
+        program_launch(&h, launch.clone(), Arc::new(FakeAddons::new())),
+        play_no_otp(h.profile),
+    )
+    .await;
+    assert_eq!(
+        launch
+            .last_plan()
+            .unwrap()
+            .env()
+            .contains_key("UMU_CONTAINER_NSENTER"),
+        joins
+    );
+}
+
+/// Under plain wine there is no container to join, and what a companion must share is the
+/// synchronization the game's server was started with.
+#[tokio::test]
+async fn a_plain_wine_companion_shares_the_games_synchronization() {
+    let h = harness_customized(false, |profile| profile.launch.xivalexander = true);
+    let launch = Arc::new(
+        FakeLaunchBackend::exiting()
+            .on_runner(apogee_runtime::RunnerKind::Wine)
+            .reporting(apogee_runtime::HostCaps {
+                ntsync: false,
+                fsync: true,
+            }),
+    );
+    let addons = Arc::new(FakeAddons::new());
+    run(
+        program_launch(&h, launch.clone(), addons.clone()),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    let plan = launch.last_plan().unwrap();
+    assert!(!plan.env().contains_key("UMU_CONTAINER_NSENTER"));
+    assert_eq!(plan.env().get("WINEFSYNC").map(String::as_str), Some("1"));
+    assert_eq!(
+        addons.shared_env(),
+        Some(std::collections::BTreeMap::from([(
+            "WINEFSYNC".to_owned(),
+            "1".to_owned()
+        )]))
+    );
+}
+
+/// Programs are built and started only once the game's pid is known, ahead of the user's own tools,
+/// and a disabled program is never so much as named to the seam.
+#[tokio::test]
+async fn programs_start_after_the_game_and_ahead_of_the_users_own_tools() {
+    let own = absolute_fixture_path("tools/own.sh");
+    let h = harness_customized(false, |profile| {
+        profile.launch.xivalexander = true;
+        profile.launch.act = false;
+        profile
+            .external
+            .push(prefix_tool("tools/own.sh", RunIn::Host));
+    });
+    let addons = Arc::new(FakeAddons::new());
+    let events = run(
+        program_launch(&h, Arc::new(FakeLaunchBackend::exiting()), addons.clone()),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    assert_eq!(
+        addons.calls(),
+        [
+            AddonCall::Prepared {
+                prefix: false,
+                dalamud: false,
+            },
+            AddonCall::ProgramsRequested {
+                programs: vec!["xivalexander".to_owned()],
+                game_version: GAME_VERSION.to_owned(),
+            },
+            AddonCall::Started {
+                game_pid: std::process::id().cast_signed(),
+                confirming: false,
+                count: 2,
+            },
+            AddonCall::GameClosed,
+        ]
+    );
+    let running = states(&events)
+        .iter()
+        .position(|s| *s == FlowState::Running)
+        .unwrap();
+    assert!(running > 0);
+    assert_eq!(
+        addons.started_programs(),
+        [PathBuf::from("/fake/programs/xivalexander.exe"), own]
+    );
+}
+
+/// `prefix fix` resolves what a check reports, and a check reports the enabled programs' steps, so
+/// both carry them; a profile with every program off asks for the base setup only.
+#[rstest::rstest]
+#[case(PrefixAction::Check)]
+#[case(PrefixAction::Fix)]
+#[tokio::test]
+async fn prefix_repair_and_check_carry_the_enabled_programs(#[case] action: PrefixAction) {
+    let h = harness_customized(false, |profile| profile.launch.act = true);
+    let health = apogee_runtime::PrefixHealth::default();
+    let addons = Arc::new(FakeAddons::new());
+    let ctx = context_with_addons(
+        &h,
+        Arc::new(FixtureTransport::new([])),
+        Arc::new(FakePatchBackend::new()),
+        Arc::new(FakeLaunchBackend::exiting().with_health(health.clone(), health)),
+        addons.clone(),
+        NOW,
+    );
+    run(
+        ctx,
+        Command::Prefix {
+            profile: h.profile,
+            action,
+        },
+    )
+    .await;
+    assert!(
+        addons.calls().contains(&AddonCall::ProgramSetup {
+            programs: vec!["act".to_owned()],
+        }),
+        "{:?}",
+        addons.calls()
+    );
+}
+
+/// No session at rest while a companion is configured: a cached one is removed before the launch
+/// reads it, so a bare launch has to sign in, and a full sign-in launches from the session it holds
+/// without writing one.
+#[tokio::test]
+async fn a_configured_companion_keeps_no_session_at_rest() {
+    let h = harness(false);
+    // A plain launch first, which caches its session the way every launch without a companion does.
+    run(
+        program_launch(
+            &h,
+            Arc::new(FakeLaunchBackend::exiting()),
+            Arc::new(FakeAddons::new()),
+        ),
+        play_no_otp(h.profile),
+    )
+    .await;
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_some());
+
+    let mut profile = h.store.load_profile(h.profile).unwrap();
+    profile
+        .external
+        .push(prefix_tool("tools/own.sh", RunIn::Host));
+    h.store.save_profile(&profile).unwrap();
+
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let ctx = context(&h, Arc::new(FixtureTransport::new([])), launch.clone(), NOW);
+    let events = run(ctx, Command::Launch { profile: h.profile }).await;
+    assert_eq!(states(&events), [FlowState::NeedsLogin]);
+    assert_eq!(launch.launch_count(), 0);
+    assert!(h.store.load_uid_cache(h.account).unwrap().is_none());
+
+    let launch = Arc::new(FakeLaunchBackend::exiting());
+    let events = run(
+        program_launch(&h, launch.clone(), Arc::new(FakeAddons::new())),
+        play_no_otp(h.profile),
+    )
+    .await;
+    assert_eq!(states(&events).last(), Some(&FlowState::Exited));
+    assert_eq!(launch.launch_count(), 1);
+    assert!(
+        h.store.load_uid_cache(h.account).unwrap().is_none(),
+        "the session was written while a companion is configured"
+    );
+}
+
+/// A companion on the profile can reach a listener that admits any source, or take its port first,
+/// so with one configured an unpinned listener is not opened at all: the code is asked for instead,
+/// and nothing is submitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_companion_turns_pushed_codes_off_without_a_pinned_source() {
+    let h = harness_customized(true, |profile| profile.launch.act = true);
+    listen_on_ephemeral(&h, ListenerSources::Any);
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let events = run(
+        context_otp(&h, transport.clone(), otp_empty(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Notice(Notice::PushedCodesNeedAPinnedSource)))
+    );
+    assert!(states(&events).contains(&FlowState::NeedsOtp));
+    assert!(
+        !states(&events)
+            .iter()
+            .any(|s| matches!(s, FlowState::WaitingForPushedCode { .. })),
+        "a port was opened"
+    );
+    assert_eq!(submitted_otp(&transport), None);
+}
+
+/// A pinned listener still works with a companion configured: the pin is what makes it safe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_listener_stays_on_with_a_companion() {
+    let h = harness_customized(true, |profile| profile.launch.xivalexander = true);
+    listen_on_ephemeral(
+        &h,
+        ListenerSources::Only {
+            addresses: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        },
+    );
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let (task, mut rx) = spawn_run(
+        context_otp(&h, transport.clone(), otp_empty(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+        CancellationToken::new(),
+    );
+    let mut events = Vec::new();
+    let waiting = await_state(&mut rx, &mut events, |state| {
+        matches!(state, FlowState::WaitingForPushedCode { .. })
+    })
+    .await
+    .expect("the pinned listener was not opened");
+    push_code(listening_port(&waiting).unwrap(), "246810")
+        .await
+        .unwrap();
+    task.await.unwrap();
+    drain(&mut rx, &mut events);
+    assert_eq!(submitted_otp(&transport).as_deref(), Some("246810"));
+}
+
+/// Something already holding the listener's port would receive a code pushed now, so the failure
+/// comes with a notice naming the port and saying not to send it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_listener_port_says_not_to_send_the_code() {
+    let h = harness(true);
+    let squatter = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    let mut settings = h.store.load_settings().unwrap_or_default();
+    settings.otp_listener = ListenerSettings {
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+        sources: ListenerSources::Any,
+        wait_seconds: 20,
+    };
+    h.store.save_settings(&settings).unwrap();
+    let transport = Arc::new(FixtureTransport::new(login_then_current()));
+    let events = run(
+        context_otp(&h, transport.clone(), otp_empty(), NOW),
+        Command::Login {
+            profile: h.profile,
+            password: secret("hunter2"),
+            otp: OtpSource::Listener,
+        },
+    )
+    .await;
+
+    let notice = events
+        .iter()
+        .position(|e| matches!(e, Event::Notice(Notice::OtpPortHeld { port: p }) if *p == port))
+        .expect("the held port was not narrated");
+    let error = events
+        .iter()
+        .position(|e| matches!(e, Event::Error(_)))
+        .expect("the bind failure was not reported");
+    assert!(notice < error, "the warning came after the failure");
+    assert_eq!(submitted_otp(&transport), None);
+    drop(squatter);
+}
+
+/// With a companion configured on an account whose secrets sit in the platform keyring, the launch
+/// says so before anything about the launch happens. An account that stores nothing, and a profile
+/// with no companion, are not told.
+#[rstest::rstest]
+#[case(true, false, true)]
+#[case(true, true, false)]
+#[case(false, false, false)]
+#[tokio::test]
+async fn a_companion_on_a_keyring_account_is_narrated_before_the_launch(
+    #[case] companion: bool,
+    #[case] never_store: bool,
+    #[case] narrated: bool,
+) {
+    let h = harness_customized(false, |profile| profile.launch.act = companion);
+    let mut account = h.store.load_account(h.account).unwrap();
+    account.never_store = never_store;
+    h.store.save_account(&account).unwrap();
+    let events = run(
+        program_launch(
+            &h,
+            Arc::new(FakeLaunchBackend::exiting()),
+            Arc::new(FakeAddons::new()),
+        ),
+        play_no_otp(h.profile),
+    )
+    .await;
+
+    let notice = events
+        .iter()
+        .position(|e| matches!(e, Event::Notice(Notice::CompanionCanReadKeyring)));
+    assert_eq!(notice.is_some(), narrated, "{events:?}");
+    if let Some(notice) = notice {
+        let preparing = events
+            .iter()
+            .position(|e| matches!(e, Event::State(FlowState::PreparingPrefix)))
+            .unwrap();
+        assert!(notice < preparing);
+    }
 }

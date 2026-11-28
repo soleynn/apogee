@@ -32,6 +32,8 @@ fn setup(home: &Path) -> Result<PathBuf, Fallible> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",
@@ -184,6 +186,8 @@ fn a_prefix_with_no_config_says_so() -> Result<(), Fallible> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",

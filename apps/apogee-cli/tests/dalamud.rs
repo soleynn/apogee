@@ -31,6 +31,8 @@ fn with_profile() -> std::io::Result<TempDir> {
         &[
             "profile",
             "add",
+            "--runner",
+            "managed:wine-xiv@test",
             "--name",
             "main",
             "--user",

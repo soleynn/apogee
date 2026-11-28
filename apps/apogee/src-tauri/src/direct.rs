@@ -6,7 +6,8 @@ use apogee_core::{Core, Uuid};
 
 use crate::dto::IpcErrorDto;
 use crate::dto::read::{
-    BundlePartDto, CatalogEntryDto, NextActionDto, ResolvedSetupDto, SteamInstallDto,
+    BundlePartDto, CatalogEntryDto, NextActionDto, ProgramSettingDto, ResolvedSetupDto,
+    SteamInstallDto,
 };
 use crate::dto::store::DefaultsDto;
 use crate::{ShellState, run_blocking};
@@ -54,6 +55,19 @@ pub(super) async fn resolved_setup(
     core.resolved_setup(profile)
         .await
         .map(|setups| setups.iter().map(ResolvedSetupDto::from).collect())
+        .map_err(|error| IpcErrorDto::core(&error))
+}
+
+#[tauri::command]
+pub(super) async fn program_settings(
+    state: tauri::State<'_, ShellState>,
+    profile: String,
+) -> Result<Vec<ProgramSettingDto>, IpcErrorDto> {
+    let profile = profile_id(&profile)?;
+    let (core, _permit) = state.ready_core_for_direct_read().await?;
+    core.program_settings(profile)
+        .await
+        .map(|settings| settings.iter().map(ProgramSettingDto::from).collect())
         .map_err(|error| IpcErrorDto::core(&error))
 }
 

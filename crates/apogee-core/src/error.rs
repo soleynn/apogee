@@ -54,8 +54,21 @@ pub enum CoreError {
     NoTickSource,
     #[error("no profile with id {0}")]
     NoProfile(Uuid),
+    /// The profile has no runner chosen yet. Nothing that needs a prefix can run until it has one;
+    /// the profile's next action names the choice to make.
+    #[error("profile {profile} has no runner chosen")]
+    RunnerUnchosen { profile: Uuid },
+    /// The profile names a runner this build no longer launches. The profile itself is intact; the
+    /// way forward is choosing a managed runner, which its next action offers.
+    #[error("profile {profile} names the runner {runner:?}, which this build does not launch")]
+    RunnerUnsupported { profile: Uuid, runner: String },
     #[error("no account with id {0}")]
     NoAccount(Uuid),
+    /// A profile write would let code run beside the game that the stored profile does not, and the
+    /// caller did not carry the user's consent for it. `what` is the program switch or the companion
+    /// row's program that needs it. Nothing was written.
+    #[error("turning on {what} for profile {profile} needs the user's consent")]
+    ConsentRequired { profile: Uuid, what: String },
     #[error("profile removal changed while awaiting confirmation for {profile}")]
     RemovalPlanChanged { profile: Uuid },
     #[error("the account password is not valid text")]
