@@ -74,6 +74,5 @@ To run it: `npm run tauri dev` (starts Vite on port 1420, then the window agains
 
 ## Not yet done
 
-- The icons under `src-tauri/icons/` are placeholders.
 - The full launcher presentation, localization catalog, packaging, and real-window smoke coverage
   are still being built.

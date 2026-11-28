@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320"
+     viewBox="0 0 1280 320" role="img" aria-labelledby="title">
+  <title id="title">Apogee</title>
+
+  <g transform="translate(140 48) scale(1.75)">
+    <rect x="5.5" y="5.5" width="117" height="117" rx="29"
+          fill="#171a21" stroke="#3e4451" stroke-width="3"/>
+    <g transform="translate(64 64) rotate(-45)">
+      <path d="M32 18.1 A43 27 0 1 1 32 -18.1" fill="none"
+            stroke="#61afef" stroke-width="10.5" stroke-linecap="round"/>
+      <circle cx="-14" cy="0" r="9.5" fill="#d7dae0"/>
+      <circle cx="43" cy="0" r="9" fill="#61afef"/>
+    </g>
+  </g>
+
+  <g fill="#383a42" fill-rule="evenodd" transform="translate(413 101)">
+    <path d="M0 118 45 0h23l45 118H90l-9.4-25H32.1l-9.4 25H0Zm39.2-44H73.5L56.3 28Z"/>
+    <path transform="translate(135)" d="M0 0h49c29 0 46 14 46 39S78 78 49 78H21v40H0V0Zm21 19v40h27c16 0 25-7 25-20s-9-20-25-20H21Z"/>
+    <path transform="translate(247)" d="M56-2c33 0 56 21 56 60v2c0 39-23 60-56 60S0 99 0 60v-2C0 19 23-2 56-2Zm0 20c-22 0-34 15-34 40v2c0 25 12 40 34 40s34-15 34-40v-2c0-25-12-40-34-40Z"/>
+    <path transform="translate(380)" d="M56-2c22 0 39 8 49 24L89 35C81 24 70 18 56 18c-22 0-34 15-34 40v2c0 25 12 40 35 40 13 0 25-3 33-10V73H57V55h54v46c-14 12-33 19-55 19C23 120 0 99 0 60v-2C0 19 23-2 56-2Z"/>
+    <path transform="translate(516)" d="M0 0h90l-8 19H21v30h58l-8 19H21v31h69l-8 19H0Z"/>
+    <path transform="translate(626)" d="M0 0h90l-8 19H21v30h58l-8 19H21v31h69l-8 19H0Z"/>
+  </g>
+</svg>
