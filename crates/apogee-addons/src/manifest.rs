@@ -47,6 +47,13 @@ use apogee_runtime::{ArchiveFormat, ArchiveLayout, RegistryDelete, RegistryEdit,
 
 use crate::SupportTier;
 
+pub(crate) mod program;
+
+pub use program::{
+    ProgramEntry, ProgramEvidence, ProgramStart, ProgramStep, RefusedProgram, RunnerPin,
+    UpdaterKey, UpdaterKeyFormat,
+};
+
 /// The manifest schema version this build understands.
 pub const COMPONENT_MANIFEST_VERSION: u32 = 1;
 
@@ -150,6 +157,9 @@ fn trusted_keys(raw: &[[u8; 32]]) -> Result<Vec<VerifyingKey>, ManifestError> {
 /// deep; these exist only so a hostile row cannot describe a path no filesystem would take.
 const MAX_PATH_DEPTH: usize = 32;
 const MAX_NAME_BYTES: usize = 255;
+
+/// The token a program row's path starts with to mean the prefix user's roaming application data.
+const APPDATA_TOKEN: &str = "{appdata}";
 
 /// Why a component manifest was rejected.
 ///
@@ -256,6 +266,35 @@ pub enum ManifestError {
         /// Which rule it broke.
         reason: &'static str,
     },
+    /// A companion environment variable this launcher will not set.
+    ///
+    /// Only an exact allowlist of keys may be set for a companion, because everything that redirects
+    /// the launch chain is reachable through some variable and a list of those is never complete.
+    #[error("{component}: environment variable {key:?} is not one a companion may set: {reason}")]
+    #[non_exhaustive]
+    BadEnv {
+        /// The row it appears in.
+        component: String,
+        /// The variable as published.
+        key: String,
+        /// Which rule it broke.
+        reason: &'static str,
+    },
+    /// A manifest older than one this launcher already verified.
+    ///
+    /// Each signed manifest carries a serial that only ever rises, so a validly signed but superseded
+    /// manifest replayed to this launcher (one pinning a program release since withdrawn, say) is
+    /// refused rather than trusted again.
+    #[error(
+        "manifest serial {found} is older than {highest}, which this launcher already verified"
+    )]
+    #[non_exhaustive]
+    Rollback {
+        /// The serial the refused manifest carries, zero when it carries none.
+        found: u64,
+        /// The highest serial verified here before.
+        highest: u64,
+    },
     /// Two rows offering the same name, in either list.
     ///
     /// A component name is what the prefix records, so a duplicate would make "is it applied?"
@@ -276,18 +315,83 @@ pub enum InjectableKind {
     Dalamud,
 }
 
+/// Where a [`ComponentPath`] is rooted inside a prefix.
+///
+/// # Examples
+///
+/// ```
+/// use apogee_addons::manifest::PathRoot;
+///
+/// assert_ne!(PathRoot::DriveC, PathRoot::AppData);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PathRoot {
+    /// The prefix's `C:` drive. Every base verb's path, and a program row's path that names no token.
+    DriveC,
+    /// The prefix user's roaming application-data directory, `C:\users\<user>\AppData\Roaming`.
+    ///
+    /// Spelled `{appdata}` at the head of a path in a program row. The user differs by runner (Proton
+    /// prefixes belong to `steamuser`, plain wine ones to the account running it), which is why a row
+    /// cannot spell the directory out and the token is resolved against the prefix at use.
+    AppData,
+}
+
 /// A relative path a verb's files may be written to, already confined.
 ///
-/// Rooted at the prefix's `C:`. Validated when the manifest is parsed, so nothing downstream
-/// re-derives a path from a string.
+/// Rooted at the prefix's `C:`, or for a program row at [`PathRoot::AppData`] when it starts with the
+/// `{appdata}` token. Validated when the manifest is parsed, so nothing downstream re-derives a path
+/// from a string.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComponentPath(PathBuf);
+pub struct ComponentPath {
+    path: PathBuf,
+    root: PathRoot,
+}
 
 impl ComponentPath {
     /// The path, relative to whatever root its component installs under.
     #[must_use]
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// Which directory of the prefix [`Self::as_path`] is relative to.
+    #[must_use]
+    pub const fn root(&self) -> PathRoot {
+        self.root
+    }
+
+    /// Validate a program row's path, which may start with the `{appdata}` token.
+    ///
+    /// Any other component spelled as a `{token}` is refused rather than taken literally, so a token
+    /// a later build defines can never land as a directory named after it in this one.
+    ///
+    /// # Errors
+    /// As [`Self::parse`], and [`ManifestError::BadPath`] for an unknown or misplaced token.
+    pub(crate) fn parse_rooted(raw: &str, component: &str) -> Result<Self, ManifestError> {
+        let bad = |reason: &'static str| ManifestError::BadPath {
+            component: component.to_owned(),
+            path: raw.to_owned(),
+            reason,
+        };
+        let (root, rest) = match raw.strip_prefix(APPDATA_TOKEN) {
+            Some(rest) if rest.starts_with(['/', '\\']) => (PathRoot::AppData, &rest[1..]),
+            Some(_) => return Err(bad("the {appdata} token must be followed by a path")),
+            None => (PathRoot::DriveC, raw),
+        };
+        let parsed = Self::parse(rest, component).map_err(|err| match err {
+            // Reported against the path as the row spells it, token included.
+            ManifestError::BadPath { reason, .. } => bad(reason),
+            other => other,
+        })?;
+        if parsed
+            .path
+            .components()
+            .any(|part| part.as_os_str().to_string_lossy().starts_with('{'))
+        {
+            return Err(bad("it carries a token this build does not define"));
+        }
+        Ok(Self { root, ..parsed })
     }
 
     /// Validate one manifest-supplied relative path.
@@ -300,7 +404,7 @@ impl ComponentPath {
     /// [`ManifestError::BadPath`] if it is empty, absolute, climbs out of its root, carries a drive
     /// letter, a null byte or a control character, nests deeper than [`MAX_PATH_DEPTH`], or has a
     /// component longer than [`MAX_NAME_BYTES`].
-    fn parse(raw: &str, component: &str) -> Result<Self, ManifestError> {
+    pub(crate) fn parse(raw: &str, component: &str) -> Result<Self, ManifestError> {
         let bad = |reason: &'static str| ManifestError::BadPath {
             component: component.to_owned(),
             path: raw.to_owned(),
@@ -345,7 +449,10 @@ impl ComponentPath {
         if out.as_os_str().is_empty() {
             return Err(bad("it resolves to nothing"));
         }
-        Ok(Self(out))
+        Ok(Self {
+            path: out,
+            root: PathRoot::DriveC,
+        })
     }
 }
 
@@ -443,6 +550,16 @@ pub struct ComponentManifest {
     pub injectables: Vec<InjectableEntry>,
     /// The prefix-setup steps the launch path applies on its own.
     pub verbs: Vec<Verb>,
+    /// The curated programs a profile can enable, in the order they are installed and started.
+    ///
+    /// Read only by a build that knows the list: an older one ignores the key, so adding the list
+    /// cost no schema bump and leaves its Dalamud row and verbs exactly as they were.
+    pub programs: Vec<ProgramEntry>,
+    /// Program rows this build could not read. Each costs that row only; see [`RefusedProgram`].
+    pub refused_programs: Vec<RefusedProgram>,
+    /// The manifest's serial, which only ever rises from one signed manifest to the next. `None` for
+    /// a manifest that carries none, which is treated as zero.
+    pub serial: Option<u64>,
 }
 
 impl ComponentManifest {
@@ -524,13 +641,38 @@ impl ComponentManifest {
         self.injectables.iter().find(|i| i.kind == kind)
     }
 
+    /// The program row named `name`, if this build could read it.
+    #[must_use]
+    pub fn program(&self, name: &str) -> Option<&ProgramEntry> {
+        self.programs.iter().find(|p| p.name == name)
+    }
+
+    /// The program row named `name` that this build could not read, and why.
+    #[must_use]
+    pub fn refused_program(&self, name: &str) -> Option<&RefusedProgram> {
+        self.refused_programs.iter().find(|p| p.name == name)
+    }
+
     /// Every name the manifest offers, sorted. What the duplicate check reads.
+    ///
+    /// A program's steps are in it as well as the program itself, because each is recorded in the
+    /// prefix under its own name, beside the base verbs.
     fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .injectables
             .iter()
             .map(|i| i.name.as_str())
             .chain(self.verbs.iter().map(|v| v.name.as_str()))
+            .chain(self.programs.iter().flat_map(|p| {
+                std::iter::once(p.name.as_str())
+                    .chain(p.steps.iter().map(|step| step.verb.name.as_str()))
+            }))
+            .chain(
+                self.refused_programs
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .filter(|name| !name.is_empty()),
+            )
             .collect();
         names.sort_unstable();
         names
@@ -546,6 +688,11 @@ struct RawManifest {
     injectables: Vec<RawInjectable>,
     #[serde(default)]
     verbs: Vec<RawVerb>,
+    /// Each row read on its own, so one this build cannot read costs that row and not the manifest.
+    #[serde(default)]
+    programs: Vec<serde_json::Value>,
+    #[serde(default)]
+    serial: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -639,8 +786,22 @@ impl TryFrom<RawManifest> for ComponentManifest {
             .into_iter()
             .map(build_verb)
             .collect::<Result<Vec<_>, _>>()?;
+        let mut programs = Vec::new();
+        let mut refused_programs = Vec::new();
+        for row in raw.programs {
+            match program::read_row(row) {
+                Ok(entry) => programs.push(entry),
+                Err(refused) => refused_programs.push(refused),
+            }
+        }
 
-        let manifest = Self { injectables, verbs };
+        let manifest = Self {
+            injectables,
+            verbs,
+            programs,
+            refused_programs,
+            serial: raw.serial,
+        };
         manifest.check_names()?;
         Ok(manifest)
     }
@@ -708,21 +869,7 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
         "dalamud" => InjectableKind::Dalamud,
         _ => return Err(unknown(&raw.name, "injectable kind", raw.kind)),
     };
-    let tier = match (raw.tier.as_str(), raw.note) {
-        ("first_class", None) => SupportTier::FirstClass,
-        // Refused rather than dropped. A first-class tier has nothing to warn about, so a note on one
-        // would never be shown, and a row that carries one is a row whose author expected it to be.
-        ("first_class", Some(_)) => {
-            return Err(unknown(&raw.name, "tier", "first_class with a note"));
-        }
-        ("best_effort", Some(note)) => SupportTier::BestEffort { note },
-        // A best-effort tier with no note would present as "not first class" with no statement of what
-        // that costs, which is the opposite of the point of tiering it.
-        ("best_effort", None) => {
-            return Err(unknown(&raw.name, "tier", "best_effort without a note"));
-        }
-        (other, _) => return Err(unknown(&raw.name, "tier", other)),
-    };
+    let tier = parse_tier(&raw.name, &raw.tier, raw.note)?;
     Ok(InjectableEntry {
         distribution: parse_url(&raw.name, &raw.distribution)?,
         name: raw.name,
@@ -732,12 +879,31 @@ fn build_injectable(raw: RawInjectable) -> Result<InjectableEntry, ManifestError
     })
 }
 
+/// A row's tier and note, under the one rule every list shares.
+fn parse_tier(
+    component: &str,
+    tier: &str,
+    note: Option<String>,
+) -> Result<SupportTier, ManifestError> {
+    match (tier, note) {
+        ("first_class", None) => Ok(SupportTier::FirstClass),
+        // Refused rather than dropped. A first-class tier has nothing to warn about, so a note on one
+        // would never be shown, and a row that carries one is a row whose author expected it to be.
+        ("first_class", Some(_)) => Err(unknown(component, "tier", "first_class with a note")),
+        ("best_effort", Some(note)) => Ok(SupportTier::BestEffort { note }),
+        // A best-effort tier with no note would present as "not first class" with no statement of what
+        // that costs, which is the opposite of the point of tiering it.
+        ("best_effort", None) => Err(unknown(component, "tier", "best_effort without a note")),
+        (other, _) => Err(unknown(component, "tier", other)),
+    }
+}
+
 fn build_verb(raw: RawVerb) -> Result<Verb, ManifestError> {
     check_identifier("verb name", &raw.name)?;
     let ops = raw
         .ops
         .into_iter()
-        .map(|op| build_op(&raw.name, op))
+        .map(|op| build_op(&raw.name, op, false))
         .collect::<Result<Vec<_>, _>>()?;
     let verify = raw
         .verify
@@ -752,7 +918,9 @@ fn build_verb(raw: RawVerb) -> Result<Verb, ManifestError> {
     })
 }
 
-fn build_op(component: &str, raw: RawOp) -> Result<VerbOp, ManifestError> {
+/// One op of a verb or program step. `rooted` admits the `{appdata}` token in a destination, which
+/// only a program row may use: a base verb is read by builds that do not know it.
+fn build_op(component: &str, raw: RawOp, rooted: bool) -> Result<VerbOp, ManifestError> {
     match raw {
         RawOp::Registry(entry) => {
             let value = match (entry.value_type.as_str(), entry.value) {
@@ -807,7 +975,11 @@ fn build_op(component: &str, raw: RawOp) -> Result<VerbOp, ManifestError> {
             Ok(VerbOp::RegistryDelete(delete))
         }
         RawOp::Files(files) => {
-            let into = ComponentPath::parse(&files.into, component)?;
+            let into = if rooted {
+                ComponentPath::parse_rooted(&files.into, component)?
+            } else {
+                ComponentPath::parse(&files.into, component)?
+            };
             Ok(VerbOp::Files {
                 artifact: build_artifact(component, files)?,
                 into,

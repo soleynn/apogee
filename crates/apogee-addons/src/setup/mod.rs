@@ -167,6 +167,8 @@ impl SetupReport {
 /// The names the manifest and its detached signature are cached under.
 const MANIFEST_FILE: &str = "components.json";
 const SIGNATURE_FILE: &str = "components.json.sig";
+/// The highest manifest serial this cache has verified, beside the manifest it came from.
+const SERIAL_FILE: &str = "serial";
 /// Where a fetch in progress writes, cleared before every attempt.
 const STAGING_DIR: &str = ".fetching";
 /// What a failure on the catalog's own filesystem steps is reported against.
@@ -188,7 +190,8 @@ const CATALOG: &str = "the signed catalog";
 /// [`AddonError::Io`] for any of its own filesystem steps, [`AddonError::Spec`] for a URL that is
 /// not http(s), [`AddonError::Download`] if a download does not complete (a fired `cancel` arrives
 /// this way, as a cancelled fetch), and [`AddonError::Manifest`] if what was served does not verify
-/// against any key in `keys`, or does not parse once it has.
+/// against any key in `keys`, does not parse once it has, or carries a serial lower than one this cache
+/// has already verified ([`ManifestError::Rollback`](crate::ManifestError::Rollback)).
 pub(crate) async fn fetch_manifest(
     fetcher: &Fetcher,
     manifest_url: &Url,
@@ -225,9 +228,54 @@ pub(crate) async fn fetch_manifest(
     // for is a maintainer's business, asserted where the hosted file is embedded rather than on a
     // user's machine.
     let verified = VerifiedManifest::verify(&manifest, &signature, keys)?;
+    // Refused before it is published, so a replayed manifest never replaces the newer one it is
+    // older than.
+    let found = verified.rows().serial.unwrap_or(0);
+    let highest = check_serial(cache_dir, found).await?;
 
     publish(&staging, cache_dir).await?;
+    if found > highest {
+        record_serial(cache_dir, found).await?;
+    }
     Ok(verified)
+}
+
+/// Refuse `found` if it is older than the highest serial verified into `cache_dir`, returning that
+/// highest.
+///
+/// The record is an ordinary file in the launcher's own data directory, so it stops a superseded
+/// manifest replayed from the network or a stale mirror, not a local process running as the same
+/// user, which could rewrite the record as easily as the cache. An unreadable or garbled record is
+/// read as none for the same reason: whoever can garble it can also delete it.
+///
+/// # Errors
+/// [`AddonError::Manifest`] wrapping [`ManifestError::Rollback`](crate::ManifestError::Rollback).
+async fn check_serial(cache_dir: &Path, found: u64) -> Result<u64> {
+    let highest = tokio::fs::read_to_string(cache_dir.join(SERIAL_FILE))
+        .await
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if found < highest {
+        return Err(crate::ManifestError::Rollback { found, highest }.into());
+    }
+    Ok(highest)
+}
+
+/// Record `serial` as the highest verified into `cache_dir`. Written beside and renamed over, so an
+/// interrupted write leaves the previous record rather than a truncated one.
+///
+/// # Errors
+/// [`AddonError::Io`] if the record cannot be written.
+async fn record_serial(cache_dir: &Path, serial: u64) -> Result<()> {
+    let path = cache_dir.join(SERIAL_FILE);
+    let staged = cache_dir.join(format!("{SERIAL_FILE}.new"));
+    tokio::fs::write(&staged, serial.to_string())
+        .await
+        .map_err(|source| artifact::io_failed(CATALOG, "record its serial", &staged, source))?;
+    tokio::fs::rename(&staged, &path)
+        .await
+        .map_err(|source| artifact::io_failed(CATALOG, "record its serial", &path, source))
 }
 
 /// Move a verified manifest and its signature from `staging` into the cache.
@@ -265,8 +313,8 @@ async fn publish(staging: &Path, cache_dir: &Path) -> Result<()> {
 /// fetching and reading the cache are separate calls.
 ///
 /// # Errors
-/// [`AddonError::Manifest`] if what is cached no longer verifies against `keys`, or no longer
-/// parses.
+/// [`AddonError::Manifest`] if what is cached no longer verifies against `keys`, no longer parses, or
+/// is older than a manifest this cache has already verified.
 pub(crate) async fn cached_manifest(
     cache_dir: &Path,
     keys: &[[u8; 32]],
@@ -279,7 +327,9 @@ pub(crate) async fn cached_manifest(
     ) else {
         return Ok(None);
     };
-    Ok(Some(VerifiedManifest::verify(&manifest, &signature, keys)?))
+    let verified = VerifiedManifest::verify(&manifest, &signature, keys)?;
+    check_serial(cache_dir, verified.rows().serial.unwrap_or(0)).await?;
+    Ok(Some(verified))
 }
 
 /// Download `url` to `dest` over HTTPS with no content pin, because the caller authenticates these

@@ -349,3 +349,77 @@ async fn a_key_that_was_never_trusted_admits_nothing() {
         "{err:?}"
     );
 }
+
+/// One manifest served from two servers, the body and a signature over it.
+async fn serving_signed(body: &str) -> Result<(ChaosServer, ChaosServer), Box<dyn Error>> {
+    Ok((
+        ChaosServer::serving(body.as_bytes().to_vec())
+            .tls()
+            .start()
+            .await?,
+        ChaosServer::serving(sign_manifest(body.as_bytes()).to_vec())
+            .tls()
+            .start()
+            .await?,
+    ))
+}
+
+/// A validly signed manifest older than one already verified is a replay, and is refused before it
+/// can replace the newer one: the cache still serves the newer manifest afterwards. A manifest that
+/// carries no serial at all counts as the oldest there is, so stripping the key is no way round it.
+#[tokio::test]
+async fn a_manifest_older_than_one_already_verified_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let newer = r#"{ "version": 1, "serial": 7, "verbs": [
+        { "name": "newer", "reason": "the current row", "ops": [] } ] }"#;
+    let older = r#"{ "version": 1, "serial": 6, "verbs": [
+        { "name": "older", "reason": "a withdrawn row", "ops": [] } ] }"#;
+    let unserialed = r#"{ "version": 1, "verbs": [
+        { "name": "older", "reason": "a withdrawn row", "ops": [] } ] }"#;
+    let mut servers = Vec::new();
+    for body in [newer, older, unserialed] {
+        servers.push(serving_signed(body).await.expect("servers"));
+    }
+    let mut ders = Vec::new();
+    for (body, sig) in &servers {
+        ders.push(body.cert_der().expect("tls").to_vec());
+        ders.push(sig.cert_der().expect("tls").to_vec());
+    }
+    let fetcher =
+        fetcher_trusting(&ders.iter().map(Vec::as_slice).collect::<Vec<_>>()).expect("fetcher");
+    let runtime = Runtime::new(fetcher.clone(), RuntimePaths::default());
+    let addons = Addons::new(runtime, fetcher, AddonPaths::new(dir.path()));
+    let keys = [test_verifying_key_bytes()];
+    let cancel = CancellationToken::new();
+    let urls: Vec<_> = servers
+        .iter()
+        .map(|(body, sig)| (body.url("manifest.json"), sig.url("manifest.json.sig")))
+        .collect();
+    let fetch = |index: usize| {
+        let (body, sig) = &urls[index];
+        addons.fetch_manifest_for_testing(body, sig, &keys, &cancel)
+    };
+
+    fetch(0).await.expect("the newer manifest verifies");
+    for replay in [1, 2] {
+        let err = fetch(replay).await.expect_err("a replay is refused");
+        assert!(
+            matches!(
+                err,
+                AddonError::Manifest(ManifestError::Rollback { highest: 7, .. })
+            ),
+            "{err:?}"
+        );
+    }
+    // The same serial again is not a rollback: a re-fetch of the current manifest must keep working.
+    fetch(0).await.expect("the current manifest fetched twice");
+    let cached = addons
+        .cached_manifest_for_testing(&keys)
+        .await
+        .expect("cache reads")
+        .expect("cache holds one");
+    assert!(
+        cached.rows().verb("newer").is_some(),
+        "the newer manifest survived the replay"
+    );
+}

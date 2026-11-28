@@ -296,6 +296,19 @@ frozen!(
             ManifestError::DuplicateName { name: "a-verb".to_owned() },
             "two components are both named \"a-verb\"",
         ),
+        ManifestError::BadEnv { .. } => (
+            ManifestError::BadEnv {
+                component: "act".to_owned(),
+                key: "LD_PRELOAD".to_owned(),
+                reason: "only MONO_PATH and WINEDLLOVERRIDES may be set for a companion",
+            },
+            "act: environment variable \"LD_PRELOAD\" is not one a companion may set: \
+             only MONO_PATH and WINEDLLOVERRIDES may be set for a companion",
+        ),
+        ManifestError::Rollback { .. } => (
+            ManifestError::Rollback { found: 6, highest: 7 },
+            "manifest serial 6 is older than 7, which this launcher already verified",
+        ),
     }
 );
 

@@ -81,6 +81,7 @@ use crate::launch::Preparation;
 use crate::setup::SetupReport;
 
 pub mod backup;
+mod env_rules;
 pub mod dalamud;
 pub mod external;
 pub mod launch;
