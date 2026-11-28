@@ -62,7 +62,7 @@ pub(crate) fn prepare(prefix: &Path, driver: Option<&str>) -> Option<PathBuf> {
                 }
             }
             let root = create(&root)?;
-            if let Err(error) = std::fs::write(&stamp, driver) {
+            if let Err(error) = write_stamp(&stamp, driver) {
                 tracing::warn!(%error, path = %stamp.display(), "driver version was not recorded");
             }
             return Some(root);
@@ -102,9 +102,39 @@ pub(crate) fn env(root: &Path) -> [(&'static str, String); 4] {
     ]
 }
 
+/// Record `driver` in a fresh stamp file. Whatever stood at the path, a link included, is removed
+/// first and the file is created new, so the write never lands through a link planted there.
+fn write_stamp(stamp: &Path, driver: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    match std::fs::remove_file(stamp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(stamp)?
+        .write_all(driver.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_the_stamp_is_replaced_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let stamp = dir.path().join("driver_cache.version");
+        std::os::unix::fs::symlink(&victim, &stamp).unwrap();
+        write_stamp(&stamp, "NVRM 595.84").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!std::fs::symlink_metadata(&stamp).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "NVRM 595.84");
+    }
 
     fn fill(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
