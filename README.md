@@ -1,22 +1,18 @@
-<!--
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-wordmark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset=".github/assets/logo-wordmark-light.svg">
-    <img alt="Apogee" src=".github/assets/logo-wordmark-light.svg" width="360">
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/apogee-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset=".github/assets/apogee-wordmark-light.svg">
+    <img alt="Apogee" src=".github/assets/apogee-wordmark-light.svg" width="480">
   </picture>
 </p>
--->
 
-# Apogee
-
-[![CI](https://img.shields.io/github/actions/workflow/status/soleynn/apogee/ci.yml?branch=main&label=CI&labelColor=0d1117)](https://github.com/soleynn/apogee/actions/workflows/ci.yml)
-[![CodeQL](https://img.shields.io/github/actions/workflow/status/soleynn/apogee/codeql.yml?branch=main&label=CodeQL&labelColor=0d1117)](https://github.com/soleynn/apogee/actions/workflows/codeql.yml)
-[![Release](https://img.shields.io/github/v/release/soleynn/apogee?label=release&color=238636&labelColor=0d1117)](https://github.com/soleynn/apogee/releases/latest)
-[![Pre-release](https://img.shields.io/github/v/release/soleynn/apogee?include_prereleases&label=pre-release&color=30363d&labelColor=0d1117)](https://github.com/soleynn/apogee/releases)
-[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-238636?labelColor=0d1117)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.97.0-30363d?labelColor=0d1117)](rust-toolchain.toml)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Steam%20Deck-30363d?labelColor=0d1117)](#install)
+[![CI](https://img.shields.io/github/actions/workflow/status/soleynn/apogee/ci.yml?branch=main&label=CI&labelColor=21252b)](https://github.com/soleynn/apogee/actions/workflows/ci.yml)
+[![CodeQL](https://img.shields.io/github/actions/workflow/status/soleynn/apogee/codeql.yml?branch=main&label=CodeQL&labelColor=21252b)](https://github.com/soleynn/apogee/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/soleynn/apogee?label=release&color=61afef&labelColor=21252b)](https://github.com/soleynn/apogee/releases/latest)
+[![Pre-release](https://img.shields.io/github/v/release/soleynn/apogee?include_prereleases&label=pre-release&color=3e4451&labelColor=21252b)](https://github.com/soleynn/apogee/releases)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-61afef?labelColor=21252b)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.97.0-3e4451?labelColor=21252b)](rust-toolchain.toml)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Steam%20Deck-3e4451?labelColor=21252b)](#install)
 
 A from-scratch, Linux-first launcher for FINAL FANTASY XIV. Apogee reimplements the Square Enix
 login protocol, ZiPatch patching and repair, and Wine/Proton runner management as a workspace of
