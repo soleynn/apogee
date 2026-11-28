@@ -4,98 +4,104 @@ on:
   push:
     tags:
       - "v*"
+  # A packaging dry run: build and package both archives exactly as a stable tag would, keep them as
+  # workflow artifacts, and publish nothing. On demand, and on every pull request that edits this
+  # file, so a change to packaging runs before the tag that depends on it rather than on it.
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
 
 permissions:
   contents: read
 
 jobs:
-  release:
-    name: release
+  # What this run is: a tag to publish (stable or a -pre.N checkpoint) or a dry run, and the version
+  # string the archives are named with. A dry run has no tag, so it names them after the commit.
+  classify:
+    name: classify
     runs-on: ubuntu-latest
-    # Generous next to the couple of minutes a release has taken so far: a stable tag builds two
-    # release binaries with no build cache at all.
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.classify.outputs.publish }}
+      prerelease: ${{ steps.classify.outputs.prerelease }}
+      version: ${{ steps.classify.outputs.version }}
+    steps:
+      - id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # Only a tag push publishes: a manual run started from a tag is still a dry run.
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
+            if [[ "$REF_NAME" == *-* ]]; then
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "version=dry-run-${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Stable tags and dry runs ship binaries; -pre.N checkpoints do not. Built on the oldest supported
+  # Ubuntu so the Linux binary links against an older glibc and runs on more distributions than one
+  # built on the newest image would. Read-only: nothing here can publish.
+  package:
+    name: package
+    needs: classify
+    if: needs.classify.outputs.prerelease == 'false'
+    runs-on: ubuntu-22.04
+    # Generous next to the few minutes this takes: two release builds with no build cache at all.
     timeout-minutes: 30
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Classify the tag
-        id: tag
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [[ "$REF_NAME" == *-* ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "cliff_args=--unreleased --strip all" >> "$GITHUB_OUTPUT"
-          else
-            # A stable release rolls up every commit since the previous STABLE tag, including the
-            # -pre.N checkpoints in between (cliff.toml ignore_tags drops those as section boundaries).
-            # --latest/--current do not honor ignore_tags for range computation, so they would emit
-            # only the commits since the last -pre tag; pass an explicit prev-stable..this range instead.
-            prev=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -v '[-]' | grep -vFx "$REF_NAME" | head -n1)
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            if [ -n "$prev" ]; then
-              echo "cliff_args=--strip all ${prev}..${REF_NAME}" >> "$GITHUB_OUTPUT"
-            else
-              echo "cliff_args=--strip all ${REF_NAME}" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-      - name: Generate release notes
-        id: git-cliff
-        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
-        with:
-          config: cliff.toml
-          args: ${{ steps.tag.outputs.cliff_args }}
-      # Stable tags ship binaries; pre-release checkpoints do not. Build, strip, and package the CLI
-      # for each target so the release carries self-contained archives plus sha256 sidecars.
-      - name: Set up Rust
-        if: steps.tag.outputs.prerelease == 'false'
-        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
         with:
           toolchain: "1.97.0"
           targets: x86_64-pc-windows-gnu
       # Windows is cross-built from this runner against the GNU/MinGW ABI, the same way
       # `build-windows-cross` does in CI: a plain apt package, no MSVC SDK and no second runner.
       - name: Install the MinGW-w64 cross toolchain
-        if: steps.tag.outputs.prerelease == 'false'
         run: .github/scripts/apt-install.sh --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
       - name: Build and package the Linux CLI
-        id: package
-        if: steps.tag.outputs.prerelease == 'false'
         env:
-          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.classify.outputs.version }}
         run: |
           triple=x86_64-unknown-linux-gnu
           # Locked, so a Cargo.lock nobody remembered to bump fails here rather than resolving to
           # something the tag was never tested against.
           cargo build --release --locked -p apogee-cli
           strip target/release/apogee-cli
-          pkg="apogee-cli-${REF_NAME}-${triple}"
+          pkg="apogee-cli-${VERSION}-${triple}"
           install -Dm755 target/release/apogee-cli "dist/${pkg}/apogee-cli"
           # The terms travel with the binary. This is a copyleft project and a tarball of one file is
           # a tarball that does not say so.
           install -Dm644 LICENSE "dist/${pkg}/LICENSE"
-          tar -C dist -czf "${pkg}.tar.gz" "${pkg}"
-          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
-          echo "tarball=${pkg}.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=${pkg}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          tar -C dist -czf "out/${pkg}.tar.gz" "${pkg}"
+          ( cd out && sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256" )
+          # A binary that starts is the least a dry run should prove.
+          "dist/${pkg}/apogee-cli" --version
       # The Windows archive carries the pair, flat and in one directory. On Windows the patcher
       # applies through a separate elevated worker, and it finds that worker by looking for
       # `apogee-elevated.exe` beside its own executable: an archive holding only the CLI unpacks to a
       # launcher that cannot elevate, with nothing to point at but a spawn failure. Nothing installs
       # them, so the layout in the archive is the layout on disk.
       - name: Build and package the Windows CLI
-        id: package_windows
-        if: steps.tag.outputs.prerelease == 'false'
         env:
-          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.classify.outputs.version }}
         run: |
           triple=x86_64-pc-windows-gnu
           cargo build --release --locked --target "$triple" -p apogee-cli -p apogee-elevated
-          pkg="apogee-cli-${REF_NAME}-${triple}"
+          pkg="apogee-cli-${VERSION}-${triple}"
           # The cross toolchain's `strip`, which targets this object format directly rather than
           # leaning on the host binutils having been built with PE support.
           for bin in apogee-cli apogee-elevated; do
@@ -104,23 +110,89 @@ jobs:
           done
           install -Dm644 LICENSE "dist/${pkg}/LICENSE"
           # zip rather than a tarball: it is the format Windows opens without installing anything.
-          ( cd dist && zip -qr "../${pkg}.zip" "${pkg}" )
-          sha256sum "${pkg}.zip" > "${pkg}.zip.sha256"
-          echo "archive=${pkg}.zip" >> "$GITHUB_OUTPUT"
-          echo "checksum=${pkg}.zip.sha256" >> "$GITHUB_OUTPUT"
+          ( cd dist && zip -qr "../out/${pkg}.zip" "${pkg}" )
+          ( cd out && sha256sum "${pkg}.zip" > "${pkg}.zip.sha256" )
+      - name: Check the archives
+        run: |
+          cd out
+          sha256sum -c ./*.sha256
+          tar -tzf ./*.tar.gz
+          unzip -l ./*.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-archives
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Publishing only: a tag push, after packaging succeeded or (for a -pre.N checkpoint) was skipped.
+  release:
+    name: release
+    needs: [classify, package]
+    if: >-
+      always() && needs.classify.outputs.publish == 'true'
+      && (needs.package.result == 'success' || needs.package.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      # The provenance attestation: a signing identity for this run, and the store it is recorded in.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Choose the notes range
+        id: range
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            # A checkpoint lists what changed since the tag before it, stable or checkpoint. Not
+            # --unreleased: once this tag exists that range can come out empty, which is how a
+            # pre-release page ended up holding nothing but its heading. cliff.toml's ignore_tags
+            # keeps -pre tags from cutting sections, so --tag gives this one its heading.
+            prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${REF_NAME}^" 2>/dev/null || true)
+            echo "args=--strip all --tag ${REF_NAME} ${prev:+${prev}..}${REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            # A stable release rolls up every commit since the previous STABLE tag, including the
+            # -pre.N checkpoints in between (cliff.toml ignore_tags drops those as section boundaries).
+            # --latest/--current do not honor ignore_tags for range computation, so they would emit
+            # only the commits since the last -pre tag; pass an explicit prev-stable..this range.
+            prev=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -v '[-]' | grep -vFx "$REF_NAME" | head -n1)
+            echo "args=--strip all ${prev:+${prev}..}${REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate release notes
+        id: git-cliff
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          args: ${{ steps.range.outputs.args }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.classify.outputs.prerelease == 'false'
+        with:
+          name: release-archives
+          path: out
+      # A signed statement that these exact archives came out of this workflow at this commit, which
+      # `gh attestation verify <archive> --repo soleynn/apogee` checks against the file a user has.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: needs.classify.outputs.prerelease == 'false'
+        with:
+          subject-path: |
+            out/*.tar.gz
+            out/*.zip
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           NOTES: ${{ steps.git-cliff.outputs.content }}
-          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
-          TARBALL: ${{ steps.package.outputs.tarball }}
-          CHECKSUM: ${{ steps.package.outputs.checksum }}
-          WIN_ARCHIVE: ${{ steps.package_windows.outputs.archive }}
-          WIN_CHECKSUM: ${{ steps.package_windows.outputs.checksum }}
+          PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           if [ "$PRERELEASE" = "true" ]; then
-            gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --prerelease
+            gh release create "$REF_NAME" --notes "$NOTES" --prerelease
           else
-            gh release create "$GITHUB_REF_NAME" --notes "$NOTES" --latest \
-              "$TARBALL" "$CHECKSUM" "$WIN_ARCHIVE" "$WIN_CHECKSUM"
+            gh release create "$REF_NAME" --notes "$NOTES" --latest out/*
           fi
