@@ -298,7 +298,8 @@ pub enum ManifestError {
     /// Two rows offering the same name, in either list.
     ///
     /// A component name is what the prefix records, so a duplicate would make "is it applied?"
-    /// unanswerable.
+    /// unanswerable. Returned for a repeat among the injectables and base verbs; a repeat that
+    /// involves a program row refuses that row instead, and this is the reason it records.
     #[error("two components are both named {name:?}")]
     #[non_exhaustive]
     DuplicateName {
@@ -658,26 +659,34 @@ impl ComponentManifest {
         self.refused_programs.iter().find(|p| p.name == name)
     }
 
-    /// Every name the manifest offers, sorted. What the duplicate check reads.
+    /// Every name the manifest offers, sorted.
     ///
     /// A program's steps are in it as well as the program itself, because each is recorded in the
     /// prefix under its own name, beside the base verbs.
+    #[cfg(test)]
     fn names(&self) -> Vec<&str> {
+        let mut names = self.base_names();
+        names.extend(self.programs.iter().flat_map(|p| {
+            std::iter::once(p.name.as_str())
+                .chain(p.steps.iter().map(|step| step.verb.name.as_str()))
+        }));
+        names.extend(
+            self.refused_programs
+                .iter()
+                .map(|p| p.name.as_str())
+                .filter(|name| !name.is_empty()),
+        );
+        names.sort_unstable();
+        names
+    }
+
+    /// The names of the injectables and the base verbs, sorted: the rows every build reads.
+    fn base_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
             .injectables
             .iter()
             .map(|i| i.name.as_str())
             .chain(self.verbs.iter().map(|v| v.name.as_str()))
-            .chain(self.programs.iter().flat_map(|p| {
-                std::iter::once(p.name.as_str())
-                    .chain(p.steps.iter().map(|step| step.verb.name.as_str()))
-            }))
-            .chain(
-                self.refused_programs
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .filter(|name| !name.is_empty()),
-            )
             .collect();
         names.sort_unstable();
         names
@@ -694,8 +703,10 @@ struct RawManifest {
     #[serde(default)]
     verbs: Vec<RawVerb>,
     /// Each row read on its own, so one this build cannot read costs that row and not the manifest.
+    /// Held as whatever JSON it is for the same reason: a value that is not a list at all costs the
+    /// programs, not the injectables and verbs beside it.
     #[serde(default)]
-    programs: Vec<serde_json::Value>,
+    programs: Option<serde_json::Value>,
     #[serde(default)]
     serial: Option<u64>,
 }
@@ -793,38 +804,41 @@ impl TryFrom<RawManifest> for ComponentManifest {
             .into_iter()
             .map(build_verb)
             .collect::<Result<Vec<_>, _>>()?;
-        let mut programs = Vec::new();
-        let mut refused_programs = Vec::new();
-        for row in raw.programs {
-            match program::read_row(row) {
-                Ok(entry) => programs.push(entry),
-                Err(refused) => refused_programs.push(refused),
-            }
-        }
-
-        let manifest = Self {
+        let mut manifest = Self {
             injectables,
             verbs,
-            programs,
-            refused_programs,
+            programs: Vec::new(),
+            refused_programs: Vec::new(),
             serial: raw.serial,
         };
         manifest.check_names()?;
+
+        let rows = match raw.programs {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Array(rows)) => {
+                rows.into_iter().map(program::read_row).collect()
+            }
+            Some(_) => vec![Err(program::not_a_list())],
+        };
+        let (programs, refused_programs) = program::settle_names(rows, &manifest.base_names());
+        manifest.programs = programs;
+        manifest.refused_programs = refused_programs;
         Ok(manifest)
     }
 }
 
 impl ComponentManifest {
-    /// Every name is unique across both lists.
+    /// Every injectable and base verb name is unique across both lists.
     ///
     /// A cross-row property, so it is checked once the rows are built rather than while building
-    /// one.
+    /// one. Program rows are not part of it: a name a program row shares costs that row alone, which
+    /// [`program::settle_names`] decides.
     ///
     /// # Errors
     /// [`ManifestError::DuplicateName`] naming the first repeat.
     fn check_names(&self) -> Result<(), ManifestError> {
         let mut seen: Vec<&str> = Vec::new();
-        for name in self.names() {
+        for name in self.base_names() {
             if seen.last() == Some(&name) {
                 return Err(ManifestError::DuplicateName {
                     name: name.to_owned(),

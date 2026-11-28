@@ -263,6 +263,76 @@ pub(super) fn read_row(value: serde_json::Value) -> Result<ProgramEntry, Refused
     build_program(raw).map_err(|err| refuse(&err))
 }
 
+/// The refusal recorded when the `programs` value is not a list, so there are no rows to read.
+pub(super) fn not_a_list() -> RefusedProgram {
+    RefusedProgram {
+        name: String::new(),
+        reason: "the programs value is not a list of rows".to_owned(),
+    }
+}
+
+/// Refuse every program row whose name, or one of whose step names, is not its alone.
+///
+/// Each name is recorded in the prefix beside the base verbs, so a shared one makes the record
+/// ambiguous. The cost falls on program rows only, and is decided from the list as it was written
+/// rather than row by row, so the order of the rows never changes the outcome:
+///
+/// - a row naming itself or a step like an injectable or a base verb (`base`) is refused, and the
+///   injectable or verb stands;
+/// - rows that share a name with each other, as a program name or a step name on either side, are
+///   all refused, since nothing says which of them the name belongs to;
+/// - a row sharing its name or a step name with a row already refused is refused as well, because
+///   the name would otherwise answer both for a program and for why one is absent;
+/// - a row using one name twice among its own name and steps is refused.
+///
+/// A row that was already refused stays refused under its own reason. Rows keep their order.
+pub(super) fn settle_names(
+    rows: Vec<Result<ProgramEntry, RefusedProgram>>,
+    base: &[&str],
+) -> (Vec<ProgramEntry>, Vec<RefusedProgram>) {
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &rows {
+        match row {
+            Ok(entry) => {
+                for name in names_of(entry) {
+                    *uses.entry(name.to_owned()).or_default() += 1;
+                }
+            }
+            // An unreadable row's steps were never read, so its name is all it holds.
+            Err(refused) if !refused.name.is_empty() => {
+                *uses.entry(refused.name.clone()).or_default() += 1;
+            }
+            Err(_) => {}
+        }
+    }
+
+    let mut programs = Vec::new();
+    let mut refused_programs = Vec::new();
+    for row in rows {
+        match row {
+            Ok(entry) => {
+                let shared = names_of(&entry)
+                    .find(|name| base.contains(name) || uses.get(*name).is_some_and(|n| *n > 1))
+                    .map(str::to_owned);
+                match shared {
+                    Some(name) => refused_programs.push(RefusedProgram {
+                        name: entry.name,
+                        reason: crate::chain_of(&ManifestError::DuplicateName { name }),
+                    }),
+                    None => programs.push(entry),
+                }
+            }
+            Err(refused) => refused_programs.push(refused),
+        }
+    }
+    (programs, refused_programs)
+}
+
+/// A program's own name, then each of its step names.
+fn names_of(entry: &ProgramEntry) -> impl Iterator<Item = &str> {
+    std::iter::once(entry.name.as_str()).chain(entry.steps.iter().map(|s| s.verb.name.as_str()))
+}
+
 fn build_program(raw: RawProgram) -> Result<ProgramEntry, ManifestError> {
     check_identifier("program name", &raw.name)?;
     let name = raw.name;
@@ -665,20 +735,116 @@ pub(crate) mod tests {
     }
 
     /// A step is recorded in the prefix under its own name beside the base verbs, so a step named like
-    /// a verb, or like another program's step, would make the record ambiguous.
+    /// a verb would make the record ambiguous. It costs the program row; the verb still stands.
     #[test]
-    fn a_step_named_like_another_component_is_refused() {
+    fn a_step_named_like_a_base_verb_costs_the_row_and_not_the_verb() {
         let mut row = act_row("https://example.invalid/act.zip", PIN);
         row["steps"][0]["name"] = "base".into();
-        let json = serde_json::json!({
-            "version": 1,
-            "verbs": [{ "name": "base", "reason": "r", "ops": [] }],
-            "programs": [row],
-        });
-        assert!(matches!(
-            ComponentManifest::from_json_bytes(json.to_string().as_bytes()),
-            Err(ManifestError::DuplicateName { name }) if name == "base"
-        ));
+        let manifest = with_programs(&[row]);
+        assert!(manifest.program("act").is_none());
+        let refused = manifest.refused_program("act").expect("kept as refused");
+        assert!(refused.reason.contains("\"base\""), "{}", refused.reason);
+        assert!(manifest.verb("base").is_some());
+        assert_eq!(manifest.injectables.len(), 1);
+    }
+
+    /// Two rows under one name are both refused whichever comes first, and so are two rows that
+    /// share only a step; a third row that shares nothing is untouched.
+    #[test]
+    fn rows_that_share_a_name_are_all_refused_and_the_rest_stand() {
+        let act = || act_row("https://example.invalid/act.zip", PIN);
+        let renamed = |name: &str, steps: [&str; 2]| {
+            let mut row = act();
+            row["name"] = name.into();
+            row["steps"][0]["name"] = steps[0].into();
+            row["steps"][1]["name"] = steps[1].into();
+            row
+        };
+        let other = renamed("other", ["other-files", "other-config"]);
+
+        // The same program name, with no step in common.
+        let twin = renamed("act", ["twin-files", "twin-config"]);
+        for rows in [
+            [act(), twin.clone(), other.clone()],
+            [twin, other.clone(), act()],
+        ] {
+            let manifest = with_programs(&rows);
+            assert!(manifest.program("act").is_none());
+            assert_eq!(manifest.refused_programs.len(), 2);
+            assert!(manifest.refused_programs.iter().all(|r| r.name == "act"));
+            assert!(manifest.program("other").is_some());
+            assert!(manifest.verb("base").is_some());
+        }
+
+        // One step in common, and a step named like the other program.
+        for shared in [
+            renamed("second", ["act-files", "second-config"]),
+            renamed("second", ["second-files", "act"]),
+        ] {
+            let manifest = with_programs(&[act(), shared, other.clone()]);
+            assert!(
+                manifest
+                    .programs
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .eq(["other"])
+            );
+            assert!(manifest.refused_program("act").is_some());
+            assert!(manifest.refused_program("second").is_some());
+        }
+
+        // One name used twice inside a single row.
+        let manifest = with_programs(&[renamed("act", ["act", "act-config"]), other]);
+        assert!(manifest.refused_program("act").is_some());
+        assert!(manifest.program("other").is_some());
+    }
+
+    /// A row that could not be read still holds its name, so a readable row under the same name is
+    /// refused with it rather than standing in for it. Each keeps its own reason.
+    #[test]
+    fn a_refused_rows_name_refuses_a_readable_row_that_shares_it() {
+        let mut unreadable = act_row("https://example.invalid/act.zip", PIN);
+        unreadable["tier"] = "unheard_of".into();
+        let good = act_row("https://example.invalid/act.zip", PIN);
+        for rows in [[unreadable.clone(), good.clone()], [good, unreadable]] {
+            let manifest = with_programs(&rows);
+            assert!(manifest.programs.is_empty());
+            let reasons: Vec<&str> = manifest
+                .refused_programs
+                .iter()
+                .filter(|r| r.name == "act")
+                .map(|r| r.reason.as_str())
+                .collect();
+            assert_eq!(reasons.len(), 2);
+            assert_eq!(
+                reasons.iter().filter(|r| r.contains("both named")).count(),
+                1,
+                "{reasons:?}"
+            );
+            assert!(manifest.verb("base").is_some());
+        }
+    }
+
+    /// A `programs` value that is not a list has no rows to read. That is recorded as one refusal
+    /// under no name, and the injectables and verbs are read as if the key were absent.
+    #[test]
+    fn a_programs_value_that_is_not_a_list_costs_only_the_programs() {
+        for programs in [
+            serde_json::json!({ "act": {} }),
+            serde_json::json!("act"),
+            serde_json::json!(7),
+        ] {
+            let json = serde_json::json!({
+                "version": 1,
+                "verbs": [{ "name": "base", "reason": "r", "ops": [] }],
+                "programs": programs,
+            });
+            let manifest = ComponentManifest::from_json_bytes(json.to_string().as_bytes())
+                .expect("the rest of the manifest still parses");
+            assert!(manifest.programs.is_empty());
+            assert_eq!(manifest.refused_programs.len(), 1);
+            assert!(manifest.verb("base").is_some());
+        }
     }
 
     /// The token means something only at the head of a program row's path, and a base verb is read by
