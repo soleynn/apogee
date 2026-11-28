@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -56,7 +55,7 @@ fn custom_runner(dir: &Path) -> io::Result<()> {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin)?;
     let wine = bin.join("wine");
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &wine,
         b"#!/bin/sh\n\
           if [ \"$1\" = wineboot ]; then\n\
@@ -68,7 +67,6 @@ fn custom_runner(dir: &Path) -> io::Result<()> {
           fi\n\
           \"$@\"\n",
     )?;
-    std::fs::set_permissions(&wine, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
