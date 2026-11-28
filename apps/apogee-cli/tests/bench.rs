@@ -104,3 +104,36 @@ fn json_reports_every_log_and_keeps_a_failure_beside_the_successes() {
     assert!(rows[1]["error"].is_string());
     assert!(rows[1].get("report").is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn json_reports_a_log_whose_name_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = tempdir().unwrap();
+    let logs = tempdir().unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"run_\xff.csv");
+    // Not every filesystem takes such a name; where it cannot exist there is nothing to report.
+    if fs::write(logs.path().join(name), FRAMETIME_CSV).is_err() {
+        return;
+    }
+
+    let out = run_bench(
+        home.path(),
+        &[logs.path().as_os_str(), std::ffi::OsStr::new("--json")],
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        rows[0]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("run_\u{fffd}.csv")
+    );
+    assert_eq!(rows[0]["report"]["all_frames"]["frame_count"], 3);
+}

@@ -2203,6 +2203,9 @@ fn bench_analyze(paths: &[PathBuf], json: bool) -> Result<ExitCode, CliError> {
             .and_then(|text| bench_metrics::analyze(&text));
         failed |= report.is_err();
         if json {
+            // Lossily: a path that is not UTF-8 has no JSON string of its own, and one unreadable
+            // name must not cost the report for every other log.
+            let file = file.to_string_lossy();
             rows.push(match report {
                 Ok(report) => serde_json::json!({ "file": file, "report": report }),
                 Err(err) => serde_json::json!({ "file": file, "error": err.to_string() }),
