@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Apogee</title>
+  <rect x="5.5" y="5.5" width="117" height="117" rx="29" fill="#171a21" stroke="#3e4451" stroke-width="3"/>
+  <g transform="translate(64 64) rotate(-45)">
+    <path d="M32 18.1 A43 27 0 1 1 32 -18.1" fill="none" stroke="#61afef" stroke-width="10.5" stroke-linecap="round"/>
+    <circle cx="-14" cy="0" r="9.5" fill="#d7dae0"/>
+    <circle cx="43" cy="0" r="9" fill="#61afef"/>
+  </g>
+</svg>
