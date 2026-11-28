@@ -1,9 +1,12 @@
 [package]
 name = "apogee-sqpack"
 version = "1.0.0"
+description = "Readers for FFXIV's SqPack archive formats and their compressed-block codec"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

@@ -1,9 +1,12 @@
 [package]
 name = "apogee-cli"
 version = "0.4.0"
+description = "Headless command-line FFXIV launcher built on apogee-core"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 apogee-core = { path = "../../crates/apogee-core" }

@@ -1,9 +1,12 @@
 [package]
 name = "apogee-otp"
 version = "1.0.0"
+description = "TOTP codes for a Square Enix account and the local listener a companion app can deliver one to"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

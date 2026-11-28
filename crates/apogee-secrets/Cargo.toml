@@ -1,9 +1,12 @@
 [package]
 name = "apogee-secrets"
 version = "1.0.0"
+description = "Account-scoped secret storage over the OS keyring, with an encrypted file fallback"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

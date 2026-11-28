@@ -9,6 +9,8 @@ edition      = "2024"
 # two launcher processes from writing over each other without taking a C locking crate.
 rust-version = "1.89"
 license      = "GPL-3.0-or-later"
+repository   = "https://github.com/soleynn/apogee"
+homepage     = "https://soleynn.github.io/apogee/"
 
 [workspace.dependencies]
 # foundation runtime

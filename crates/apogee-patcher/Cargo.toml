@@ -1,9 +1,12 @@
 [package]
 name = "apogee-patcher"
 version = "1.0.0"
+description = "FFXIV patch orchestration: download, apply and repair over a repository's patch set"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

@@ -13,4 +13,4 @@ are always welcome as issues.
 <!-- A short bullet list of what changed. -->
 -
 
-_CI runs fmt, clippy, cargo deny, and a Windows cross-build. Please make sure it is green._
+_CI formats, lints, audits dependencies, runs the test suites on Linux and Windows, cross-builds the other targets, and fuzzes the parsers this change touches. Please make sure it is green._

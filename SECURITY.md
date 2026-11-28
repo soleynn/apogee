@@ -25,8 +25,15 @@ disclosure; for an actively exploited issue we can coordinate a shorter timeline
 
 ## Supported versions
 
-Apogee is pre-release and has no stable versions yet. Security fixes land on the latest `main`; there
-are no back-supported releases to patch. This section will list supported versions once releases begin.
+| Version                     | Supported |
+| --------------------------- | --------- |
+| Latest 0.4.x release        | Yes       |
+| `main`                      | Yes       |
+| Pre-releases, older 0.x     | No        |
+
+Fixes land on `main` and ship in the next release. A fix that matters for players also gets a patch
+release on the latest stable line; older lines and pre-releases are not patched, so upgrade to the
+latest release first.
 
 ## Scope
 

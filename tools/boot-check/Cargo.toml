@@ -6,6 +6,7 @@
 [package]
 name = "boot-check"
 version = "0.0.0"
+description = "Dev tool: checks Square Enix's live boot-version endpoint against the patchlist parser"
 edition = "2021"
 publish = false
 
