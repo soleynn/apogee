@@ -1,9 +1,12 @@
 [package]
 name = "sqex-proto"
 version = "1.0.0"
+description = "A transport-free reimplementation of the Square Enix FFXIV launcher protocol: OAuth login, boot and version checks, patchlists"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 # The obfuscated ticket type only, for the Steam login variant. Carrying the type rather than a

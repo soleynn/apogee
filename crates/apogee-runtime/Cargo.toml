@@ -1,9 +1,12 @@
 [package]
 name = "apogee-runtime"
 version = "1.0.0"
+description = "Wine and Proton runner management, prefix lifecycle and process supervision, driven by a signed manifest"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

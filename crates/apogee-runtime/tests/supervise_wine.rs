@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -45,8 +44,7 @@ exit 127
 "#;
 
 fn write_script(path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
-    std::fs::write(path, body)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    apogee_test_support::exec::write_executable(path, body)?;
     Ok(())
 }
 

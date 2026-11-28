@@ -42,14 +42,34 @@ jobs:
           languages: rust
           build-mode: none
           # Test code carries fixture credentials by design (fake passwords, session ids, a fixed test
-          # signing key); exclude it so those are not flagged as hard-coded secrets. Product code is
-          # still fully analyzed.
+          # signing key); exclude it so those are not flagged as hard-coded secrets. The dev tools
+          # under tools/ are separate workspaces that print what they fetch to the maintainer's own
+          # terminal and never ship. Product code is still fully analyzed.
           config: |
             paths-ignore:
               - '**/tests.rs'
               - '**/tests/**'
               - crates/apogee-test-support/**
+              - tools/**
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
+          category: "/language:rust"
+          upload: false
+          output: sarif
+      # The CLI's job is to print to the user's own terminal, account ids and file paths included, and
+      # cleartext-logging reads every such line as a leak into a log. Drop that one query's results for
+      # the CLI only; the library crates keep it, since a secret reaching their logs would be real.
+      # Plain jq on the SARIF rather than a third-party filter action, so there is nothing more to pin.
+      - name: Drop CLI terminal output from cleartext-logging
+        run: |
+          jq '.runs[].results |= map(select(
+                ((.ruleId // .rule.id) == "rust/cleartext-logging"
+                 and (.locations[0].physicalLocation.artifactLocation.uri // "" | startswith("apps/apogee-cli/")))
+                | not))' sarif/rust.sarif > rust.filtered.sarif
+          echo "kept $(jq '[.runs[].results[]] | length' rust.filtered.sarif) of $(jq '[.runs[].results[]] | length' sarif/rust.sarif) results"
+      - name: Upload the results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: rust.filtered.sarif
           category: "/language:rust"

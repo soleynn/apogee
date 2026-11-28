@@ -1,9 +1,12 @@
 [package]
 name = "sqex-crypto"
 version = "1.0.0"
+description = "A byte-exact reimplementation of the Square Enix launcher's argument and Steam ticket obfuscation"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

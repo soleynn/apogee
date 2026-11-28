@@ -28,6 +28,18 @@ fn dead_source() -> Result<Url, url::ParseError> {
     Url::parse("http://127.0.0.1:1/f.bin")
 }
 
+/// How long a connection may go without a byte before the client calls it stalled, in the tests
+/// that starve one segment on purpose. Those tests count requests and ranges exactly, so a healthy
+/// segment must never trip it: a busy runner (a coverage build, a full test binary on four cores)
+/// can pause a stream for longer than a fraction of a second, and at 150 ms a healthy segment was
+/// sometimes declared stalled and moved to the mirror, adding requests the assertions then counted.
+/// Two seconds is far beyond such a pause and still far short of [`STARVED`].
+const STALL: Duration = Duration::from_secs(2);
+
+/// The gap between chunks of a deliberately starved segment: long enough that no attempt ever
+/// receives a byte inside [`STALL`].
+const STARVED: Duration = Duration::from_secs(30);
+
 /// The default policy with its waits compressed. What these tests measure is which source was asked
 /// and in what order, never how long the transfer was polite for.
 fn brisk() -> RetryPolicy {
@@ -100,7 +112,7 @@ async fn a_permanently_stalled_segment_moves_to_a_mirror_and_completes() {
     let dest = dir.path().join("out.bin");
     let len = 24 * MIB; // three 8 MiB segments
     let primary = ChaosServer::builder(61, len)
-        .slow_range(8 * MIB, Duration::from_secs(30))
+        .slow_range(8 * MIB, STARVED)
         .chunk(256 * 1024)
         .start()
         .await
@@ -117,10 +129,10 @@ async fn a_permanently_stalled_segment_moves_to_a_mirror_and_completes() {
     .unwrap();
 
     let verified = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         Fetcher::builder()
             .max_connections_per_file(3)
-            .stall_timeout(Duration::from_millis(150))
+            .stall_timeout(STALL)
             .retry_policy(brisk())
             .build()
             .unwrap()
@@ -315,7 +327,7 @@ async fn every_source_failing_ends_the_transfer_instead_of_spinning() {
     let len = 16 * MIB; // segments at 0 and 8 MiB; only the second one is starved
     let silent = |seed| {
         ChaosServer::builder(seed, len)
-            .slow_range(8 * MIB, Duration::from_secs(30))
+            .slow_range(8 * MIB, STARVED)
             .chunk(256 * 1024)
     };
     let primary = silent(64).start().await.unwrap();
@@ -331,10 +343,10 @@ async fn every_source_failing_ends_the_transfer_instead_of_spinning() {
     .unwrap();
 
     let err = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         Fetcher::builder()
             .max_connections_per_file(2)
-            .stall_timeout(Duration::from_millis(150))
+            .stall_timeout(STALL)
             .retry_policy(brisk().max_attempts(4))
             .build()
             .unwrap()

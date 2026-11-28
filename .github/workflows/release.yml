@@ -63,9 +63,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
+      - uses: ./.github/actions/rust-toolchain
         with:
-          toolchain: "1.97.0"
           targets: x86_64-pc-windows-gnu
       # Windows is cross-built from this runner against the GNU/MinGW ABI, the same way
       # `build-windows-cross` does in CI: a plain apt package, no MSVC SDK and no second runner.

@@ -48,17 +48,18 @@ jobs:
           - otp_import
           - otp_listener_request
           - otp_listener_framing
+    # Run from the fuzz workspace so cargo takes the nightly its rust-toolchain.toml pins, not the
+    # stable one at the repository root.
+    defaults:
+      run:
+        working-directory: fuzz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
+      - uses: ./.github/actions/rust-toolchain
         with:
-          # Pinned to the last good nightly. rustc 89c61a754 (2026-07-23) ICEs compiling tokio under
-          # the fuzzer's ASAN/sancov flags (rustc_codegen_ssa operand.rs "not immediate"). The
-          # `cargo +nightly-2026-07-23` steps below must use the same string. Restore floating
-          # `nightly` (here and in those steps) once the upstream regression clears.
-          toolchain: nightly-2026-07-23
+          file: fuzz/rust-toolchain.toml
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -80,8 +81,8 @@ jobs:
           tool: cargo-fuzz
       # A five-minute soak per target (the every-push smoke is 30 s). The gnu target is pinned:
       # cargo-fuzz's default picks musl here, whose static libc is incompatible with the sanitizer.
-      - run: cargo +nightly-2026-07-23 fuzz build ${{ matrix.target }} --target x86_64-unknown-linux-gnu
-      - run: cargo +nightly-2026-07-23 fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300 -rss_limit_mb=2048
+      - run: cargo fuzz build ${{ matrix.target }} --target x86_64-unknown-linux-gnu
+      - run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300 -rss_limit_mb=2048
 
   differential-apply:
     name: differential-apply
@@ -91,9 +92,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
-        with:
-          toolchain: "1.97.0"
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -118,9 +117,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
-        with:
-          toolchain: "1.97.0"
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -142,14 +139,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master # zizmor: ignore[ref-version-mismatch]
+      - uses: ./.github/actions/rust-toolchain
         with:
-          toolchain: "1.97.0"
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --no-fail-fast --summary-only
+          tool: cargo-llvm-cov,nextest
+      # The default nextest profile, which retries nothing: CI's profile retries a failing test, so a
+      # flaky one passes there and only fails here, and a failure here is the signal that one is back.
+      - run: cargo llvm-cov nextest --workspace --no-tests=pass --no-report
+      - name: Publish the coverage summary
+        if: always()
+        run: |
+          {
+            echo '## Coverage'
+            echo
+            echo '```text'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

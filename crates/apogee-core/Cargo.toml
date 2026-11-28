@@ -1,9 +1,12 @@
 [package]
 name = "apogee-core"
 version = "0.0.0"
+description = "The Apogee launcher core: composition root, persisted profiles and settings, and the command and event surface the shells drive"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 thiserror.workspace = true

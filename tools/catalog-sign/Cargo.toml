@@ -6,6 +6,7 @@
 [package]
 name = "catalog-sign"
 version = "0.0.0"
+description = "Dev tool: signs an Apogee catalog manifest with an offline Ed25519 key"
 edition = "2021"
 publish = false
 

@@ -6,6 +6,14 @@
   <title>Apogee</title>
   <link rel="icon" href="apogee.svg" type="image/svg+xml">
   <meta name="description" content="A from-scratch, Linux-first launcher for FINAL FANTASY XIV.">
+  <meta property="og:title" content="Apogee">
+  <meta property="og:description" content="A from-scratch, Linux-first launcher for FINAL FANTASY XIV.">
+  <meta property="og:url" content="https://soleynn.github.io/apogee/">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://soleynn.github.io/apogee/apogee-social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta name="twitter:card" content="summary_large_image">
   <style>
     * { box-sizing: border-box; }
     body {
@@ -21,10 +29,11 @@
       color: #d7dae0;
     }
     .status {
-      display: inline-block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em;
+      display: inline-block; text-decoration: none; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em;
       color: #98c379; border: 1px solid rgba(152, 195, 121, 0.4); border-radius: 999px;
       padding: 0.3rem 0.9rem; margin-bottom: 1.75rem;
     }
+    a.status:hover { border-color: rgba(152, 195, 121, 0.8); }
     .tag { font-size: 1.15rem; color: #9da5b4; margin: 0 0 2.25rem; line-height: 1.6; }
     .links { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
     a.btn {
@@ -34,6 +43,9 @@
     a.btn:hover { border-color: #5c6370; background: #2c313a; }
     a.btn.primary { background: #61afef; border-color: #61afef; color: #21252b; }
     a.btn.primary:hover { background: #7cbdf2; border-color: #7cbdf2; }
+    .catalogs { margin-top: 1.75rem; font-size: 0.9rem; color: #7f848e; }
+    .catalogs a { color: #9da5b4; text-decoration: none; border-bottom: 1px solid #3e4451; }
+    .catalogs a:hover { color: #d7dae0; border-color: #5c6370; }
     footer { margin-top: 2.75rem; font-size: 0.8rem; color: #7f848e; line-height: 1.6; }
   </style>
 </head>
@@ -41,18 +53,37 @@
   <main>
     <img class="mark" src="apogee.svg" alt="">
     <h1>Apogee</h1>
-    <div class="status">Early development</div>
+    <!-- Reads the newest release from the GitHub API; without script or network it still links to it. -->
+    <a class="status" id="release" href="https://github.com/soleynn/apogee/releases/latest">Latest release</a>
     <p class="tag">
       A from-scratch, Linux-first launcher for FINAL FANTASY XIV. Standalone Rust crates, a headless
       CLI, and a thin desktop shell.
     </p>
     <div class="links">
-      <a class="btn primary" href="https://github.com/soleynn/apogee">GitHub</a>
+      <a class="btn primary" href="https://github.com/soleynn/apogee/releases/latest">Download</a>
+      <a class="btn" href="https://github.com/soleynn/apogee">GitHub</a>
+      <a class="btn" href="https://github.com/soleynn/apogee/blob/main/SECURITY.md">Security</a>
       <a class="btn" href="https://github.com/soleynn/apogee/blob/main/LICENSE">License (GPL-3.0)</a>
     </div>
+    <p class="catalogs">
+      Signed catalogs:
+      <a href="components/manifest.json">components</a> ·
+      <a href="runners/manifest.json">runners</a> ·
+      <a href="indexes/manifest.json">repair indexes</a>
+    </p>
     <footer>
       Independent, clean-room project. Not affiliated with or endorsed by Square Enix.
     </footer>
   </main>
+  <script>
+    fetch("https://api.github.com/repos/soleynn/apogee/releases/latest")
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((rel) => {
+        const el = document.getElementById("release");
+        el.textContent = "Latest: " + rel.tag_name;
+        el.href = rel.html_url;
+      })
+      .catch(() => {});
+  </script>
 </body>
 </html>

@@ -12,6 +12,8 @@ pub mod chaos;
 // only, and the gates that need it must not pull the download transport in to ask. Fetching itself
 // stays behind the `corpus` feature, inside the module.
 pub mod corpus;
+#[cfg(unix)]
+pub mod exec;
 pub mod golden;
 pub mod login_fixtures;
 pub mod redact;

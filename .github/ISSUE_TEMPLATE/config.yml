@@ -1,2 +1,9 @@
-# Keep a blank-issue option so no one is forced through a template.
+# Keep a blank-issue option so no one is forced through a form.
 blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/soleynn/apogee/security/advisories/new
+    about: Report it privately. Only the maintainer can see a security advisory.
+  - name: Ask on Discord
+    url: https://discord.com/users/1444305499456671829
+    about: Questions, help getting started, or to talk about contributing.

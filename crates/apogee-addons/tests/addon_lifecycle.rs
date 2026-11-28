@@ -1,7 +1,5 @@
 //! The companion lifecycle over real processes: what starts, what stops, and what is never touched.
 
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -31,14 +29,13 @@ fn runtime(dir: &Path) -> Result<Runtime, Fallible> {
 #[cfg(target_os = "linux")]
 fn ticker(dir: &Path, name: &str, marker: &Path) -> Result<PathBuf, Fallible> {
     let path = dir.join(name);
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &path,
         format!(
             "#!/bin/sh\nwhile :; do : > {}; sleep 0.05; done\n",
             marker.display()
         ),
     )?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
     Ok(path)
 }
 
@@ -46,11 +43,10 @@ fn ticker(dir: &Path, name: &str, marker: &Path) -> Result<PathBuf, Fallible> {
 #[cfg(target_os = "linux")]
 fn one_shot(dir: &Path, name: &str, marker: &Path) -> Result<PathBuf, Fallible> {
     let path = dir.join(name);
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &path,
         format!("#!/bin/sh\n: > {}\nexit 0\n", marker.display()),
     )?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
     Ok(path)
 }
 
@@ -113,14 +109,13 @@ async fn stopping_reaches_a_process_the_tool_backgrounded() -> Result<(), Fallib
     let dir = tempfile::tempdir()?;
     let marker = dir.path().join("alive");
     let tool = dir.path().join("shim.sh");
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &tool,
         format!(
             "#!/bin/sh\n(while :; do : > {}; sleep 0.05; done) &\nexit 0\n",
             marker.display()
         ),
     )?;
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))?;
 
     let runtime = runtime(dir.path())?;
     let game = GameContext::new(std::process::id().cast_signed())?;
@@ -536,14 +531,13 @@ async fn a_companion_is_told_the_game_process_id() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
     let out = dir.path().join("seen");
     let tool = dir.path().join("report.sh");
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &tool,
         format!(
             "#!/bin/sh\nprintf '%s' \"$APOGEE_GAME_PID\" > {}\nexit 0\n",
             out.display()
         ),
     )?;
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))?;
 
     let runtime = runtime(dir.path())?;
     let game = GameContext::new(4242)?;
@@ -571,14 +565,13 @@ async fn an_after_game_tool_is_not_told_a_process_id_that_is_gone() -> Result<()
     let dir = tempfile::tempdir()?;
     let out = dir.path().join("seen");
     let tool = dir.path().join("report.sh");
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &tool,
         format!(
             "#!/bin/sh\nprintf '[%s]' \"$APOGEE_GAME_PID\" > {}\nexit 0\n",
             out.display()
         ),
     )?;
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))?;
 
     let runtime = runtime(dir.path())?;
     let addon = ExternalAddon::new(&tool, vec![], RunIn::Host, Trigger::OnClose)?;
@@ -607,14 +600,13 @@ async fn arguments_reach_the_child_unsplit() -> Result<(), Fallible> {
     let dir = tempfile::tempdir()?;
     let out = dir.path().join("argv");
     let tool = dir.path().join("echo.sh");
-    std::fs::write(
+    apogee_test_support::exec::write_executable(
         &tool,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$1\" > {}\nexit 0\n",
             out.display()
         ),
     )?;
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))?;
 
     let runtime = runtime(dir.path())?;
     let addon = ExternalAddon::new(
