@@ -623,6 +623,13 @@ pub(crate) enum AddonDto {
         program: String,
         pid: i32,
     },
+    /// A curated program's path was already running and this launcher did not start it, so it is
+    /// not verified as the pinned program.
+    RunningUnverified {
+        what: String,
+        program: String,
+        pid: i32,
+    },
     Stopped {
         program: String,
         pid: i32,
@@ -670,6 +677,13 @@ impl AddonDto {
                 pid: *pid,
             },
             AddonEvent::AlreadyRunning { program, pid, .. } => Self::AlreadyRunning {
+                program: program.to_string_lossy().into_owned(),
+                pid: *pid,
+            },
+            AddonEvent::RunningUnverified {
+                what, program, pid, ..
+            } => Self::RunningUnverified {
+                what: what.clone(),
                 program: program.to_string_lossy().into_owned(),
                 pid: *pid,
             },

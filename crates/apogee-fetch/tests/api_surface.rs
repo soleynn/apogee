@@ -52,6 +52,7 @@ fn signatures() {
     let _: fn(&DownloadSpec) -> Option<u64> = DownloadSpec::expected_len;
     let _: fn(&DownloadSpec) -> Option<u64> = DownloadSpec::max_len;
     let _: fn(&DownloadSpec) -> &[String] = DownloadSpec::allowed_content_types;
+    let _: fn(&DownloadSpec) -> &[String] = DownloadSpec::allowed_hosts;
     let _: fn(&DownloadSpec) -> &Validator = DownloadSpec::validator;
     let _: fn(&DownloadSpec) -> bool = DownloadSpec::resume;
     let _: fn(&DownloadSpec) -> bool = DownloadSpec::overwrite;
@@ -75,6 +76,10 @@ fn signatures() {
         b.mirrors(urls)
     }
     let _: fn(DownloadSpecBuilder, Vec<Url>) -> DownloadSpecBuilder = mirrors;
+    fn allowed_hosts(b: DownloadSpecBuilder, hosts: Vec<String>) -> DownloadSpecBuilder {
+        b.allowed_hosts(hosts)
+    }
+    let _: fn(DownloadSpecBuilder, Vec<String>) -> DownloadSpecBuilder = allowed_hosts;
     let _: fn(DownloadSpecBuilder, HeaderPolicy) -> DownloadSpecBuilder =
         DownloadSpecBuilder::header_policy;
     let _: fn(DownloadSpecBuilder) -> DownloadSpecBuilder = DownloadSpecBuilder::allow_unverified;

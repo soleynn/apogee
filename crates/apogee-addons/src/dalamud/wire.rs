@@ -9,6 +9,35 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// A response body as UTF-8 JSON text, whatever encoding its byte-order mark names.
+///
+/// The distribution serves at least one document, the runtime digest map, as UTF-16LE with a BOM, and a
+/// JSON parser reading those bytes as UTF-8 refuses them. A body with no BOM is taken as UTF-8 untouched;
+/// a UTF-8 BOM is dropped. A UTF-16 body that is not whole code units or not valid UTF-16 is refused.
+pub(crate) fn json_text(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, BadEncoding> {
+    let utf16 = |body: &[u8], unit: fn([u8; 2]) -> u16| -> Result<Vec<u8>, BadEncoding> {
+        let (units, rest) = body.as_chunks::<2>();
+        if !rest.is_empty() {
+            return Err(BadEncoding);
+        }
+        let units: Vec<u16> = units.iter().map(|pair| unit(*pair)).collect();
+        String::from_utf16(&units)
+            .map(String::into_bytes)
+            .map_err(|_| BadEncoding)
+    };
+    match bytes {
+        [0xEF, 0xBB, 0xBF, body @ ..] => Ok(std::borrow::Cow::Borrowed(body)),
+        [0xFF, 0xFE, body @ ..] => utf16(body, u16::from_le_bytes).map(std::borrow::Cow::Owned),
+        [0xFE, 0xFF, body @ ..] => utf16(body, u16::from_be_bytes).map(std::borrow::Cow::Owned),
+        _ => Ok(std::borrow::Cow::Borrowed(bytes)),
+    }
+}
+
+/// A response whose byte-order mark names UTF-16 but whose body is not valid UTF-16.
+#[derive(Debug, thiserror::Error)]
+#[error("a UTF-16 response body is not valid UTF-16")]
+pub(crate) struct BadEncoding;
+
 /// A path-to-digest map, keyed by a Windows-shaped relative path with an uppercase hex value.
 pub(crate) type HashManifest = BTreeMap<String, String>;
 
@@ -91,6 +120,37 @@ pub struct Installed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn utf16le_with_bom(text: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes
+    }
+
+    /// The live runtime digest map arrives as UTF-16LE with a BOM and CRLF line ends.
+    #[test]
+    fn a_utf16le_digest_map_parses() {
+        let body = utf16le_with_bom("{\r\n  \"dotnet.exe\": \"0A1B\"\r\n}");
+        let text = json_text(&body).expect("decode");
+        let map: HashManifest = serde_json::from_slice(&text).expect("parse");
+        assert_eq!(map.get("dotnet.exe").map(String::as_str), Some("0A1B"));
+    }
+
+    #[test]
+    fn a_body_with_a_byte_order_mark_is_decoded_by_it() {
+        let mut be = vec![0xFE, 0xFF];
+        be.extend("{}".encode_utf16().flat_map(u16::to_be_bytes));
+        assert_eq!(&*json_text(&be).expect("decode"), b"{}");
+        assert_eq!(&*json_text(b"\xEF\xBB\xBF{}").expect("decode"), b"{}");
+        assert_eq!(&*json_text(b"{}").expect("decode"), b"{}");
+    }
+
+    #[test]
+    fn a_broken_utf16_body_is_refused() {
+        // A dangling byte, and an unpaired high surrogate.
+        assert!(json_text(&[0xFF, 0xFE, b'{', 0x00, b'}']).is_err());
+        assert!(json_text(&[0xFF, 0xFE, 0x00, 0xD8, b'{', 0x00]).is_err());
+    }
 
     /// The distribution serves more than this launcher reads, and adds to it between releases. Refusing
     /// an unknown field would turn an upstream release note into a launcher that cannot install.

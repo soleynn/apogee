@@ -499,7 +499,7 @@ fn planned(manifest: &ComponentManifest, prefix: &Prefix) -> (Vec<StepAction>, V
     for verb in &manifest.verbs {
         prefix.record_verb(&verb.name).expect("record the verb");
     }
-    let planned = plan_for(manifest, prefix).expect("plan");
+    let planned = plan_for(manifest, prefix, &[], None).expect("plan");
     (
         planned
             .plan

@@ -243,6 +243,14 @@ fn addon_value(event: &AddonEvent) -> Value {
             "program": program.to_string_lossy(),
             "pid": pid,
         }),
+        AddonEvent::RunningUnverified {
+            what, program, pid, ..
+        } => json!({
+            "kind": "runningUnverified",
+            "what": what,
+            "program": program.to_string_lossy(),
+            "pid": pid,
+        }),
         AddonEvent::Stopped { program, pid, .. } => json!({
             "kind": "stopped",
             "program": program.to_string_lossy(),

@@ -13,6 +13,12 @@
 //! the strength of the validator rather than the transport, so it loses nothing by staying where it
 //! started.
 //!
+//! A request may narrow that floor, never widen it. A spec that names
+//! [`allowed_hosts`](crate::DownloadSpecBuilder::allowed_hosts) runs under [`confined`], the same
+//! floor plus one more rule: every hop must land on a host the spec names. Since the policy is fixed
+//! when a client is built, the fetcher keeps one client per distinct host list, and a spec that names
+//! none shares the one every other request uses.
+//!
 //! A custom [`Policy`] gets no loop detection from `reqwest` of its own; only the limit-based default
 //! policy counts hops, and that protection is not shared with a custom one. So the hop cap enforced
 //! here is what actually ends a redirect cycle: without it, a server that redirects to itself would
@@ -30,12 +36,27 @@ const MAX_HOPS: usize = 3;
 
 /// Why a redirect was refused. Carried as the cause of the [`reqwest::Error`] the policy raises, and
 /// read back by [`refusal`] to tell a refusal apart from a transport fault after `send`.
-#[derive(Debug)]
-struct Refused(&'static str);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// The hop broke one of the floor rules every request runs under.
+    Floor(&'static str),
+    /// The hop leaves the hosts the request was confined to.
+    Host {
+        /// The hop that was refused, as the server named it.
+        target: Url,
+    },
+}
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        match self {
+            Self::Floor(detail) => f.write_str(detail),
+            Self::Host { target } => write!(
+                f,
+                "redirect to {} leaves the allowed hosts",
+                target.host_str().unwrap_or_default()
+            ),
+        }
     }
 }
 
@@ -44,9 +65,41 @@ impl std::error::Error for Refused {}
 /// The policy the client is built with.
 pub(crate) fn policy() -> Policy {
     Policy::custom(|attempt| match refuse(attempt.previous(), attempt.url()) {
-        Some(detail) => attempt.error(Refused(detail)),
+        Some(detail) => attempt.error(Refused::Floor(detail)),
         None => attempt.follow(),
     })
+}
+
+/// The floor, plus a refusal of any hop whose host is not one of `hosts`.
+///
+/// `hosts` is compared exactly against the hop's host, so it is expected lowercased, which is how a
+/// parsed URL carries an `http`/`https` host. The port is not part of the comparison: the hop's
+/// scheme is already held to the floor, and a list of names is what a caller has to hand. The floor
+/// is asked first, so a hop that is both off-list and a downgrade is named for the downgrade, the
+/// reason that holds whatever the list says.
+pub(crate) fn confined(hosts: std::sync::Arc<[String]>) -> Policy {
+    Policy::custom(
+        move |attempt| match refuse_within(&hosts, attempt.previous(), attempt.url()) {
+            Some(refused) => attempt.error(refused),
+            None => attempt.follow(),
+        },
+    )
+}
+
+/// The decision [`confined`] makes for one hop.
+fn refuse_within(hosts: &[String], previous: &[Url], next: &Url) -> Option<Refused> {
+    if let Some(detail) = refuse(previous, next) {
+        return Some(Refused::Floor(detail));
+    }
+    (!host_allowed(hosts, next)).then(|| Refused::Host {
+        target: next.clone(),
+    })
+}
+
+/// Whether `url`'s host is one of `hosts`.
+pub(crate) fn host_allowed(hosts: &[String], url: &Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| hosts.iter().any(|allowed| allowed == host))
 }
 
 /// Why the hop from `previous` (every URL already requested, oldest first) to `next` must not be
@@ -90,18 +143,18 @@ fn too_many_hops(previous: &[Url]) -> Option<&'static str> {
 /// the [`Refused`] the policy raised. An unrecognized redirect error still answers `Some`: it is
 /// still the policy layer declining to proceed, and reading it as a transport fault would retry a
 /// request whose answer cannot change.
-pub(crate) fn refusal(error: &reqwest::Error) -> Option<&'static str> {
+pub(crate) fn refusal(error: &reqwest::Error) -> Option<Refused> {
     if !error.is_redirect() {
         return None;
     }
     let mut cause = std::error::Error::source(error);
     while let Some(current) = cause {
         if let Some(refused) = current.downcast_ref::<Refused>() {
-            return Some(refused.0);
+            return Some(refused.clone());
         }
         cause = current.source();
     }
-    Some("redirect refused")
+    Some(Refused::Floor("redirect refused"))
 }
 
 #[cfg(test)]
@@ -179,6 +232,81 @@ mod tests {
         }
     }
 
+    fn within(hosts: &[&str], previous: &[&str], next: &str) -> Option<Refused> {
+        let hosts: Vec<String> = hosts.iter().map(|h| (*h).to_owned()).collect();
+        refuse_within(&hosts, &urls(previous), &Url::parse(next).unwrap())
+    }
+
+    /// A confined request follows a hop onto a listed host, wherever on that host it lands and
+    /// whatever its port, and refuses one onto any other, naming the hop.
+    #[test]
+    fn a_confined_hop_is_followed_only_onto_a_listed_host() {
+        let hosts = ["front.example", "store.example"];
+        assert_eq!(
+            within(
+                &hosts,
+                &["https://front.example/a"],
+                "https://store.example:8443/b"
+            ),
+            None
+        );
+        assert_eq!(
+            within(
+                &hosts,
+                &["https://front.example/a"],
+                "https://STORE.example/b"
+            ),
+            None,
+            "a parsed host is lowercased before it is compared",
+        );
+        for off in [
+            "https://elsewhere.example/b",
+            // A listed name as a suffix, a prefix, or in the userinfo is still another host.
+            "https://evil-store.example/b",
+            "https://store.example.evil/b",
+            "https://store.example@evil.example/b",
+            "https://127.0.0.1/b",
+        ] {
+            let refused = within(&hosts, &["https://front.example/a"], off);
+            assert_eq!(
+                refused,
+                Some(Refused::Host {
+                    target: Url::parse(off).unwrap()
+                }),
+                "{off}",
+            );
+        }
+    }
+
+    /// The floor still holds under confinement and is asked first: a downgrade onto a listed host is
+    /// refused as a downgrade, and the hop cap still ends a chain that never leaves the list.
+    #[test]
+    fn confinement_keeps_the_floor_and_names_it_first() {
+        let hosts = ["host.example"];
+        assert_eq!(
+            within(&hosts, &["https://host.example/a"], "http://host.example/a"),
+            Some(Refused::Floor("redirect downgrades https to plaintext")),
+        );
+        assert_eq!(
+            within(&hosts, &["https://host.example/a"], "http://off.example/a"),
+            Some(Refused::Floor("redirect downgrades https to plaintext")),
+        );
+        let chain = [
+            "https://host.example/1",
+            "https://host.example/2",
+            "https://host.example/3",
+            "https://host.example/4",
+        ];
+        assert_eq!(
+            within(&hosts, &chain[..MAX_HOPS], "https://host.example/n"),
+            None
+        );
+        assert_eq!(
+            within(&hosts, &chain[..=MAX_HOPS], "https://host.example/n"),
+            Some(Refused::Floor("redirect chain exceeds the hop cap")),
+        );
+    }
+
     /// A refusal survives the trip through `send` as a redirect error whose cause is still readable,
     /// which is what lets a caller tell it apart from a host that could not be reached.
     #[tokio::test]
@@ -214,7 +342,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_redirect(), "got {err:?}");
-        assert_eq!(refusal(&err), Some("redirect targets a non-http scheme"));
+        assert_eq!(
+            refusal(&err),
+            Some(Refused::Floor("redirect targets a non-http scheme"))
+        );
     }
 
     /// A failure that is not a redirect refusal reads as `None`, so an unreachable host is never

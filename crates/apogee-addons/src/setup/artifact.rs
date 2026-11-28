@@ -26,31 +26,39 @@ use crate::{AddonError, Result};
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// Download `artifact` into `work`, verify its digest, and extract it into `dest`.
+/// Download `artifact` into `work`, verify its digest, and extract it into `drive_c/into`.
 ///
 /// `what` names whatever the caller is setting up, and is what every failure is reported against.
 /// Returns the number of entries written.
+///
+/// Every directory from `drive_c` down to the destination is walked without following a link and
+/// made one at a time, so a link planted on the way cannot carry the write out of the prefix; the
+/// extractor applies the same rule below the destination. The walk happens once the bytes have
+/// verified, so a download that fails its pin leaves nothing behind in the prefix.
 ///
 /// # Errors
 /// [`AddonError::EmptyArchive`] when the archive yields nothing under its declared layout. Zero is a
 /// failure rather than an empty success: it means the row's layout is wrong, and sealing that as
 /// applied would leave an empty directory that never gets fixed. Otherwise whatever [`download`]
 /// failed with, or [`AddonError::Unpack`] if the archive does not unpack.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn install(
     fetcher: &Fetcher,
     artifact: &Artifact,
     what: &str,
     work: &Path,
-    dest: &Path,
+    drive_c: &Path,
+    into: &Path,
     cancel: &CancellationToken,
     events: &SetupEvents,
 ) -> Result<u64> {
     let cache = work.join(format!("{what}.archive"));
     let verified = download(fetcher, artifact, what, &cache, cancel, events).await?;
+    let dest = &crate::program::walk_dirs(drive_c, into, true, what)?;
 
     let archive = verified.path().to_path_buf();
     let layout = artifact.archive.clone();
-    let target = dest.to_path_buf();
+    let target = dest.clone();
     let named = what.to_owned();
     let entries = tokio::task::spawn_blocking(move || extract(&archive, &layout, &target, &named))
         .await
@@ -65,6 +73,64 @@ pub(super) async fn install(
     }
     let _ = tokio::fs::remove_file(&cache).await;
     Ok(entries)
+}
+
+/// Download `artifact`, unpack it into staging, and move each file into `dest`, returning every file
+/// placed with its digest.
+///
+/// The path a program step's files take. Unpacking into staging first is what lets each file be
+/// hashed as it is placed, so the install can be checked file by file later rather than as an archive
+/// that no longer exists. `into` is `dest` relative to the prefix's `C:`, which is how the returned
+/// paths are spelled. The destination is walked as [`install`] walks it.
+///
+/// # Errors
+/// As [`install`], and [`AddonError::Unpack`] if the archive holds a link or special file.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn install_staged(
+    fetcher: &Fetcher,
+    artifact: &Artifact,
+    what: &str,
+    work: &Path,
+    drive_c: &Path,
+    into: &Path,
+    cancel: &CancellationToken,
+    events: &SetupEvents,
+) -> Result<Vec<crate::program::record::PlacedFile>> {
+    let cache = work.join(format!("{what}.archive"));
+    let verified = download(fetcher, artifact, what, &cache, cancel, events).await?;
+    let dest = &crate::program::walk_dirs(drive_c, into, true, what)?;
+    let staged = work.join(format!("{what}.staged"));
+    let _ = tokio::fs::remove_dir_all(&staged).await;
+
+    let archive = verified.path().to_path_buf();
+    let layout = artifact.archive.clone();
+    let (target, into, named, stage) = (
+        dest.clone(),
+        into.to_path_buf(),
+        what.to_owned(),
+        staged.clone(),
+    );
+    let placed = tokio::task::spawn_blocking(move || {
+        let entries = extract(&archive, &layout, &stage, &named)?;
+        if entries == 0 {
+            return Err(AddonError::EmptyArchive { what: named });
+        }
+        crate::program::record::place_staged(&stage, &target, &into, &named)
+    })
+    .await
+    .map_err(|source| AddonError::Unpack {
+        what: what.to_owned(),
+        source: Box::new(source),
+    })?;
+    let _ = tokio::fs::remove_dir_all(&staged).await;
+    let _ = tokio::fs::remove_file(&cache).await;
+    let placed = placed?;
+    if placed.is_empty() {
+        return Err(AddonError::EmptyArchive {
+            what: what.to_owned(),
+        });
+    }
+    Ok(placed)
 }
 
 /// Extract on a blocking thread. Split out so the non-Linux build has somewhere to say no: the

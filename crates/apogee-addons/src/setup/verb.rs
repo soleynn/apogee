@@ -25,13 +25,14 @@
 //! time [`stale`] runs, on the next launch, nothing has run in the prefix and the file is the
 //! answer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use apogee_fetch::Fetcher;
 use apogee_runtime::{Prefix, RegistryEffect, Runtime};
 use tokio_util::sync::CancellationToken;
 
 use crate::manifest::{Verb, VerbOp};
+use crate::program::record::PlacedFile;
 use crate::{AddonError, Result};
 
 use super::artifact;
@@ -46,37 +47,55 @@ use super::event::SetupEvents;
 /// failed with (passed through rather than wrapped, since [`artifact::install`] already reports
 /// against the verb's name), or [`AddonError::VerbIncomplete`] naming the first path `verb` promised
 /// that is not there once every op has reported success.
+///
+/// `staged` places a files op's archive through staging and returns every file it placed, which is
+/// what a program step does so its install can be checked file by file when a launch is planned. A
+/// base verb places straight into its destination and returns nothing.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn apply(
     runtime: &Runtime,
     fetcher: &Fetcher,
     prefix: &Prefix,
     verb: &Verb,
     work: &Path,
+    staged: bool,
     cancel: &CancellationToken,
     events: &SetupEvents,
-) -> Result<()> {
+) -> Result<Vec<PlacedFile>> {
+    let mut placed = Vec::new();
     for op in &verb.ops {
-        run_op(runtime, fetcher, prefix, verb, op, work, cancel, events).await?;
+        placed.extend(
+            run_op(
+                runtime, fetcher, prefix, verb, op, work, staged, cancel, events,
+            )
+            .await?,
+        );
     }
     if let Some(missing) = missing(prefix, verb) {
         return Err(AddonError::VerbIncomplete {
             verb: verb.name.clone(),
-            missing: missing.to_path_buf(),
+            missing,
         });
     }
-    Ok(())
+    Ok(placed)
 }
 
 /// The first path `verb` promised that is not there, or `None` when every one of them is.
 ///
 /// A verb naming nothing has no path to check, which is every verb whose effect is a registry value:
 /// there is no file to look for. Those are answered by [`stale`] instead, off the ops themselves.
-pub(super) fn missing<'v>(prefix: &Prefix, verb: &'v Verb) -> Option<&'v Path> {
+///
+/// A path whose root this prefix cannot resolve counts as not there, since nothing can be found at
+/// it.
+pub(super) fn missing(prefix: &Prefix, verb: &Verb) -> Option<PathBuf> {
     let drive_c = prefix.drive_c();
-    verb.verify
-        .iter()
-        .map(crate::manifest::ComponentPath::as_path)
-        .find(|path| !drive_c.join(path).exists())
+    verb.verify.iter().find_map(|path| {
+        match crate::program::under_drive_c(prefix, path, &verb.name) {
+            Ok(rel) if drive_c.join(&rel).exists() => None,
+            Ok(rel) => Some(rel),
+            Err(_) => Some(path.as_path().to_path_buf()),
+        }
+    })
 }
 
 /// Why `verb` needs applying again despite the prefix recording it, or `None` when nothing says it
@@ -121,9 +140,10 @@ async fn run_op(
     verb: &Verb,
     op: &VerbOp,
     work: &Path,
+    staged: bool,
     cancel: &CancellationToken,
     events: &SetupEvents,
-) -> Result<()> {
+) -> Result<Vec<PlacedFile>> {
     let failed = |source: Box<dyn std::error::Error + Send + Sync>| AddonError::VerbFailed {
         verb: verb.name.clone(),
         source,
@@ -132,10 +152,12 @@ async fn run_op(
         VerbOp::Registry(edit) => runtime
             .registry_set(prefix, edit, cancel)
             .await
+            .map(|()| Vec::new())
             .map_err(|source| failed(Box::new(source))),
         VerbOp::RegistryDelete(delete) => runtime
             .registry_delete(prefix, delete, cancel)
             .await
+            .map(|()| Vec::new())
             .map_err(|source| failed(Box::new(source))),
         VerbOp::Files {
             artifact: art,
@@ -147,10 +169,20 @@ async fn run_op(
             // Passed through rather than wrapped: `install` is already told the verb's name and reports
             // against it, so wrapping would produce a chain that names the verb twice and says nothing
             // more the second time.
-            let dest = prefix.drive_c().join(into.as_path());
-            artifact::install(fetcher, art, &verb.name, work, &dest, cancel, events)
+            let rel = crate::program::under_drive_c(prefix, into, &verb.name)?;
+            let drive_c = prefix.drive_c();
+            if staged {
+                artifact::install_staged(
+                    fetcher, art, &verb.name, work, &drive_c, &rel, cancel, events,
+                )
                 .await
-                .map(|_entries| ())
+            } else {
+                artifact::install(
+                    fetcher, art, &verb.name, work, &drive_c, &rel, cancel, events,
+                )
+                .await
+                .map(|_entries| Vec::new())
+            }
         }
     }
 }

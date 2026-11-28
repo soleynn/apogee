@@ -275,6 +275,8 @@ pub struct Dalamud {
     endpoints: Option<Endpoints>,
     tier: SupportTier,
     caveats: Vec<String>,
+    /// The hosts a download the distribution names may go to; empty admits any.
+    allowed_hosts: Vec<String>,
     config: DalamudConfig,
 }
 
@@ -315,6 +317,7 @@ impl Dalamud {
             endpoints: Endpoints::derive(&entry.distribution),
             tier: entry.tier.clone(),
             caveats: entry.caveats.clone(),
+            allowed_hosts: entry.allowed_hosts.clone(),
             config,
         })
     }
@@ -601,7 +604,18 @@ impl Dalamud {
         const WHAT: &str = "Dalamud assets";
 
         meta.assets.iter().find_map(|asset| {
-            let file = integrity::resolve(dir, &asset.file_name);
+            let file = match integrity::resolve(dir, &asset.file_name) {
+                Ok(file) => file,
+                Err(reason) => {
+                    return Some(Self::tree_fault(
+                        WHAT,
+                        integrity::TreeFault::Unsafe {
+                            key: asset.file_name.clone(),
+                            reason,
+                        },
+                    ));
+                }
+            };
             let fault = match asset.digest() {
                 Some(expected) => match integrity::hash_file(&file, Digest::Sha1) {
                     Ok(found) if found == expected => return None,
@@ -643,10 +657,14 @@ impl Dalamud {
         let bytes = tokio::fs::read(&dest)
             .await
             .map_err(|source| self.io_failed("read a download", &dest, source))?;
-        let parsed = serde_json::from_slice(&bytes).map_err(|source| AddonError::Distribution {
-            injectable: DALAMUD.to_owned(),
-            source: Box::new(source),
-        })?;
+        let distribution =
+            |source: Box<dyn std::error::Error + Send + Sync>| AddonError::Distribution {
+                injectable: DALAMUD.to_owned(),
+                source,
+            };
+        let text = wire::json_text(&bytes).map_err(|source| distribution(Box::new(source)))?;
+        let parsed =
+            serde_json::from_slice(&text).map_err(|source| distribution(Box::new(source)))?;
         let _ = tokio::fs::remove_dir_all(&staging).await;
         Ok(parsed)
     }
@@ -701,10 +719,17 @@ impl Dalamud {
                 .await
                 .map_err(|source| self.io_failed("stage a download", parent, source))?;
         }
-        // No content pin: the distribution versions these itself and the digest maps beside them are
-        // what authenticates the bytes. The fetcher still refuses plain http.
-        let spec = DownloadSpec::builder(url.clone(), dest, Validator::None)
-            .allow_unverified()
+        // No pin of this launcher's own: the distribution versions these itself. A URL its file host
+        // addresses by content names its own sha256, and the fetcher holds the bytes to it before they
+        // are published, ahead of the digest maps, which are upstream's own and not collision
+        // resistant. Anything else is authenticated by those maps alone. Every hop of every redirect is
+        // held to the row's hosts, and the fetcher refuses plain http either way.
+        let builder = integrity::content_address(url).map_or_else(
+            || DownloadSpec::builder(url.clone(), dest, Validator::None).allow_unverified(),
+            |digest| DownloadSpec::builder(url.clone(), dest, Validator::Sha256(digest)),
+        );
+        let spec = builder
+            .allowed_hosts(self.allowed_hosts.iter().cloned())
             .build()?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<apogee_fetch::Progress>();
         let sink = events.clone();
@@ -743,19 +768,35 @@ impl Dalamud {
 
     /// One URL the distribution served, parsed at the point of use so a response that is not a URL is
     /// this crate's typed error rather than a deserializer's.
-    // `&self` for the calling convention every sibling helper in this impl shares, not because this
-    // one reads `self`.
-    #[allow(clippy::unused_self)]
+    ///
+    /// When the row names the hosts its downloads may go to, a URL on any other host, or not over
+    /// TLS, is refused here, before anything connects to it: the distribution's own answer is what
+    /// names the download, so without this a substituted answer could send the injector's fetch
+    /// anywhere.
     fn absolute(&self, raw: &str) -> Result<Url> {
-        Url::parse(raw).map_err(|source| AddonError::Distribution {
+        let url = Url::parse(raw).map_err(|source| AddonError::Distribution {
             injectable: DALAMUD.to_owned(),
             source: Box::new(source),
-        })
+        })?;
+        if !self.allowed_hosts.is_empty() {
+            let admitted = url.scheme() == "https"
+                && url
+                    .host_str()
+                    .is_some_and(|host| self.allowed_hosts.iter().any(|a| a == host));
+            if !admitted {
+                return Err(AddonError::HostNotAllowed {
+                    injectable: DALAMUD.to_owned(),
+                    url,
+                });
+            }
+        }
+        Ok(url)
     }
 
     /// One file that proves a tree wrong, in the taxonomy's own terms: a file that could not be read is
-    /// a filesystem failure and a file that read as other bytes is an integrity failure, and the two
-    /// send a reader to different places.
+    /// a filesystem failure, a file that read as other bytes is an integrity failure, and a key that
+    /// names no place inside the tree is an unsafe path, and the three send a reader to different
+    /// places.
     fn tree_fault(what: &str, fault: integrity::TreeFault) -> AddonError {
         match fault {
             integrity::TreeFault::Unreadable { file, source } => AddonError::Io {
@@ -763,6 +804,12 @@ impl Dalamud {
                 step: "read a file the digest map names",
                 path: file,
                 source: Box::new(source),
+            },
+            // The key is reported as the distribution wrote it, since it names no place on disk.
+            integrity::TreeFault::Unsafe { key, reason } => AddonError::UnsafePath {
+                what: what.to_owned(),
+                path: PathBuf::from(key),
+                reason: reason.as_str(),
             },
             integrity::TreeFault::Mismatch {
                 file,

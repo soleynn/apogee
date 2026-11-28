@@ -37,12 +37,12 @@ const IMGUI_MD5: &str = "B84C5C4098A44514A715FBD45CE39925";
 const ASSET_SHA1: &str = "A4B45E57B3934836F20CCF8529C18BCD1E120129";
 
 /// A release archive: the three files a version directory is unusable without, plus the digest map the
-/// distribution ships inside it.
-fn release_zip() -> Result<Vec<u8>, Box<dyn Error>> {
+/// distribution ships inside it, with `extra` keys appended to that map as written.
+fn release_zip(extra: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let hashes = format!(
         r#"{{ "Dalamud.Injector.exe": "{INJECTOR_MD5}",
               "Dalamud.dll": "{DALAMUD_MD5}",
-              "ImGuiScene.dll": "{IMGUI_MD5}" }}"#
+              "ImGuiScene.dll": "{IMGUI_MD5}"{extra} }}"#
     );
     zip_of(&[
         ("Dalamud.Injector.exe", b"injector".as_slice()),
@@ -81,35 +81,72 @@ struct Distribution {
     runtime: ChaosServer,
 }
 
+/// How one distribution differs from the ordinary one.
+#[derive(Default)]
+struct Shape {
+    runtime_required: bool,
+    asset_version: u32,
+    /// Cut the release archive's first body off after this many bytes.
+    drop_release_after: Option<u64>,
+    /// Appended to the release's digest map as written, a leading comma included.
+    extra_release_hashes: &'static str,
+    /// The path the release names its archive at, in place of `dalamud.zip`.
+    release_path: Option<String>,
+    /// Answer every release request with a `302` to this, instead of serving the archive.
+    release_redirect: Option<String>,
+    /// The name the asset metadata gives its digested asset, in place of `UIRes/font.otf`.
+    asset_file_name: Option<&'static str>,
+}
+
 impl Distribution {
     // `Box<dyn Error>` is not `Send`, which is only a problem for a future handed to a multi-threaded
     // executor. `#[tokio::test]` runs this one single-threaded, and `Box<dyn Error>` is the ordinary
     // idiom for a test's own error type.
     #[allow(clippy::future_not_send)]
     async fn start(runtime_required: bool, asset_version: u32) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(runtime_required, asset_version, None).await
+        Self::start_shaped(Shape {
+            runtime_required,
+            asset_version,
+            ..Shape::default()
+        })
+        .await
     }
 
     /// The same distribution with the release archive's first download cut off after `after` bytes,
     /// so the transfer has to recover and has a tally to report for it.
     #[allow(clippy::future_not_send)]
     async fn start_flaky(asset_version: u32, after: u64) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(false, asset_version, Some(after)).await
+        Self::start_shaped(Shape {
+            asset_version,
+            drop_release_after: Some(after),
+            ..Shape::default()
+        })
+        .await
     }
 
     #[allow(clippy::future_not_send)]
-    async fn start_inner(
-        runtime_required: bool,
-        asset_version: u32,
-        drop_release_after: Option<u64>,
-    ) -> Result<Self, Box<dyn Error>> {
-        let mut release_builder = ChaosServer::serving(release_zip()?).tls();
+    async fn start_shaped(shape: Shape) -> Result<Self, Box<dyn Error>> {
+        let Shape {
+            runtime_required,
+            asset_version,
+            drop_release_after,
+            extra_release_hashes,
+            release_path,
+            release_redirect,
+            asset_file_name,
+        } = shape;
+        let mut release_builder = ChaosServer::serving(release_zip(extra_release_hashes)?).tls();
         if let Some(after) = drop_release_after {
             // Chunked, or there is nothing to cut: the archive is a few hundred bytes and goes out in
             // one write, which the drop threshold never gets between.
             release_builder = release_builder.drop_after(after).chunk(16);
         }
+        if let Some(location) = release_redirect {
+            release_builder = release_builder.redirect_to(302, location);
+        }
         let release = release_builder.start().await?;
+        let release_path = release_path.unwrap_or_else(|| "dalamud.zip".to_owned());
+        let asset_file_name = asset_file_name.unwrap_or("UIRes/font.otf");
         let assets = ChaosServer::serving(asset_zip()?).tls().start().await?;
         let version_info = format!(
             r#"{{ "assemblyVersion": "{ASSEMBLY_VERSION}",
@@ -117,13 +154,13 @@ impl Distribution {
                   "runtimeVersion": "10.0.0", "runtimeRequired": {runtime_required},
                   "track": "release",
                   "downloadUrl": "{release_url}" }}"#,
-            release_url = release.url("dalamud.zip"),
+            release_url = release.url(&release_path),
         );
         let asset_meta = format!(
             r#"{{ "version": {asset_version},
                   "packageUrl": "{package}",
                   "assets": [
-                    {{ "url": "{package}", "fileName": "UIRes/font.otf", "hash": "{ASSET_SHA1}" }},
+                    {{ "url": "{package}", "fileName": "{asset_file_name}", "hash": "{ASSET_SHA1}" }},
                     {{ "url": "{package}", "fileName": "UIRes/unchecked.json", "hash": null }}
                   ] }}"#,
             package = assets.url("assets.zip"),
@@ -178,19 +215,35 @@ impl Distribution {
 /// The manifest row behind the launch setting. Its distribution pointer is overridden per test, since
 /// each endpoint has to live on a different host here.
 fn catalog() -> Result<VerifiedManifest, Box<dyn Error>> {
-    let json = br#"{ "version": 1, "injectables": [
-        { "name": "Dalamud", "kind": "dalamud",
+    catalog_allowing("[]")
+}
+
+/// The same row, naming `hosts` (a JSON list) as the only ones its downloads may go to.
+fn catalog_allowing(hosts: &str) -> Result<VerifiedManifest, Box<dyn Error>> {
+    let json = format!(
+        r#"{{ "version": 1, "injectables": [
+        {{ "name": "Dalamud", "kind": "dalamud",
           "distribution": "https://kamori.goats.dev/Dalamud/Release/VersionInfo",
-          "tier": "best_effort", "note": "Best with the wine-xiv runner." } ] }"#;
-    let signature = apogee_test_support::catalog_sign::sign_manifest(json);
+          "tier": "best_effort", "note": "Best with the wine-xiv runner.",
+          "allowed_hosts": {hosts} }} ] }}"#
+    );
+    let signature = apogee_test_support::catalog_sign::sign_manifest(json.as_bytes());
     Ok(VerifiedManifest::verify(
-        json,
+        json.as_bytes(),
         &signature,
         &[apogee_test_support::catalog_sign::test_verifying_key_bytes()],
     )?)
 }
 
 fn dalamud(root: &Path, dist: &Distribution) -> Result<Dalamud, Box<dyn Error>> {
+    dalamud_under(root, dist, &catalog()?)
+}
+
+fn dalamud_under(
+    root: &Path,
+    dist: &Distribution,
+    catalog: &VerifiedManifest,
+) -> Result<Dalamud, Box<dyn Error>> {
     let config = DalamudConfig {
         game_version: GAME_VERSION.to_owned(),
         ..DalamudConfig::default()
@@ -198,7 +251,7 @@ fn dalamud(root: &Path, dist: &Distribution) -> Result<Dalamud, Box<dyn Error>> 
     Ok(Dalamud::new(
         AddonPaths::new(root).dalamud(),
         dist.fetcher()?,
-        &catalog()?,
+        catalog,
         config,
     )
     .ok_or("the fixture carries a Dalamud row")?
@@ -483,6 +536,198 @@ async fn preparing_a_launch_on_its_own_contacts_nothing() -> Result<(), Box<dyn 
             0,
             "a launch that never asked for an install still reached the distribution"
         );
+    }
+    Ok(())
+}
+
+/// The hosts every test distribution lives on, as a row would name them: the pointer's own, which the
+/// row must admit, and the loopback address every chaos server answers on.
+const LOOPBACK_ROW: &str = r#"["kamori.goats.dev", "127.0.0.1"]"#;
+
+/// An allowed host that answers `302` to a host the row does not name is refused before that host is
+/// asked anything, and the install fails rather than degrades. The host it would have gone to holds
+/// the exact archive the release names, so nothing but the refusal stops it.
+#[tokio::test]
+async fn a_redirect_off_the_rows_hosts_is_refused_before_the_second_connect()
+-> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let elsewhere = ChaosServer::serving(release_zip("")?).tls().start().await?;
+    let mut off_list = elsewhere.url("dalamud.zip");
+    off_list
+        .set_host(Some("localhost"))
+        .map_err(|e| e.to_string())?;
+    let dist = Distribution::start_shaped(Shape {
+        asset_version: 432,
+        release_redirect: Some(off_list.to_string()),
+        ..Shape::default()
+    })
+    .await?;
+    let dalamud = dalamud_under(root.path(), &dist, &catalog_allowing(LOOPBACK_ROW)?)?;
+    let prefix = prefix(&root.path().join("prefix"))?;
+
+    let err = dalamud
+        .ensure(&prefix, &CancellationToken::new(), &SetupEvents::none())
+        .await
+        .err()
+        .ok_or("an off-list redirect was followed")?;
+
+    assert!(
+        matches!(
+            &err,
+            apogee_addons::AddonError::Download(
+                apogee_fetch::FetchError::RedirectHostNotAllowed { host, .. }
+            ) if host == "localhost"
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        elsewhere.stats().requests(),
+        0,
+        "the off-list host was contacted"
+    );
+    assert_eq!(
+        dist.release.stats().requests(),
+        1,
+        "a refused hop was asked again"
+    );
+    assert!(
+        dalamud.installed().is_none(),
+        "a refused install was recorded"
+    );
+    Ok(())
+}
+
+/// The control for the case above: the same redirect onto a host the row does name is followed and
+/// installs, so the refusal is the list's doing and not a refusal of every redirect.
+#[tokio::test]
+async fn a_redirect_onto_the_rows_hosts_is_followed() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let store = ChaosServer::serving(release_zip("")?).tls().start().await?;
+    let dist = Distribution::start_shaped(Shape {
+        asset_version: 432,
+        release_redirect: Some(store.url("dalamud.zip").to_string()),
+        ..Shape::default()
+    })
+    .await?;
+    let mut builder = Fetcher::builder();
+    for server in dist.servers().into_iter().chain([&store]) {
+        builder = builder.extra_root_certificate(server.cert_der().ok_or("not tls")?);
+    }
+    let dalamud = Dalamud::new(
+        AddonPaths::new(root.path()).dalamud(),
+        builder.build()?,
+        &catalog_allowing(LOOPBACK_ROW)?,
+        DalamudConfig {
+            game_version: GAME_VERSION.to_owned(),
+            ..DalamudConfig::default()
+        },
+    )
+    .ok_or("the fixture carries a Dalamud row")?
+    .with_endpoints(dist.endpoints());
+    let prefix = prefix(&root.path().join("prefix"))?;
+
+    dalamud
+        .ensure(&prefix, &CancellationToken::new(), &SetupEvents::none())
+        .await?;
+
+    assert!(store.stats().requests() > 0, "the store served the archive");
+    assert!(dalamud.installed().is_some());
+    Ok(())
+}
+
+/// A release named by its content's sha256, as the real file host names every download, is held to
+/// that digest. The archive served here is intact and its own digest map agrees with every file in
+/// it, so the address is the only thing that can refuse it.
+#[tokio::test]
+async fn a_content_addressed_archive_must_hash_to_its_address() -> Result<(), Box<dyn Error>> {
+    use sha2::{Digest as _, Sha256};
+
+    let digest = Sha256::digest(release_zip("")?);
+    let address: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let wrong = "0".repeat(64);
+    for (path, admitted) in [(&address, true), (&wrong, false)] {
+        let root = tempfile::tempdir()?;
+        let dist = Distribution::start_shaped(Shape {
+            asset_version: 432,
+            release_path: Some(format!("File/Get/{path}")),
+            ..Shape::default()
+        })
+        .await?;
+        let dalamud = dalamud(root.path(), &dist)?;
+        let prefix = prefix(&root.path().join("prefix"))?;
+
+        let outcome = dalamud
+            .ensure(&prefix, &CancellationToken::new(), &SetupEvents::none())
+            .await;
+
+        if admitted {
+            outcome?;
+        } else {
+            let err = outcome
+                .err()
+                .ok_or("bytes that are not their address were accepted")?;
+            assert!(
+                matches!(
+                    &err,
+                    apogee_addons::AddonError::IntegrityMismatch { expected, got, .. }
+                        if *expected == wrong && *got == address
+                ),
+                "got {err:?}"
+            );
+            assert!(
+                !paths(root.path())
+                    .addon
+                    .join(format!("Hooks/{ASSEMBLY_VERSION}/Dalamud.Injector.exe"))
+                    .exists(),
+                "an archive that failed its address was extracted"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A digest map whose key climbs out of the tree fails the install as an unsafe path, whichever map
+/// it is in. The file the release's key points at exists, holding exactly the bytes the map claims,
+/// so a resolver that followed the key would call the tree intact.
+#[tokio::test]
+async fn a_digest_key_that_leaves_its_tree_fails_the_install() -> Result<(), Box<dyn Error>> {
+    for (extra, asset, named) in [
+        (
+            r#", "..\\..\\escape.dll": "A312764C3972C532880BB8BB12BE8AF2""#,
+            None,
+            r"..\..\escape.dll",
+        ),
+        ("", Some("../../../escape.otf"), "../../../escape.otf"),
+    ] {
+        let root = tempfile::tempdir()?;
+        let dist = Distribution::start_shaped(Shape {
+            asset_version: 432,
+            extra_release_hashes: extra,
+            asset_file_name: asset,
+            ..Shape::default()
+        })
+        .await?;
+        let dalamud = dalamud(root.path(), &dist)?;
+        let prefix = prefix(&root.path().join("prefix"))?;
+        // Two levels above the version directory is the addon directory itself.
+        let addon = paths(root.path()).addon;
+        std::fs::create_dir_all(&addon)?;
+        std::fs::write(addon.join("escape.dll"), b"injector")?;
+
+        let err = dalamud
+            .ensure(&prefix, &CancellationToken::new(), &SetupEvents::none())
+            .await
+            .err()
+            .ok_or("a map naming a file outside its tree was accepted")?;
+
+        assert!(
+            matches!(
+                &err,
+                apogee_addons::AddonError::UnsafePath { path, .. } if path == Path::new(named)
+            ),
+            "{named}: got {err:?}"
+        );
+        assert!(dalamud.installed().is_none(), "{named}: it was recorded");
     }
     Ok(())
 }

@@ -1,7 +1,8 @@
 //! The download engine handle.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -39,6 +40,22 @@ pub(crate) struct Shared {
     /// One jitter source per fetcher, so every retry site of every job draws from a generator
     /// seeded once rather than one seeded per transfer.
     pub(crate) jitter: Arc<Jitter>,
+    /// How this fetcher's client was built, so a client confined to a host list is the same client
+    /// in every other respect.
+    recipe: ClientRecipe,
+    /// One client per distinct host list a spec has been confined to. The redirect policy is fixed
+    /// when a client is built, so confinement cannot be a per-request setting on the shared client;
+    /// keying on the list lets every download confined the same way share one connection pool.
+    confined: Mutex<HashMap<Arc<[String]>, reqwest::Client>>,
+}
+
+/// Everything about the HTTP client a [`FetcherBuilder`] decides, apart from its redirect policy.
+#[derive(Debug, Clone)]
+struct ClientRecipe {
+    pool_max_idle_per_host: usize,
+    /// DER roots a test fixture asked the client to trust.
+    #[cfg(feature = "testing")]
+    extra_roots: Vec<Vec<u8>>,
 }
 
 /// A resumable, verified downloader.
@@ -66,6 +83,12 @@ impl Fetcher {
     #[must_use]
     pub fn builder() -> FetcherBuilder {
         FetcherBuilder::default()
+    }
+
+    /// The client `spec` is sent through: the shared one, or, when the spec is confined to a host
+    /// list, the client built for that list, built on first use.
+    fn client_for(&self, spec: &DownloadSpec) -> Result<reqwest::Client, FetchError> {
+        client_for(&self.client, &self.shared, spec)
     }
 
     /// Download `spec`'s source to its destination, returning proof it verified.
@@ -108,15 +131,10 @@ impl Fetcher {
                 what: "Validator::External must be fetched through download_external",
             });
         }
+        let client = self.client_for(spec)?;
         let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
-        crate::segmented::dispatch(
-            &self.client,
-            spec,
-            Reporter::new(progress),
-            cancel,
-            &self.shared,
-        )
-        .await
+        crate::segmented::dispatch(&client, spec, Reporter::new(progress), cancel, &self.shared)
+            .await
     }
 
     /// Download `spec`'s externally-verified source and hand back the landed path, never a
@@ -143,12 +161,13 @@ impl Fetcher {
                 what: "download_external requires Validator::External",
             });
         }
+        let client = self.client_for(spec)?;
         let _job = self.shared.scheduler.acquire_job(spec.priority()).await;
         // The `External` plan verifies nothing beyond length, so the proof `dispatch` mints is over
         // length-checked bytes only; it is unwrapped to a bare path here and never handed out, so no
         // consumer receives a `VerifiedFile` the bytes did not earn.
         let landed = crate::segmented::dispatch(
-            &self.client,
+            &client,
             spec,
             Reporter::new(progress),
             cancel,
@@ -195,6 +214,7 @@ impl Fetcher {
         let shared = Arc::clone(&self.shared);
         let job_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
+            let client = client_for(&client, &shared, &spec)?;
             let _job = shared.scheduler.acquire_job(spec.priority()).await;
             crate::segmented::dispatch(&client, &spec, Reporter::new(Some(tx)), job_cancel, &shared)
                 .await
@@ -379,7 +399,7 @@ impl FetcherBuilder {
     }
 
     /// Assemble the shared scheduler/limiter/cache from the configured caps.
-    fn shared(&self) -> Arc<Shared> {
+    fn shared(&self, recipe: ClientRecipe) -> Arc<Shared> {
         Arc::new(Shared {
             scheduler: Arc::new(Scheduler::new(self.max_files, self.max_connections_total)),
             limiter: self
@@ -391,6 +411,8 @@ impl FetcherBuilder {
             stall_timeout: self.stall_timeout,
             retry: self.retry,
             jitter: Arc::new(Jitter::new()),
+            recipe,
+            confined: Mutex::new(HashMap::new()),
         })
     }
 
@@ -427,13 +449,27 @@ impl FetcherBuilder {
                 ),
             });
         }
+        let recipe = ClientRecipe {
+            pool_max_idle_per_host: self.max_connections_per_file,
+            #[cfg(feature = "testing")]
+            extra_roots: self.extra_roots.clone(),
+        };
+        let client = recipe.build(crate::redirect::policy())?;
+        let shared = self.shared(recipe);
+        Ok(Fetcher { client, shared })
+    }
+}
+
+impl ClientRecipe {
+    /// The client this recipe describes, following redirects under `redirect`.
+    fn build(&self, redirect: reqwest::redirect::Policy) -> Result<reqwest::Client, FetchError> {
         let client_builder = reqwest::Client::builder()
             // Keep the on-wire bytes identical to the body bytes: verification and the length
             // cross-check must see exactly what the server sent, never a transparently decoded stream.
             .gzip(false)
             .deflate(false)
             // Keep enough idle connections alive to reuse across a file's segments.
-            .pool_max_idle_per_host(self.max_connections_per_file)
+            .pool_max_idle_per_host(self.pool_max_idle_per_host)
             // Advertise a 16 MiB flow-control window, well past hyper's 5 MiB connection and 2 MiB
             // stream defaults. Everything fetched over TLS negotiates HTTP/2, and a download whose
             // length the caller does not declare runs on the single-connection engine, so its whole
@@ -457,7 +493,7 @@ impl FetcherBuilder {
             // hung connect would report `Connect` or `Stalled` depending on which timer's tick landed
             // first. One deadline, around the whole of each `send`, is what makes that answer
             // deterministic.
-            .redirect(crate::redirect::policy())
+            .redirect(redirect)
             // The origin URL is none of the redirect target's business. reqwest adds a `Referer`
             // carrying it by default, which hands a third-party host the full path a transfer
             // started from, including a patch file's name. Nothing we fetch needs one.
@@ -470,12 +506,35 @@ impl FetcherBuilder {
                     source: std::io::Error::other(e),
                 })
         })?;
-        let client = client_builder.build().map_err(|e| FetchError::Client {
+        client_builder.build().map_err(|e| FetchError::Client {
             source: std::io::Error::other(e),
-        })?;
-        let shared = self.shared();
-        Ok(Fetcher { client, shared })
+        })
     }
+}
+
+/// The client `spec` is sent through, given the fetcher's shared `client` and state.
+fn client_for(
+    client: &reqwest::Client,
+    shared: &Shared,
+    spec: &DownloadSpec,
+) -> Result<reqwest::Client, FetchError> {
+    if spec.allowed_hosts().is_empty() {
+        return Ok(client.clone());
+    }
+    // A poisoned lock still holds a map of fully built clients: nothing is ever left half-inserted.
+    let mut confined = shared
+        .confined
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(built) = confined.get(spec.allowed_hosts()) {
+        return Ok(built.clone());
+    }
+    let hosts: Arc<[String]> = spec.allowed_hosts().into();
+    let built = shared
+        .recipe
+        .build(crate::redirect::confined(Arc::clone(&hosts)))?;
+    confined.insert(hosts, built.clone());
+    Ok(built)
 }
 
 #[cfg(test)]

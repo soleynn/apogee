@@ -1016,11 +1016,20 @@ pub(crate) async fn send_bounded(
 /// A failure establishing the connection, or the client's redirect policy declining to follow one.
 /// Both arrive from the same `send`; only the cause chain tells them apart.
 pub(crate) fn connect_error(url: &Url, source: reqwest::Error) -> FetchError {
-    if let Some(detail) = crate::redirect::refusal(&source) {
-        return FetchError::RedirectRefused {
-            url: url.clone(),
-            detail,
-        };
+    match crate::redirect::refusal(&source) {
+        Some(crate::redirect::Refused::Floor(detail)) => {
+            return FetchError::RedirectRefused {
+                url: url.clone(),
+                detail,
+            };
+        }
+        Some(crate::redirect::Refused::Host { target }) => {
+            return FetchError::RedirectHostNotAllowed {
+                url: url.clone(),
+                host: target.host_str().unwrap_or_default().to_owned(),
+            };
+        }
+        None => {}
     }
     FetchError::Connect {
         host: url.host_str().unwrap_or_default().to_owned(),

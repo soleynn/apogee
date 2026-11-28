@@ -106,6 +106,7 @@ dependencies = [
  "apogee-fetch",
  "apogee-runtime",
  "async-trait",
+ "blake3",
  "ed25519-dalek",
  "md-5",
  "rustix",

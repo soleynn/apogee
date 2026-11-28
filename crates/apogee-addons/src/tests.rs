@@ -210,6 +210,33 @@ frozen!(
             AddonError::Backup(BackupError::NothingSelected),
             "no source tree held anything to back up",
         ),
+        AddonError::UnsafePath { .. } => (
+            AddonError::UnsafePath {
+                what: "act".to_owned(),
+                path: path(),
+                reason: "a directory on the way is a link",
+            },
+            "act: \"/tmp/a\" is not a safe place to use: a directory on the way is a link",
+        ),
+        AddonError::ProgramPrefixMismatch { .. } => (
+            AddonError::ProgramPrefixMismatch {
+                program: "act".to_owned(),
+                gated: path(),
+                game: PathBuf::from("/tmp/b"),
+            },
+            "act was checked in \"/tmp/a\", but the game is running in \"/tmp/b\"",
+        ),
+        AddonError::HostNotAllowed { .. } => (
+            AddonError::HostNotAllowed {
+                injectable: "Dalamud".to_owned(),
+                url: url::Url::parse("https://elsewhere.invalid/latest.zip").expect("url"),
+            },
+            "Dalamud: https://elsewhere.invalid/latest.zip is not on a host its catalog row allows",
+        ),
+        AddonError::SeparateSession { .. } => (
+            AddonError::SeparateSession { program: path(), servers: 2 },
+            "\"/tmp/a\" is not on the game's wine session: 2 wine servers serve this prefix",
+        ),
         AddonError::Cancelled => (AddonError::Cancelled, "cancelled"),
         AddonError::Unsupported { .. } => (
             AddonError::Unsupported {
@@ -295,6 +322,19 @@ frozen!(
         ManifestError::DuplicateName { .. } => (
             ManifestError::DuplicateName { name: "a-verb".to_owned() },
             "two components are both named \"a-verb\"",
+        ),
+        ManifestError::BadEnv { .. } => (
+            ManifestError::BadEnv {
+                component: "act".to_owned(),
+                key: "LD_PRELOAD".to_owned(),
+                reason: "only MONO_PATH and WINEDLLOVERRIDES may be set for a companion",
+            },
+            "act: environment variable \"LD_PRELOAD\" is not one a companion may set: \
+             only MONO_PATH and WINEDLLOVERRIDES may be set for a companion",
+        ),
+        ManifestError::Rollback { .. } => (
+            ManifestError::Rollback { found: 6, highest: 7 },
+            "manifest serial 6 is older than 7, which this launcher already verified",
         ),
     }
 );

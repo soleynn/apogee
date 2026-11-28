@@ -58,6 +58,8 @@ pub enum ExternalAddonProblem {
     InvalidProgram,
     /// The record contains fields this build does not understand and must preserve.
     UnsupportedFields,
+    /// The record asks for an environment variable a companion may not set.
+    InvalidEnv,
 }
 
 /// A companion tool the user configured: what to run, what to pass it, where it runs, and when.
@@ -97,6 +99,15 @@ pub struct ExternalAddon {
     run_in: RunIn,
     trigger: Trigger,
     enabled: bool,
+    /// Environment the program needs, held to the companion allowlist when it is run. Left out of a
+    /// saved record when empty, so a record that never used it saves exactly as an older build wrote
+    /// it, and an older build that meets one keeps it as a field it refuses to run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    /// The curated program this entry was built for, when it was built from a signed row rather than
+    /// configured by the user. Never saved: a record that claimed it would be claiming a pin.
+    #[serde(skip)]
+    curated: Option<String>,
     #[serde(flatten)]
     unsupported: BTreeMap<String, serde_json::Value>,
 }
@@ -134,6 +145,8 @@ impl ExternalAddon {
             run_in,
             trigger,
             enabled: true,
+            env: BTreeMap::new(),
+            curated: None,
             unsupported: BTreeMap::new(),
         };
         addon.check_program(0)?;
@@ -165,6 +178,54 @@ impl ExternalAddon {
         self.trigger
     }
 
+    /// The same entry with `env` set for the program it runs.
+    ///
+    /// Only `MONO_PATH` and `WINEDLLOVERRIDES` may be set, the latter as additions that never name a
+    /// library the game's own launch decides. Anything else is accepted here, so a configuration
+    /// loads, and refused when the entry is run, as [`AddonError::InvalidAddon`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> apogee_addons::Result<()> {
+    /// use apogee_addons::{ExternalAddon, RunIn, Trigger};
+    /// use std::collections::BTreeMap;
+    ///
+    /// let program = std::env::temp_dir().join("tool.exe");
+    /// let trigger = Trigger::WithGame { keep_after_close: false };
+    /// let env = BTreeMap::from([("LD_PRELOAD".to_owned(), "/tmp/x.so".to_owned())]);
+    /// let tool = ExternalAddon::new(program, vec![], RunIn::Prefix, trigger)?.with_env(env);
+    ///
+    /// assert!(tool.problem(0, true).is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// The environment it asks for.
+    #[must_use]
+    pub const fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
+    /// The curated program this entry was built for, or `None` for one the user configured.
+    ///
+    /// A curated entry found already running was not started by this launcher, so whatever is running
+    /// at its path is reported as running and unverified rather than as the pinned program.
+    #[must_use]
+    pub fn curated_program(&self) -> Option<&str> {
+        self.curated.as_deref()
+    }
+
+    pub(crate) fn curated_as(mut self, program: &str) -> Self {
+        self.curated = Some(program.to_owned());
+        self
+    }
+
     /// Whether the launch considers it at all.
     #[must_use]
     pub const fn enabled(&self) -> bool {
@@ -187,6 +248,10 @@ impl ExternalAddon {
             Some(ExternalAddonProblem::UnsupportedFields)
         } else if self.program.as_os_str().is_empty() || !self.program.is_absolute() {
             Some(ExternalAddonProblem::InvalidProgram)
+        } else if crate::env_rules::check(&self.env, &crate::env_rules::GameOverrides::none())
+            .is_err()
+        {
+            Some(ExternalAddonProblem::InvalidEnv)
         } else {
             None
         }
@@ -238,6 +303,17 @@ impl ExternalAddon {
     }
 
     pub(crate) fn validate(&self, index: usize, has_prefix: bool) -> Result<()> {
+        self.validate_against(index, has_prefix, &crate::env_rules::GameOverrides::none())
+    }
+
+    /// [`Self::validate`], with `game_overrides` naming the libraries the game's launch environment
+    /// overrides beyond the fixed set, which an override of this entry's may not name either.
+    pub(crate) fn validate_against(
+        &self,
+        index: usize,
+        has_prefix: bool,
+        game_overrides: &crate::env_rules::GameOverrides,
+    ) -> Result<()> {
         self.check_program(index)?;
         if let Some(field) = self.unsupported.keys().next() {
             // Refused rather than ignored: a key that changes how a program is executed must never be
@@ -252,6 +328,13 @@ impl ExternalAddon {
                 program: self.program.clone(),
             });
         }
+        crate::env_rules::check(&self.env, game_overrides).map_err(|refused| {
+            AddonError::InvalidAddon {
+                program: self.program.clone(),
+                index,
+                reason: refused.reason,
+            }
+        })?;
         Ok(())
     }
 
@@ -287,6 +370,8 @@ struct RawExternalAddon {
     trigger: Trigger,
     #[serde(default = "enabled_default")]
     enabled: bool,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     /// Keys this build does not understand, kept verbatim so a newer build's field survives an older
     /// build's save, and refused at the point of execution.
     #[serde(flatten)]
@@ -306,6 +391,8 @@ impl From<RawExternalAddon> for ExternalAddon {
             run_in: raw.run_in,
             trigger: raw.trigger,
             enabled: raw.enabled,
+            env: raw.env,
+            curated: None,
             unsupported: raw.unsupported,
         }
     }
@@ -435,6 +522,59 @@ mod tests {
         let addon: ExternalAddon = serde_json::from_value(raw).expect("parse");
         let back = serde_json::to_value(&addon).expect("serialize");
         assert_eq!(back["future_field"], serde_json::json!({"a": 1}));
+    }
+
+    /// A user's entry is held to the same environment allowlist as a signed row: refused when it is run,
+    /// reported as a configuration problem while it is edited, and saved only when it carries some.
+    #[test]
+    fn an_entry_asking_for_an_environment_outside_the_allowlist_is_refused() -> Result<()> {
+        let tool = |key: &str, value: &str| -> Result<ExternalAddon> {
+            Ok(host(absolute("act/act"))?
+                .with_env(BTreeMap::from([(key.to_owned(), value.to_owned())])))
+        };
+        for (key, value) in [
+            ("PYTHONPATH", "/tmp"),
+            ("PROTON_VERB", "run"),
+            ("VK_LAYER_PATH", "/tmp"),
+            ("LD_PRELOAD", "/tmp/x.so"),
+            ("WINEDLLOVERRIDES", "d3d11=n"),
+        ] {
+            let addon = tool(key, value)?;
+            assert!(
+                matches!(
+                    addon.validate(0, true),
+                    Err(AddonError::InvalidAddon { .. })
+                ),
+                "{key}"
+            );
+            assert_eq!(
+                addon.configuration_problem(),
+                Some(ExternalAddonProblem::InvalidEnv)
+            );
+        }
+        let allowed = tool("WINEDLLOVERRIDES", "winhttp=n,b")?;
+        assert!(allowed.validate(0, true).is_ok());
+        // An override the game's own launch environment adds is refused as well.
+        assert!(
+            allowed
+                .validate_against(
+                    0,
+                    true,
+                    &crate::env_rules::GameOverrides::Named(vec!["winhttp".to_owned()])
+                )
+                .is_err()
+        );
+
+        let saved = serde_json::to_value(&allowed).expect("serialize");
+        assert_eq!(saved["env"]["WINEDLLOVERRIDES"], "winhttp=n,b");
+        let back: ExternalAddon = serde_json::from_value(saved).expect("parse");
+        assert_eq!(back, allowed);
+        let plain = serde_json::to_value(host(absolute("act/act"))?).expect("serialize");
+        assert!(
+            plain.get("env").is_none(),
+            "an entry without one saves as before"
+        );
+        Ok(())
     }
 
     /// A prefix tool in a launch with no prefix is that entry's failure, named as such.

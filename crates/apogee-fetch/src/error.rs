@@ -61,6 +61,14 @@ pub enum SpecError {
         scheme: String,
     },
 
+    /// The spec names the hosts its download may go to, and a source it was given is on none of them.
+    #[error("source is not on an allowed host: {url}")]
+    #[non_exhaustive]
+    HostNotAllowed {
+        /// The primary or mirror URL that was refused.
+        url: Url,
+    },
+
     /// A `Validator::External` download without a declared length.
     #[error("externally-verified downloads require a declared length")]
     ExternalRequiresLength,
@@ -140,6 +148,20 @@ pub enum FetchError {
         url: Url,
         /// Which floor rule the hop broke.
         detail: &'static str,
+    },
+
+    /// A redirect onto a host the request was confined to keep off: the spec named
+    /// [`allowed_hosts`](crate::DownloadSpecBuilder::allowed_hosts) and this hop is not on one. Never
+    /// retried, for the reason [`RedirectRefused`](FetchError::RedirectRefused) is not: the host that
+    /// answered did so fine, and what it answered with is the problem. Nothing is requested of the
+    /// refused host.
+    #[error("refused a redirect while fetching {url}: {host} is not an allowed host")]
+    #[non_exhaustive]
+    RedirectHostNotAllowed {
+        /// The source whose redirect was refused.
+        url: Url,
+        /// The host the hop would have gone to, as the server named it.
+        host: String,
     },
 
     /// The transfer made no progress for too long, with no other source to try.
@@ -405,6 +427,7 @@ mod tests {
             | FetchError::ServerFileChanged { .. } => Some(true),
             FetchError::Http { .. } => None,
             FetchError::RedirectRefused { .. }
+            | FetchError::RedirectHostNotAllowed { .. }
             | FetchError::LengthMismatch { .. }
             | FetchError::ResponseTooLarge { .. }
             | FetchError::ContentTypeRejected { .. }
@@ -430,6 +453,7 @@ mod tests {
             | FetchError::Transport { .. }
             | FetchError::Http { .. }
             | FetchError::RedirectRefused { .. }
+            | FetchError::RedirectHostNotAllowed { .. }
             | FetchError::Stalled { .. }
             | FetchError::AllSourcesFailed { .. }
             | FetchError::ServerFileChanged { .. }
@@ -489,6 +513,10 @@ mod tests {
             FetchError::RedirectRefused {
                 url: url.clone(),
                 detail: "left https for plaintext",
+            },
+            FetchError::RedirectHostNotAllowed {
+                url: url.clone(),
+                host: "elsewhere.test".to_owned(),
             },
             FetchError::LengthMismatch {
                 expected: 100,
